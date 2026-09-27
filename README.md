@@ -203,12 +203,60 @@ $env:QT_QPA_PLATFORM = 'offscreen'
 
 测试覆盖配置校验、热键录制、选区、编辑器工具和布局、箭头几何、裁剪、保存/剪贴板、贴图菜单与会话。离屏测试不能取代多显示器、混合 DPI、全局热键权限及真实桌面点击穿透验收。
 
-可选 PyInstaller 打包：
+## Nuitka 打包
+
+准备环境（只需一次）：
 
 ```powershell
-.\.venv\Scripts\python -m pip install pyinstaller
-.\.venv\Scripts\pyinstaller --noconfirm --onefile --windowed --name ScreenSnap main.py
+python -m venv .venv
+.\.venv\Scripts\python -m pip install -r requirements.txt nuitka zstandard
 ```
+
+打包前清理临时与调试文件：
+
+```powershell
+Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
+Get-ChildItem -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+```
+
+下面四组命令覆盖「文件夹/单文件」×「无控制台/带控制台」，图标使用仓库根目录的 `icon.ico`。文件夹模式启动更快，适合开机自启；单文件模式只有一个 exe，便于分发。
+
+### 文件夹模式 + 无控制台（成品）
+
+```powershell
+nuitka --mode=standalone --enable-plugins=pyside6,upx --windows-console-mode=disable --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=F:\Program_directory\miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
+```
+
+### 文件夹模式 + 带控制台（调试）
+
+```powershell
+nuitka --mode=standalone --enable-plugins=pyside6,upx --windows-console-mode=force --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=F:\Program_directory\miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
+```
+
+### 单文件模式 + 无控制台
+
+```powershell
+nuitka --mode=onefile --enable-plugins=pyside6,upx --windows-console-mode=disable --onefile-no-compression --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=F:\Program_directory\miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
+```
+
+### 单文件模式 + 带控制台（调试）
+
+```powershell
+nuitka --mode=onefile --enable-plugins=pyside6,upx --windows-console-mode=force --onefile-no-compression --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=F:\Program_directory\miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
+```
+
+产物为 `dist\main.dist\ScreenSnap.exe`（文件夹模式，分发时拷贝整个目录）或 `dist\ScreenSnap.exe`（单文件模式）。建议先构建带控制台的版本确认无报错，再出无控制台成品。
+
+打包要点：
+
+- `--include-package=ui`：`ui/__init__.py` 用 `importlib` 懒加载子模块，Nuitka 静态分析不到，缺少时运行报 `No module named 'ui.settings_window'`。
+- `--include-data-files=...\ffi.dll=ffi.dll`：Conda/Miniconda 派生的 Python 把 libffi 命名为 `ffi.dll` 且放在环境 `Library\bin` 下，Nuitka 不会自动拷贝，缺少时启动即报 `IMPORT_HARD_CTYPES`。改用 python.org 官方 CPython 时不需要该参数。
+- `--windows-icon-from-ico` 只影响 exe 文件图标；托盘图标由 `main.py` 的 `tray_icon()` 现场绘制。
+- 单文件模式必须加 `--onefile-no-compression`，否则与 UPX 二次压缩反而更大更慢。
+- UPX 需在 PATH 中（本项目验证环境为 UPX 4.0.1），否则用 `--upx-binary=<upx.exe 路径>` 指定。
+- 无可用 MSVC 时 Nuitka 会自动下载 MinGW64，`--assume-yes-for-downloads` 用于免交互确认。
+- 调试阶段不要加 `--remove-output`，保留 `dist\main.build` 可增量编译；正式出包时再加。
+- 开机自动启动写入的是 exe 自身路径，程序每次启动会同步一次，移动 exe 后手动运行一次即可更新。
 
 一般不需要管理员权限；只有明确需要操作受保护窗口时才考虑提升权限。Windows 全局热键在权限不同的应用上可能无法触发。
 
