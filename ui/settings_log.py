@@ -1,0 +1,19 @@
+"""日志分级、轮转和保存位置配置。"""
+
+from ui.widgets.file_path_edit import FilePathEdit
+from ui.widgets.tooltip import SettingsPage
+
+
+class LogPage(SettingsPage):
+    """控制标准库日志的开关、等级、轮转周期和保存位置。"""
+
+    def __init__(self, config, changed):
+        super().__init__(config, changed)
+        self.group("日志记录")
+        self.check("logging_enabled", "启用日志", "关闭后停止写入运行日志")
+        self.choice("log_level", "日志等级", [(name, name) for name in ("INFO", "DEBUG", "TRACE")], "TRACE 记录更细致的信息")
+        self.choice("log_when", "分割周期", [("每天", "midnight"), ("每小时", "H")], "最多保留 14 份日志")
+        directory = FilePathEdit(config.data["log_dir"],
+                     lambda value: self.update_value("log_dir", value))
+        directory.setToolTip("仅使用已存在的目录；留空或目录不存在时保存到启动文件所在目录的 logs 文件夹")
+        self.form.addRow("日志保存目录", directory)

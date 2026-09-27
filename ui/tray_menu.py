@@ -1,0 +1,30 @@
+"""托盘菜单。"""
+
+from PySide6.QtWidgets import QMenu, QStyle
+from core.constants import shortcut_suffix
+
+
+def make_tray_menu(app, capture, settings, quit_app, edit_clipboard=None, open_image=None,
+                   hotkeys=None):
+    """只组装菜单动作，截图与退出逻辑仍由主程序持有。"""
+    menu = QMenu()
+    menu.addAction(app.style().standardIcon(QStyle.SP_DesktopIcon),
+                   f"快速截图{shortcut_suffix(hotkeys, 'capture')}", capture)
+    menu.addSeparator()
+    clipboard_action = menu.addAction(
+        app.style().standardIcon(QStyle.SP_FileDialogContentsView),
+        f"编辑剪贴板图片{shortcut_suffix(hotkeys, 'edit_clipboard')}"
+    )
+    if edit_clipboard is not None:
+        clipboard_action.triggered.connect(edit_clipboard)
+    open_action = menu.addAction(
+        app.style().standardIcon(QStyle.SP_DialogOpenButton),
+        f"打开并编辑图片{shortcut_suffix(hotkeys, 'open_image')}"
+    )
+    if open_image is not None:
+        open_action.triggered.connect(open_image)
+    menu.addSeparator()
+    menu.addAction(app.style().standardIcon(QStyle.SP_FileDialogDetailedView), "设置", settings)
+    menu.addSeparator()
+    menu.addAction(app.style().standardIcon(QStyle.SP_DialogCloseButton), "退出", quit_app)
+    return menu
