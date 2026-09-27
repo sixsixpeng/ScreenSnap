@@ -9,6 +9,11 @@ RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
 ENTRY_NAME = "ScreenSnap"
 
 
+def is_frozen():
+    """PyInstaller 设置 sys.frozen，Nuitka 只在编译模块注入 __compiled__。"""
+    return getattr(sys, "frozen", False) or "__compiled__" in globals()
+
+
 def set_start_on_boot(enabled):
     if sys.platform != "win32":
         if enabled:
@@ -18,7 +23,7 @@ def set_start_on_boot(enabled):
     import winreg
 
     if enabled:
-        if getattr(sys, "frozen", False):
+        if is_frozen():
             command = [sys.executable]
         else:
             python = Path(sys.executable).with_name("pythonw.exe")
