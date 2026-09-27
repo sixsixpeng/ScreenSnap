@@ -224,25 +224,25 @@ Get-ChildItem -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyCon
 ### 文件夹模式 + 无控制台（成品）
 
 ```powershell
-nuitka --mode=standalone --enable-plugins=pyside6,upx --windows-console-mode=disable --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=F:\Program_directory\miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
+nuitka --mode=standalone --enable-plugins=pyside6,upx --windows-console-mode=disable --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
 ```
 
 ### 文件夹模式 + 带控制台（调试）
 
 ```powershell
-nuitka --mode=standalone --enable-plugins=pyside6,upx --windows-console-mode=force --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=F:\Program_directory\miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
+nuitka --mode=standalone --enable-plugins=pyside6,upx --windows-console-mode=force --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
 ```
 
 ### 单文件模式 + 无控制台
 
 ```powershell
-nuitka --mode=onefile --enable-plugins=pyside6,upx --windows-console-mode=disable --onefile-no-compression --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=F:\Program_directory\miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
+nuitka --mode=onefile --enable-plugins=pyside6,upx --windows-console-mode=disable --onefile-no-compression --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
 ```
 
 ### 单文件模式 + 带控制台（调试）
 
 ```powershell
-nuitka --mode=onefile --enable-plugins=pyside6,upx --windows-console-mode=force --onefile-no-compression --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=F:\Program_directory\miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
+nuitka --mode=onefile --enable-plugins=pyside6,upx --windows-console-mode=force --onefile-no-compression --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
 ```
 
 产物为 `dist\main.dist\ScreenSnap.exe`（文件夹模式，分发时拷贝整个目录）或 `dist\ScreenSnap.exe`（单文件模式）。建议先构建带控制台的版本确认无报错，再出无控制台成品。
@@ -257,6 +257,64 @@ nuitka --mode=onefile --enable-plugins=pyside6,upx --windows-console-mode=force 
 - 无可用 MSVC 时 Nuitka 会自动下载 MinGW64，`--assume-yes-for-downloads` 用于免交互确认。
 - 调试阶段不要加 `--remove-output`，保留 `dist\main.build` 可增量编译；正式出包时再加。
 - 开机自动启动写入的是 exe 自身路径，程序每次启动会同步一次，移动 exe 后手动运行一次即可更新。
+
+## 可选：PyInstaller 打包
+
+Nuitka 是本项目的默认打包方式；PyInstaller 作为备选保留，命令更简单但产物更大、无编译优化。
+
+安装 PyInstaller：
+
+```powershell
+.\.venv\Scripts\python -m pip install pyinstaller
+```
+
+下面四组命令与 Nuitka 一一对应：「文件夹/单文件」×「无控制台/带控制台」。UPX 用 `--upx-dir` 指定目录（本机为 `dev_env\upx-4.0.1-win64`），upx.exe 不会被打进产物，运行时不需要它；不想压缩就删掉该参数。
+
+### 文件夹模式 + 无控制台（成品）
+
+```powershell
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onedir --windowed --icon icon.ico --upx-dir "dev_env\upx-4.0.1-win64" --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
+```
+
+### 文件夹模式 + 带控制台（调试）
+
+```powershell
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onedir --console --icon icon.ico --upx-dir "dev_env\upx-4.0.1-win64" --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
+```
+
+### 单文件模式 + 无控制台
+
+```powershell
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --icon icon.ico --upx-dir "dev_env\upx-4.0.1-win64" --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
+```
+
+### 单文件模式 + 带控制台（调试）
+
+```powershell
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --console --icon icon.ico --upx-dir "dev_env\upx-4.0.1-win64" --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
+```
+
+产物为 `dist\ScreenSnap\ScreenSnap.exe`（文件夹模式，分发时拷贝整个 `dist\ScreenSnap` 目录）或 `dist\ScreenSnap.exe`（单文件模式）。
+
+与 Nuitka 的对应关系：`--onedir`/`--onefile` 对应 `--mode=standalone`/`--mode=onefile`，`--windowed`/`--console` 对应 `--windows-console-mode=disable`/`force`，`--icon` 对应 `--windows-icon-from-ico`，`--hidden-import` 对应 `--include-package`。
+
+首次打包请**先选带控制台的两组中之一**构建，确认没有 traceback 后再出窗口版。
+
+### PyInstaller 常见报错与解决
+
+| 报错/现象 | 原因 | 解决办法 |
+| --- | --- | --- |
+| `ModuleNotFoundError: No module named 'ui.settings_window'`（或 `ui.tray_menu`、`ui.capture_notification`） | `ui/__init__.py` 的 `__getattr__` 用 `importlib.import_module` 懒加载顶层组件，PyInstaller 只做静态 import 分析扫描不到；这三个模块在仓库里没有任何静态引用（只有 `ui.widgets.tooltip` 被 `main.py` 直接导入） | 加上面三个 `--hidden-import`；或改用 `--collect-submodules=ui` 一把全收；也可以在入口 `main.py` 顶部改为显式 `from ui.settings_window import SettingsWindow` 等静态导入（代价是可能重新引入循环引用） |
+| `ImportError: DLL load failed while importing _ctypes` / `IMPORT_HARD_CTYPES` | 使用 Conda/Miniconda 派生的 Python 时，libffi 被改名成 `ffi.dll` 且放在环境的 `Library\bin` 下，没被打进包 | 换成 python.org 官方 CPython（推荐）；或用 `--paths "<环境>\Library\bin"` 让 PyInstaller 找到 DLL，必要时 `--add-binary "<环境>\Library\bin\ffi.dll;."` |
+| `ImportError: DLL load failed while importing win32ui/win32gui` / `No module named pywintypes` | pywin32 的运行时 DLL（`pywintypes312.dll`、`pythoncom312.dll`）位于 `site-packages\pywin32_system32`，虚拟环境里未执行 post-install 时不会落地到正确位置 | 确认 `.venv\Lib\site-packages\pywin32_system32` 下有这两个 DLL；缺失则重装：`.\.venv\Scripts\python -m pip uninstall pywin32` 后重装，或运行 `python Scripts\pywin32_postinstall.py -install`；仍不行则补 `--hidden-import pywintypes --hidden-import pythoncom` |
+| `This application failed to start because no Qt platform plugin could be initialized.` / 双击无任何窗口直接退出 | Qt 的 `platforms\qwindows.dll` 未随行；PySide6 6.11 较新，旧版 PyInstaller 的 hook 可能不完整 | 升级到 PyInstaller 6.x 以上再打包；或加 `--collect-all PySide6`；临时验证可把 `.\.venv\Lib\site-packages\PySide6\plugins\platforms` 拷到 exe 同目录，并设置 `QT_QPA_PLATFORM_PLUGIN_PATH` |
+| 窗口版闪退看不到任何信息 | `--windowed` 吞掉了 stdout/stderr | 去掉 `--windowed`（或加 `--console`、`--debug=all`）重新构建，在 exe 所在目录用终端运行查看堆栈；未自定义日志目录时，程序还会把日志写到 exe 同级的 `logs\app.log` |
+| `PermissionError` / 无法删除 `dist`、`build` 或 exe 被占用 | 上一次构建的托盘程序仍在运行 | 托盘右键退出（或任务管理器结束 `ScreenSnap.exe`）后重试；重复构建保留 `--noconfirm`，改依赖后务必保留 `--clean` |
+| 单文件版首次启动要几秒才出现托盘、被杀软拦截 | onefile 每次运行都把内容解压到 `%TEMP%\_MEIxxxx`，解压行为常被误报 | 改用 onedir 分发；或把生成的 `dist\ScreenSnap.exe` 加入杀软白名单 |
+| 打包后热键不触发，源码运行正常 | `keyboard` 的全局钩子对不同权限等级的进程无效，和是否打包无关 | 以管理员身份运行，或对目标进程保持同级权限；详见「已知限制」 |
+| 开机自动启动写了源码路径 | 自查是否从源码运行；PyInstaller 同样会设置 `sys.frozen`，`core/startup.py` 会写入 exe 路径 | 用打包后的 exe 手动启动一次即可同步注册表；移动位置后再启动一次同样会更新 |
+
+PyInstaller 不会编译 Python 代码，产物通常明显大于 Nuitka；对体积敏感时优先使用上面的 Nuitka 命令。
 
 一般不需要管理员权限；只有明确需要操作受保护窗口时才考虑提升权限。Windows 全局热键在权限不同的应用上可能无法触发。
 
