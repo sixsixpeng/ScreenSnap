@@ -3,7 +3,7 @@
 from PySide6.QtWidgets import QMessageBox, QWidget, QHBoxLayout, QPushButton, QStyle
 
 from core.constants import HOTKEY_LABELS
-from config.config_manager import canonical_hotkey
+from config.config_manager import DEFAULTS, canonical_hotkey
 from ui.widgets.hotkey_edit import HotkeyEdit
 from ui.widgets.tooltip import SettingsPage
 
@@ -37,6 +37,14 @@ class HotkeyPage(SettingsPage):
             layout.addWidget(clear)
             self.form.addRow(label, row)
             setattr(self, f"edit_{action}", widget)
+
+    def reset_page(self):
+        """本页恢复默认：开关与全部热键绑定一起回到出厂值。"""
+        super().reset_page()
+        for action, binding in DEFAULTS["hotkeys"].items():
+            self.config.data["hotkeys"][action] = binding
+            getattr(self, f"edit_{action}").setKeySequence(binding)
+        self.changed()
 
     def clear_binding(self, action):
         """清除绑定后同步录制控件和 JSON，保留该动作在设置页。"""

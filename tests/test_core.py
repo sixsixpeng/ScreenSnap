@@ -86,6 +86,17 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(next(Path(folder).glob("settings.json.broken-*")).read_text(encoding="utf-8"),
                              "{invalid")
 
+    def test_invalid_single_setting_falls_back_without_losing_others(self):
+        from config.config_manager import DEFAULTS
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            path.write_text(json.dumps({"pen_color": "#ff0000", "font_size": 999}), encoding="utf-8")
+            manager = ConfigManager(path)
+            self.assertEqual(manager.data["pen_color"], "#ff0000")
+            self.assertEqual(manager.data["font_size"], DEFAULTS["font_size"])
+            self.assertEqual(len(list(Path(folder).glob("settings.json.broken-*"))), 1)
+
     def test_existing_annotation_values_are_not_replaced_by_new_defaults(self):
         from editor.toolbar_widget import ToolbarWidget
 
@@ -233,6 +244,42 @@ class CoreTests(unittest.TestCase):
                 for key in settings.pages.widget(index).controls:
                     self.assertIn(key, manager.data)
             self.assertFalse(settings.pages.widget(0).controls["start_on_boot"].isChecked())
+            settings.close()
+
+    def test_uia_detect_default_on_and_hover_interval_clamped(self):
+        from config.config_manager import DEFAULTS, validate
+
+        self.assertTrue(DEFAULTS["window_uia_detect"])
+        self.assertEqual(DEFAULTS["window_hover_interval"], 80)
+        # 区间内的值保留。
+        self.assertEqual(validate({"window_hover_interval": 120})["window_hover_interval"], 120)
+        # 越界会被拒绝（加载时由 repair 回退到默认值）。
+        with self.assertRaises(ValueError):
+            validate({"window_hover_interval": 9})
+        with self.assertRaises(ValueError):
+            validate({"window_hover_interval": 600})
+
+    def test_general_page_reset_restores_uia_and_hover_interval(self):
+        from config.config_manager import DEFAULTS
+        from ui.settings_window import SettingsWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            # 模拟用户把两项改成了非默认值。
+            path.write_text(json.dumps({"window_uia_detect": False,
+                                        "window_hover_interval": 300}), encoding="utf-8")
+            manager = ConfigManager(path)
+            self.assertFalse(manager.data["window_uia_detect"])
+            self.assertEqual(manager.data["window_hover_interval"], 300)
+            settings = SettingsWindow(manager)
+            general = settings.pages.widget(0)
+            general.reset_page()
+            # 单页重置应把本页涉及的项（含本轮新增项）还原为默认值并持久化。
+            self.assertTrue(manager.data["window_uia_detect"])
+            self.assertEqual(manager.data["window_hover_interval"],
+                             DEFAULTS["window_hover_interval"])
+            self.assertEqual(ConfigManager(path).data["window_hover_interval"],
+                             DEFAULTS["window_hover_interval"])
             settings.close()
 
     def test_text_item_uses_shared_annotation_color(self):
@@ -677,13 +724,31 @@ class CoreTests(unittest.TestCase):
     def test_startup_notice_and_tray_icon(self):
         from types import SimpleNamespace
         from config.config_manager import DEFAULTS
-        from main import Application, tray_icon
+        from core.app_icon import ICON_FILES, app_icon, icon_dir
+        from main import Application, drawn_icon, tray_icon
 
+        self.assertTrue(any((icon_dir() / name).is_file() for name in ICON_FILES))
         icon = tray_icon()
         self.assertFalse(icon.isNull())
-        picture = icon.pixmap(32, 32).toImage()
-        self.assertGreater(picture.pixelColor(picture.width() // 2, picture.height() // 2).alpha(), 0)
-        self.assertGreater(picture.pixelColor(picture.width() * 3 // 4, picture.height() * 3 // 4).alpha(), 0)
+        self.assertFalse(app_icon().isNull())
+        picture = icon.pixmap(64, 64).toImage()
+        opaque = sum(1 for x in range(picture.width()) for y in range(picture.height())
+                     if picture.pixelColor(x, y).alpha() > 0)
+        self.assertGreater(opaque, 50)
+        # 图标文件中心留空；内置绘制图标中心有实心圆点，可借此确认用的是文件图标。
+        self.assertEqual(picture.pixelColor(picture.width() // 2, picture.height() // 2).alpha(), 0)
+        drawn = drawn_icon().pixmap(64, 64).toImage()
+        self.assertGreater(drawn.pixelColor(drawn.width() // 2, drawn.height() // 2).alpha(), 0)
+
+        # 未显式设置图标的窗口应继承应用级图标（设置、编辑器等窗口都靠这条链路）。
+        from PySide6.QtWidgets import QApplication, QWidget
+
+        application = QApplication.instance()
+        application.setWindowIcon(icon)
+        window = QWidget()
+        self.assertFalse(window.windowIcon().isNull())
+        self.assertEqual(window.windowIcon().cacheKey(), icon.cacheKey())
+        window.close()
 
         app = Application.__new__(Application)
         app.config = SimpleNamespace(data=DEFAULTS.copy())
@@ -3482,6 +3547,22 @@ class CoreTests(unittest.TestCase):
             app.start_capture("capture", from_tray=True)
             self.assertEqual(schedule.call_args.args[0], 150)
 
+    def test_capture_delay_setting_adds_wait_before_capture(self):
+        import logging
+        from main import Application
+
+        app = Application.__new__(Application)
+        app.mask = None
+        app.logger = logging.getLogger("screensnap")
+        app.config = Mock(data={"last_capture_rect": [1, 2, 3, 4], "capture_delay": 800})
+        app.show_mask = Mock()
+        with patch("main.QTimer.singleShot") as schedule:
+            app.start_capture("capture")
+            self.assertEqual(schedule.call_args.args[0], 800)
+            # 托盘菜单本来就有 150 毫秒等待，用户延迟在此基础上累加。
+            app.start_capture("capture", from_tray=True)
+            self.assertEqual(schedule.call_args.args[0], 950)
+
     def test_repeat_capture_remembers_global_region_and_crops_fresh_frame(self):
         from main import Application
         from screenshot.mask_window import MaskWindow
@@ -4290,6 +4371,708 @@ class CoreTests(unittest.TestCase):
             finally:
                 manager.close_all()
                 self.app.processEvents()
+
+    def test_clipboard_color_values_are_recognized(self):
+        from sticker.clipboard_source import parse_color
+
+        self.assertEqual(parse_color("#ff0000"), "#ff0000")
+        self.assertEqual(parse_color("1a2B3c"), "#1a2b3c")
+        self.assertEqual(parse_color("#abc"), "#aabbcc")
+        for value in ("", "hello", "#12", "#12345", "rgb(1, 2, 3)"):
+            self.assertIsNone(parse_color(value))
+
+    def test_clipboard_source_renders_text_color_and_file_cards(self):
+        from PySide6.QtCore import QMimeData, QUrl
+        from PySide6.QtGui import QGuiApplication
+        from config.config_manager import DEFAULTS
+        from sticker.clipboard_source import (read_clipboard, render_color_card,
+                                              render_file_card, render_text_card)
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "note.txt"
+            path.write_text("hello", encoding="utf-8")
+            card = render_text_card("第一行\n第二行", DEFAULTS)
+            self.assertFalse(card.isNull())
+            self.assertGreater(card.height(), 20)
+            color = render_color_card("#ff0000", DEFAULTS)
+            self.assertEqual((color.width(), color.height()), (260, 150))
+            self.assertFalse(render_file_card([str(path)], DEFAULTS).isNull())
+            board = QGuiApplication.clipboard()
+            try:
+                board.setText("#ff0000")
+                self.assertEqual(read_clipboard(DEFAULTS).kind, "color")
+                board.setText("普通文字")
+                text = read_clipboard(DEFAULTS)
+                self.assertEqual((text.kind, text.text), ("text", "普通文字"))
+                mime = QMimeData()
+                mime.setUrls([QUrl.fromLocalFile(str(path))])
+                board.setMimeData(mime)
+                files = read_clipboard(DEFAULTS)
+                self.assertEqual(files.kind, "files")
+                self.assertEqual([Path(item) for item in files.paths], [path])
+            finally:
+                board.clear()
+
+    def test_paste_clipboard_creates_sticker_and_restores_origin(self):
+        from PySide6.QtGui import QGuiApplication
+        from config.config_manager import DEFAULTS
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            manager = StickerManager(DEFAULTS)
+            board = QGuiApplication.clipboard()
+            try:
+                board.clear()
+                self.assertIsNone(manager.paste_clipboard())
+                board.setText("待办：检查缓存")
+                item = manager.paste_clipboard()
+                self.assertIsNotNone(item)
+                self.assertEqual(item.origin, {"kind": "text", "text": "待办：检查缓存"})
+                self.assertTrue(Path(item.source).exists())
+                manager.persist()
+                restored = StickerManager(DEFAULTS)
+                restored.restore()
+                self.assertEqual(len(restored.items), 1)
+                self.assertEqual(restored.items[0].origin.get("text"), "待办：检查缓存")
+                restored.close_all()
+            finally:
+                board.clear()
+                manager.close_all()
+                self.app.processEvents()
+
+    def test_sticker_menu_offers_origin_actions_for_text_and_files(self):
+        from PySide6.QtGui import QGuiApplication, QImage
+        from config.config_manager import DEFAULTS
+        from sticker.sticker_menu import build_menu
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            manager = StickerManager(DEFAULTS)
+            try:
+                image = QImage(12, 8, QImage.Format_RGB32)
+                plain = manager.add(image)
+                with_origin = manager.add(image, origin={"kind": "text", "text": "示例"})
+                self.assertNotIn("复制文字", {action.text() for action in build_menu(plain).actions()})
+                self.assertIn("复制文字", {action.text() for action in build_menu(with_origin).actions()})
+                with_origin.copy_origin_text()
+                self.assertEqual(QGuiApplication.clipboard().text(), "示例")
+            finally:
+                QGuiApplication.clipboard().clear()
+                manager.close_all()
+                self.app.processEvents()
+
+    def test_every_setting_has_an_entry_in_settings_window(self):
+        from config.config_manager import DEFAULTS
+        from ui import SettingsWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = SettingsWindow(ConfigManager(Path(folder) / "settings.json"))
+            keys = set()
+            for index in range(settings.pages.count()):
+                page = settings.pages.widget(index)
+                keys.update(page.controls)
+                keys.update(page.color_buttons)
+            # 热键与上次区域由专用控件或程序内部维护，不需要普通设置项入口。
+            self.assertEqual(set(DEFAULTS) - keys, {"hotkeys", "last_capture_rect"})
+            settings.close()
+
+    def test_window_element_detection_cycles_selection_with_tab(self):
+        from PySide6.QtCore import QRect, Qt
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 100, "height": 80}
+        settings = dict(DEFAULTS, magnifier=False, crosshair=False, window_detection=True,
+                        element_depth=3)
+        chain = [(0, 0, 100, 80), (10, 10, 60, 50), (20, 20, 40, 30)]
+        with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+             patch("screenshot.mask_window.element_chain", return_value=chain):
+            mask = MaskWindow(Image.new("RGB", (100, 80), "white"), bounds, [bounds], settings)
+            # 悬停识别要求遮罩可见（截图结束时不再查询系统窗口）。
+            mask.show()
+            self.app.processEvents()
+            self.assertEqual(mask.element_chain, chain)
+            QTest.keyClick(mask, Qt.Key_Tab)
+            self.assertEqual(mask.selection.rects, [QRect(0, 0, 100, 80)])
+            QTest.keyClick(mask, Qt.Key_Tab)
+            self.assertEqual(mask.selection.rects, [QRect(10, 10, 50, 40)])
+            QTest.keyClick(mask, Qt.Key_Tab, Qt.ShiftModifier)
+            self.assertEqual(mask.selection.rects, [QRect(0, 0, 100, 80)])
+            mask.close()
+            auto = MaskWindow(Image.new("RGB", (100, 80), "white"), bounds, [bounds],
+                              dict(settings, window_auto_select=True))
+            self.assertEqual(auto.selection.rects, [QRect(0, 0, 100, 80)])
+            auto.close()
+            disabled = MaskWindow(Image.new("RGB", (100, 80), "white"), bounds, [bounds],
+                                  dict(settings, window_detection=False))
+            self.assertEqual(disabled.element_chain, [])
+            disabled.close()
+
+    def test_mask_hover_detection_highlights_and_click_selects(self):
+        from PySide6.QtCore import QPoint, QRect, Qt
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 100, "height": 80}
+        settings = dict(DEFAULTS, magnifier=False, crosshair=False, window_detection=True,
+                        window_hover_detect=True, element_depth=3)
+        chain = [(0, 0, 100, 80), (10, 10, 60, 50)]
+        with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+                patch("screenshot.mask_window.element_chain", return_value=chain):
+            mask = MaskWindow(Image.new("RGB", (100, 80), "white"), bounds, [bounds], settings)
+            try:
+                # 悬停识别要求遮罩可见（截图结束后不再查询系统窗口）。
+                mask.show()
+                self.app.processEvents()
+                mask.hover_stamp = 0.0
+                mask.poll_hover()
+                # 悬停取最内层元素。
+                self.assertEqual(mask.hover_rect, QRect(10, 10, 50, 40))
+                QTest.mousePress(mask, Qt.LeftButton, Qt.NoModifier, QPoint(20, 20))
+                QTest.mouseRelease(mask, Qt.LeftButton, Qt.NoModifier, QPoint(20, 20))
+                self.assertEqual(mask.selection.rects, [QRect(10, 10, 50, 40)])
+            finally:
+                mask.close()
+
+    def test_hover_detection_works_on_every_monitor(self):
+        from PySide6.QtCore import QRect
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 100}
+        monitors = [{"left": 0, "top": 0, "width": 100, "height": 100},
+                    {"left": 100, "top": 0, "width": 100, "height": 100}]
+        settings = dict(DEFAULTS, magnifier=False, crosshair=False)
+        chain = [(120, 10, 180, 60)]
+        with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+                patch("screenshot.mask_window.element_chain", return_value=chain):
+            mask = MaskWindow(Image.new("RGB", (200, 100), "white"), bounds, monitors, settings)
+            try:
+                mask.show()
+                self.app.processEvents()
+                second = mask.session.views[1]
+                self.assertFalse(second.primary)
+                second.hover_stamp = 0.0
+                second.poll_hover()
+                # 非 primary 的遮罩也必须能识别，否则主屏永远没有高亮。
+                self.assertEqual(second.hover_rect, QRect(120, 10, 60, 50))
+            finally:
+                mask.close()
+
+    def test_follow_keeps_snap_when_window_minimized(self):
+        from PySide6.QtCore import QPoint, QRect
+        from PySide6.QtGui import QImage
+        from config.config_manager import DEFAULTS
+
+        settings = dict(DEFAULTS, sticker_snap_targets="window", sticker_follow_window=True)
+        sticker = StickerItem(QImage(40, 30, QImage.Format_RGB32), settings=settings)
+        target = Mock(handle=1234, title="记事本", class_name="Notepad", rect=QRect(100, 100, 300, 200))
+        try:
+            with patch("sticker.sticker_item.visible_targets", return_value=[target]), \
+                    patch("sticker.sticker_item.window_under_point", return_value=target):
+                sticker.apply_snap(QPoint(104, 105), QPoint(120, 120))
+            self.assertTrue(sticker.following())
+            # 最小化只是读不到矩形，句柄仍在，吸附关系要保留。
+            with patch("sticker.sticker_item.window_logical_rect", return_value=None), \
+                    patch("sticker.sticker_item.window_present", return_value=True):
+                sticker.poll_follow()
+            self.assertIsNotNone(sticker.snap_target)
+            self.assertTrue(sticker.following())
+            # 窗口真正关闭才解除吸附与跟随。
+            with patch("sticker.sticker_item.window_logical_rect", return_value=None), \
+                    patch("sticker.sticker_item.window_present", return_value=False):
+                sticker.poll_follow()
+            self.assertIsNone(sticker.snap_target)
+            self.assertFalse(sticker.following())
+        finally:
+            sticker.release_snap()
+            sticker.close()
+
+    def test_toolbar_options_panel_shows_live_preview(self):
+        from config.config_manager import DEFAULTS
+        from editor.toolbar_widget import ToolbarWidget
+
+        toolbar = ToolbarWidget(settings=dict(DEFAULTS))
+        try:
+            self.assertEqual(sorted(toolbar.previews),
+                             ["arrow", "crop", "marker", "mosaic", "shapes", "text"])
+            # 弹窗未显示时 isVisible 恒为 False，这里只看控件自身的显式隐藏状态。
+            toolbar.tool_buttons["arrow"].click()
+            self.assertEqual([name for name, widget in toolbar.previews.items() if not widget.isHidden()],
+                             ["arrow"])
+            toolbar.tool_buttons["mosaic"].click()
+            self.assertEqual([name for name, widget in toolbar.previews.items() if not widget.isHidden()],
+                             ["mosaic"])
+            # 预览行要计入弹窗高度。
+            menu = toolbar.options_button.menu()
+            panel = menu.actions()[0].defaultWidget()
+            menu.show()
+            self.app.processEvents()
+            self.assertGreater(panel.height(), 120)
+            # 改参数后丢弃缓存，下一次绘制按新值重建。
+            preview = toolbar.previews["mosaic"]
+            preview.scene = "cached"
+            toolbar.mosaic_size.setValue(30)
+            self.assertIsNone(preview.scene)
+            toolbar.tool_buttons["select"].click()
+            self.assertEqual([widget for widget in toolbar.previews.values() if widget.isVisible()],
+                             [])
+        finally:
+            toolbar.close()
+
+    def test_editor_window_toolbar_preview_follows_settings(self):
+        from config.config_manager import DEFAULTS
+
+        editor = EditorWindow(Image.new("RGB", (120, 90), "white"), dict(DEFAULTS))
+        try:
+            self.assertTrue(editor.toolbar.previews)
+            editor.toolbar.tool_buttons["text"].click()
+            self.assertEqual([name for name, widget in editor.toolbar.previews.items()
+                              if not widget.isHidden()], ["text"])
+            editor.toolbar.font_size.setValue(36)
+            self.assertIsNone(editor.toolbar.previews["text"].scene)
+        finally:
+            editor.close()
+
+    def test_element_chain_prefers_uia_and_falls_back(self):
+        import sys
+        from unittest.mock import Mock
+        from core import window_elements, window_uia
+
+        # UIA 可用时直接用它的结果。
+        with patch("core.window_uia.element_chain", return_value=[(5, 5, 6, 6)]), \
+                patch.object(window_elements, "collect", return_value=[(0, 0, 1, 1)]) as fallback:
+            self.assertEqual(window_elements.element_chain((1, 1), 3, use_uia=True),
+                             [(5, 5, 6, 6)])
+            fallback.assert_not_called()
+        # UIA 拿不到结果时退回窗口句柄。
+        with patch("core.window_uia.element_chain", return_value=[]), \
+                patch.object(window_elements, "collect", return_value=[(0, 0, 1, 1)]):
+            self.assertEqual(window_elements.element_chain((1, 1), 3, use_uia=True),
+                             [(0, 0, 1, 1)])
+
+    def test_element_chain_survives_uia_flag(self):
+        from core import window_elements
+
+        # collect 必须接受 use_uia，否则提示日志会抛 NameError，识别整体失效。
+        with patch("core.window_uia.element_chain", return_value=[]), \
+                patch.object(window_elements, "top_window_at", return_value=None):
+            self.assertEqual(window_elements.element_chain((1, 1), 3, use_uia=True), [])
+            self.assertEqual(window_elements.element_chain((1, 1), 3), [])
+
+    def test_uia_element_chain_walks_parents(self):
+        import sys
+        from unittest.mock import Mock
+        from core import window_uia
+
+        inner = Mock()
+        inner.BoundingRectangle = (10, 10, 100, 80)
+        inner.Name = "按钮"
+        inner.ControlTypeName = "ButtonControl"
+        outer = Mock()
+        outer.BoundingRectangle = (0, 0, 200, 150)
+        outer.Name = "窗口"
+        outer.ControlTypeName = "WindowControl"
+        inner.GetParentControl.return_value = outer
+        outer.GetParentControl.return_value = None
+        automation = Mock()
+        automation.ControlFromHandle.return_value = inner
+        with patch("core.window_uia.top_window_at", return_value=999), \
+                patch.dict(sys.modules, {"uiautomation": automation}):
+            self.assertTrue(window_uia.available())
+            self.assertEqual(window_uia.element_chain((50, 50), 3),
+                             [(0, 0, 200, 150), (10, 10, 100, 80)])
+        # 过小的控件被过滤。
+        tiny = Mock()
+        tiny.BoundingRectangle = (10, 10, 12, 12)
+        tiny.GetParentControl.return_value = None
+        automation.ControlFromHandle.return_value = tiny
+        with patch("core.window_uia.top_window_at", return_value=999), \
+                patch.dict(sys.modules, {"uiautomation": automation}):
+            self.assertEqual(window_uia.element_chain((11, 11), 3), [])
+
+    def test_settings_page_can_reset_its_own_defaults(self):
+        from config.config_manager import DEFAULTS
+
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            settings = SettingsWindow(manager)
+            try:
+                page = settings.pages.widget(5)
+                other = settings.pages.widget(0)
+                other.controls["magnifier"].setChecked(False)
+                page.controls["sticker_snap_threshold"].setValue(30)
+                self.assertEqual(manager.data["sticker_snap_threshold"], 30)
+                page.reset_page()
+                self.assertEqual(manager.data["sticker_snap_threshold"],
+                                 DEFAULTS["sticker_snap_threshold"])
+                self.assertEqual(page.controls["sticker_snap_threshold"].value(),
+                                 DEFAULTS["sticker_snap_threshold"])
+                # 本页重置不应影响其他页已经改过的选项。
+                self.assertFalse(manager.data["magnifier"])
+            finally:
+                settings.close()
+
+    def test_editor_settings_show_live_previews(self):
+        from PySide6.QtCore import QRectF
+        from PySide6.QtWidgets import QGraphicsTextItem
+
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            settings = SettingsWindow(manager)
+            page = settings.pages.widget(3)
+            previews = {preview.kind: preview for preview in page.previews}
+            self.assertEqual(sorted(previews), ["arrow", "crop", "marker", "mosaic", "shapes", "text"])
+            page.controls["font_size"].setValue(42)
+            text = previews["text"]
+            self.assertIsNone(text.scene)
+            scene = text.build(QRectF(0, 0, 320, 120))
+            items = [item for item in scene.items() if isinstance(item, QGraphicsTextItem)]
+            self.assertTrue(items)
+            self.assertEqual(items[0].font().pointSize(), 42)
+            for kind in ("arrow", "shapes", "marker", "mosaic", "crop"):
+                built = previews[kind].build(QRectF(0, 0, 320, 96))
+                self.assertGreater(len(built.items()), 1, kind)
+            settings.close()
+
+    def test_clipboard_card_sizes_follow_settings(self):
+        from config.config_manager import DEFAULTS
+        from sticker.clipboard_source import render_color_card, render_file_card
+
+        with tempfile.TemporaryDirectory() as folder:
+            paths = [Path(folder) / f"file_{index}.txt" for index in range(3)]
+            for path in paths:
+                path.write_text("x", encoding="utf-8")
+            settings = dict(DEFAULTS, color_sticker_width=320, color_sticker_height=90,
+                            file_sticker_width=520, file_sticker_max=2)
+            color = render_color_card("#ff0000", settings)
+            self.assertEqual((color.width(), color.height()), (320, 90))
+            narrow = render_file_card([str(path) for path in paths], settings)
+            self.assertEqual(narrow.width(), 520)
+            tall = render_file_card([str(path) for path in paths],
+                                    dict(settings, file_sticker_max=3))
+            self.assertGreater(tall.height(), narrow.height())
+
+    def test_clipboard_color_detection_switch_changes_kind(self):
+        from PySide6.QtGui import QGuiApplication
+        from config.config_manager import DEFAULTS
+        from sticker.clipboard_source import read_clipboard
+
+        board = QGuiApplication.clipboard()
+        try:
+            board.setText("#ff0000")
+            self.assertEqual(read_clipboard(DEFAULTS).kind, "color")
+            self.assertEqual(read_clipboard(dict(DEFAULTS, clipboard_color_detection=False)).kind,
+                             "text")
+        finally:
+            board.clear()
+
+    def test_clipboard_and_save_settings_are_validated(self):
+        from config.config_manager import DEFAULTS
+
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            for key, value in (("save_background", "red"), ("file_sticker_max", 0),
+                               ("file_sticker_width", 100), ("color_sticker_width", 20),
+                               ("color_sticker_height", 10), ("sticker_panel_thumb", 8)):
+                manager.data[key] = value
+                with self.assertRaises(ValueError, msg=key):
+                    manager.save()
+                manager.data[key] = DEFAULTS[key]
+            manager.save()
+            self.assertEqual(ConfigManager(Path(folder) / "settings.json").data["file_sticker_max"], 8)
+
+    def test_save_background_is_used_for_opaque_formats(self):
+        from PySide6.QtGui import QColor, QImage
+        from config.config_manager import DEFAULTS
+        from core.image_io import save_image
+
+        with tempfile.TemporaryDirectory() as folder:
+            image = QImage(20, 10, QImage.Format_ARGB32)
+            image.fill(Qt.transparent)
+            target = Path(folder) / "flat.jpg"
+            self.assertTrue(save_image(image, target, dict(DEFAULTS, save_format="jpg",
+                                                           save_background="#ff0000")))
+            pixel = QColor(QImage(str(target)).pixel(5, 5))
+            self.assertGreater(pixel.red(), 200)
+            self.assertLess(pixel.green(), 60)
+            self.assertLess(pixel.blue(), 60)
+
+    def test_save_format_and_quality_control_output(self):
+        from PySide6.QtGui import QColor, QImage
+        from config.config_manager import DEFAULTS
+        from core.image_io import save_image, saved_extension
+
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            self.assertEqual((manager.data["save_format"], manager.data["save_quality"]), ("png", 90))
+            self.assertEqual(saved_extension({"save_format": "jpg"}), "jpg")
+            self.assertEqual(saved_extension({}), "png")
+            image = QImage(30, 20, QImage.Format_ARGB32)
+            image.fill(QColor("red"))
+            for name, settings in (("shot.jpg", {"save_format": "jpg", "save_quality": 60}),
+                                   ("shot.webp", {"save_format": "webp", "save_quality": 80})):
+                target = Path(folder) / name
+                self.assertTrue(save_image(image, target, settings))
+                self.assertTrue(target.exists())
+            manager.data["save_format"] = "tiff"
+            with self.assertRaises(ValueError):
+                manager.save()
+            manager.data["save_format"] = "png"
+            manager.data["save_quality"] = 0
+            with self.assertRaises(ValueError):
+                manager.save()
+            manager.data["save_quality"] = 90
+            manager.save()
+            self.assertEqual(ConfigManager(Path(folder) / "settings.json").data["save_format"], "png")
+
+    def test_editor_and_history_use_configured_save_format(self):
+        from config.config_manager import DEFAULTS
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = dict(DEFAULTS, save_format="jpg", auto_dir=folder, manual_dir=folder)
+            editor = EditorWindow(Image.new("RGB", (40, 30), "white"), settings)
+            saved = editor.save()
+            self.assertEqual(saved.suffix, ".jpg")
+            self.assertTrue(saved.exists())
+            editor.close()
+            manager = StickerManager(settings)
+            self.assertEqual([path.suffix for path in manager.files()], [".jpg"])
+
+    def test_sticker_panel_lists_and_locates_open_stickers(self):
+        from PySide6.QtGui import QColor, QImage
+        from config.config_manager import DEFAULTS
+        from ui.sticker_panel import StickerPanel
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            manager = StickerManager(DEFAULTS)
+            panel = StickerPanel(manager)
+            events = []
+            manager.changed.connect(lambda: events.append(len(manager.items)))
+            try:
+                image = QImage(12, 8, QImage.Format_RGB32)
+                image.fill(QColor("red"))
+                manager.add(image)
+                manager.add(image)
+                self.assertEqual(events[-2:], [1, 2])
+                panel.refresh()
+                self.assertEqual(panel.list_widget.count(), 2)
+                self.assertEqual(panel.index_of(manager.items[0]), 0)
+                panel.locate(0)
+                panel.locate(9)
+                manager.items[-1].close()
+                self.app.processEvents()
+                panel.refresh()
+                self.assertEqual(panel.list_widget.count(), 1)
+            finally:
+                panel.close()
+                manager.close_all()
+                self.app.processEvents()
+
+    def test_tray_menu_exposes_clipboard_and_panel_entries(self):
+        from ui.tray_menu import make_tray_menu
+
+        menu = make_tray_menu(self.app, lambda: None, lambda: None, lambda: None,
+                              hotkeys={"paste_clipboard": "ctrl+f3", "sticker_panel": "ctrl+alt+p"},
+                              paste_clipboard=lambda: None, sticker_panel=lambda: None)
+        labels = [action.text() for action in menu.actions()]
+        self.assertTrue(any(label.startswith("贴剪贴板内容") for label in labels), labels)
+        self.assertTrue(any(label.startswith("贴图管理") for label in labels), labels)
+
+    def test_clipboard_plain_text_falls_back_to_html(self):
+        from PySide6.QtCore import QMimeData
+        from sticker.clipboard_source import plain_text
+
+        mime = QMimeData()
+        mime.setHtml("<p>第一行<br>第二行 &amp; 结尾</p>")
+        text = plain_text(mime)
+        self.assertIn("第一行", text)
+        self.assertIn("第二行", text)
+        self.assertIn("&", text)
+        empty = QMimeData()
+        self.assertEqual(plain_text(empty), "")
+
+    def test_sticker_snap_offsets_align_to_nearest_edge(self):
+        from sticker.sticker_snap import snap_offsets
+
+        window = {"key": "window", "left": 100, "top": 100, "right": 400, "bottom": 300,
+                  "allow_outside": True}
+        screen = {"key": "screen0", "left": 0, "top": 0, "right": 1920, "bottom": 1080,
+                  "allow_outside": False}
+        # 窗口内对齐：贴到窗口左上角。
+        self.assertEqual(snap_offsets((104, 105, 204, 205), [window], 8), (-4, -5, ("window", "left")))
+        # 窗口外贴合：贴图左沿贴到窗口右沿。
+        self.assertEqual(snap_offsets((406, 100, 506, 200), [window], 8), (-6, 0, ("window", "right")))
+        # 屏幕只做内对齐，不做外贴合。
+        self.assertEqual(snap_offsets((5, 5, 105, 105), [screen], 8), (-5, -5, ("screen0", "left")))
+        # 超出阈值不吸附，保持自由拖动。
+        self.assertEqual(snap_offsets((140, 140, 240, 240), [window], 8), (0, 0, None))
+
+    def test_sticker_snap_attaches_window_and_follows(self):
+        from PySide6.QtCore import QPoint, QRect
+        from PySide6.QtGui import QImage
+        from config.config_manager import DEFAULTS
+
+        settings = dict(DEFAULTS, sticker_snap_threshold=8, sticker_snap_targets="window",
+                        sticker_follow_window=True, sticker_follow_interval=60)
+        sticker = StickerItem(QImage(40, 30, QImage.Format_RGB32), settings=settings)
+        target = Mock(handle=1234, title="记事本", class_name="Notepad", rect=QRect(100, 100, 300, 200))
+        try:
+            with patch("sticker.sticker_item.visible_targets", return_value=[target]), \
+                    patch("sticker.sticker_item.window_under_point", return_value=target):
+                position = sticker.apply_snap(QPoint(104, 105), QPoint(120, 120))
+            self.assertEqual((position.x(), position.y()), (100, 100))
+            self.assertEqual((sticker.snap_target["hwnd"], sticker.snap_target["edge"]), (1234, "left"))
+            self.assertEqual(sticker.state()["snap"]["hwnd"], 1234)
+            self.assertTrue(sticker.following())
+            # 超出阈值时不吸附。
+            with patch("sticker.sticker_item.visible_targets", return_value=[target]), \
+                    patch("sticker.sticker_item.window_under_point", return_value=target):
+                free = sticker.apply_snap(QPoint(300, 240), QPoint(320, 250))
+            self.assertEqual((free.x(), free.y()), (300, 240))
+            # 目标窗口关闭时自动解除吸附与跟随。
+            with patch("sticker.sticker_item.window_logical_rect", return_value=None):
+                sticker.poll_follow()
+            self.assertIsNone(sticker.snap_target)
+            self.assertFalse(sticker.following())
+            sticker.settings["sticker_snap_enabled"] = False
+            self.assertFalse(sticker.snap_enabled())
+        finally:
+            sticker.release_snap()
+            sticker.close()
+
+    def test_screen_mapping_pairs_devices_and_converts(self):
+        from PySide6.QtCore import QRect
+        from core.screen_mapping import pair_screens, physical_rect_to_logical
+
+        logical = [{"name": "\\\\.\\DISPLAY1", "geometry": QRect(0, 0, 1280, 720), "dpr": 1.5},
+                   {"name": "\\\\.\\DISPLAY2", "geometry": QRect(1280, 0, 960, 540), "dpr": 1.0}]
+        # 副屏物理起点 1920 对应逻辑起点 1280，简单乘以缩放比例会得到错误结果。
+        physical = [("\\\\.\\DISPLAY2", QRect(1920, 0, 960, 540)),
+                    ("\\\\.\\DISPLAY1", QRect(0, 0, 1920, 1080))]
+        mappings = pair_screens(logical, physical)
+        self.assertEqual(len(mappings), 2)
+        first = next(item for item in mappings if item.name == "\\\\.\\DISPLAY1")
+        self.assertEqual((first.physical, first.logical),
+                         (QRect(0, 0, 1920, 1080), QRect(0, 0, 1280, 720)))
+        with patch("core.screen_mapping.screen_mappings", return_value=mappings):
+            self.assertEqual(physical_rect_to_logical(QRect(2000, 100, 300, 200)),
+                             QRect(1360, 100, 300, 200))
+
+    def test_sticker_snap_prefers_window_over_screen(self):
+        from sticker.sticker_snap import snap_offsets
+
+        screen = {"key": "screen0", "left": 0, "top": 0, "right": 1920, "bottom": 1080,
+                  "allow_outside": False, "priority": 0}
+        # 最大化窗口与屏幕边缘重合，同距离时应优先贴到窗口，否则无法开启跟随。
+        window = {"key": "win1", "left": 0, "top": 0, "right": 1920, "bottom": 1040,
+                  "allow_outside": True, "priority": 1}
+        dx, dy, hit = snap_offsets((4, 4, 104, 104), [screen, window], 8)
+        self.assertEqual((dx, dy), (-4, -4))
+        self.assertEqual(hit[0], "win1")
+
+    def test_log_rate_throttles_repeated_state(self):
+        from logger.log_rate import throttled
+
+        self.assertTrue(throttled("unit", "same", 1.0))
+        self.assertFalse(throttled("unit", "same", 1.0))
+        self.assertTrue(throttled("unit", "changed", 1.0))
+
+    def test_settings_window_resets_defaults_and_clears_session(self):
+        from PySide6.QtWidgets import QMessageBox
+        from config.config_manager import DEFAULTS
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("ui.settings_window.set_start_on_boot"), \
+                patch("ui.settings_window.data_dir", return_value=Path(folder)):
+            manager = ConfigManager(Path(folder) / "settings.json")
+            manager.data["sticker_snap_threshold"] = 30
+            manager.data["log_level"] = "TRACE"
+            manager.save()
+            session = Path(folder) / "stickers.json"
+            session.write_text("[]", encoding="utf-8")
+            cache = Path(folder) / "sticker_cache"
+            cache.mkdir()
+            (cache / "sticker_1.png").write_bytes(b"x")
+            settings = SettingsWindow(manager)
+            try:
+                with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes), \
+                        patch.object(QMessageBox, "information"):
+                    settings.reset_defaults()
+                    settings.clear_sticker_session()
+                self.assertEqual((manager.data["sticker_snap_threshold"], manager.data["log_level"]),
+                                 (DEFAULTS["sticker_snap_threshold"], DEFAULTS["log_level"]))
+                backup = Path(folder) / "settings.bak"
+                self.assertTrue(backup.is_file())
+                self.assertEqual(json.loads(backup.read_text(encoding="utf-8"))["log_level"], "TRACE")
+                # 界面控件也必须回到默认值，而不是停留在重置前的显示。
+                page = settings.pages.widget(5)
+                self.assertEqual(page.controls["sticker_snap_threshold"].value(),
+                                 DEFAULTS["sticker_snap_threshold"])
+                self.assertFalse(session.exists())
+                self.assertEqual(list(cache.glob("sticker_*.png")), [])
+            finally:
+                settings.close()
+
+    def test_window_hit_ignores_invisible_system_windows(self):
+        from core.window_snap import IGNORED_CLASSES, is_cloaked, top_window_at
+
+        # 平板模式覆盖窗口整屏大小且不可见，会抢走鼠标下的真正目标。
+        self.assertIn("TabletModeCoverWindow", IGNORED_CLASSES)
+        # 无效句柄不应抛异常，识别失败时直接返回空结果。
+        self.assertFalse(is_cloaked(0))
+        self.assertIsInstance(top_window_at(0, 0), (int, type(None)))
+
+    def test_window_under_point_builds_target(self):
+        from PySide6.QtCore import QPoint, QRect
+        from core.window_snap import window_under_point
+
+        # 命中后要能构造出目标信息（曾因缺 user32/skipped 变量而抛 NameError）。
+        with patch("core.window_snap.top_window_at", return_value=1234), \
+                patch("core.window_snap.window_logical_rect", return_value=QRect(10, 10, 100, 80)):
+            target = window_under_point(QPoint(50, 50))
+        self.assertIsNotNone(target)
+        self.assertEqual(target.handle, 1234)
+        self.assertEqual(target.rect, QRect(10, 10, 100, 80))
+
+    def test_screen_mapping_pairs_by_position_when_names_differ(self):
+        from PySide6.QtCore import QRect
+        from core.screen_mapping import pair_screens
+
+        # Qt 屏幕名是显示器型号，与 Windows 设备名对不上；两块屏分辨率又相同，
+        # 只能按排列顺序配对，配反会让水平坐标整体偏移一整块屏。
+        logical = [{"name": "T2752Q", "geometry": QRect(0, 0, 2560, 1440), "dpr": 1.0},
+                   {"name": "DELL U2723", "geometry": QRect(2560, 0, 2560, 1440), "dpr": 1.0}]
+        physical = [("\\\\.\\DISPLAY2", QRect(2560, 0, 2560, 1440)),
+                    ("\\\\.\\DISPLAY1", QRect(0, 0, 2560, 1440))]
+        mappings = {mapping.name: mapping for mapping in pair_screens(logical, physical)}
+        self.assertEqual(mappings["T2752Q"].physical, QRect(0, 0, 2560, 1440))
+        self.assertEqual(mappings["DELL U2723"].physical, QRect(2560, 0, 2560, 1440))
+
+    def test_sticker_snap_settings_are_validated(self):
+        from config.config_manager import DEFAULTS
+
+        self.assertTrue(DEFAULTS["sticker_snap_enabled"])
+        self.assertEqual((DEFAULTS["sticker_snap_threshold"], DEFAULTS["sticker_snap_targets"]),
+                         (8, "both"))
+        self.assertEqual((DEFAULTS["sticker_follow_window"], DEFAULTS["sticker_follow_interval"]),
+                         (True, 120))
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            for key, value in (("sticker_snap_threshold", 0), ("sticker_snap_threshold", 41),
+                               ("sticker_snap_targets", "desktop"),
+                               ("sticker_follow_interval", 10)):
+                manager.data[key] = value
+                with self.assertRaises(ValueError, msg=f"{key}={value}"):
+                    manager.save()
+                manager.data[key] = DEFAULTS[key]
+            manager.save()
+            reloaded = ConfigManager(Path(folder) / "settings.json")
+            self.assertEqual((reloaded.data["sticker_snap_threshold"],
+                              reloaded.data["sticker_snap_targets"]), (8, "both"))
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                                QDialog, QDialogButtonBox, QDial, QDoubleSpinBox, QHBoxLayout, QLabel,
                                QStyle, QSlider, QSpinBox, QGraphicsView)
 
+from core.image_io import save_image, saved_extension
 from core.path_utils import resolved_dir
 from config.config_manager import TOOL_WIDTH_KEYS
 from editor.annotation_canvas import AnnotationCanvas
@@ -165,19 +166,25 @@ class EditorWindow(QMainWindow):
         directory = resolved_dir(self.settings, "auto_dir" if automatic else "manual_dir")
         directory.mkdir(parents=True, exist_ok=True)
         prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", datetime.now().strftime(self.settings["filename"])).strip(" .") or "Capture"
-        path = directory / f"{prefix}.png"
+        extension = saved_extension(self.settings)
+        path = directory / f"{prefix}.{extension}"
         number = 1
         while path.exists():
-            path = directory / f"{prefix}_{number}.png"
+            path = directory / f"{prefix}_{number}.{extension}"
             number += 1
         return path
 
     def save(self, automatic=False, copy_to_clipboard=False, force_copy_image=False):
         """首次保存分配文件名；后续保存覆盖同一路径，避免重复文件。"""
+        logger = logging.getLogger("screensnap")
         path = self.last_path or self.allocate_path(automatic)
         result = self.output_image()
-        if not result.save(str(path), "PNG"):
+        if not save_image(result, path, self.settings):
+            logger.error("图片保存失败: %s（格式 %s，质量 %s）", path,
+                         self.settings["save_format"], self.settings["save_quality"])
             raise OSError(f"图片保存失败：{path}")
+        logger.info("保存图片: %s（%sx%s，%s）", path, result.width(), result.height(),
+                    self.settings["save_format"])
         self.last_path = path
         self.image_saved.emit(str(path), result)
         if (copy_to_clipboard and (self.settings["copy_saved_image"] or self.settings["copy_saved_path"])) or force_copy_image:
@@ -188,8 +195,11 @@ class EditorWindow(QMainWindow):
                 payload.setImageData(result)
             QGuiApplication.clipboard().setMimeData(payload)
             self.status.emit("已复制保存内容")
-        if self.settings["open_dir"]:
-            os.startfile(str(path.parent)) if os.name == "nt" else None
+        if self.settings["open_dir"] and os.name == "nt":
+            try:
+                os.startfile(str(path.parent))
+            except OSError as error:
+                logging.getLogger("screensnap").warning("打开保存目录失败 %s: %s", path.parent, error)
         return path
 
     def invalidate_rotation_reset(self):

@@ -1,6 +1,6 @@
 # ScreenSnap
 
-ScreenSnap 是一个基于 Python、PySide6 的 Windows 优先截图与贴图工具。程序启动后常驻系统托盘，没有常驻主窗口。支持混合 DPI 多显示器截图、单选区原地编辑、多区域截图、矢量标注、图像变换、PNG 保存、剪贴板导入导出和独立置顶贴图。
+ScreenSnap 是一个基于 Python、PySide6 的 Windows 优先截图与贴图工具。程序启动后常驻系统托盘，没有常驻主窗口。支持混合 DPI 多显示器截图、单选区原地编辑、多区域截图、矢量标注、图像变换、多格式保存、剪贴板多类型贴图和独立置顶贴图。
 
 本文同时作为**用户操作手册**和**开发维护指南**。界面、快捷键、配置项或工作流发生变化时，应在同一改动中更新相应章节和测试说明。
 
@@ -43,6 +43,10 @@ python -m venv .venv
 - `Ctrl+Shift+F2` 重用上次选区的位置和大小，在新画面中重新截图。显示器布局变化后若选区已不在桌面范围内，程序会提示。
 - `Ctrl+F` 打开固定尺寸选区输入框；输入宽高后，在当前鼠标位置建立选区。
 - 拖动选区内部可移动；拖动四角或边缘中点可调整大小。选区接近屏幕或可见窗口边缘时会吸附。选中选区后使用方向键或 WASD 可微调位置。
+- `Tab` / `Shift+Tab` 把选区切到鼠标下的窗口、分组容器或控件（由外到内逐层进入）；开启“自动选中窗口”后，开始截图即直接选中鼠标下的窗口。浏览器、Electron 等自绘界面没有子窗口句柄，只能识别到顶层窗口。
+- 开启“移动鼠标自动识别”后，移动鼠标会以青色半透明块实时高亮下方的窗口或控件（取最内层），**左键单击即选中该区域**，按住拖动仍然手绘选区；想选外层窗口或父容器时按 `Tab` 逐层切换。高亮刷新的跟手程度（灵敏度）可在常规设置的“悬停识别刷新间隔”里调整：数值越小越跟手，但调用系统识别更频繁。不需要时可在常规设置里关掉。
+- 窗口识别默认按窗口句柄，能识别真实子窗口（资源管理器、记事本、系统对话框等的按钮与列表）；浏览器网页内容、Electron、Qt/WPF 自绘界面只有一个顶层句柄。默认开启“优先用无障碍识别 (UIA)”：截图识别会先用 Windows 无障碍树识别，可以读到这些自绘界面内部的按钮、标签页、编辑框，需要安装 `uiautomation` 库（`pip install uiautomation`）；没装或查询失败时自动退回句柄识别。
+- “截图时机”里可设置**截图延迟**（0–5000 毫秒）：按下热键后先等待再抓画面，用于避开快捷键冲突造成的界面变化，或等待菜单、动画、网页渲染完成。托盘菜单发起的截图会自动再追加 150 毫秒等待菜单关闭。
 - 多显示器截图使用虚拟桌面坐标，支持显示器负坐标；显示器之间的间隙也处于虚拟桌面矩形内。
 - 截图提示显示首个选区的缩略图和选区总数，约 4 秒后关闭。提示、尺寸文字、十字线和放大镜不会写入截图。
 - 单选区且完整位于同一显示器内时，默认进入**原地编辑**：不会打开新编辑窗口，而是在选区上直接显示编辑画布和紧凑图标工具栏。多选区或跨屏选区会自动回退到独立编辑器窗口，避免多画布和跨屏 DPI 坐标冲突。
@@ -71,6 +75,8 @@ python -m venv .venv
 | 马赛克 | 方块/毛玻璃/细粒、颗粒度 | 作用于框选区域 |
 | 橡皮擦 | 直径 | 只擦除标注，不会擦除原始截图像素 |
 | 裁剪 | 裁剪框颜色、线宽 | 仅独立编辑器提供；参数持久化到配置文件 |
+
+“更多设置”底部还有**实时预览**，与设置窗口“编辑器”页共用同一套绘制：画笔/矩形/椭圆显示形状预览，箭头、记号笔、马赛克、文字、裁剪各自显示对应效果，改任意参数立即重绘。预览行不计入没有专属参数的工具（选择、取色），弹窗宽度和高度会按当前工具的参数行与预览重新计算；矮屏（可用高度 < 800）自动改用更矮的预览，避免弹窗超出屏幕。独立编辑器和单选区原地编辑共用同一套工具栏，两处都有该预览。
 
 画笔、形状、箭头、记号笔和文字共用标注颜色；各工具线宽、形状线型、文字样式、箭头样式、马赛克选项及裁剪框颜色和线宽均通过配置文件持久化。首次没有配置时标注颜色默认 `#ff0000`，各标注工具线宽默认 2 px，橡皮擦直径 30 px，马赛克颗粒度 10 px；已有配置优先。
 旧配置中的“双向”样式仍按空心双向显示；双向箭头的两端使用相同的尖角比例。编辑器导出时对标注边缘启用抗锯齿，以减轻斜线锯齿。
@@ -105,13 +111,32 @@ python -m venv .venv
 
 每张贴图都是独立窗口。左键拖动移动；滚轮缩放（倍率限制 0.1–10）；方向键或 WASD 每次移动 1 像素；Esc 关闭当前贴图。贴图支持默认描边和阴影，外观可在设置的“贴图”页统一配置。
 
-右键菜单提供锁定/解锁、重置大小、复制图像、从文件打开替换此贴图、从文件打开新贴图、描边开关、阴影开关、置顶开关、关闭当前贴图、透明度滑块及点击穿透。替换会保留当前窗口的位置与缩放；取消文件选择不会更改贴图。锁定后不能拖动、缩放或用方向键移动。点击穿透后无法从贴图本身打开右键菜单，使用 `Ctrl+Shift+T` 恢复贴图交互。描边/阴影右键菜单只控制当前贴图是否显示，颜色、宽度和强度由全局设置控制。
+拖动贴图时会自动吸附对齐：靠近屏幕工作区边缘或其他可见窗口的边缘（默认 8 逻辑像素内）即贴合，吸附瞬间沿图像外沿显示一圈青色虚线。按住 `Alt` 拖动可临时取消吸附，方便像素级摆放。贴到某个窗口后默认跟随该窗口移动；目标窗口最小化或隐藏时暂停跟随但保留吸附关系，恢复后继续跟随，只有窗口真正关闭才自动解除吸附。也可以在右键菜单单独开关跟随或直接解除吸附。
 
-`F3` 按修改时间从自动保存目录打开最新且尚未贴出的有效 PNG；连续按下会依次寻找更早的未贴图片，全部已贴出时不重复创建。关闭某张贴图后可以再次用 F3 贴出；已删除或无法读取的历史图片会被跳过。上一张/下一张热键仍切换自动目录中的 PNG 历史，并复用历史贴图窗口。隐藏/显示、关闭全部贴图也有全局热键。
+右键菜单提供锁定/解锁、重置大小、复制图像、从文件打开替换此贴图、从文件打开新贴图、描边开关、阴影开关、置顶开关、跟随此窗口/取消跟随、解除吸附、关闭当前贴图、透明度滑块及点击穿透。替换会保留当前窗口的位置与缩放；取消文件选择不会更改贴图。锁定后不能拖动、缩放或用方向键移动。点击穿透后无法从贴图本身打开右键菜单，使用 `Ctrl+Shift+T` 恢复贴图交互。描边/阴影右键菜单只控制当前贴图是否显示，颜色、宽度和强度由全局设置控制。
+
+`F3` 按修改时间从自动保存目录打开最新且尚未贴出的有效图片；连续按下会依次寻找更早的未贴图片，全部已贴出时不重复创建。关闭某张贴图后可以再次用 F3 贴出；已删除或无法读取的历史图片会被跳过。上一张/下一张热键仍切换自动目录中的图片历史，并复用历史贴图窗口。隐藏/显示、关闭全部贴图也有全局热键。
+
+#### 贴剪贴板内容
+
+`Ctrl+F3` 把剪贴板当前内容直接贴成新窗口，无需先截图。按图片、文件、颜色、文字的顺序识别：
+
+| 剪贴板内容 | 贴出的效果 |
+| --- | --- |
+| 图片 | 原样贴出 |
+| 文件（资源管理器复制） | 系统图标 + 文件名卡片，最多展示 8 项，其余只统计数量 |
+| 颜色值（`#RGB`、`#RRGGBB` 或裸六位十六进制） | 纯色块，左下角可标注色值 |
+| 其他文字 | 便签卡片，按最大宽度自动折行 |
+
+文字与颜色贴图会记住原文，右键菜单提供“复制文字”或“复制颜色值”；文件贴图提供“打开原文件”。这些信息随贴图会话一起保存，重启后仍然可用。卡片样式在设置的“剪贴板贴图”页调整；如果希望 `#ff0000` 这类内容一律按文字贴出，关闭该页的“识别颜色值”。
+
+#### 贴图管理窗口
+
+`Ctrl+Alt+P` 或托盘菜单“贴图管理”打开管理窗口，列出当前所有贴图的缩略图、内容说明和位置。每行可定位、显示/隐藏或关闭单张贴图，顶部按钮提供刷新、统一隐藏/显示和关闭全部。窗口打开时贴图增减会自动刷新列表。
 
 ### 系统托盘
 
-托盘右键菜单包含：快速截图、编辑剪贴板图片、打开并编辑图片、从文件打开新贴图、设置、退出。菜单项的快捷键文字跟随设置中的当前绑定；快捷键被清除时，不显示过期提示。
+托盘右键菜单包含：快速截图、贴剪贴板内容、贴图管理、编辑剪贴板图片、打开并编辑图片、从文件打开新贴图、设置、退出。菜单项的快捷键文字跟随设置中的当前绑定；快捷键被清除时，不显示过期提示。
 
 ## 默认快捷键
 
@@ -122,6 +147,8 @@ python -m venv .venv
 | 全屏（虚拟桌面）截图 | `Ctrl+Shift+F1` |
 | 当前显示器截图 | `Ctrl+F1` |
 | 贴上次截图 | `F3` |
+| 贴剪贴板内容 | `Ctrl+F3` |
+| 贴图管理窗口 | `Ctrl+Alt+P` |
 | 编辑剪贴板图片 | `Ctrl+Alt+V` |
 | 打开并编辑图片 | `Ctrl+Alt+O` |
 | 上一张/下一张历史贴图 | `Ctrl+Alt+Left` / `Ctrl+Alt+Right` |
@@ -135,15 +162,16 @@ python -m venv .venv
 
 ## 设置和数据
 
-设置窗口分为常规、快捷键、保存、编辑器、日志和贴图六类：
+设置窗口分为常规、快捷键、保存、编辑器、日志、贴图和剪贴板贴图七类：
 每页按使用场景显示带标题的设置组，较长的页面可在页内滚动；同一组件的颜色、线宽及其他参数集中在同一组。
 
-- **常规**：开机自动启动、光标捕获、放大镜、十字线、遮罩、锚点、通知和声音。
+- **常规**：开机自动启动、通知与音效、光标捕获、原地编辑、放大镜、十字线、遮罩、窗口与控件识别（含移动鼠标自动识别、自动选中窗口、无障碍识别 (UIA) 与悬停识别刷新间隔）、识别层级、锚点、历史图片数量。
 - **快捷键**：全局热键开关、录制、清除和冲突检查。
-- **保存**：原地编辑初始截图目录、手动保存目录、文件名模板、保存后打开目录，以及保存时复制图片/文件路径的两个独立开关。
-- **编辑器**：默认标注工具、公共标注颜色、线宽、矩形/椭圆线型、字号、字体、文字对齐、箭头/线段样式和马赛克选项。
-- **日志**：日志开关、级别、轮转和保存目录设置。
-- **贴图**：新贴图默认描边、描边颜色/宽度、默认阴影、阴影颜色/强度。
+- **保存**：原地编辑初始截图目录、手动保存目录、保存格式（PNG/JPEG/WebP/BMP）、图片质量、保存底色、文件名模板、保存后打开目录，以及保存时复制图片/文件路径的两个独立开关。
+- **编辑器**：默认标注工具、公共标注颜色，以及箭头、形状、荧光笔、文字、马赛克、裁剪框的实时预览；线宽、线型、字号、字体、文字对齐、箭头样式和马赛克选项。改任何参数时预览立即重绘，所见即所得；编辑器工具栏的“更多设置”里也有同一套预览。
+- **日志**：日志开关、级别（ERROR/WARNING/INFO/DEBUG/TRACE）、轮转和保存目录设置。
+- **贴图**：新贴图默认描边、描边颜色/宽度、默认阴影、阴影颜色/强度、贴图管理窗口的缩略图宽度，以及拖动与吸附（吸附开关、触发距离、吸附目标、是否跟随窗口、跟随刷新间隔）。
+- **剪贴板贴图**：是否把十六进制文本识别为颜色、文字卡片字体/字号/文字颜色/背景颜色/最大宽度/最大行数；颜色卡片是否标注色值、色块宽度与高度；文件卡片是否显示所在目录、最多展示数量与卡片宽度。
 
 开机自动启动默认关闭，仅在 Windows 上可用；开启后写入当前用户的登录启动项，不需要管理员权限。旧配置缺少该选项时会补为关闭，但不会在启动时删除用户手动创建的同名启动项。
 源码运行时启动项指向当前 Python 和 `main.py`；用 PyInstaller 打包运行时指向当前 `.exe`，不依赖源码。移动打包后的程序后，手动运行新位置的程序一次即可更新启动路径。
@@ -157,13 +185,19 @@ python -m venv .venv
 | 自动保存与历史图片 | `~/Pictures/ScreenSnap/Auto` | `~/Pictures/ScreenSnap/Auto` |
 | 手动保存 | `~/Pictures/ScreenSnap/Manual` | `~/Pictures/ScreenSnap/Manual` |
 
+每页底部都有“恢复本页默认”，只把该页选项改回默认值；窗口底部的“恢复全部默认”是最终手段，会先把当前设置备份成同目录的 `settings.bak` 再整体重置，“清理贴图会话”则删除贴图会话文件与私有缓存，方便从空白状态验证。
+
 启动时若设置文件或贴图会话无法解析，会把原文件改名为带 `.broken-` 时间戳的备份；
 设置恢复默认值，贴图会话跳过无法恢复的记录。贴图私有缓存仅保留当前有效会话引用的图片，
 退出保存会话或下次启动时会清理孤儿缓存；损坏会话对应的缓存暂时保留，便于排查和恢复。
 
 日志保存目录可在日志设置中指定；只有目录已存在时才写入该位置。留空或指定目录不存在时，日志写入启动文件（源码运行时为 `main.py`，打包后为可执行文件）所在目录的 `logs` 子目录，不会尝试创建不存在的自定义目录。
 
-Windows 用户目录按系统返回的图片目录解析。自动和手动目录可分别修改。文件名模板使用 Python `strftime`，默认 `_%Y%m%d_%H%M%S`；模板下方列出年、月、日、时、分、秒占位符及普通字符的含义。重名时追加序号，非法路径字符替换为下划线。自动保存目录同时作为贴图历史 PNG 来源。
+日志同时写入文件和控制台（打包为无控制台程序时只写文件）。默认等级 INFO，记录启动、截图、保存、贴图创建、窗口识别结果以及吸附与跟随的启停；需要排查时把等级调到 DEBUG，可看到逻辑与物理坐标的换算、鼠标命中的窗口句柄/标题/类名/矩形、每层元素链、吸附候选与选中的边，以及跟随位移。高频日志按状态变化去重并按最短间隔输出，不会每帧刷屏。
+
+Windows 用户目录按系统返回的图片目录解析。自动和手动目录可分别修改。文件名模板使用 Python `strftime`，默认 `_%Y%m%d_%H%M%S`；模板下方列出年、月、日、时、分、秒占位符及普通字符的含义。重名时追加序号，非法路径字符替换为下划线。自动保存目录同时作为贴图历史的图片来源，所有可保存格式都会被读取。
+
+保存格式默认 PNG（无损）；JPEG 与 WebP 使用“图片质量”设置（1–100，默认 90），BMP 忽略该设置。JPEG 与 BMP 不支持透明通道，保存前会把透明区域合成到“保存底色”（默认白色）。贴图自身缓存始终使用 PNG，不受该设置影响。
 
 配置首次启动时创建；旧配置缺少的新选项会使用默认值补齐。设置页面支持 JSON 导入/导出，导入时校验类型、取值和热键冲突。旧版 `%APPDATA%\SnipasteClone` 数据仅在新 ScreenSnap 目录不存在时迁移。
 
@@ -175,12 +209,12 @@ Windows 用户目录按系统返回的图片目录解析。自动和手动目录
 | --- | --- |
 | `main.py` | 应用组装、托盘、配置刷新、快捷键分发和窗口生命周期 |
 | `config/` | JSON 默认值、迁移、校验、导入/导出 |
-| `core/` | 屏幕捕获、路径处理、快捷键标签等共享逻辑 |
+| `core/` | 屏幕捕获、程序图标、窗口与控件识别、屏幕坐标映射、窗口命中查询、路径处理、保存格式、快捷键标签等共享逻辑 |
 | `hotkey/` | 全局键盘监听线程和动作信号 |
 | `screenshot/` | 遮罩窗口、多选区状态和截图提示绘制 |
 | `editor/` | 工具栏、画布、矢量标注、撤销历史、变换与输出 |
-| `sticker/` | 独立贴图窗口、右键菜单、历史图片与会话恢复 |
-| `ui/` | 托盘菜单、通知、设置页及共享控件 |
+| `sticker/` | 独立贴图窗口、右键菜单、边缘吸附与窗口跟随、剪贴板内容渲染、历史图片与会话恢复 |
+| `ui/` | 托盘菜单、通知、贴图管理窗口、设置页、标注实时预览及共享控件 |
 | `logger/` | 标准库日志配置和轮转 |
 | `tests/test_core.py` | 离屏 Qt 行为测试 |
 
@@ -193,6 +227,10 @@ Windows 用户目录按系统返回的图片目录解析。自动和手动目录
 5. `EditorWindow` 发出保存或贴图信号；`Application` 将结果交给保存通知或 `StickerManager`。
 6. 设置变更先经 `ConfigManager` 校验并保存，再刷新热键、托盘文字、已打开编辑器中的配置型控件，以及已打开贴图的外观。裁剪框颜色/宽度是当前编辑器局部状态，不进入该持久化链路。
 7. 贴图创建时会把无源图片立即写入 `sticker_cache`，运行期主要持有显示用 `QPixmap` 和源文件路径；退出时保存贴图会话状态，重启后从源文件恢复。
+8. “贴剪贴板内容”由 `sticker/clipboard_source.py` 按图片、文件、颜色、文字的顺序识别剪贴板，非图片内容先渲染成卡片图像，再走同一条贴图创建链路，并把可序列化的 origin 写入会话。
+9. 所有导出路径统一调用 `core/image_io.save_image()`，由它决定扩展名、透明通道处理和质量参数；贴图私有缓存不经过这里，固定使用 PNG。
+10. 拖动贴图时 `StickerItem` 用 `core/window_snap.py` 查询鼠标下的外部窗口（跳过本进程窗口），用 `core/screen_mapping.py` 把 Win32 物理像素矩形换算成 Qt 逻辑坐标，再由 `sticker/sticker_snap.py` 的纯计算挑出最近的边并给出位移；贴到窗口后按记录的目标句柄与相对偏移，用 `QTimer` 轮询窗口位置实现跟随，窗口消失即自动解除。
+11. 程序图标由 `core/app_icon.py` 从打包解包目录或项目根目录读取 `icon.ico`（含 16–256 多尺寸），缺失或损坏时回退到 `main.drawn_icon()` 现场绘制的图标；`QApplication.setWindowIcon()` 让托盘、设置窗口、编辑器和贴图管理窗口共用同一图标，Windows 下另有 AppUserModelID 保证任务栏正确分组。
 
 ### 修改功能时的检查清单
 
@@ -219,7 +257,7 @@ $env:QT_QPA_PLATFORM = 'offscreen'
 .\.venv\Scripts\python -m unittest tests.test_core.CoreTests.test_arrow_styles_include_filled_open_and_double -v
 ```
 
-测试覆盖配置校验、热键录制、选区、编辑器工具和布局、箭头几何、裁剪、保存/剪贴板、贴图菜单与会话。离屏测试不能取代多显示器、混合 DPI、全局热键权限及真实桌面点击穿透验收。
+测试覆盖配置校验、热键录制、选区、编辑器工具和布局、箭头几何、裁剪、保存格式与质量、剪贴板内容识别与贴出、贴图菜单与会话、贴图吸附与跟随、屏幕坐标换算、贴图管理窗口。离屏测试不能取代多显示器、混合 DPI、全局热键权限及真实桌面点击穿透验收。
 
 ## PyInstaller 打包
 
@@ -230,25 +268,25 @@ $env:QT_QPA_PLATFORM = 'offscreen'
 ### 文件夹模式 + 无控制台（成品）
 
 ```powershell
-.\.venv\Scripts\pyinstaller --noconfirm --clean --onedir --windowed --icon icon.ico --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onedir --windowed --icon icon.ico --name ScreenSnap --add-data "icon.ico;." --add-data "icon.png;." --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification --hidden-import ui.sticker_panel main.py
 ```
 
 ### 文件夹模式 + 带控制台（调试）
 
 ```powershell
-.\.venv\Scripts\pyinstaller --noconfirm --clean --onedir --console --icon icon.ico --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onedir --console --icon icon.ico --name ScreenSnap --add-data "icon.ico;." --add-data "icon.png;." --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification --hidden-import ui.sticker_panel main.py
 ```
 
 ### 单文件模式 + 无控制台
 
 ```powershell
-.\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --icon icon.ico --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --icon icon.ico --name ScreenSnap --add-data "icon.ico;." --add-data "icon.png;." --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification --hidden-import ui.sticker_panel main.py
 ```
 
 ### 单文件模式 + 带控制台（调试）
 
 ```powershell
-.\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --console --icon icon.ico --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --console --icon icon.ico --name ScreenSnap --add-data "icon.ico;." --add-data "icon.png;." --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification --hidden-import ui.sticker_panel main.py
 ```
 
 产物为 `dist\ScreenSnap\ScreenSnap.exe`（文件夹模式，分发时拷贝整个 `dist\ScreenSnap` 目录）或 `dist\ScreenSnap.exe`（单文件模式）。
@@ -261,7 +299,7 @@ $env:QT_QPA_PLATFORM = 'offscreen'
 
 | 报错/现象 | 原因 | 解决办法 |
 | --- | --- | --- |
-| `ModuleNotFoundError: No module named 'ui.settings_window'`（或 `ui.tray_menu`、`ui.capture_notification`） | `ui/__init__.py` 的 `__getattr__` 用 `importlib.import_module` 懒加载顶层组件，PyInstaller 只做静态 import 分析扫描不到；这三个模块在仓库里没有任何静态引用（只有 `ui.widgets.tooltip` 被 `main.py` 直接导入） | 加上面三个 `--hidden-import`；或改用 `--collect-submodules=ui` 一把全收；也可以在入口 `main.py` 顶部改为显式 `from ui.settings_window import SettingsWindow` 等静态导入（代价是可能重新引入循环引用） |
+| `ModuleNotFoundError: No module named 'ui.settings_window'`（或 `ui.tray_menu`、`ui.capture_notification`、`ui.sticker_panel`） | `ui/__init__.py` 的 `__getattr__` 用 `importlib.import_module` 懒加载顶层组件，PyInstaller 只做静态 import 分析扫描不到；这几个模块在仓库里没有任何静态引用（只有 `ui.widgets.tooltip` 被 `main.py` 直接导入） | 加上面四个 `--hidden-import`；或改用 `--collect-submodules=ui` 一把全收；也可以在入口 `main.py` 顶部改为显式 `from ui.settings_window import SettingsWindow` 等静态导入（代价是可能重新引入循环引用） |
 | `ImportError: DLL load failed while importing _ctypes` / `IMPORT_HARD_CTYPES` | 使用 Conda/Miniconda 派生的 Python 时，libffi 被改名成 `ffi.dll` 且放在环境的 `Library\bin` 下，没被打进包 | 换成 python.org 官方 CPython（推荐）；或用 `--paths "<环境>\Library\bin"` 让 PyInstaller 找到 DLL，必要时 `--add-binary "<环境>\Library\bin\ffi.dll;."` |
 | `ImportError: DLL load failed while importing win32ui/win32gui` / `No module named pywintypes` | pywin32 的运行时 DLL（`pywintypes312.dll`、`pythoncom312.dll`）位于 `site-packages\pywin32_system32`，虚拟环境里未执行 post-install 时不会落地到正确位置 | 确认 `.venv\Lib\site-packages\pywin32_system32` 下有这两个 DLL；缺失则重装：`.\.venv\Scripts\python -m pip uninstall pywin32` 后重装，或运行 `python Scripts\pywin32_postinstall.py -install`；仍不行则补 `--hidden-import pywintypes --hidden-import pythoncom` |
 | `This application failed to start because no Qt platform plugin could be initialized.` / 双击无任何窗口直接退出 | Qt 的 `platforms\qwindows.dll` 未随行；PySide6 6.11 较新，旧版 PyInstaller 的 hook 可能不完整 | 升级到 PyInstaller 6.x 以上再打包；或加 `--collect-all PySide6`；临时验证可把 `.\.venv\Lib\site-packages\PySide6\plugins\platforms` 拷到 exe 同目录，并设置 `QT_QPA_PLATFORM_PLUGIN_PATH` |
@@ -282,5 +320,11 @@ PyInstaller 当前为推荐打包方式；窗口版出现启动问题时先用�
 - 原地编辑首版只支持单选区且完整位于一个显示器内；多选区和跨屏选区会自动回退到完整编辑窗口。
 - 原地编辑首版隐藏图像旋转组，避免旋转/翻转改变画布尺寸后引发选区和 DPI 坐标错位。
 - 橡皮擦只移除标注，不擦除原始截图像素；马赛克和裁剪需要框选区域。
-- 贴图历史只读取自动保存目录中的 PNG，没有独立图库或历史文件删除界面。
+- 贴图历史只读取自动保存目录中的图片（覆盖所有可保存格式），没有独立图库或历史文件删除界面。
+- 文件贴图使用系统图标，少数特殊文件类型可能只能显示通用图标；贴出的卡片是图像，不能直接在贴图里编辑文字。
+- JPEG 与 BMP 不支持透明通道，保存时透明区域会合成到“保存底色”（默认白色）；文字、颜色和文件贴图始终以 PNG 缓存。
+- 窗口与控件识别依赖窗口句柄层级：浏览器、Electron 等自绘界面只能识别到顶层窗口，管理员权限进程的窗口也可能无法枚举。
+- 贴图吸附的目标窗口来自鼠标下方的窗口句柄：管理员权限进程的窗口无法识别，此时只吸附屏幕工作区边缘；混合 DPI 多屏下物理与逻辑坐标的换算需在目标设备验证。
+- 配置文件单项非法时只回退该项并备份原文件；整体无法解析时才全部回退默认值。
+- 托盘与任务栏图标取自随包的 `icon.ico` / `icon.png`；打包时需用 `--add-data` 一并分发，否则会回退到内置绘制的图标。
 - 点击穿透依赖操作系统窗口输入行为；恢复交互通过全局快捷键完成。

@@ -17,11 +17,32 @@ def build_menu(sticker):
         ("解锁" if sticker.locked else "锁定", QStyle.SP_DialogApplyButton, sticker.toggle_lock),
         ("重置大小", QStyle.SP_DialogResetButton, sticker.reset_size),
         ("复制图像", QStyle.SP_FileDialogContentsView, sticker.copy_image),
+    ]:
+        menu.addAction(sticker.style().standardIcon(icon), label, callback)
+    if sticker.origin_text():
+        label = "复制颜色值" if (sticker.origin or {}).get("kind") == "color" else "复制文字"
+        menu.addAction(sticker.style().standardIcon(QStyle.SP_FileDialogContentsView), label,
+                       sticker.copy_origin_text)
+    if sticker.origin_paths():
+        menu.addAction(sticker.style().standardIcon(QStyle.SP_DialogOpenButton), "打开原文件",
+                       sticker.open_origin)
+    for label, icon, callback in [
         ("关闭描边" if sticker.border_enabled else "开启描边", QStyle.SP_FileDialogDetailedView, sticker.toggle_border),
         ("隐藏阴影" if sticker.shadow_enabled else "显示阴影", QStyle.SP_FileDialogInfoView, sticker.toggle_shadow),
         ("关闭置顶" if sticker.always_on_top else "开启置顶", QStyle.SP_ArrowUp, sticker.toggle_top),
     ]:
         menu.addAction(sticker.style().standardIcon(icon), label, callback)
+    snap = getattr(sticker, "snap_target", None)
+    if isinstance(snap, dict) and snap.get("target") == "window":
+        following = getattr(sticker, "following", lambda: False)()
+        follow = menu.addAction(sticker.style().standardIcon(QStyle.SP_ArrowRight),
+                                "取消跟随此窗口" if following else "跟随此窗口", sticker.toggle_follow)
+        follow.setToolTip("跟随开启后，贴图会随吸附的窗口一起移动；关闭后贴图停在当前位置\n"
+                          f"当前吸附：{snap.get('title') or snap.get('hwnd')}（{snap.get('edge')} 边）")
+    if isinstance(snap, dict):
+        detach = menu.addAction(sticker.style().standardIcon(QStyle.SP_DialogCancelButton),
+                                "解除吸附", sticker.release_snap)
+        detach.setToolTip("清除当前吸附关系，拖动时不再自动对齐该窗口或屏幕边缘")
     if getattr(sticker, "open_file_replace", None) is not None:
         menu.addAction(sticker.style().standardIcon(QStyle.SP_DialogOpenButton),
                        "从文件打开替换此贴图", sticker.open_file_replace)

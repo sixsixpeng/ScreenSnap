@@ -5,6 +5,7 @@ from importlib import import_module
 _EXPORTS = {
 	"SettingsWindow": "ui.settings_window",
 	"CaptureNotification": "ui.capture_notification",
+	"StickerPanel": "ui.sticker_panel",
 	"make_tray_menu": "ui.tray_menu",
 }
 __all__ = list(_EXPORTS)

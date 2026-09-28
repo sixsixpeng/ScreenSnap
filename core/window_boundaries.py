@@ -1,5 +1,6 @@
 """可见窗口边缘坐标；其他平台返回空列表。"""
 
+import logging
 import os
 
 
@@ -23,7 +24,17 @@ def visible_windows():
                     rectangles.append((bounds.left, bounds.top, bounds.right, bounds.bottom))
         return True
 
-    callback = callback_type(collect)
-    # 保持回调对象存活到 EnumWindows 返回，防止原生回调访问失效内存。
-    user32.EnumWindows(callback, 0)
+    try:
+        callback = callback_type(collect)
+        # 保持回调对象存活到 EnumWindows 返回，防止原生回调访问失效内存。
+        user32.EnumWindows(callback, 0)
+    except (OSError, ValueError) as error:
+        # 系统枚举偶发失败，降级为不吸附，不影响截图本身。
+        logging.getLogger("screensnap").warning("枚举窗口失败，本次不提供窗口吸附: %s", error)
+        return []
+    logger = logging.getLogger("screensnap")
+    logger.debug("枚举到 %d 个可见窗口", len(rectangles))
+    for index, (left, top, right, bottom) in enumerate(rectangles):
+        logger.debug("可见窗口[%d]: 物理(%d,%d,%dx%d)", index, left, top,
+                     right - left, bottom - top)
     return rectangles

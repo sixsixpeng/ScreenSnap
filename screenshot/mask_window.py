@@ -1,7 +1,9 @@
 """全屏统一遮罩与多选区事件分发。"""
 
+import logging
 import os
 import re
+import time
 from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal, QPoint, QPointF, QRect, QEvent, QMimeData, QTimer
@@ -10,14 +12,19 @@ from PySide6.QtWidgets import (QWidget, QDialog, QDialogButtonBox, QFormLayout, 
                                QFrame, QGraphicsView, QToolButton, QLabel)
 
 from core.dpi import DisplayMapper
+from core.image_io import save_image, saved_extension
 from core.path_utils import resolved_dir
 from core.screen_capture import to_qimage
 from core.window_boundaries import visible_windows
+from core.window_elements import element_chain
+from logger.log_rate import log_every
 from editor.annotation_canvas import AnnotationCanvas
 from editor.toolbar_widget import ToolbarWidget
 from screenshot.selection_rect import SelectionRects
 from screenshot.overlay_info import paint_info
 from screenshot.magnifier_widget import magnifier_rect, paint_magnifier
+
+# 鼠标移动时悬停识别的刷新间隔由设置“window_hover_interval”控制（毫秒），避免每个移动事件都调用系统 API。
 
 
 class MaskSession:
@@ -388,10 +395,11 @@ class InlineEditor(QWidget):
         directory = resolved_dir(self.settings, "auto_dir" if automatic else "manual_dir")
         directory.mkdir(parents=True, exist_ok=True)
         prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", datetime.now().strftime(self.settings["filename"])).strip(" .") or "Capture"
-        path = directory / f"{prefix}.png"
+        extension = saved_extension(self.settings)
+        path = directory / f"{prefix}.{extension}"
         number = 1
         while path.exists():
-            path = directory / f"{prefix}_{number}.png"
+            path = directory / f"{prefix}_{number}.{extension}"
             number += 1
         return path
 
@@ -401,7 +409,7 @@ class InlineEditor(QWidget):
     def save(self, automatic=False, copy_to_clipboard=False, force_copy_image=False):
         path = self.last_path or self.allocate_path(automatic)
         result = self.output_image()
-        if not result.save(str(path), "PNG"):
+        if not save_image(result, path, self.settings):
             raise OSError(f"图片保存失败：{path}")
         self.last_path = path
         self.saved.emit(str(path), result)
@@ -537,6 +545,10 @@ class MaskWindow(QWidget):
         self.selection = self.session.selection
         self.position = QPoint(self.session.position)
         self.resize_cursor = "nwse"
+        # 鼠标悬停识别出的元素矩形（bounds 局部物理坐标）与上次检测时刻。
+        self.hover_rect = None
+        self.hover_stamp = 0.0
+        self.press_position = None
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -556,6 +568,17 @@ class MaskWindow(QWidget):
             self.selection.rects.append(QRect(monitor["left"] - bounds["left"],
                                               monitor["top"] - bounds["top"],
                                               monitor["width"], monitor["height"]))
+        # 窗口未显示时先识别一次，此时命中测试不会被本进程遮罩挡住。
+        self.element_chain = []
+        self.element_index = -1
+        if primary and settings.get("window_detection", True):
+            point = self.mapper.logical_global_to_physical_global(QCursor.pos())
+            self.element_chain = element_chain((point.x(), point.y()),
+                                               settings.get("element_depth", 3),
+                                               use_uia=bool(settings.get("window_uia_detect", False)),
+                                               exclude_hwnd=int(self.winId()))
+            if self.element_chain and settings.get("window_auto_select", False):
+                self.apply_element(0)
 
     def logical_window_offset(self):
         """当前窗口左上角相对整轮遮罩 logical_bounds 的偏移。"""
@@ -592,6 +615,11 @@ class MaskWindow(QWidget):
 
     def closeEvent(self, event):
         """窗口关闭后释放截图大图，避免 Application.mask 暂存时继续占用内存。"""
+        logging.getLogger("screensnap").debug("关闭截图遮罩")
+        # 截图结束：清掉悬停高亮，避免下一轮截图残留上一次的元素框。
+        self.hover_rect = None
+        self.hover_stamp = 0.0
+        self.press_position = None
         self.magnifier_overlay.hide()
         editor = self.session.inline_editor
         if editor is not None:
@@ -720,6 +748,14 @@ class MaskWindow(QWidget):
             clipped = rect.intersected(self.monitor_rect)
             if not clipped.isEmpty():
                 painter.drawRect(self.to_logical_rect(clipped))
+        if self.hover_rect is not None and self.selection.active is None:
+            # 悬停候选：青色半透明块，与红色选区边框区分。
+            clipped = self.hover_rect.intersected(self.monitor_rect)
+            if not clipped.isEmpty():
+                painter.setPen(QPen(QColor("#00ad91"), 2))
+                painter.setBrush(QColor(0, 173, 145, 40))
+                painter.drawRect(self.to_logical_rect(clipped))
+                painter.setBrush(Qt.NoBrush)
 
     def mousePressEvent(self, event):
         """左键开始创建选区，已有选区的命中由选区对象判定。"""
@@ -737,6 +773,8 @@ class MaskWindow(QWidget):
             return
         if event.button() == Qt.LeftButton:
             self.position = self.to_physical_point(event.position().toPoint())
+            # 记录按下位置，用于区分“单击确认元素”和“拖动手绘选区”。
+            self.press_position = QPoint(self.position)
             hit = self.selection.handle_at(self.position)
             if hit is not None:
                 self.resize_cursor = hit[2]
@@ -786,6 +824,12 @@ class MaskWindow(QWidget):
             y_edges.extend(edge - self.bounds["top"] for left, top, right, bottom in self.window_edges
                            for edge in (top, bottom))
             self.selection.update(self.position, x_edges, y_edges)
+        # 正在手绘或拖动时不显示悬停高亮，避免和选区抢视觉焦点。
+        if (self.selection.start is None and self.selection.dragging is None
+                and self.selection.resizing is None):
+            self.poll_hover()
+        else:
+            self.hover_rect = None
         self.update_all()
 
     def mouseReleaseEvent(self, event):
@@ -802,6 +846,11 @@ class MaskWindow(QWidget):
         if event.button() == Qt.LeftButton:
             self.position = self.to_physical_point(event.position().toPoint())
             self.selection.finish()
+            # 几乎没移动的单击视为确认，直接选中当前高亮的窗口或控件。
+            if (self.press_position is not None
+                    and (self.position - self.press_position).manhattanLength() <= 3):
+                self.select_hover()
+            self.press_position = None
             self.update_all()
 
     def mouseDoubleClickEvent(self, event):
@@ -831,6 +880,9 @@ class MaskWindow(QWidget):
                     view = self.focus_view_for_position(self.position)
                     QCursor.setPos(view.mapToGlobal(view.to_logical_point(self.position)))
             return
+        if key == Qt.Key_Tab:
+            self.cycle_element(-1 if event.modifiers() & Qt.ShiftModifier else 1)
+            return
         if key == Qt.Key_Escape:
             self.close()
         elif key in (Qt.Key_Return, Qt.Key_Enter):
@@ -850,6 +902,145 @@ class MaskWindow(QWidget):
                     view = self.focus_view_for_position(self.position)
                     QCursor.setPos(view.mapToGlobal(view.to_logical_point(self.position)))
         self.update_all()
+
+    def detect_elements(self):
+        """临时隐藏遮罩后识别鼠标下的窗口链，避免遮罩自己挡住命中测试。"""
+        if not self.primary:
+            return self.session.views[0].element_chain
+        point = self.mapper.logical_global_to_physical_global(QCursor.pos())
+        self.hide()
+        try:
+            self.element_chain = element_chain((point.x(), point.y()),
+                                               self.settings.get("element_depth", 3),
+                                               use_uia=self.uia_enabled(),
+                                               exclude_hwnd=int(self.winId()))
+        finally:
+            self.show()
+        logging.getLogger("screensnap").info(
+            "窗口识别: 鼠标物理点(%d,%d) 层级上限=%s 候选=%d 层 %s",
+            point.x(), point.y(), self.settings.get("element_depth", 3),
+            len(self.element_chain), self.element_chain)
+        self.element_index = -1
+        return self.element_chain
+
+    def hover_detection_enabled(self):
+        """悬停识别需要总识别开关和本项开关同时打开。"""
+        return bool(self.settings.get("window_detection", True)
+                    and self.settings.get("window_hover_detect", True))
+
+    def uia_enabled(self):
+        """是否优先用 UIA 读自绘界面内部控件；库没装时会自动退回句柄识别。"""
+        return bool(self.settings.get("window_uia_detect", False))
+
+    def detect_hover(self):
+        """识别鼠标下的元素用于高亮；不隐藏遮罩，避免移动时闪烁。
+
+        每个显示器的遮罩各自检测：鼠标停在哪个屏，就由那个屏的窗口收事件并
+        高亮。不能只让 primary 检测，否则鼠标在其它显示器上时完全没有提示。
+        """
+        # 已经画出选区后不再提示元素：这时用户在调整或确认自己的选区，
+        # 继续高亮只会干扰（也是“截图完了还在识别”的来源）。
+        if not self.hover_detection_enabled() or self.selection.rects:
+            self.hover_rect = None
+            return None
+        point = self.mapper.logical_global_to_physical_global(QCursor.pos())
+        chain = element_chain((point.x(), point.y()), self.settings.get("element_depth", 3),
+                              use_uia=self.uia_enabled(),
+                              exclude_hwnd=int(self.winId()))
+        if not chain:
+            self.hover_rect = None
+            return None
+        # 取最内层：鼠标停在按钮上就选中按钮，停在窗口空白处选中整个窗口。
+        left, top, right, bottom = chain[-1]
+        self.hover_rect = QRect(left - self.bounds["left"], top - self.bounds["top"],
+                                right - left, bottom - top)
+        return self.hover_rect
+
+    def poll_hover(self):
+        """按时间节流刷新悬停高亮，鼠标移动事件非常密集。"""
+        # 遮罩已经不可见（截图结束）时不再查询系统窗口。
+        if not self.isVisible():
+            self.hover_rect = None
+            return
+        point = self.mapper.logical_global_to_physical_global(QCursor.pos())
+        # 每个显示器各有一个遮罩：鼠标在哪个屏，就由那个屏的窗口收事件并高亮，
+        # 其它屏的遮罩收不到鼠标事件，它上面残留的高亮永远不会被自己的逻辑清掉。
+        # 所以当前活跃屏在轮询一开始就清掉其它屏的残留高亮；鼠标跨屏后旧屏的
+        # 元素框立即消失，不会“鼠标都移出去了还亮着”。
+        for view in self.session.views:
+            if view is not self:
+                view.hover_rect = None
+        # 鼠标不在本显示器（理论上不会发生，因为本屏遮罩才会收到事件）时同样清掉自己。
+        if not self.monitor_rect.contains(point):
+            self.hover_rect = None
+            return
+        # 鼠标移出高亮区域时立即取消，不等下一次轮询，避免高亮滞后。
+        if self.hover_rect is not None and not self.hover_rect.contains(self.position):
+            self.hover_rect = None
+            self.hover_stamp = 0.0
+        # 悬停高亮按时间节流刷新（间隔由“悬停识别刷新间隔”设置控制，毫秒）：
+        # 数值越小越跟手（灵敏度越高），但调用系统识别接口更频繁；开启 UIA 时无障碍查询
+        # 更慢，间隔自动翻倍以兼容。仍卡在 SLOW_SECONDS(0.4s) 熔断阈值内，不会因变快而误关 UIA。
+        interval = (self.settings.get("window_hover_interval", 80) / 1000.0) * (2 if self.uia_enabled() else 1)
+        stamp = time.monotonic()
+        if stamp - self.hover_stamp < interval:
+            return
+        self.hover_stamp = stamp
+        rect = self.detect_hover()
+        logger = logging.getLogger("screensnap")
+        if rect is None:
+            log_every(logger, logging.DEBUG, "hover-none", None, 1.0,
+                      "悬停识别: 鼠标物理点(%d,%d) 没有可识别的元素",
+                      point.x(), point.y())
+            return
+        # 高亮结果用 INFO，默认等级就能确认“识别到了什么、画在哪里”。
+        log_every(logger, logging.INFO, "hover",
+                  (rect.x(), rect.y(), rect.width(), rect.height()), 1.0,
+                  "悬停高亮: 鼠标物理点(%d,%d) 高亮区域=(%d,%d,%dx%d) 显示器内=%s",
+                  point.x(), point.y(), rect.x(), rect.y(), rect.width(), rect.height(),
+                  not rect.intersected(self.monitor_rect).isEmpty())
+
+    def select_hover(self):
+        """单击时把当前高亮的窗口或控件直接作为选区。"""
+        rect = self.hover_rect
+        if rect is None or rect.isEmpty():
+            return False
+        self.selection.rects.clear()
+        self.selection.rects.append(QRect(rect))
+        self.selection.active = None
+        logging.getLogger("screensnap").info(
+            "单击选中窗口元素: (%d,%d,%dx%d)", rect.x(), rect.y(), rect.width(), rect.height())
+        return True
+
+    def apply_element(self, index):
+        """把某一层窗口或控件的矩形直接作为选区。"""
+        left, top, right, bottom = self.element_chain[index]
+        self.selection.rects.clear()
+        self.selection.rects.append(QRect(left - self.bounds["left"], top - self.bounds["top"],
+                                          right - left, bottom - top))
+        self.selection.active = None
+        self.update_all()
+        logging.getLogger("screensnap").debug("应用第 %d 层窗口元素作为选区: %s",
+                                              index + 1, self.element_chain[index])
+
+    def cycle_element(self, step):
+        """在窗口与控件层级间切换选区；没有缓存时重新识别一次。"""
+        if not self.primary:
+            self.session.views[0].cycle_element(step)
+            return
+        if not self.settings.get("window_detection", True):
+            return
+        if not self.element_chain and not self.detect_elements():
+            logging.getLogger("screensnap").debug("鼠标下没有可识别的窗口或控件")
+            return
+        # -1 表示尚未应用过，正向切到最外层窗口，反向切到最内层控件。
+        if self.element_index < 0:
+            self.element_index = 0 if step > 0 else len(self.element_chain) - 1
+        else:
+            self.element_index = (self.element_index + step) % len(self.element_chain)
+        self.apply_element(self.element_index)
+        logging.getLogger("screensnap").debug("切换到第 %d/%d 层窗口元素",
+                                              self.element_index + 1, len(self.element_chain))
 
     def select_fixed_size(self):
         """一次输入宽高，确认后在当前光标位置创建选区。"""
@@ -896,10 +1087,14 @@ class MaskWindow(QWidget):
                 images.append((self.image.crop(area), self.alternate.crop(area) if self.alternate else None))
                 last_rect = [clipped.x() + self.bounds["left"], clipped.y() + self.bounds["top"],
                              clipped.width(), clipped.height()]
+        logger = logging.getLogger("screensnap")
         if images:
+            logger.info("确认选区: %d 个，最后区域 %sx%s", len(images), last_rect[2], last_rect[3])
             self.hide()
             self.last_region.emit(last_rect)
             self.selected.emit(images)
+        else:
+            logger.debug("没有有效选区，直接关闭遮罩")
         self.close()
 
     def inline_view_for_rect(self, rect):

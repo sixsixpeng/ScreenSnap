@@ -1,6 +1,7 @@
 """常驻托盘的程序入口。"""
 
 import ctypes
+import logging
 import os
 import sys
 
@@ -27,6 +28,16 @@ def enable_windows_dpi_awareness():
         pass
 
 
+def enable_windows_app_id():
+    """让任务栏按应用自身图标分组，而不是显示 python 解释器图标。"""
+    if os.name != "nt":
+        return
+    try:
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ScreenSnap.Desktop")
+    except (AttributeError, OSError) as error:
+        logging.getLogger("screensnap").warning("无法设置任务栏应用标识: %s", error)
+
+
 enable_windows_dpi_awareness()
 
 from PySide6.QtCore import Qt, QRect, QTimer, QSignalBlocker
@@ -35,20 +46,20 @@ from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QGraphicsView, QFil
 
 from config import ConfigManager
 from config.config_manager import TOOL_WIDTH_KEYS
-from core import data_dir, capture, qimage_to_pillow
+from core import app_icon, data_dir, capture, qimage_to_pillow
 from core.startup import set_start_on_boot
 from editor import EditorWindow
 from hotkey import HotkeyManager
 from logger import configure_logging
 from screenshot import MaskWindow
 from sticker import StickerManager
-from ui import SettingsWindow, make_tray_menu, CaptureNotification
+from ui import SettingsWindow, make_tray_menu, CaptureNotification, StickerPanel
 from ui.widgets.tooltip import TOOLTIP_STYLE
 from PIL import Image
 
 
-def tray_icon():
-    """现场绘制高分辨率取景框图标，缩放后依然能辨认截图入口。"""
+def drawn_icon():
+    """现场绘制高分辨率取景框图标，仅在没有图标文件时兜底。"""
     pixmap = QPixmap(64, 64)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
@@ -71,17 +82,28 @@ def tray_icon():
     return QIcon(pixmap)
 
 
+def tray_icon():
+    """托盘与应用图标：优先使用项目图标文件，缺失时用内置绘制图标。"""
+    icon = app_icon()
+    return icon if not icon.isNull() else drawn_icon()
+
+
 class Application:
     """集中连接托盘、热键和窗口；具体业务交由各模块处理。"""
 
+    # 日志处理器随设置重建，logger 对象本身保持不变。
+    logger = logging.getLogger("screensnap")
+
     def __init__(self):
         self.qt = QApplication(sys.argv)
+        enable_windows_app_id()
+        # 应用级图标会被设置、编辑器、贴图管理等所有未显式设置图标的窗口继承。
         self.qt.setWindowIcon(tray_icon())
         # 没有默认主窗口；关闭设置或编辑器时必须继续保持托盘常驻。
         self.qt.setQuitOnLastWindowClosed(False)
         self.qt.setStyleSheet(TOOLTIP_STYLE)
         self.config = ConfigManager(data_dir() / "settings.json")
-        self.logger = configure_logging(self.config.data)
+        configure_logging(self.config.data)
         if self.config.data["start_on_boot"]:
             try:
                 set_start_on_boot(True)
@@ -98,11 +120,14 @@ class Application:
         self.hotkey_recording = False
         self.tray = QSystemTrayIcon(self.qt.windowIcon(), self.qt)
         self.tray.setToolTip("ScreenSnap")
+        self.sticker_panel = None
         self.menu = make_tray_menu(
             self.qt, lambda: self.start_capture("capture", from_tray=True), self.open_settings, self.qt.quit,
             lambda: self.dispatch("edit_clipboard"), lambda: self.dispatch("open_image"),
             self.config.data["hotkeys"],
             open_sticker=self.stickers.open_file,
+            paste_clipboard=lambda: self.dispatch("paste_clipboard"),
+            sticker_panel=self.open_sticker_panel,
         )
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self.tray_clicked)
@@ -119,6 +144,7 @@ class Application:
 
     def announce_startup(self):
         """事件循环开始后提示就绪，沿用托盘气泡总开关。"""
+        self.logger.info("ScreenSnap 已启动")
         self.notify("已启动，可使用快捷键截图或右键托盘打开设置")
 
     def tray_clicked(self, reason):
@@ -134,11 +160,14 @@ class Application:
 
     def refresh(self):
         """配置落盘后更新热键、日志和已打开编辑器的标注颜色。"""
-        self.logger = configure_logging(self.config.data)
+        configure_logging(self.config.data)
         self.menu = make_tray_menu(
             self.qt, lambda: self.start_capture("capture", from_tray=True), self.open_settings, self.qt.quit,
             lambda: self.dispatch("edit_clipboard"), lambda: self.dispatch("open_image"),
             self.config.data["hotkeys"],
+            open_sticker=self.stickers.open_file,
+            paste_clipboard=lambda: self.dispatch("paste_clipboard"),
+            sticker_panel=self.open_sticker_panel,
         )
         self.tray.setContextMenu(self.menu)
         if not self.hotkey_recording:
@@ -223,18 +252,27 @@ class Application:
             self.stickers.close_all()
         elif action == "touch":
             self.stickers.restore_input()
+        elif action == "paste_clipboard":
+            self.paste_clipboard()
+        elif action == "sticker_panel":
+            self.open_sticker_panel()
+        else:
+            self.logger.warning("未处理的热键动作: %s", action)
 
     def edit_clipboard_image(self):
         """读取系统剪贴板中的图像并交给截图编辑器。"""
         image = QGuiApplication.clipboard().image()
         if image.isNull():
-            self.notify("剪贴板中没有图片")
+            self.logger.debug("剪贴板中没有图片，无法打开编辑器")
+            self.notify("剪贴板中没有图片；文字、颜色或文件可用“贴剪贴板内容”直接贴出")
             return
         try:
             source = qimage_to_pillow(image)
         except (OSError, ValueError) as error:
+            self.logger.warning("读取剪贴板图片失败: %s", error)
             self.notify(f"无法读取剪贴板图片: {error}")
             return
+        self.logger.info("编辑剪贴板图片: %sx%s", image.width(), image.height())
         self.edit_images([(source, None)], from_capture=False)
 
     def open_and_edit_image(self):
@@ -249,19 +287,27 @@ class Application:
             with Image.open(path) as opened:
                 source = opened.convert("RGBA").copy()
         except (OSError, ValueError) as error:
+            self.logger.warning("打开图片失败 %s: %s", path, error)
             self.notify(f"无法打开图片: {error}")
             return
+        self.logger.info("打开图片: %s", path)
         self.edit_images([(source, None)], from_capture=False)
 
     def start_capture(self, mode, from_tray=False):
         """跳过已显示的遮罩；仅托盘菜单发起的截图等待菜单关闭。"""
         if self.mask is not None and self.mask.isVisible():
+            self.logger.debug("遮罩已显示，忽略截图请求: %s", mode)
             return
         if mode == "repeat" and not self.config.data["last_capture_rect"]:
+            self.logger.debug("尚无上次截图区域，跳过重复截图")
             self.notify("暂无上次截图区域")
             return
-        # 托盘菜单发起时稍后捕获，避免菜单进入截图。
-        QTimer.singleShot(150 if from_tray else 0, lambda: self.show_mask(mode))
+        # 托盘菜单发起时稍后捕获，避免菜单进入截图；用户设置的延迟在此基础上累加。
+        delay = int(self.config.data.get("capture_delay", 0) or 0)
+        waiting = (150 if from_tray else 0) + delay
+        if delay:
+            self.logger.info("截图延迟 %d 毫秒后显示遮罩: %s", delay, mode)
+        QTimer.singleShot(waiting, lambda: self.show_mask(mode))
 
     def show_mask(self, mode):
         """保存两版画面并显示覆盖虚拟桌面的选区遮罩。"""
@@ -271,6 +317,8 @@ class Application:
             rect = QRect(*self.config.data["last_capture_rect"]).intersected(
                 QRect(bounds["left"], bounds["top"], bounds["width"], bounds["height"]))
             if rect.isEmpty():
+                self.logger.warning("上次截图区域已不在屏幕范围内: %s",
+                                    self.config.data["last_capture_rect"])
                 self.notify("上次截图区域已不在当前屏幕")
                 return
             left, top = rect.x() - bounds["left"], rect.y() - bounds["top"]
@@ -342,8 +390,31 @@ class Application:
 
     def add_sticker(self, image):
         """创建新贴图并根据独立设置决定是否显示托盘提示。"""
-        self.stickers.add(image)
+        try:
+            self.stickers.add(image)
+        except (OSError, ValueError) as error:
+            self.logger.error("创建贴图失败: %s", error, exc_info=True)
+            self.notify(f"创建贴图失败: {error}")
+            return
         self.notify("已创建贴图", "sticker_notification")
+
+    def paste_clipboard(self):
+        """把剪贴板中的图片、文件、颜色或文字直接贴到屏幕上。"""
+        if self.stickers.paste_clipboard() is None:
+            self.logger.debug("剪贴板中没有可贴出的图片、文件、颜色或文字")
+            self.notify("剪贴板中没有可贴出的内容")
+            return
+        self.notify("已贴出剪贴板内容", "sticker_notification")
+
+    def open_sticker_panel(self):
+        """复用同一个贴图管理窗口，打开时按当前贴图重建列表。"""
+        if self.sticker_panel is None:
+            self.sticker_panel = StickerPanel(self.stickers)
+        self.logger.debug("打开贴图管理窗口: %d 张贴图", len(self.stickers.items))
+        self.sticker_panel.refresh()
+        self.sticker_panel.show()
+        self.sticker_panel.raise_()
+        self.sticker_panel.activateWindow()
 
     def saved(self, path, image=None):
         """记录保存结果并按保存通知设置显示提示。"""
@@ -372,9 +443,14 @@ class Application:
     def shutdown(self):
         """退出前保存贴图会话并释放全局热键和托盘。"""
         # 退出前先保存贴图状态并注销系统热键，避免残留钩子和悬浮窗口。
-        self.stickers.persist()
+        self.logger.info("正在退出，保存 %d 张贴图的会话", len(self.stickers.items))
+        try:
+            self.stickers.persist()
+        except OSError as error:
+            self.logger.error("保存贴图会话失败: %s", error, exc_info=True)
         self.hotkeys.stop()
         self.tray.hide()
+        self.logger.info("已退出")
 
 
 if __name__ == "__main__":

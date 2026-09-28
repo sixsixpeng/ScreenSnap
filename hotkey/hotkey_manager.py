@@ -1,5 +1,6 @@
 """keyboard 回调只向 Qt 主线程投递信号。"""
 
+import logging
 import queue
 import threading
 
@@ -54,13 +55,22 @@ class HotkeyManager(QObject):
         self.clear()
         if not request["enabled"]:
             return
+        logger = logging.getLogger("screensnap")
         try:
             for action, binding in request["bindings"].items():
-                if binding:
+                if not binding:
+                    continue
+                try:
                     handle = keyboard.add_hotkey(
                         binding, lambda current=action: self.emit_action(current), suppress=False
                     )
-                    self.handles.append(handle)
+                except (ValueError, OSError) as error:
+                    # 单个热键被占用时记录并继续，其余可用热键仍然生效。
+                    logger.error("注册热键失败 %s=%s: %s", action, binding, error)
+                    self.failed.emit(f"{action}（{binding}）：{error}")
+                    continue
+                self.handles.append(handle)
+            logger.debug("已注册全局热键: %d 个", len(self.handles))
         except (ValueError, OSError):
             self.clear()
             raise

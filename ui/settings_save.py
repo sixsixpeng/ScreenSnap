@@ -17,8 +17,16 @@ class SavePage(SettingsPage):
                 self.group("手动保存")
             widget = FilePathEdit(config.data[key], lambda value, name=key: self.update_value(name, value))
             widget.setToolTip("留空时使用图片文件夹中的 ScreenSnap/Auto 或 ScreenSnap/Manual")
+            self.controls[key] = widget
             self.form.addRow(label, widget)
         self.group("文件与目录")
+        self.choice("save_format", "保存格式", [("PNG（无损）", "png"), ("JPEG", "jpg"),
+                                            ("WebP", "webp"), ("BMP", "bmp")],
+                    "自动与手动保存使用的图片格式")
+        self.number("save_quality", "图片质量", 1, 100,
+                    "仅 JPEG 与 WebP 生效；数值越大越清晰，文件也越大")
+        self.color("save_background", "保存底色",
+                    "JPEG 与 BMP 不支持透明通道，保存时透明区域会先合成到这个颜色")
         self.text("filename", "文件名模板", "使用 strftime 时间占位符生成文件名")
         hint = QLabel("%Y 四位年    %m 月    %d 日\n"
                   "%H 时（24 小时制）    %M 分    %S 秒\n"

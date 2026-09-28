@@ -1,7 +1,8 @@
 """编辑器工具栏。"""
 
 from PySide6.QtCore import Signal, Qt, QSize, QTimer, QSignalBlocker
-from PySide6.QtGui import QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QColor
+from PySide6.QtGui import (QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QColor,
+                           QGuiApplication)
 from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, QLabel,
                                QCheckBox, QToolButton, QMenu, QStyle, QButtonGroup,
                                QSlider, QFontComboBox, QWidgetAction, QSizePolicy,
@@ -9,6 +10,10 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, Q
 from ui.widgets.color_button import ColorButton
 from config.config_manager import DEFAULTS, TOOL_WIDTH_KEYS
 from core.constants import shortcut_label
+
+# 每个工具在“更多设置”里对应的实时预览类型。
+PREVIEW_KINDS = {"pen": "shapes", "rect": "shapes", "ellipse": "shapes", "arrow": "arrow",
+                 "marker": "marker", "mosaic": "mosaic", "text": "text", "crop": "crop"}
 
 
 def settings_icon():
@@ -336,7 +341,25 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(self.rect_style, 10, 1, 1, 2)
         panel_layout.addWidget(QLabel("椭圆线型"), 11, 0)
         panel_layout.addWidget(self.ellipse_style, 11, 1, 1, 2)
-        for row in range(12):
+        # 实时预览：与设置页共用同一套绘制，改参数立刻看到效果。
+        from ui.widgets.annotation_preview import AnnotationPreview
+
+        preview_box = QWidget()
+        preview_layout = QVBoxLayout(preview_box)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        # 预览高度按屏幕可用高度自适应，矮屏上不会把弹窗顶出屏幕。
+        screen = QGuiApplication.primaryScreen()
+        usable = screen.availableGeometry().height() if screen is not None else 900
+        self.previews = {}
+        for kind in ("text", "arrow", "shapes", "marker", "mosaic", "crop"):
+            widget = AnnotationPreview(settings, kind, 88 if usable < 800 else 104)
+            widget.setMinimumWidth(200)
+            widget.setVisible(False)
+            self.previews[kind] = widget
+            preview_layout.addWidget(widget)
+        panel_layout.addWidget(QLabel("预览"), 12, 0)
+        panel_layout.addWidget(preview_box, 12, 1, 1, 2)
+        for row in range(13):
             label = panel_layout.itemAtPosition(row, 0).widget()
             label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             label.setMinimumHeight(38)
@@ -346,7 +369,11 @@ class ToolbarWidget(QWidget):
                 panel_layout.setAlignment(widget, Qt.AlignVCenter)
         self.option_rows = [tuple(panel_layout.itemAtPosition(row, column).widget()
                                   for column in range(3) if panel_layout.itemAtPosition(row, column))
-                            for row in range(12)]
+                            for row in range(13)]
+        # 任何参数变化都重绘预览，弹窗尺寸随后按内容重新计算。
+        self.setting_changed.connect(lambda *args: self.refresh_previews())
+        self.crop_style_changed.connect(lambda *args: self.refresh_previews())
+        self.color_changed.connect(lambda *args: self.refresh_previews())
         panel_action = QWidgetAction(menu)
         panel_action.setDefaultWidget(panel)
         menu.addAction(panel_action)
@@ -407,6 +434,11 @@ class ToolbarWidget(QWidget):
         self.edit_image_layout.addStretch()
         self.reflow(1100)
 
+    def refresh_previews(self):
+        """参数变化后重绘“更多设置”里的实时预览。"""
+        for widget in self.previews.values():
+            widget.refresh()
+
     def change_tool_width(self, value):
         tool = next((key for key, button in self.tool_buttons.items() if button.isChecked()), None)
         if tool in TOOL_WIDTH_KEYS:
@@ -430,6 +462,14 @@ class ToolbarWidget(QWidget):
             rows.add(10)
         elif tool == "ellipse":
             rows.add(11)
+        # 有对应预览的工具才显示预览行，其余工具隐藏以节省弹窗高度。
+        kind = PREVIEW_KINDS.get(tool)
+        if kind:
+            rows.add(12)
+        for name, widget in self.previews.items():
+            widget.setVisible(name == kind)
+        if kind:
+            self.previews[kind].refresh()
         # 同一个弹出面板只展示当前工具的参数，切换时保留各自的线宽。
         for index, widgets in enumerate(self.option_rows):
             for widget in widgets:

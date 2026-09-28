@@ -1,6 +1,7 @@
 """mss 捕获虚拟桌面，保留屏幕物理坐标。"""
 
 from io import BytesIO
+import logging
 import os
 
 import mss
@@ -69,8 +70,14 @@ def capture(cursor=False, alternatives=False):
         shot = grabber.grab(bounds)
         image = Image.frombytes("RGB", shot.size, shot.rgb)
         monitors = [dict(monitor) for monitor in grabber.monitors[1:]]
+    logger = logging.getLogger("screensnap")
+    logger.debug("捕获虚拟桌面: %sx%s，显示器 %d 个", image.width, image.height, len(monitors))
     with_pointer = image.copy()
-    pointer = native_cursor()
+    try:
+        pointer = native_cursor()
+    except Exception as error:  # 指针形状偶发无法读取，降级为不含光标的截图。
+        logger.warning("无法读取鼠标指针，本次截图不含光标: %s", error)
+        pointer = None
     if pointer is not None:
         cursor_image, left, top = pointer
         with_pointer.paste(cursor_image, (left - bounds["left"], top - bounds["top"]), cursor_image)

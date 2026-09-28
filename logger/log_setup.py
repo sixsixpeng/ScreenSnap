@@ -5,6 +5,8 @@ import sys
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
+from logger.log_context import ContextFilter
+
 
 def configure_logging(settings):
     """重建轮转处理器，使设置页修改日志选项后立即生效。"""
@@ -13,6 +15,9 @@ def configure_logging(settings):
     for handler in logger.handlers[:]:
         logger.removeHandler(handler)
         handler.close()
+    # 现场信息过滤器只保留一个，反复保存设置不会重复叠加。
+    for item in logger.filters[:]:
+        logger.removeFilter(item)
     logger.disabled = not settings["logging_enabled"]
     if logger.disabled:
         return logger
@@ -30,6 +35,15 @@ def configure_logging(settings):
     handler = TimedRotatingFileHandler(
         directory / "app.log", when=settings["log_when"], backupCount=14, encoding="utf-8"
     )
-    handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+    logger.addFilter(ContextFilter())
+    # 位置信息用 模块:行号 函数名，方括号内是鼠标、前台窗口与当前操作对象。
+    handler.setFormatter(logging.Formatter(
+        "%(asctime)s %(levelname)s %(module)s:%(lineno)d %(funcName)s() [%(context)s] %(message)s"))
     logger.addHandler(handler)
+    # 控制台同步输出，方便直接观察；打包为无控制台程序时 sys.stdout 为 None。
+    if sys.stdout is not None:
+        console = logging.StreamHandler(sys.stdout)
+        console.setFormatter(logging.Formatter(
+            "%(asctime)s %(levelname)s %(module)s:%(lineno)d [%(context)s] %(message)s"))
+        logger.addHandler(console)
     return logger

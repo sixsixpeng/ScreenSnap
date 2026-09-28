@@ -8,7 +8,8 @@ HOTKEY_LABELS = {
     "edit_clipboard": "编辑剪贴板图片", "open_image": "打开并编辑图片",
     "paste": "贴上次截图", "previous": "上一张贴图", "next": "下一张贴图",
     "hide": "隐藏/显示贴图", "close_all": "关闭全部贴图",
-    "touch": "恢复贴图交互",
+    "touch": "恢复贴图交互", "paste_clipboard": "贴剪贴板内容",
+    "sticker_panel": "贴图管理窗口",
 }
 
 
