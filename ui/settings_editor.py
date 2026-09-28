@@ -21,7 +21,9 @@ class EditorPage(SettingsPage):
         self.add_color("pen_color", "标注颜色")
         self.group("箭头")
         self.choice("arrow_style", "箭头样式", [("实心", "filled"), ("空心", "open"),
-                               ("实心双向", "double_filled"), ("空心双向", "double")],
+                                ("实心双向", "double_filled"), ("空心双向", "double"),
+                               ("实心线段", "solid_line"), ("空心线段", "open_line"),
+                               ("实心虚线", "solid_dash"), ("空心虚线", "open_dash")],
                     "新建箭头的箭头头部样式")
         self.number("arrow_width", "箭头线宽", 1, 50, "只影响对应工具")
         self.group("线条与形状")
@@ -29,6 +31,10 @@ class EditorPage(SettingsPage):
         for key, label in (("rect_width", "矩形线宽"), ("ellipse_width", "椭圆线宽"),
                            ("eraser_width", "橡皮擦宽度")):
             self.number(key, label, 1, 50, "只影响对应工具")
+        self.choice("rect_style", "矩形线型", [("实线", "solid"), ("虚线", "dash")],
+                    "新建矩形使用的边框线型")
+        self.choice("ellipse_style", "椭圆线型", [("实线", "solid"), ("虚线", "dash")],
+                    "新建椭圆使用的边框线型")
         self.group("荧光笔")
         self.number("marker_width", "荧光笔线宽", 1, 50, "只影响对应工具")
         self.number("marker_opacity", "荧光笔不透明度", 1, 100, "越低越能看清原图；荧光笔也使用标注颜色")
@@ -47,6 +53,9 @@ class EditorPage(SettingsPage):
         self.number("editor_border_width", "编辑区边框粗细", 1, 12,
                     "只在编辑画布中显示，不写入图片")
         self.add_color("editor_border_color", "编辑区边框颜色")
+        self.group("裁剪框")
+        self.add_color("crop_color", "裁剪框颜色")
+        self.number("crop_width", "裁剪框线宽", 1, 12, "只影响编辑器裁剪框")
 
     def add_color(self, key, label):
         button = ColorButton(self.config.data[key],

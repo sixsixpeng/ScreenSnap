@@ -62,7 +62,8 @@ class ColorButton(QPushButton):
         swatch = QPixmap(18, 18)
         swatch.fill(QColor(self.color))
         self.setIcon(QIcon(swatch))
-        self.setText("颜色" if self.compact else f"选择颜色 {self.color}")
+        self.setText("" if self.property("icon_only") else
+                 "颜色" if self.compact else f"选择颜色 {self.color}")
         if self.compact:
             self.setToolTip(f"选择{self.purpose}：{self.color}")
 

@@ -16,11 +16,19 @@ def build_menu(sticker):
     for label, icon, callback in [
         ("解锁" if sticker.locked else "锁定", QStyle.SP_DialogApplyButton, sticker.toggle_lock),
         ("重置大小", QStyle.SP_DialogResetButton, sticker.reset_size),
-        ("复制图像", QStyle.SP_FileIcon, sticker.copy_image),
+        ("复制图像", QStyle.SP_FileDialogContentsView, sticker.copy_image),
+        ("关闭描边" if sticker.border_enabled else "开启描边", QStyle.SP_FileDialogDetailedView, sticker.toggle_border),
+        ("隐藏阴影" if sticker.shadow_enabled else "显示阴影", QStyle.SP_FileDialogInfoView, sticker.toggle_shadow),
         ("关闭置顶" if sticker.always_on_top else "开启置顶", QStyle.SP_ArrowUp, sticker.toggle_top),
-        ("关闭当前贴图", QStyle.SP_DialogCloseButton, sticker.close),
     ]:
         menu.addAction(sticker.style().standardIcon(icon), label, callback)
+    if getattr(sticker, "open_file_replace", None) is not None:
+        menu.addAction(sticker.style().standardIcon(QStyle.SP_DialogOpenButton),
+                       "从文件打开替换此贴图", sticker.open_file_replace)
+        menu.addAction(sticker.style().standardIcon(QStyle.SP_DialogOpenButton),
+                       "从文件打开新贴图", sticker.open_file_new)
+    menu.addAction(sticker.style().standardIcon(QStyle.SP_DialogCloseButton),
+                   "关闭当前贴图", sticker.close)
     opacity = menu.addMenu(sticker.style().standardIcon(QStyle.SP_FileDialogDetailedView), "透明度")
     action = QWidgetAction(opacity)
     slider = QSlider(Qt.Horizontal)

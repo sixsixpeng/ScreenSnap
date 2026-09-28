@@ -12,7 +12,6 @@ class SavePage(SettingsPage):
     def __init__(self, config, changed):
         super().__init__(config, changed)
         self.group("自动保存")
-        self.check("auto_save", "完成后自动保存", "双击完成编辑时保存到自动目录")
         for key, label in [("auto_dir", "自动保存目录"), ("manual_dir", "手动保存目录")]:
             if key == "manual_dir":
                 self.group("手动保存")
@@ -27,3 +26,6 @@ class SavePage(SettingsPage):
         hint.setWordWrap(True)
         self.form.addRow("", hint)
         self.check("open_dir", "保存后打开目录", "每次保存成功后打开资源管理器")
+        self.group("手动保存后复制")
+        self.check("copy_saved_image", "图片", "双击保存和保存按钮将合成图片放入剪贴板")
+        self.check("copy_saved_path", "文件路径文字", "双击保存和保存按钮将保存路径作为文字放入剪贴板")

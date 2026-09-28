@@ -48,6 +48,16 @@ class SelectionRects:
         hit = self.handle_at(point)
         return hit[:4] if hit is not None and hit[4] == "both" else None
 
+    def border_at(self, point):
+        """非缩放手柄的边框窄带可用于拖动，编辑画布内部仍处理标注。"""
+        if self.handle_at(point) is not None:
+            return False
+        for rect in reversed(self.rects):
+            if (rect.adjusted(-6, -6, 6, 6).contains(point) and
+                    not rect.adjusted(6, 6, -6, -6).contains(point)):
+                return True
+        return False
+
     def begin(self, point):
         """优先选中顶层选区的缩放手柄，再判断整体拖动或新建。"""
         hit = self.handle_at(point)
@@ -60,7 +70,7 @@ class SelectionRects:
             return
         self.nudge_corner = None
         for index in range(len(self.rects) - 1, -1, -1):
-            if self.rects[index].contains(point):
+            if self.rects[index].adjusted(-6, -6, 6, 6).contains(point):
                 self.nudge_corner = None
                 self.dragging = index
                 self.drag_origin = QPoint(point)
@@ -121,6 +131,10 @@ class SelectionRects:
             self.finish()
         if self.nudge_corner is not None:
             index, anchor, point, axis, original = self.nudge_corner
+            if axis == "x":
+                dy = 0
+            elif axis == "y":
+                dx = 0
             point = point + QPoint(dx, dy)
             self.rects[index] = self.resized_rect(anchor, point, axis, original)
             self.nudge_corner = (index, anchor, point, axis, original)

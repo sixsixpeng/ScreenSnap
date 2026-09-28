@@ -51,19 +51,72 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(callable(exported))
 
     def test_config_roundtrip_and_conflict(self):
+        from config.config_manager import DEFAULTS
+
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "settings.json"
             manager = ConfigManager(path)
+            self.assertEqual({DEFAULTS[key] for key in ("pen_width", "rect_width", "ellipse_width",
+                                                        "arrow_width", "marker_width")}, {2})
+            self.assertEqual(DEFAULTS["eraser_width"], 30)
+            self.assertEqual((DEFAULTS["pen_color"], DEFAULTS["mosaic_size"]), ("#ff0000", 10))
+            self.assertTrue(DEFAULTS["copy_saved_image"])
+            self.assertFalse(DEFAULTS["copy_saved_path"])
             manager.data["hotkeys"]["capture"] = "ctrl+q"
             manager.save()
             self.assertEqual(ConfigManager(path).data["hotkeys"]["capture"], "ctrl+q")
             path.write_text(json.dumps({"hotkeys": {"paste": "ctrl+q", "capture": "ctrl+q"}}))
-            with self.assertRaises(ValueError):
-                ConfigManager(path)
+            self.assertEqual(ConfigManager(path).data["hotkeys"], DEFAULTS["hotkeys"])
+            self.assertEqual(len(list(Path(folder).glob("settings.json.broken-*"))), 1)
             path.write_text(json.dumps({"hotkeys": {"paste": "shift+ctrl+q",
                                                      "capture": "ctrl+shift+q"}}))
+            restored = ConfigManager(path)
+            self.assertEqual(len(list(Path(folder).glob("settings.json.broken-*"))), 2)
             with self.assertRaises(ValueError):
-                ConfigManager(path)
+                restored.import_from(next(Path(folder).glob("settings.json.broken-*")))
+
+    def test_config_invalid_json_is_backed_up_on_load(self):
+        from config.config_manager import DEFAULTS
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            path.write_text("{invalid", encoding="utf-8")
+            manager = ConfigManager(path)
+            self.assertEqual(manager.data, DEFAULTS)
+            self.assertEqual(next(Path(folder).glob("settings.json.broken-*")).read_text(encoding="utf-8"),
+                             "{invalid")
+
+    def test_existing_annotation_values_are_not_replaced_by_new_defaults(self):
+        from editor.toolbar_widget import ToolbarWidget
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            path.write_text(json.dumps({"pen_color": "#12ab34", "pen_width": 7,
+                                        "arrow_width": 14, "eraser_width": 9,
+                                        "mosaic_size": 23}), encoding="utf-8")
+            restored = ConfigManager(path).data
+            self.assertEqual((restored["pen_color"], restored["pen_width"],
+                              restored["arrow_width"], restored["mosaic_size"]),
+                             ("#12ab34", 7, 14, 23))
+            self.assertEqual((restored["copy_saved_image"], restored["copy_saved_path"]), (True, False))
+            self.assertEqual(ToolbarWidget().tool_widths["arrow"], 2)
+            self.assertEqual(ToolbarWidget().tool_widths["eraser"], 30)
+            self.assertEqual(restored["eraser_width"], 9)
+            for values, expected_width in ((restored, 9), (ConfigManager(Path(folder) / "fresh.json").data, 30)):
+                toolbar = ToolbarWidget(settings=values)
+                toolbar.tool_buttons["eraser"].click()
+                self.assertEqual(toolbar.pen_width.value(), expected_width)
+                toolbar.close()
+
+    def test_legacy_completion_settings_are_removed_on_load(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            path.write_text(json.dumps({"auto_save": False, "auto_copy": False,
+                                        "manual_dir": folder}), encoding="utf-8")
+            manager = ConfigManager(path)
+            self.assertEqual(manager.data["manual_dir"], folder)
+            self.assertNotIn("auto_save", manager.data)
+            self.assertNotIn("auto_copy", json.loads(path.read_text(encoding="utf-8")))
 
     def test_log_directory_setting_persists(self):
         from ui.widgets.file_path_edit import FilePathEdit
@@ -77,6 +130,65 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(ConfigManager(manager.path).data["log_dir"],
                              directory.input.text())
             settings.close()
+
+    def test_save_clipboard_options_persist_independently(self):
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            settings = SettingsWindow(manager)
+            save_page = settings.pages.widget(2)
+            image = save_page.controls["copy_saved_image"]
+            path = save_page.controls["copy_saved_path"]
+            self.assertTrue(image.isChecked())
+            self.assertFalse(path.isChecked())
+            image.setChecked(False)
+            path.setChecked(True)
+            reloaded = ConfigManager(manager.path).data
+            self.assertFalse(reloaded["copy_saved_image"])
+            self.assertTrue(reloaded["copy_saved_path"])
+            settings.close()
+
+    @patch("PySide6.QtGui.QGuiApplication.clipboard")
+    def test_save_clipboard_options_apply_to_both_editors(self, clipboard_source):
+        from PySide6.QtCore import QMimeData
+        from PySide6.QtGui import QGuiApplication
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        clipboard = clipboard_source.return_value
+        clipboard.mimeData.return_value = QMimeData()
+        def set_text(text):
+            payload = QMimeData()
+            payload.setText(text)
+            clipboard.mimeData.return_value = payload
+        clipboard.setText.side_effect = set_text
+        clipboard.setMimeData.side_effect = lambda payload: setattr(clipboard.mimeData, "return_value", payload)
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 80, "height": 60}
+            for copy_image, copy_path in ((True, False), (False, True), (True, True), (False, False)):
+                settings = {**DEFAULTS, "auto_dir": folder, "manual_dir": folder,
+                            "magnifier": False, "copy_saved_image": copy_image,
+                            "copy_saved_path": copy_path}
+                window = EditorWindow(Image.new("RGB", (80, 60), "red"), settings)
+                with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                    mask = MaskWindow(Image.new("RGB", (80, 60), "blue"), bounds, [bounds], settings)
+                mask.selection.rects.append(QRect(5, 5, 40, 30))
+                mask.complete()
+                for active in (window, mask.session.inline_editor):
+                    QGuiApplication.clipboard().setText("previous clipboard")
+                    saved_path = active.save(copy_to_clipboard=True)
+                    mime = QGuiApplication.clipboard().mimeData()
+                    self.assertEqual(mime.hasImage(), copy_image)
+                    if copy_path:
+                        self.assertEqual(mime.text(), str(saved_path))
+                    else:
+                        self.assertEqual(mime.text(), "" if copy_image else "previous clipboard")
+                    del mime
+                    if not copy_image and not copy_path:
+                        active.execute("copy")
+                        self.assertTrue(QGuiApplication.clipboard().mimeData().hasImage())
+                mask.close()
+                window.close()
+            self.app.processEvents()
 
     def test_logging_uses_existing_directory_or_startup_fallback(self):
         from config.config_manager import DEFAULTS
@@ -163,15 +275,17 @@ class CoreTests(unittest.TestCase):
             settings.close()
 
     def test_filename_template_has_visible_format_guide(self):
-        from PySide6.QtWidgets import QLabel
+        from PySide6.QtWidgets import QFormLayout, QLabel
 
         with tempfile.TemporaryDirectory() as folder:
             settings = SettingsWindow(ConfigManager(Path(folder) / "settings.json"))
             page = settings.pages.widget(2)
-            field_row, _ = page.form.getWidgetPosition(page.controls["filename"])
+            form = next(form for form in page.findChildren(QFormLayout)
+                        if form.getWidgetPosition(page.controls["filename"])[0] >= 0)
+            field_row, _ = form.getWidgetPosition(page.controls["filename"])
             guide = next(label for label in page.findChildren(QLabel)
                          if "%Y 四位年" in label.text())
-            guide_row, _ = page.form.getWidgetPosition(guide)
+            guide_row, _ = form.getWidgetPosition(guide)
             self.assertEqual(guide_row, field_row + 1)
             for token in ("%Y", "%m", "%d", "%H", "%M", "%S", "_"):
                 self.assertIn(token, guide.text())
@@ -349,7 +463,8 @@ class CoreTests(unittest.TestCase):
         editor.show()
         self.app.processEvents()
         self.assertTrue(editor.operation_tips.isVisible())
-        self.assertIn("双击空白处完成保存", editor.operation_tips.text())
+        self.assertIn("双击空白处保存并退出", editor.operation_tips.text())
+        self.assertIn("快速选中", editor.operation_tips.text())
         self.assertIn("Esc 放弃编辑", editor.operation_tips.text())
         editor.close()
 
@@ -375,13 +490,48 @@ class CoreTests(unittest.TestCase):
         painter.fontMetrics.return_value.height.return_value = 16
         painter.fontMetrics.return_value.elidedText.side_effect = lambda text, mode, width: text
         paint_info(painter, QPoint(20, 20), None)
-        self.assertIn("拖拽框选", painter.drawText.call_args_list[-1].args[-1])
-        self.assertEqual(painter.drawText.call_count, 1)
-        self.assertLessEqual(painter.drawRoundedRect.call_args.args[0].height(), 32)
+        self.assertIn("拖拽框选", " ".join(call.args[-1] for call in painter.drawText.call_args_list))
+        self.assertGreaterEqual(painter.drawText.call_count, 1)
+        self.assertEqual(painter.drawRoundedRect.call_args.args[0].height(),
+                 16 * painter.drawText.call_count + 12)
+        painter.drawText.reset_mock()
         paint_info(painter, QPoint(20, 20), QRect(10, 10, 40, 30))
-        selected_hint = painter.drawText.call_args_list[-1].args[-1]
+        selected_hint = " ".join(call.args[-1] for call in painter.drawText.call_args_list)
         self.assertIn("内部拖动移动", selected_hint)
-        self.assertIn("边中点单向缩放", selected_hint)
+        self.assertIn("Enter/双击快速进入编辑", selected_hint)
+        self.assertIn("四角/边中点缩放", selected_hint)
+
+    def test_capture_operation_tips_use_available_monitor_width(self):
+        from screenshot.overlay_info import paint_info
+
+        painter = Mock()
+        painter.fontMetrics.return_value.horizontalAdvance.side_effect = lambda text: len(text) * 12
+        painter.fontMetrics.return_value.height.return_value = 16
+        paint_info(painter, QPoint(20, 20), QRect(10, 10, 40, 30), QRect(0, 0, 1920, 1080))
+        wide_rect = painter.drawRoundedRect.call_args.args[0]
+        self.assertLessEqual(wide_rect.width(), 1920 - 16)
+        self.assertEqual(wide_rect.left(), (1920 - wide_rect.width()) // 2)
+        self.assertTrue(all(call.args[1] & Qt.AlignHCenter for call in painter.drawText.call_args_list))
+        self.assertFalse(painter.fontMetrics.return_value.elidedText.called)
+        painter.drawText.reset_mock()
+        paint_info(painter, QPoint(20, 20), QRect(10, 10, 40, 30), QRect(0, 0, 600, 300))
+        self.assertLessEqual(painter.drawRoundedRect.call_args.args[0].width(), 584)
+        self.assertGreater(painter.drawText.call_count, 1)
+        self.assertIn("Esc取消", " ".join(call.args[-1] for call in painter.drawText.call_args_list))
+
+    def test_capture_tips_keep_long_coordinates_visible_in_inline_edit(self):
+        from screenshot.overlay_info import paint_info
+
+        painter = Mock()
+        painter.fontMetrics.return_value.horizontalAdvance.side_effect = lambda text: len(text) * 12
+        painter.fontMetrics.return_value.height.return_value = 16
+        paint_info(painter, QPoint(-123456, 987654), QRect(20, 20, 800, 600),
+                   QRect(0, 0, 1920, 1080))
+        rect = painter.drawRoundedRect.call_args.args[0]
+        self.assertLessEqual(rect.width(), 1920 - 16)
+        self.assertEqual(rect.left(), (1920 - rect.width()) // 2)
+        self.assertIn("-123456, 987654", " ".join(call.args[-1] for call in painter.drawText.call_args_list))
+        self.assertFalse(painter.fontMetrics.return_value.elidedText.called)
 
     def test_capture_operation_tips_are_centered_on_each_monitor(self):
         from PySide6.QtGui import QColor, QImage, QPainter
@@ -393,7 +543,9 @@ class CoreTests(unittest.TestCase):
         paint_info(painter, QPoint(0, 0), None, QRect(0, 0, 1000, 900))
         paint_info(painter, QPoint(0, 0), None, QRect(1000, 0, 1000, 900))
         painter.end()
-        self.assertGreater(image.pixelColor(49, 20).red(), 200)
+        self.assertGreater(image.pixelColor(4, 20).red(), 200)
+        self.assertGreater(image.pixelColor(995, 20).red(), 200)
+        self.assertGreater(image.pixelColor(1004, 20).red(), 200)
         self.assertLess(image.pixelColor(500, 9).red(), 100)
         self.assertLess(image.pixelColor(1500, 9).red(), 100)
 
@@ -418,7 +570,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(restored["annotation_tool"], "marker")
             self.assertEqual(restored["text_alignment"], "right")
             self.assertEqual(restored["marker_width"], 9)
-            self.assertEqual(restored["pen_width"], 3)
+            self.assertEqual(restored["pen_width"], 2)
             self.assertEqual(restored["marker_opacity"], 55)
             self.assertEqual(window.pages.widget(3).controls["marker_opacity"].value(), 55)
             self.assertEqual(restored["mosaic_mode"], "blur")
@@ -604,6 +756,11 @@ class CoreTests(unittest.TestCase):
         clipboard.trigger()
         open_image.trigger()
         self.assertEqual(calls, ["clipboard", "open"])
+        menu = make_tray_menu(self.app, lambda: None, lambda: None, lambda: None,
+                              open_sticker=lambda: calls.append("sticker"))
+        next(action for action in menu.actions()
+             if action.text() == "从文件打开新贴图").trigger()
+        self.assertEqual(calls[-1], "sticker")
 
     def test_sticker_context_menu_shows_restore_hotkey(self):
         from PySide6.QtGui import QImage
@@ -611,19 +768,100 @@ class CoreTests(unittest.TestCase):
 
         image = QImage(24, 18, QImage.Format_RGB32)
         sticker = StickerItem(image, settings={"hotkeys": {"touch": "ctrl+shift+t"}})
-        action = next(action for action in build_menu(sticker).actions()
+        menu = build_menu(sticker)
+        copy_action = next(action for action in menu.actions() if action.text() == "复制图像")
+        icon_image = copy_action.icon().pixmap(24, 24).toImage()
+        self.assertTrue(any(icon_image.pixelColor(x, y).alpha() > 0
+                    for x in range(icon_image.width()) for y in range(icon_image.height())))
+        action = next(action for action in menu.actions()
                       if "点击穿透" in action.text())
         self.assertIn("Ctrl+Shift+T", action.text())
+        labels = [action.text() for action in build_menu(sticker).actions()]
+        self.assertIn("关闭描边", labels)
+        self.assertIn("隐藏阴影", labels)
+        sticker.toggle_border()
+        sticker.toggle_shadow()
+        labels = [action.text() for action in build_menu(sticker).actions()]
+        self.assertIn("开启描边", labels)
+        self.assertIn("显示阴影", labels)
         sticker.close()
+
+    def test_sticker_border_shadow_defaults_settings_and_persistence(self):
+        from PySide6.QtGui import QImage, QColor
+        from config.config_manager import DEFAULTS, validate
+        from ui.settings_sticker import StickerPage
+
+        self.assertTrue(validate({})["sticker_border_enabled"])
+        with self.assertRaises(ValueError):
+            validate({"sticker_border_color": "red"})
+        with self.assertRaises(ValueError):
+            validate({"sticker_border_width": 21})
+        with self.assertRaises(ValueError):
+            validate({"sticker_shadow_strength": 101})
+
+        image = QImage(20, 12, QImage.Format_RGB32)
+        image.fill(QColor("#ffffff"))
+        settings = dict(DEFAULTS, sticker_border_color="#123456", sticker_border_width=3,
+                        sticker_shadow_strength=50)
+        sticker = StickerItem(image, settings=settings)
+        self.assertGreater(sticker.width(), image.width())
+        painted = sticker.grab().toImage()
+        self.assertEqual(painted.pixelColor(sticker.padding(), sticker.padding()).name(), "#123456")
+        sticker.toggle_border()
+        self.assertFalse(sticker.border_enabled)
+        self.assertFalse(sticker.state()["border"])
+        sticker.toggle_shadow()
+        self.assertFalse(sticker.shadow_enabled)
+        self.assertFalse(sticker.state()["shadow"])
+        sticker.close()
+
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            page = StickerPage(manager, manager.save)
+            self.assertIn("sticker_border_enabled", page.controls)
+            page.controls["sticker_border_width"].setValue(5)
+            self.assertEqual(ConfigManager(manager.path).data["sticker_border_width"], 5)
+            page.color_buttons["sticker_border_color"].changed("#abcdef")
+            self.assertEqual(ConfigManager(manager.path).data["sticker_border_color"], "#abcdef")
+            page.close()
+
+    def test_sticker_manager_caches_source_on_add(self):
+        from PySide6.QtGui import QImage, QColor
+        from config.config_manager import DEFAULTS
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            image = QImage(12, 8, QImage.Format_RGB32)
+            image.fill(QColor("#23bc58"))
+            manager = StickerManager(DEFAULTS)
+            item = manager.add(image)
+            self.assertIsNotNone(item.source)
+            self.assertTrue(Path(item.source).is_file())
+            self.assertIsNone(item.image)
+            manager.persist()
+            state = json.loads((Path(folder) / "stickers.json").read_text(encoding="utf-8"))[0]
+            self.assertEqual(state["source"], item.source)
+            item.close()
 
     def test_annotation_font_size_and_arrow_style_persist(self):
         from config.config_manager import DEFAULTS
+        from config.config_manager import TOOL_WIDTH_KEYS
 
         with tempfile.TemporaryDirectory() as folder:
             manager = ConfigManager(Path(folder) / "settings.json")
             settings = SettingsWindow(manager)
             editor = EditorWindow(Image.new("RGB", (40, 30), "white"), manager.data)
             editor.setting_changed.connect(settings.set_annotation_setting)
+            page = settings.pages.widget(3)
+            for key in (*TOOL_WIDTH_KEYS.values(), "arrow_style", "rect_style", "ellipse_style",
+                        "marker_opacity", "font", "font_size", "text_alignment", "line_spacing",
+                        "mosaic_mode", "mosaic_size", "annotation_tool"):
+                self.assertIn(key, page.controls)
+            self.assertIn("pen_color", page.color_buttons)
+            for index, (tool, key) in enumerate(TOOL_WIDTH_KEYS.items(), 7):
+                editor.toolbar.tool_buttons[tool].click()
+                editor.toolbar.pen_width.setValue(index)
+                self.assertEqual(ConfigManager(manager.path).data[key], index)
             editor.toolbar.font_size.setValue(31)
             editor.toolbar.tool_buttons["arrow"].click()
             editor.toolbar.choice_buttons["arrow_style"]["open"].click()
@@ -700,6 +938,34 @@ class CoreTests(unittest.TestCase):
         notice.assert_not_called()
         beep.assert_not_called()
 
+    def test_capture_editors_initial_save_and_close_all(self):
+        from types import SimpleNamespace
+        from config.config_manager import DEFAULTS
+        from main import Application
+
+        with tempfile.TemporaryDirectory() as folder:
+            app = Application.__new__(Application)
+            app.config = SimpleNamespace(data=dict(DEFAULTS, auto_dir=folder, filename="capture", sound=False,
+                                                   bubble=False, capture_notification=False))
+            app.editors = []
+            app.capture_notice = None
+            app.logger = Mock()
+            app.settings_window = Mock()
+            app.saved = Mock()
+            app.completed = Mock()
+            app.add_sticker = Mock()
+            app.notify = Mock()
+            app.edit_images([(Image.new("RGB", (20, 12), "blue"), None),
+                             (Image.new("RGB", (10, 8), "red"), None)])
+
+            self.assertEqual(len(app.editors), 2)
+            paths = [editor.last_path for editor in app.editors]
+            self.assertTrue(all(path and path.is_file() for path in paths))
+            self.assertEqual({path.name for path in paths}, {"capture.png", "capture_1.png"})
+            app.editors[0].close_all_requested.emit()
+            self.app.processEvents()
+            self.assertTrue(all(not editor.isVisible() for editor in app.editors))
+
     def test_hotkey_clear_button_updates_binding(self):
         from PySide6.QtWidgets import QPushButton
         from ui.settings_hotkey import HotkeyPage
@@ -740,11 +1006,20 @@ class CoreTests(unittest.TestCase):
         open_arrow = shape("arrow", start, end, "#ff0000", 4, "open")
         double = shape("arrow", start, end, "#ff0000", 4, "double")
         double_filled = shape("arrow", start, end, "#ff0000", 4, "double_filled")
+        solid_line = shape("arrow", start, end, "#ff0000", 4, "solid_line")
+        open_line = shape("arrow", start, end, "#ff0000", 4, "open_line")
+        solid_dash = shape("arrow", start, end, "#ff0000", 4, "solid_dash")
+        open_dash = shape("arrow", start, end, "#ff0000", 4, "open_dash")
         self.assertEqual(filled.brush().color().name(), "#ff0000")
         self.assertEqual(open_arrow.brush().style(), Qt.NoBrush)
         self.assertEqual(double.brush().style(), Qt.NoBrush)
         self.assertEqual(double_filled.brush().color().name(), "#ff0000")
         self.assertEqual(double.path(), double_filled.path())
+        self.assertEqual(solid_line.path().elementCount(), 2)
+        self.assertGreater(open_line.path().elementCount(), solid_line.path().elementCount())
+        self.assertEqual(solid_dash.pen().style(), Qt.DashLine)
+        self.assertEqual(open_dash.pen().style(), Qt.DashLine)
+        self.assertEqual(open_dash.brush().style(), Qt.NoBrush)
         shaft_end = open_arrow.path().elementAt(1)
         self.assertLess(shaft_end.x, end.x())
         self.assertGreater(double.path().elementCount(), open_arrow.path().elementCount())
@@ -762,8 +1037,26 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(validate({"arrow_style": "open"})["arrow_style"], "open")
         self.assertEqual(validate({"arrow_style": "double_filled"})["arrow_style"], "double_filled")
         self.assertEqual(validate({"arrow_style": "double"})["arrow_style"], "double")
+        self.assertEqual(validate({"arrow_style": "solid_line"})["arrow_style"], "solid_line")
+        self.assertEqual(validate({"arrow_style": "open_dash"})["arrow_style"], "open_dash")
         with self.assertRaises(ValueError):
             validate({"arrow_style": "dotted"})
+
+    def test_rect_and_ellipse_support_solid_and_dash_styles(self):
+        from PySide6.QtCore import QPointF
+        from config.config_manager import validate
+
+        start, end = QPointF(10, 10), QPointF(60, 40)
+        rect_solid = shape("rect", start, end, "#ff0000", 3, "solid")
+        rect_dash = shape("rect", start, end, "#ff0000", 3, "dash")
+        ellipse_dash = shape("ellipse", start, end, "#ff0000", 3, "dash")
+        self.assertEqual(rect_solid.pen().style(), Qt.SolidLine)
+        self.assertEqual(rect_dash.pen().style(), Qt.DashLine)
+        self.assertEqual(ellipse_dash.pen().style(), Qt.DashLine)
+        self.assertEqual(validate({"rect_style": "dash"})["rect_style"], "dash")
+        self.assertEqual(validate({"ellipse_style": "solid"})["ellipse_style"], "solid")
+        with self.assertRaises(ValueError):
+            validate({"rect_style": "dot"})
 
     def test_arrow_outline_keeps_clear_shaft_and_sloped_shoulders(self):
         from math import atan2, degrees
@@ -894,6 +1187,62 @@ class CoreTests(unittest.TestCase):
         selection.update(QPoint(corner.x() + 20, corner.y() + 10))
         selection.finish()
         self.assertEqual((selection.rects[-1].width(), selection.rects[-1].height()), (60, 40))
+
+    def test_selection_border_moves_without_resizing_or_creating_region(self):
+        selection = SelectionRects()
+        selection.rects = [QRect(20, 20, 100, 80)]
+        border = QPoint(48, 16)
+        self.assertTrue(selection.border_at(border))
+        selection.begin(border)
+        self.assertEqual(selection.dragging, 0)
+        selection.update(border + QPoint(17, 9))
+        selection.finish()
+        self.assertEqual(selection.rects, [QRect(37, 29, 100, 80)])
+        self.assertFalse(selection.border_at(QPoint(0, 0)))
+        self.assertFalse(selection.border_at(QPoint(37, 29)))
+
+    def test_inline_border_drag_recrops_and_keeps_canvas_inside_unhandled(self):
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True, "magnifier": False}
+            image = Image.new("RGB", (320, 240), "blue")
+            image.paste("red", (35, 35, 155, 125))
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(image, bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(30, 30, 100, 80))
+            mask.complete()
+            editor = mask.session.inline_editor
+            viewport = editor.canvas.viewport()
+            inside = QPoint(50, 50)
+            event = QMouseEvent(QEvent.MouseButtonPress, QPointF(inside), QPointF(inside),
+                                Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+            self.assertFalse(editor.eventFilter(viewport, event))
+            start = QPoint(58, 30)
+            QTest.mousePress(mask, Qt.LeftButton, pos=start)
+            self.assertEqual(mask.selection.dragging, 0)
+            QTest.mouseMove(mask, start + QPoint(15, 8))
+            QTest.mouseRelease(mask, Qt.LeftButton, pos=start + QPoint(15, 8))
+            self.assertEqual(mask.selection.rects, [QRect(45, 38, 100, 80)])
+            self.assertEqual(editor.canvas.image.getpixel((0, 0)), (255, 0, 0))
+            self.assertEqual(editor.canvas.geometry(), mask.to_logical_rect(mask.selection.rects[0]).toRect())
+            border = viewport.mapFrom(mask, QPoint(73, 39))
+            moved = viewport.mapFrom(mask, QPoint(83, 45))
+            press = QMouseEvent(QEvent.MouseButtonPress, QPointF(border), QPointF(border),
+                                Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+            self.assertTrue(editor.eventFilter(viewport, press))
+            move = QMouseEvent(QEvent.MouseMove, QPointF(moved), QPointF(moved),
+                               Qt.NoButton, Qt.LeftButton, Qt.NoModifier)
+            self.assertTrue(editor.eventFilter(viewport, move))
+            release = QMouseEvent(QEvent.MouseButtonRelease, QPointF(moved), QPointF(moved),
+                                  Qt.LeftButton, Qt.NoButton, Qt.NoModifier)
+            self.assertTrue(editor.eventFilter(viewport, release))
+            self.assertEqual(mask.selection.rects, [QRect(55, 44, 100, 80)])
+            mask.close()
 
     def test_selection_resizes_from_all_four_corners(self):
         selection = SelectionRects()
@@ -1132,6 +1481,8 @@ class CoreTests(unittest.TestCase):
         mask.close()
 
     def test_mask_keyboard_nudge_moves_pointer_with_selection(self):
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
         from config.config_manager import DEFAULTS
         from screenshot.mask_window import MaskWindow
         bounds = {"left": 30, "top": 40, "width": 200, "height": 150}
@@ -1163,7 +1514,1113 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(mask.position, corner + QPoint(1, 0))
             self.assertEqual(mask.selection.nudge_corner[2], corner + QPoint(1, 0))
             move_pointer.assert_called_with(mask.mapToGlobal(mask.position))
+            mask.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, QPointF(45, 38), QPointF(45, 38),
+                                           Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+            self.assertEqual(mask.position, QPoint(45, 38))
+            self.assertIsNone(mask.selection.handle_at(mask.position))
+            before = QRect(mask.selection.rects[0])
+            QTest.keyClick(mask, Qt.Key_Down)
+            self.assertEqual(mask.selection.rects[0], before.translated(0, 1))
+            self.assertIsNone(mask.selection.nudge_corner)
         mask.close()
+
+    def test_display_mapper_handles_mixed_dpi_screens(self):
+        from core.dpi import DisplayMapper
+
+        bounds = {"left": 0, "top": 0, "width": 5760, "height": 2160}
+        monitors = [
+            {"left": 0, "top": 0, "width": 1920, "height": 1080},
+            {"left": 1920, "top": 0, "width": 3840, "height": 2160},
+        ]
+        mapper = DisplayMapper(bounds, monitors, screen_infos=[
+            {"geometry": QRect(0, 0, 1920, 1080), "dpr": 1.0},
+            {"geometry": QRect(1920, 0, 3072, 1728), "dpr": 1.25},
+        ])
+
+        self.assertEqual(mapper.logical_bounds, QRect(0, 0, 4992, 1728))
+        self.assertEqual(mapper.physical_local_to_logical_local(QPoint(2045, 125)), QPoint(2020, 100))
+        self.assertEqual(mapper.logical_local_to_physical_local(QPoint(2020, 100)), QPoint(2045, 125))
+        self.assertEqual(mapper.physical_local_rect_to_logical_local_rect(QRect(1920, 0, 125, 125)).toRect(),
+                         QRect(1920, 0, 100, 100))
+
+    def test_display_mapper_removes_vertical_gap_after_scaled_top_screen(self):
+        from core.dpi import DisplayMapper
+
+        bounds = {"left": 0, "top": 0, "width": 3840, "height": 3240}
+        monitors = [
+            {"left": 0, "top": 0, "width": 3840, "height": 2160},
+            {"left": 0, "top": 2160, "width": 1920, "height": 1080},
+        ]
+        mapper = DisplayMapper(bounds, monitors, screen_infos=[
+            {"geometry": QRect(0, 0, 3072, 1728), "dpr": 1.25},
+            # 一些混合 DPI 环境会把下屏 top 报成物理 2160，不能让它变成遮罩空白。
+            {"geometry": QRect(0, 2160, 1920, 1080), "dpr": 1.0},
+        ])
+
+        self.assertEqual(mapper.logical_bounds, QRect(0, 0, 3072, 2808))
+        bottom = mapper.monitor_local_rect(monitors[1])
+        self.assertEqual(mapper.physical_local_rect_to_logical_local_rect(bottom).toRect(),
+                         QRect(0, 1728, 1920, 1080))
+        self.assertEqual(mapper.physical_local_to_logical_local(QPoint(100, 2210)), QPoint(100, 1778))
+        self.assertEqual(mapper.logical_local_to_physical_local(QPoint(100, 1778)), QPoint(100, 2210))
+        self.assertEqual(mapper.physical_local_rect_to_native_global_rect(bottom).toRect(),
+                         QRect(0, 2160, 1920, 1080))
+
+    def test_display_mapper_does_not_rescale_when_qt_geometry_is_physical(self):
+        from core.dpi import DisplayMapper
+
+        bounds = {"left": 0, "top": 0, "width": 3840, "height": 3240}
+        monitors = [
+            {"left": 0, "top": 0, "width": 3840, "height": 2160},
+            {"left": 0, "top": 2160, "width": 1920, "height": 1080},
+        ]
+        mapper = DisplayMapper(bounds, monitors, screen_infos=[
+            # 在部分 DPI-aware 进程中，Qt geometry 已是物理尺寸；此时不能再除以 1.25。
+            {"geometry": QRect(0, 0, 3840, 2160), "dpr": 1.25},
+            {"geometry": QRect(0, 2160, 1920, 1080), "dpr": 1.0},
+        ])
+
+        self.assertEqual(mapper.logical_bounds, QRect(0, 0, 3840, 3240))
+        top = mapper.monitor_local_rect(monitors[0])
+        bottom = mapper.monitor_local_rect(monitors[1])
+        self.assertEqual(mapper.physical_local_rect_to_logical_local_rect(top).toRect(),
+                         QRect(0, 0, 3840, 2160))
+        self.assertEqual(mapper.physical_local_rect_to_logical_local_rect(bottom).toRect(),
+                         QRect(0, 2160, 1920, 1080))
+        self.assertEqual(mapper.physical_local_to_logical_local(QPoint(3000, 1000)), QPoint(3000, 1000))
+        self.assertEqual(mapper.logical_local_to_physical_local(QPoint(100, 2300)), QPoint(100, 2300))
+
+    def test_display_mapper_keeps_qt_geometry_size_for_common_dpi_combinations(self):
+        from core.dpi import DisplayMapper
+
+        cases = (
+            # 两个都 100%。
+            ((1920, 1080, 1.0, 1920, 1080), (1920, 1080, 1.0, 1920, 1080)),
+            # 一个 125%，一个 100%。
+            ((3840, 2160, 1.25, 3072, 1728), (1920, 1080, 1.0, 1920, 1080)),
+            # 两个都 125%。
+            ((3840, 2160, 1.25, 3072, 1728), (2560, 1440, 1.25, 2048, 1152)),
+            # 两个都缩放但比例不同。
+            ((3840, 2160, 1.25, 3072, 1728), (2880, 1620, 1.5, 1920, 1080)),
+            # Qt 已返回物理尺寸时，即使 DPR 不是 1，也不能再次缩放。
+            ((3840, 2160, 1.25, 3840, 2160), (1920, 1080, 1.0, 1920, 1080)),
+        )
+        for left, right in cases:
+            with self.subTest(left=left, right=right):
+                left_pw, left_ph, left_dpr, left_lw, left_lh = left
+                right_pw, right_ph, right_dpr, right_lw, right_lh = right
+                bounds = {"left": 0, "top": 0, "width": left_pw + right_pw,
+                          "height": max(left_ph, right_ph)}
+                monitors = [
+                    {"left": 0, "top": 0, "width": left_pw, "height": left_ph},
+                    {"left": left_pw, "top": 0, "width": right_pw, "height": right_ph},
+                ]
+                mapper = DisplayMapper(bounds, monitors, screen_infos=[
+                    {"geometry": QRect(0, 0, left_lw, left_lh), "dpr": left_dpr},
+                    {"geometry": QRect(left_lw, 0, right_lw, right_lh), "dpr": right_dpr},
+                ])
+
+                self.assertEqual(mapper.physical_local_rect_to_logical_local_rect(
+                    mapper.monitor_local_rect(monitors[0])).toRect(), QRect(0, 0, left_lw, left_lh))
+                self.assertEqual(mapper.physical_local_rect_to_logical_local_rect(
+                    mapper.monitor_local_rect(monitors[1])).toRect(), QRect(left_lw, 0, right_lw, right_lh))
+
+    def test_display_mapper_matches_same_resolution_different_dpi_by_position(self):
+        from core.dpi import DisplayMapper
+
+        bounds = {"left": 0, "top": 0, "width": 7680, "height": 2160}
+        monitors = [
+            {"left": 0, "top": 0, "width": 3840, "height": 2160},
+            {"left": 3840, "top": 0, "width": 3840, "height": 2160},
+        ]
+        mapper = DisplayMapper(bounds, monitors, screen_infos=[
+            # 故意把右屏放前面；两个屏物理分辨率相同，只靠尺寸会错配。
+            {"geometry": QRect(3072, 0, 2560, 1440), "dpr": 1.5},
+            {"geometry": QRect(0, 0, 3072, 1728), "dpr": 1.25},
+        ])
+
+        self.assertEqual(mapper.physical_local_rect_to_logical_local_rect(
+            mapper.monitor_local_rect(monitors[0])).toRect(), QRect(0, 0, 3072, 1728))
+        self.assertEqual(mapper.physical_local_rect_to_logical_local_rect(
+            mapper.monitor_local_rect(monitors[1])).toRect(), QRect(3072, 0, 2560, 1440))
+
+    def test_display_mapper_handles_three_and_four_screen_mixed_dpi_layouts(self):
+        from core.dpi import DisplayMapper
+
+        bounds = {"left": 0, "top": 0, "width": 6720, "height": 3240}
+        monitors = [
+            {"left": 0, "top": 0, "width": 3840, "height": 2160},
+            {"left": 3840, "top": 0, "width": 2880, "height": 1620},
+            {"left": 0, "top": 2160, "width": 1920, "height": 1080},
+            {"left": 1920, "top": 2160, "width": 2560, "height": 1440},
+        ]
+        mapper = DisplayMapper(bounds, monitors, screen_infos=[
+            {"geometry": QRect(0, 0, 3072, 1728), "dpr": 1.25},
+            {"geometry": QRect(3072, 0, 1920, 1080), "dpr": 1.5},
+            {"geometry": QRect(0, 1728, 1920, 1080), "dpr": 1.0},
+            {"geometry": QRect(1920, 1728, 2048, 1152), "dpr": 1.25},
+        ])
+
+        expected = [QRect(0, 0, 3072, 1728), QRect(3072, 0, 1920, 1080),
+                    QRect(0, 1728, 1920, 1080), QRect(1920, 1728, 2048, 1152)]
+        self.assertEqual([mapper.physical_local_rect_to_logical_local_rect(
+            mapper.monitor_local_rect(monitor)).toRect() for monitor in monitors], expected)
+        for monitor in monitors:
+            center = QPoint(monitor["left"] - bounds["left"] + monitor["width"] // 2,
+                            monitor["top"] - bounds["top"] + monitor["height"] // 2)
+            self.assertEqual(mapper.logical_local_to_physical_local(
+                mapper.physical_local_to_logical_local(center)), center)
+
+    def test_display_mapper_removes_horizontal_gap_after_scaled_left_screen(self):
+        from core.dpi import DisplayMapper
+
+        bounds = {"left": 0, "top": 0, "width": 5760, "height": 2160}
+        monitors = [
+            {"left": 0, "top": 0, "width": 3840, "height": 2160},
+            {"left": 3840, "top": 0, "width": 1920, "height": 1080},
+        ]
+        mapper = DisplayMapper(bounds, monitors, screen_infos=[
+            {"geometry": QRect(0, 0, 3072, 1728), "dpr": 1.25},
+            {"geometry": QRect(3840, 0, 1920, 1080), "dpr": 1.0},
+        ])
+
+        self.assertEqual(mapper.logical_bounds, QRect(0, 0, 4992, 1728))
+        right = mapper.monitor_local_rect(monitors[1])
+        self.assertEqual(mapper.physical_local_rect_to_logical_local_rect(right).toRect(),
+                         QRect(3072, 0, 1920, 1080))
+
+    def test_mask_uses_logical_geometry_but_crops_physical_pixels(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 100}
+        screen_infos = [{"geometry": QRect(0, 0, 100, 50), "dpr": 2.0}]
+        settings = {**DEFAULTS, "inline_edit": False}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+                patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos):
+            mask = MaskWindow(Image.new("RGB", (200, 100), "white"), bounds, [bounds], settings)
+        self.assertEqual(mask.geometry(), QRect(0, 0, 100, 50))
+        self.assertEqual(mask.to_physical_point(QPoint(10, 5)), QPoint(20, 10))
+        self.assertEqual(mask.to_logical_rect(QRect(20, 10, 40, 20)).toRect(), QRect(10, 5, 20, 10))
+
+        selected = []
+        regions = []
+        mask.selected.connect(selected.append)
+        mask.last_region.connect(regions.append)
+        mask.selection.rects.append(QRect(20, 10, 40, 20))
+        mask.complete()
+        self.assertEqual(selected[0][0][0].size, (40, 20))
+        self.assertEqual(regions[0], [20, 10, 40, 20])
+
+    def test_mask_close_releases_images_and_application_reference(self):
+        from types import SimpleNamespace
+        from config.config_manager import DEFAULTS
+        from main import Application
+
+        bounds = {"left": 0, "top": 0, "width": 80, "height": 60}
+        frame = Image.new("RGB", (80, 60), "blue")
+        app = Application.__new__(Application)
+        app.config = SimpleNamespace(data=dict(DEFAULTS, inline_edit=False))
+        app.logger = Mock()
+        app.remember_region = Mock()
+        app.edit_images = Mock()
+        app.saved = Mock()
+        app.close_all_editors = Mock()
+        app.add_sticker = Mock()
+        with patch("main.capture", return_value=(frame, bounds, [bounds], frame.copy())), \
+                patch("screenshot.mask_window.visible_windows", return_value=[]):
+            app.show_mask("capture")
+        mask = app.mask
+        self.assertIsNotNone(mask.image)
+        mask.close()
+        self.app.processEvents()
+        self.assertIsNone(mask.image)
+        self.assertIsNone(mask.alternate)
+        self.assertIsNone(mask.preview)
+        self.assertIsNone(app.mask)
+
+    def test_mask_vertical_mixed_dpi_layout_has_no_gap_and_crops_bottom_screen(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 3840, "height": 3240}
+        monitors = [
+            {"left": 0, "top": 0, "width": 3840, "height": 2160},
+            {"left": 0, "top": 2160, "width": 1920, "height": 1080},
+        ]
+        settings = {**DEFAULTS, "crosshair": False, "magnifier": False, "mask_opacity": 0,
+                    "inline_edit": False}
+        screen_infos = [
+            {"geometry": QRect(0, 0, 3072, 1728), "dpr": 1.25},
+            {"geometry": QRect(0, 2160, 1920, 1080), "dpr": 1.0},
+        ]
+        with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+                patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos):
+            mask = MaskWindow(Image.new("RGB", (3840, 3240), "white"), bounds, monitors, settings)
+
+        self.assertEqual([view.geometry() for view in mask.session.views],
+                         [QRect(0, 0, 3072, 1728), QRect(0, 2160, 1920, 1080)])
+        self.assertEqual(mask.session.views[1].logical_window_offset(), QPoint(0, 1728))
+        self.assertEqual(mask.session.views[1].to_physical_point(QPoint(0, 0)), QPoint(0, 2160))
+        self.assertEqual(mask.to_logical_rect(QRect(0, 2160, 1920, 1080)).toRect(),
+                         QRect(0, 1728, 1920, 1080))
+        self.assertEqual(mask.session.views[1].to_logical_rect(QRect(0, 2160, 1920, 1080)).toRect(),
+                         QRect(0, 0, 1920, 1080))
+        selected = []
+        regions = []
+        mask.selected.connect(selected.append)
+        mask.last_region.connect(regions.append)
+        mask.selection.rects.append(QRect(100, 2210, 200, 100))
+        mask.complete()
+        self.assertEqual(selected[0][0][0].size, (200, 100))
+        self.assertEqual(regions[0], [100, 2210, 200, 100])
+
+    def test_mask_inline_edit_single_region_saves_and_closes_in_place(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from PySide6.QtWidgets import QToolButton
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+            settings = {**DEFAULTS, "auto_dir": folder, "filename": "inline", "inline_edit": True,
+                        "crosshair": False, "magnifier": False, "mask_opacity": 0, "sound": False,
+                        "bubble": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+            selected = []
+            saved = []
+            mask.selected.connect(selected.append)
+            mask.image_saved.connect(lambda path, image: saved.append((path, image)))
+            mask.selection.rects.append(QRect(10, 12, 30, 20))
+            mask.complete()
+            self.assertFalse(selected)
+            self.assertIsNotNone(mask.session.inline_editor)
+            self.assertEqual(mask.session.inline_editor.toolbar.objectName(), "inlineCaptureToolbar")
+            self.assertIn("background: #f7fbfc", mask.session.inline_editor.toolbar.styleSheet())
+            self.assertIn("QCheckBox", mask.session.inline_editor.toolbar.styleSheet())
+            self.assertIn("subcontrol-position: center", mask.session.inline_editor.toolbar.styleSheet())
+            self.assertNotIn("indicator:checked", mask.session.inline_editor.toolbar.styleSheet())
+            self.assertIn("background: #237a8a", mask.session.inline_editor.toolbar.styleSheet())
+            visible_buttons = [button for button in mask.session.inline_editor.toolbar.findChildren(QToolButton)
+                               if not button.isHidden()]
+            self.assertTrue(visible_buttons)
+            self.assertTrue(all(button.toolButtonStyle() == Qt.ToolButtonIconOnly for button in visible_buttons))
+            self.assertTrue(all(button.width() <= 34 for button in visible_buttons))
+            self.assertEqual(mask.session.inline_editor.toolbar.cursor_switch.text(), "")
+            self.assertEqual(mask.session.inline_editor.toolbar.options_button.text(), "")
+            toolbar = mask.session.inline_editor.toolbar
+            self.assertTrue(toolbar.sections[1].isHidden())
+            self.assertTrue(toolbar.tool_buttons["crop"].isHidden())
+            mask.session.inline_editor.apply_picked_color("#123456")
+            self.assertEqual(toolbar.pen_color.text(), "")
+            self.assertEqual(toolbar.pen_color.color, "#123456")
+            output_positions = [toolbar.output_grid.getItemPosition(toolbar.output_grid.indexOf(button))[:2]
+                                for button in toolbar.output_buttons if not button.isHidden()]
+            edit_positions = [toolbar.output_grid.getItemPosition(toolbar.output_grid.indexOf(button))[:2]
+                              for button in toolbar.edit_buttons]
+            self.assertTrue(all(row == 0 for row, column in output_positions + edit_positions))
+            self.assertLess(max(column for row, column in output_positions),
+                            min(column for row, column in edit_positions))
+            path = Path(saved[0][0])
+            self.assertTrue(path.is_file())
+            self.assertEqual(path.name, "inline.png")
+            mask.session.inline_editor.canvas.image = Image.new("RGB", (30, 20), "red")
+            mask.session.inline_editor.canvas.refresh_image()
+            mask.session.inline_editor.execute("save")
+            self.assertFalse(mask.isVisible())
+            with Image.open(path) as opened:
+                self.assertEqual(opened.getpixel((0, 0))[:3], (255, 0, 0))
+
+    def test_inline_double_click_saves_image_to_clipboard(self):
+        from PySide6.QtGui import QGuiApplication
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 160, "height": 120}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True, "magnifier": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (160, 120), "red"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(20, 20, 80, 60))
+            mask.complete()
+            mask.show()
+            self.app.processEvents()
+            QGuiApplication.clipboard().clear()
+            QTest.mouseDClick(mask.session.inline_editor.canvas.viewport(), Qt.LeftButton, pos=QPoint(25, 20))
+            self.app.processEvents()
+            self.assertFalse(mask.isVisible())
+            mime = QGuiApplication.clipboard().mimeData()
+            self.assertTrue(mime.hasImage())
+            self.assertFalse(mime.hasText())
+            self.assertEqual(QGuiApplication.clipboard().image().pixelColor(0, 0).name(), "#ff0000")
+
+    def test_inline_first_save_failure_keeps_editor_open_for_retry(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            blocked = Path(folder) / "blocked"
+            blocked.write_text("not a directory")
+            bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+            settings = {**DEFAULTS, "auto_dir": str(blocked), "filename": "inline",
+                        "inline_edit": True, "magnifier": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+            errors = []
+            mask.save_failed.connect(errors.append)
+            mask.selection.rects.append(QRect(10, 12, 30, 20))
+            mask.complete()
+            self.assertEqual(len(errors), 1)
+            self.assertIn("blocked", errors[0])
+            self.assertIsNotNone(mask.session.inline_editor)
+            self.assertFalse(mask.session.completing)
+            settings["auto_dir"] = folder
+            self.assertEqual(mask.session.inline_editor.save(automatic=True).name, "inline.png")
+            mask.close()
+
+    def test_mask_inline_edit_keeps_magnifier_settings_and_updates_position(self):
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QCursor, QMouseEvent
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+            settings = {**DEFAULTS, "auto_dir": folder, "filename": "inline", "inline_edit": True,
+                        "crosshair": True, "magnifier": True, "mask_opacity": 0, "bubble": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+                    patch.object(QCursor, "pos", return_value=QPoint(70, 50)):
+                mask = MaskWindow(Image.new("RGB", (320, 240), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(10, 12, 30, 20))
+            mask.complete()
+            self.assertTrue(settings["crosshair"])
+            self.assertTrue(settings["magnifier"])
+            mask.show()
+            self.app.processEvents()
+            editor = mask.session.inline_editor
+            overlay = mask.magnifier_overlay
+            self.assertTrue(overlay.isVisible())
+            self.assertTrue(overlay.isWindow())
+            self.assertTrue(overlay.windowFlags() & Qt.WindowStaysOnTopHint)
+            self.assertTrue(overlay.windowFlags() & Qt.WindowTransparentForInput)
+            self.assertTrue(overlay.testAttribute(Qt.WA_TransparentForMouseEvents))
+            self.assertEqual(mask.position, QPoint(70, 50))
+            self.assertEqual(overlay.geometry(), QRect(100, 80, 144, 144))
+            initially_painted = overlay.grab().toImage()
+            self.assertEqual(initially_painted.pixelColor(0, 0).name(), "#ffffff")
+            self.assertGreater(initially_painted.pixelColor(95, 75).alpha(), 0)
+            viewport = editor.canvas.viewport()
+            mouse = QPoint(5, 5)
+            expected = mask.to_physical_point(viewport.mapTo(mask, mouse))
+            mouse_event = QMouseEvent(QEvent.MouseMove, QPointF(mouse),
+                                      QPointF(viewport.mapToGlobal(mouse)),
+                                      Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+            editor.eventFilter(viewport, mouse_event)
+            self.app.processEvents()
+            self.assertEqual(mask.position, expected)
+            from screenshot.magnifier_widget import magnifier_rect
+            self.assertEqual(overlay.geometry(),
+                             magnifier_rect(mask.to_logical_point(expected), mask.rect()))
+            painted = overlay.grab().toImage()
+            self.assertGreater(painted.pixelColor(40, 42).alpha(), 0)
+            mask.close()
+
+    def test_inline_options_menu_does_not_raise_magnifier_or_move_capture_cursor(self):
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QCursor, QMouseEvent
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 1200, "height": 900}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True, "magnifier": True}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+                    patch.object(QCursor, "pos", return_value=QPoint(350, 350)):
+                mask = MaskWindow(Image.new("RGB", (1200, 900), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(40, 40, 100, 80))
+            mask.complete()
+            mask.show()
+            self.app.processEvents()
+            editor = mask.session.inline_editor
+            editor.toolbar.tool_buttons["arrow"].click()
+            overlay = mask.magnifier_overlay
+            original_position = QPoint(mask.position)
+            self.assertTrue(overlay.isVisible())
+
+            menu = editor.toolbar.options_button.menu()
+            menu.popup(mask.mapToGlobal(QPoint(400, 300)))
+            self.app.processEvents()
+            self.assertTrue(menu.isVisible())
+            self.assertFalse(overlay.isVisible())
+            panel = menu.actions()[0].defaultWidget()
+            mouse = QMouseEvent(QEvent.MouseMove, QPointF(20, 20), QPointF(panel.mapToGlobal(QPoint(20, 20))),
+                                Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+            editor.eventFilter(panel, mouse)
+            self.assertEqual(mask.position, original_position)
+            mask.update_all()
+            self.assertFalse(overlay.isVisible())
+            menu.hide()
+            self.app.processEvents()
+            self.assertTrue(overlay.isVisible())
+            self.assertEqual(mask.position, original_position)
+            mask.close()
+
+    def test_inline_options_menu_resizes_on_first_open_for_each_tool(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 1200, "height": 900}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True, "magnifier": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (1200, 900), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(40, 40, 100, 80))
+            mask.complete()
+            mask.show()
+            toolbar = mask.session.inline_editor.toolbar
+            menu = toolbar.options_button.menu()
+            panel = menu.actions()[0].defaultWidget()
+            widths = []
+            for tool in ("arrow", "pen", "text", "eraser", "arrow"):
+                toolbar.tool_buttons[tool].click()
+                menu.popup(mask.mapToGlobal(QPoint(400, 300)))
+                self.app.processEvents()
+                widths.append(menu.width())
+                self.assertGreaterEqual(menu.width(), panel.width(), tool)
+                for row in toolbar.option_rows:
+                    for widget in row:
+                        if widget.isVisible():
+                            self.assertLessEqual(widget.geometry().right(), panel.width(), tool)
+                menu.hide()
+                self.app.processEvents()
+            self.assertGreater(widths[0], widths[1], widths)
+            self.assertGreater(widths[2], widths[3], widths)
+            self.assertEqual(widths[0], widths[4], widths)
+            mask.close()
+
+    def test_inline_toolbar_first_hover_does_not_raise_visible_magnifier(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtWidgets import QToolButton
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 1200, "height": 900}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True, "magnifier": True}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (1200, 900), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(40, 40, 300, 200))
+            mask.complete()
+            mask.show()
+            self.app.processEvents()
+            button = mask.session.inline_editor.toolbar.tool_buttons["arrow"]
+            overlay = mask.magnifier_overlay
+            self.assertTrue(button.toolTip())
+            self.assertTrue(overlay.isVisible())
+            buttons = [widget for widget in mask.session.inline_editor.toolbar.findChildren(QToolButton)
+                       if widget.isVisible() and widget.toolTip()]
+            self.assertIn(mask.session.inline_editor.toolbar.options_button, buttons)
+            with patch.object(overlay, "raise_") as raise_overlay, \
+                    patch.object(mask, "mouseMoveEvent", wraps=mask.mouseMoveEvent) as move_mask:
+                QTest.mouseMove(button, pos=button.rect().center())
+                self.app.processEvents()
+                raise_overlay.assert_not_called()
+                move_mask.reset_mock()
+                for hovered in buttons:
+                    center = hovered.rect().center()
+                    move = QMouseEvent(QEvent.MouseMove, QPointF(center), QPointF(hovered.mapToGlobal(center)),
+                                       Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+                    mask.session.inline_editor.eventFilter(hovered, move)
+                move_mask.assert_not_called()
+            mask.close()
+
+    def test_inline_annotation_settings_survive_config_reload(self):
+        from main import Application
+        from editor.editor_window import EditorWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            config = ConfigManager(Path(folder) / "settings.json")
+            app = Application.__new__(Application)
+            app.config = config
+            app.settings_window = SettingsWindow(config)
+            app.logger = Mock()
+            app.edit_images = Mock()
+            app.saved = Mock()
+            app.initial_save_failed = Mock()
+            app.close_all_editors = Mock()
+            app.add_sticker = Mock()
+            bounds = {"left": 0, "top": 0, "width": 1200, "height": 900}
+            frame = Image.new("RGB", (1200, 900), "blue")
+            with patch("main.capture", return_value=(frame, bounds, [bounds], frame.copy())), \
+                    patch("screenshot.mask_window.visible_windows", return_value=[]):
+                app.show_mask("capture")
+            mask = app.mask
+            mask.selection.rects.append(QRect(40, 40, 300, 200))
+            mask.complete()
+            toolbar = mask.session.inline_editor.toolbar
+            toolbar.tool_buttons["arrow"].click()
+            toolbar.pen_width.setValue(13)
+            toolbar.choice_buttons["arrow_style"]["open"].click()
+            toolbar.cursor_switch.setChecked(True)
+            widths = {"pen": 7, "rect": 8, "ellipse": 9, "arrow": 13, "marker": 11, "eraser": 12}
+            for tool, width in widths.items():
+                toolbar.tool_buttons[tool].click()
+                toolbar.pen_width.setValue(width)
+            for key, value in (("rect_style", "dash"), ("ellipse_style", "dash"),
+                               ("text_alignment", "right"), ("mosaic_mode", "blur")):
+                toolbar.choice_buttons[key][value].click()
+            toolbar.marker_opacity.setValue(54)
+            toolbar.font_size.setValue(25)
+            toolbar.mosaic_size.setValue(18)
+            toolbar.color_changed.emit("#123456")
+            reloaded = ConfigManager(config.path).data
+            for tool, width in widths.items():
+                self.assertEqual(reloaded[f"{tool}_width"], width)
+            self.assertEqual(reloaded["arrow_style"], "open")
+            self.assertTrue(reloaded["cursor"])
+            for key, value in (("rect_style", "dash"), ("ellipse_style", "dash"),
+                               ("text_alignment", "right"), ("mosaic_mode", "blur"),
+                               ("marker_opacity", 54), ("font_size", 25),
+                               ("mosaic_size", 18), ("pen_color", "#123456")):
+                self.assertEqual(reloaded[key], value, key)
+            restored_window = EditorWindow(frame, reloaded)
+            for tool, width in widths.items():
+                self.assertEqual(restored_window.toolbar.tool_widths[tool], width)
+            self.assertTrue(restored_window.toolbar.choice_buttons["arrow_style"]["open"].isChecked())
+            restored_window.close()
+            window = EditorWindow(frame, config.data)
+            app.qt = self.app
+            app.tray = Mock()
+            app.hotkey_recording = True
+            app.editors = [window]
+            app.stickers = Mock()
+            config.data.update(arrow_width=17, arrow_style="double", annotation_tool="arrow",
+                               crop_color="#234567", crop_width=5)
+            with patch("main.configure_logging", return_value=app.logger), \
+                    patch("main.make_tray_menu", return_value=Mock()):
+                app.refresh()
+            for active in (window, mask.session.inline_editor):
+                self.assertEqual(active.toolbar.tool_widths["arrow"], 17)
+                self.assertTrue(active.toolbar.choice_buttons["arrow_style"]["double"].isChecked())
+                self.assertEqual(active.toolbar.pen_width.value(), 17)
+            self.assertEqual((window.canvas.crop_color, window.canvas.crop_width), ("#234567", 5))
+            self.assertEqual(window.toolbar.crop_color.color, "#234567")
+            self.assertEqual(window.toolbar.crop_width.value(), 5)
+            window.close()
+            mask.close()
+            app.settings_window.close()
+
+    def test_inline_options_button_opens_after_keyboard_nudge(self):
+        from PySide6.QtCore import QTimer
+        from PySide6.QtWidgets import QWidget
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 1200, "height": 900}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True, "magnifier": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (1200, 900), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(40, 40, 300, 200))
+            mask.complete()
+            mask.show()
+            editor = mask.session.inline_editor
+            editor.canvas.setFocus()
+            self.app.processEvents()
+            editor.toolbar.tool_buttons["arrow"].click()
+            with patch("screenshot.mask_window.QCursor.setPos"):
+                QTest.keyClick(editor.canvas, Qt.Key_Right)
+            self.assertEqual(mask.selection.rects[0], QRect(41, 40, 300, 200))
+            button = editor.toolbar.options_button
+            opened = []
+            def capture_menu():
+                opened.append(button.menu().isVisible())
+                button.menu().hide()
+            QTimer.singleShot(0, capture_menu)
+            QTest.mouseClick(button, Qt.LeftButton)
+            self.app.processEvents()
+            self.assertEqual(opened, [True])
+            corner = mask.selection.rects[0].bottomRight()
+            viewport = editor.canvas.viewport()
+            with patch.object(mask, "grabMouse", wraps=mask.grabMouse) as grab_mouse, \
+                    patch.object(mask, "releaseMouse", wraps=mask.releaseMouse) as release_mouse:
+                QTest.mousePress(viewport, Qt.LeftButton, pos=viewport.mapFrom(mask, corner))
+                self.assertIsNotNone(mask.selection.resizing)
+                grab_mouse.assert_called_once()
+                if self.app.platformName() == "windows":
+                    self.assertIs(QWidget.mouseGrabber(), mask)
+                with patch("screenshot.mask_window.QCursor.setPos"):
+                    QTest.keyClick(editor.canvas, Qt.Key_Right)
+                release_mouse.assert_called_once()
+                if self.app.platformName() == "windows":
+                    self.assertIsNot(QWidget.mouseGrabber(), mask)
+            self.assertIsNone(mask.selection.resizing)
+            QTimer.singleShot(0, capture_menu)
+            QTest.mouseClick(button, Qt.LeftButton)
+            self.app.processEvents()
+            self.assertEqual(opened, [True, True])
+            mask.close()
+
+    def test_mask_selection_draws_magnifier_on_mask_surface(self):
+        from PySide6.QtGui import QCursor
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+        settings = {**DEFAULTS, "magnifier": True, "crosshair": False, "mask_opacity": 0}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+                patch.object(QCursor, "pos", return_value=QPoint(70, 50)):
+            mask = MaskWindow(Image.new("RGB", (320, 240), "blue"), bounds, [bounds], settings)
+        mask.show()
+        self.app.processEvents()
+        self.assertTrue(mask.magnifier_overlay.isVisible())
+        self.assertEqual(mask.magnifier_overlay.grab().toImage().pixelColor(0, 0).name(), "#ffffff")
+        self.assertEqual(mask.grab().toImage().pixelColor(88, 68).name(), "#0000ff")
+        mask.close()
+
+    def test_inline_resize_keeps_magnifier_above_selection(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 900, "height": 700}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True,
+                        "magnifier": True, "crosshair": False, "mask_opacity": 0}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (900, 700), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(200, 200, 120, 80))
+            mask.complete()
+            mask.show()
+            self.app.processEvents()
+            QTest.mousePress(mask, Qt.LeftButton, pos=QPoint(319, 279))
+            QTest.mouseMove(mask, QPoint(420, 340))
+            self.app.processEvents()
+            self.assertFalse(mask.session.inline_editor.toolbar.isVisible())
+            self.assertTrue(mask.magnifier_overlay.isVisible())
+            self.assertEqual(mask.magnifier_overlay.grab().toImage().pixelColor(0, 0).name(), "#ffffff")
+            QTest.mouseRelease(mask, Qt.LeftButton, pos=QPoint(420, 340))
+            self.app.processEvents()
+            self.assertTrue(mask.magnifier_overlay.isVisible())
+            mask.close()
+
+    def test_selection_resize_keeps_magnifier_visible(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 900, "height": 700}
+        settings = {**DEFAULTS, "magnifier": True, "crosshair": False, "mask_opacity": 0}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (900, 700), "blue"), bounds, [bounds], settings)
+        mask.selection.rects.append(QRect(200, 200, 120, 80))
+        mask.show()
+        self.app.processEvents()
+        QTest.mousePress(mask, Qt.LeftButton, pos=QPoint(319, 279))
+        QTest.mouseMove(mask, QPoint(420, 340))
+        self.app.processEvents()
+        self.assertTrue(mask.magnifier_overlay.isVisible())
+        self.assertEqual(mask.magnifier_overlay.grab().toImage().pixelColor(0, 0).name(), "#ffffff")
+        QTest.mouseRelease(mask, Qt.LeftButton, pos=QPoint(420, 340))
+        mask.close()
+
+    def test_inline_editor_replaces_persisted_crop_tool(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 240, "height": 180}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True,
+                        "annotation_tool": "crop", "magnifier": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (240, 180), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(20, 20, 80, 60))
+            mask.complete()
+            editor = mask.session.inline_editor
+            self.assertEqual(editor.canvas.tool, "select")
+            self.assertTrue(editor.toolbar.tool_buttons["crop"].isHidden())
+            self.assertTrue(editor.toolbar.tool_buttons["select"].isChecked())
+            mask.close()
+
+    def test_inline_editor_activates_the_persisted_annotation_tool(self):
+        from PySide6.QtWidgets import QGraphicsView
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 240, "height": 180}
+            settings = {**DEFAULTS, "auto_dir": folder, "filename": "inline-arrow",
+                        "inline_edit": True, "annotation_tool": "arrow", "magnifier": False,
+                        "crosshair": False, "mask_opacity": 0, "bubble": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (240, 180), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(20, 20, 80, 60))
+            mask.complete()
+            editor = mask.session.inline_editor
+
+            self.assertTrue(editor.toolbar.tool_buttons["arrow"].isChecked())
+            self.assertFalse(editor.toolbar.tool_buttons["select"].isChecked())
+            self.assertEqual(editor.canvas.tool, "arrow")
+            self.assertEqual(editor.canvas.dragMode(), QGraphicsView.NoDrag)
+            mask.close()
+
+    def test_mask_inline_edit_output_actions_close_and_route(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        def inline_mask(folder, name):
+            bounds = {"left": 0, "top": 0, "width": 80, "height": 60}
+            settings = {**DEFAULTS, "auto_dir": folder, "filename": name, "inline_edit": True,
+                        "crosshair": False, "magnifier": False, "mask_opacity": 0, "bubble": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (80, 60), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(5, 6, 30, 20))
+            mask.show()
+            self.app.processEvents()
+            mask.complete()
+            self.app.processEvents()
+            return mask
+
+        with tempfile.TemporaryDirectory() as folder:
+            paste_mask = inline_mask(folder, "paste")
+            pasted = []
+            paste_mask.sticker_requested.connect(pasted.append)
+            paste_button = next(button for button, action in paste_mask.session.inline_editor.toolbar.command_buttons
+                                if action == "paste")
+            close_all_button = next(button for button, action in paste_mask.session.inline_editor.toolbar.command_buttons
+                                    if action == "close_all_editors")
+            self.assertFalse(close_all_button.isVisible())
+            paste_button.click()
+            self.app.processEvents()
+            self.assertEqual(len(pasted), 1)
+            self.assertTrue(all(not view.isVisible() for view in paste_mask.session.views))
+
+            save_mask = inline_mask(folder, "save")
+            saved = []
+            save_mask.image_saved.connect(lambda path, image: saved.append(path))
+            editor = save_mask.session.inline_editor
+            initial_path = editor.last_path
+            editor.canvas.image = Image.new("RGB", (30, 20), "red")
+            editor.canvas.refresh_image()
+            save_button = next(button for button, action in editor.toolbar.command_buttons if action == "save")
+            from PySide6.QtGui import QGuiApplication
+            QGuiApplication.clipboard().clear()
+            save_button.click()
+            self.app.processEvents()
+            self.assertIn(str(initial_path), saved)
+            self.assertTrue(QGuiApplication.clipboard().mimeData().hasImage())
+            self.assertFalse(QGuiApplication.clipboard().mimeData().hasText())
+            self.assertEqual(QGuiApplication.clipboard().image().pixelColor(0, 0).name(), "#ff0000")
+            self.assertTrue(all(not view.isVisible() for view in save_mask.session.views))
+            with Image.open(initial_path) as opened:
+                self.assertEqual(opened.getpixel((0, 0))[:3], (255, 0, 0))
+
+            discard_mask = inline_mask(folder, "discard")
+            saved = []
+            discard_mask.image_saved.connect(lambda path, image: saved.append(path))
+            discard_button = next(button for button, action in discard_mask.session.inline_editor.toolbar.command_buttons
+                                  if action == "discard")
+            discard_button.click()
+            self.app.processEvents()
+            self.assertFalse(saved)
+            self.assertTrue(all(not view.isVisible() for view in discard_mask.session.views))
+
+    def test_inline_repeated_handle_nudges_keep_cursor_on_handle(self):
+        from PySide6.QtCore import QSize
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 420, "height": 320}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True, "magnifier": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (420, 320), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(60, 60, 120, 90))
+            mask.complete()
+            mask.show()
+            self.app.processEvents()
+            with patch("screenshot.mask_window.QCursor.setPos") as move_pointer:
+                for index, invalid_key, valid_key in (
+                        (4, Qt.Key_Left, Qt.Key_W), (5, Qt.Key_Up, Qt.Key_D),
+                        (6, Qt.Key_Right, Qt.Key_S), (7, Qt.Key_Down, Qt.Key_A),
+                        (0, None, Qt.Key_Left), (1, None, Qt.Key_Right),
+                        (2, None, Qt.Key_Left), (3, None, Qt.Key_Right)):
+                    mask.selection.rects[0] = QRect(60, 60, 120, 90)
+                    mask.selection.nudge_corner = None
+                    handle = mask.selection.handles_for(mask.selection.rects[0])[index][0]
+                    QTest.mousePress(mask, Qt.LeftButton, pos=handle)
+                    QTest.mouseRelease(mask, Qt.LeftButton, pos=handle)
+                    original = QRect(mask.selection.rects[0])
+                    for _ in range(16):
+                        QTest.keyClick(mask, invalid_key or valid_key)
+                        self.assertIsNotNone(mask.selection.nudge_corner)
+                        self.assertEqual(mask.position, mask.selection.nudge_corner[2])
+                        self.assertIsNotNone(mask.selection.handle_at(mask.position))
+                        move_pointer.assert_called_with(mask.mapToGlobal(mask.to_logical_point(mask.position)))
+                    if invalid_key is not None:
+                        self.assertEqual(mask.selection.rects[0], original)
+                        QTest.keyClick(mask, valid_key)
+                        self.assertEqual(mask.selection.rects[0].size() - original.size(),
+                                         QSize(1, 0) if index in (5, 7) else QSize(0, 1))
+                        self.assertIsNotNone(mask.selection.nudge_corner)
+            mask.close()
+
+    def test_inline_keyboard_nudges_handle_or_entire_region(self):
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True,
+                        "magnifier": False, "cursor": False}
+            image = Image.new("RGB", (320, 240), "blue")
+            image.paste("red", (44, 44, 160, 130))
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(image, bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(40, 40, 100, 80))
+            mask.complete()
+            mask.show()
+            editor = mask.session.inline_editor
+            editor.canvas.setFocus()
+            self.app.processEvents()
+            self.assertTrue(editor.canvas.hasFocus())
+            corner = mask.selection.rects[0].bottomRight()
+            QTest.mousePress(mask, Qt.LeftButton, pos=corner)
+            QTest.mouseRelease(mask, Qt.LeftButton, pos=corner)
+            with patch("screenshot.mask_window.QCursor.setPos"):
+                QTest.keyClick(mask, Qt.Key_D)
+                self.assertEqual(mask.selection.rects[0], QRect(40, 40, 101, 80))
+                editor.canvas.setFocus()
+                self.app.processEvents()
+                self.assertTrue(editor.canvas.hasFocus())
+                QTest.keyClick(editor.canvas.viewport(), Qt.Key_D)
+                self.assertEqual(mask.selection.rects[0], QRect(40, 40, 102, 80))
+                self.assertIsNotNone(mask.selection.nudge_corner)
+                self.assertTrue(editor.canvas.hasFocus())
+                inside = editor.canvas.viewport().mapFrom(mask, QPoint(85, 75))
+                press = QMouseEvent(QEvent.MouseButtonPress, QPointF(inside), QPointF(inside),
+                                    Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+                self.assertFalse(editor.eventFilter(editor.canvas.viewport(), press))
+                self.assertEqual(mask.position, QPoint(85, 75))
+                for key, delta in ((Qt.Key_A, QPoint(-1, 0)), (Qt.Key_Right, QPoint(1, 0)),
+                                   (Qt.Key_W, QPoint(0, -1)), (Qt.Key_Down, QPoint(0, 1)),
+                                   (Qt.Key_S, QPoint(0, 1)), (Qt.Key_Up, QPoint(0, -1)),
+                                   (Qt.Key_D, QPoint(1, 0)), (Qt.Key_Left, QPoint(-1, 0))):
+                    before = QRect(mask.selection.rects[0])
+                    QTest.keyClick(editor.canvas, key)
+                    self.assertEqual(mask.selection.rects[0], before.translated(delta))
+                    self.assertIsNone(mask.selection.nudge_corner)
+                    self.assertEqual(editor.canvas.geometry(), mask.to_logical_rect(mask.selection.rects[0]).toRect())
+                    self.assertTrue(editor.canvas.hasFocus())
+                self.assertEqual(editor.canvas.image.getpixel((5, 5)), (255, 0, 0))
+                before = QRect(mask.selection.rects[0])
+                QTest.keyClick(editor.canvas, Qt.Key_D, Qt.ControlModifier)
+                self.assertEqual(mask.selection.rects[0], before)
+            mask.close()
+
+    def test_mask_inline_edit_locks_selection_layer(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+            settings = {**DEFAULTS, "auto_dir": folder, "filename": "inline", "inline_edit": True,
+                        "crosshair": False, "magnifier": False, "mask_opacity": 0, "bubble": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(10, 10, 30, 20))
+            mask.complete()
+            self.assertIsNotNone(mask.session.inline_editor)
+            QTest.mousePress(mask, Qt.LeftButton, pos=QPoint(60, 45))
+            QTest.mouseMove(mask, QPoint(90, 70))
+            QTest.mouseRelease(mask, Qt.LeftButton, pos=QPoint(90, 70))
+            self.assertEqual(mask.selection.rects, [QRect(10, 10, 30, 20)])
+            self.assertIsNone(mask.selection.active)
+
+            QTest.mousePress(mask, Qt.LeftButton, pos=QPoint(39, 29))
+            self.assertFalse(mask.session.inline_editor.canvas.isVisible())
+            self.assertFalse(mask.session.inline_editor.toolbar.isVisible())
+            QTest.mouseMove(mask, QPoint(50, 40))
+            QTest.mouseRelease(mask, Qt.LeftButton, pos=QPoint(50, 40))
+            self.assertEqual(mask.selection.rects[0], QRect(QPoint(10, 10), QPoint(50, 40)).normalized())
+            self.assertEqual(mask.session.inline_editor.rect, mask.selection.rects[0])
+            self.assertEqual(mask.session.inline_editor.canvas.image.size, (41, 31))
+            self.assertFalse(mask.session.inline_editor.canvas.isHidden())
+            self.assertFalse(mask.session.inline_editor.toolbar.isHidden())
+
+    def test_mask_inline_cursor_switch_and_toolbar_repositions_after_resize(self):
+        from PySide6.QtWidgets import QStyle, QStyleOptionButton
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 1200, "height": 900}
+            settings = {**DEFAULTS, "auto_dir": folder, "filename": "inline", "inline_edit": True,
+                        "cursor": False, "crosshair": False, "magnifier": False,
+                        "mask_opacity": 0, "bubble": False}
+            base = Image.new("RGB", (1200, 900), "blue")
+            cursor = Image.new("RGB", (1200, 900), "red")
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(base, bounds, [bounds], settings, alternate=cursor)
+            mask.selection.rects.append(QRect(900, 500, 120, 80))
+            mask.complete()
+            editor = mask.session.inline_editor
+            self.assertEqual(editor.canvas.image.getpixel((0, 0)), (0, 0, 255))
+            cursor_switch = editor.toolbar.cursor_switch
+            option = QStyleOptionButton()
+            option.initFrom(cursor_switch)
+            indicator = cursor_switch.style().subElementRect(QStyle.SE_CheckBoxIndicator,
+                                                              option, cursor_switch)
+            self.assertLessEqual(abs(indicator.center().x() - cursor_switch.rect().center().x()), 1)
+            self.assertLessEqual(abs(indicator.center().y() - cursor_switch.rect().center().y()), 1)
+            unchecked = cursor_switch.grab().toImage()
+            cursor_switch.setChecked(True)
+            checked = cursor_switch.grab().toImage()
+            self.assertTrue(any(unchecked.pixelColor(x, y) != checked.pixelColor(x, y)
+                                for y in range(indicator.top(), indicator.bottom() + 1)
+                                for x in range(indicator.left(), indicator.right() + 1)))
+            self.assertEqual(editor.canvas.image.getpixel((0, 0)), (255, 0, 0))
+            self.assertEqual(cursor_switch.text(), "")
+            self.assertTrue(cursor_switch.isChecked())
+
+            old_toolbar = QRect(editor.toolbar.geometry())
+            QTest.mousePress(mask, Qt.LeftButton, pos=QPoint(1019, 579))
+            QTest.mouseMove(mask, QPoint(1120, 650))
+            QTest.mouseRelease(mask, Qt.LeftButton, pos=QPoint(1120, 650))
+            new_toolbar = editor.toolbar.geometry()
+            self.assertNotEqual(new_toolbar, old_toolbar)
+            self.assertLessEqual(abs(new_toolbar.right() - editor.canvas.geometry().right()), 24,
+                                 (new_toolbar, editor.canvas.geometry(), editor.toolbar.sizeHint(),
+                                  [(section.sizeHint(), section.minimumWidth(), section.geometry())
+                                   for section in editor.toolbar.sections],
+                                  editor.toolbar.tool_grid.sizeHint(), editor.toolbar.output_grid.sizeHint()))
+            self.assertEqual(editor.canvas.image.getpixel((0, 0)), (255, 0, 0))
+            for button in (editor.toolbar.tool_buttons["select"], editor.toolbar.tool_buttons["pen"],
+                           *editor.toolbar.output_buttons[:4], *editor.toolbar.edit_buttons):
+                self.assertEqual(button.width(), 30)
+                self.assertEqual(button.height(), 30)
+            output = editor.toolbar.output_grid
+            first_row = [output.itemAtPosition(0, column).widget()
+                         for column in range(output.columnCount()) if output.itemAtPosition(0, column)]
+            self.assertEqual(len({button.y() for button in first_row}), 1)
+            tools = editor.toolbar.tool_grid
+            for column in range(tools.columnCount()):
+                widgets = [tools.itemAtPosition(row, column).widget()
+                           for row in range(tools.rowCount()) if tools.itemAtPosition(row, column)]
+                self.assertEqual(len({button.x() for button in widgets}), 1)
+
+    def test_inline_tool_rows_align_with_toolbar_side(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 1200, "height": 900}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True, "magnifier": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (1200, 900), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(40, 400, 80, 80))
+            mask.complete()
+            mask.show()
+            self.app.processEvents()
+            editor = mask.session.inline_editor
+            for x, width, align_right in ((40, 80, False), (900, 80, True),
+                                          (40, 320, False), (850, 320, True),
+                                          (40, 80, False), (900, 80, True)):
+                editor.rect = QRect(x, 400, width, 80)
+                editor.position_widgets()
+                self.app.processEvents()
+                self.assertGreater(editor.toolbar.height(), 60)
+                self.assertLessEqual(editor.toolbar.height(), 110,
+                                     (editor.toolbar.geometry(), editor.toolbar.sizeHint()))
+                grid = editor.toolbar.tool_grid
+                tools = [grid.itemAt(index).widget() for index in range(grid.count())
+                         if not grid.itemAt(index).widget().isHidden()]
+                self.assertTrue(all(grid.getItemPosition(grid.indexOf(button))[0] == 0
+                                    for button in tools))
+                self.assertEqual(len({button.mapTo(editor.toolbar, QPoint(0, 0)).y()
+                                      for button in tools}), 1)
+                drawing, output = editor.toolbar.sections[0], editor.toolbar.sections[3]
+                self.assertLess(drawing.geometry().bottom(), output.geometry().top())
+                self.assertEqual(drawing.geometry().right() if align_right else drawing.geometry().left(),
+                                 output.geometry().right() if align_right else output.geometry().left(),
+                                 (editor.toolbar.geometry(), drawing.geometry(), output.geometry()))
+                output_buttons = [button for button in editor.toolbar.output_buttons
+                                  if not button.isHidden()]
+                buttons = tools + output_buttons + editor.toolbar.edit_buttons
+                self.assertEqual(len({button.mapTo(editor.toolbar, QPoint(0, 0)).y()
+                                      for button in output_buttons + editor.toolbar.edit_buttons}), 1)
+                self.assertLess(max(button.mapTo(editor.toolbar, QPoint(0, button.height())).y()
+                                    for button in tools),
+                                min(button.mapTo(editor.toolbar, QPoint(0, 0)).y()
+                                    for button in output_buttons + editor.toolbar.edit_buttons))
+                self.assertTrue(all(0 <= button.mapTo(editor.toolbar, QPoint(0, 0)).x()
+                                    and button.mapTo(editor.toolbar, QPoint(button.width(), 0)).x()
+                                    <= editor.toolbar.width() for button in buttons),
+                                (editor.toolbar.geometry(), drawing.geometry(), output.geometry()))
+                tool_edge = (max(button.mapTo(editor.toolbar, QPoint(button.width(), 0)).x()
+                                 for button in tools) if align_right else
+                             min(button.mapTo(editor.toolbar, QPoint(0, 0)).x() for button in tools))
+                output_edge = (max(button.mapTo(editor.toolbar, QPoint(button.width(), 0)).x()
+                                   for button in output_buttons + editor.toolbar.edit_buttons)
+                               if align_right else
+                               min(button.mapTo(editor.toolbar, QPoint(0, 0)).x()
+                                   for button in output_buttons + editor.toolbar.edit_buttons))
+                self.assertEqual(tool_edge, output_edge,
+                                 (editor.toolbar.geometry(), drawing.geometry(), output.geometry(),
+                                  tools[0].mapTo(editor.toolbar, QPoint(0, 0)),
+                                                                    output_buttons[0].mapTo(editor.toolbar, QPoint(0, 0)),
+                                                                    [(button.objectName(), button.mapTo(editor.toolbar, QPoint(0, 0)).x(),
+                                                                        button.width(), button.isHidden()) for button in tools]))
+            mask.close()
+
+    def test_mask_inline_toolbar_avoids_selection_when_space_allows(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 1200, "height": 900}
+            settings = {**DEFAULTS, "auto_dir": folder, "filename": "inline", "inline_edit": True,
+                        "crosshair": False, "magnifier": False, "mask_opacity": 0, "bubble": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (1200, 900), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(260, 720, 160, 80))
+            mask.complete()
+            toolbar = mask.session.inline_editor.toolbar.geometry()
+            selection = mask.session.inline_editor.canvas.geometry().adjusted(-16, -16, 16, 16)
+            self.assertTrue(mask.rect().contains(toolbar))
+            self.assertFalse(toolbar.intersects(selection))
+
+    def test_mask_creates_one_window_per_monitor_and_secondary_escape_closes_all(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 6720, "height": 3240}
+        monitors = [
+            {"left": 0, "top": 0, "width": 3840, "height": 2160},
+            {"left": 3840, "top": 0, "width": 2880, "height": 1620},
+            {"left": 0, "top": 2160, "width": 1920, "height": 1080},
+            {"left": 1920, "top": 2160, "width": 2560, "height": 1440},
+        ]
+        settings = {**DEFAULTS, "crosshair": False, "magnifier": False, "mask_opacity": 0}
+        screen_infos = [
+            {"geometry": QRect(0, 0, 3072, 1728), "dpr": 1.25},
+            {"geometry": QRect(3072, 0, 1920, 1080), "dpr": 1.5},
+            {"geometry": QRect(0, 1728, 1920, 1080), "dpr": 1.0},
+            {"geometry": QRect(1920, 1728, 2048, 1152), "dpr": 1.25},
+        ]
+        with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+                patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos):
+            mask = MaskWindow(Image.new("RGB", (6720, 3240), "white"), bounds, monitors, settings)
+
+        self.assertEqual(len(mask.session.views), 4)
+        self.assertEqual([view.geometry() for view in mask.session.views],
+                         [screen["geometry"] for screen in screen_infos])
+        mask.show()
+        self.app.processEvents()
+        QTest.keyClick(mask.session.views[2], Qt.Key_Escape)
+        self.app.processEvents()
+        self.assertTrue(all(not view.isVisible() for view in mask.session.views))
 
     def test_mask_escape_before_selection_and_fixed_size(self):
         from PySide6.QtWidgets import QDialog
@@ -1189,6 +2646,28 @@ class CoreTests(unittest.TestCase):
             QTest.keyClick(mask, Qt.Key_F, Qt.ControlModifier)
         self.assertEqual((mask.selection.rects[-1].width(), mask.selection.rects[-1].height()), (200, 150))
         mask.close()
+
+    def test_inline_escape_from_canvas_or_toolbar_closes_capture(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 500, "height": 400}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True,
+                        "magnifier": False}
+            for focus_toolbar in (False, True):
+                with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                    mask = MaskWindow(Image.new("RGB", (500, 400), "blue"), bounds, [bounds], settings)
+                mask.selection.rects.append(QRect(80, 80, 120, 90))
+                mask.complete()
+                mask.show()
+                self.app.processEvents()
+                editor = mask.session.inline_editor
+                target = editor.toolbar.options_button if focus_toolbar else editor.canvas.viewport()
+                QTest.keyClick(target, Qt.Key_Escape)
+                self.app.processEvents()
+                self.assertFalse(mask.isVisible())
+                self.assertIsNone(mask.session.inline_editor)
 
     def test_mask_opacity_changes_unselected_pixels(self):
         from PySide6.QtGui import QImage
@@ -1460,7 +2939,7 @@ class CoreTests(unittest.TestCase):
         from PySide6.QtGui import QPixmap, QColor
         from PySide6.QtWidgets import QGraphicsPixmapItem
         from config.config_manager import DEFAULTS
-        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), dict(DEFAULTS))
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), dict(DEFAULTS, eraser_width=3))
         canvas.resize(200, 150)
         canvas.show()
         pixmap = QPixmap(50, 50)
@@ -2014,6 +3493,7 @@ class CoreTests(unittest.TestCase):
             page = HotkeyPage(manager, manager.save)
             self.assertEqual(page.edit_repeat.keySequence().toString().lower(),
                              manager.data["hotkeys"]["repeat"])
+            manager.data["inline_edit"] = False
             with patch("screenshot.mask_window.visible_windows", return_value=[]):
                 mask = MaskWindow(Image.new("RGB", (200, 150), "white"), bounds,
                                   [bounds], manager.data)
@@ -2061,7 +3541,8 @@ class CoreTests(unittest.TestCase):
         from config.config_manager import DEFAULTS
         from editor.annotation_items import text_item
         with tempfile.TemporaryDirectory() as folder:
-            settings = {**DEFAULTS, "manual_dir": folder, "open_dir": False}
+            settings = {**DEFAULTS, "manual_dir": folder, "open_dir": False,
+                        "copy_saved_image": True, "copy_saved_path": True}
             editor = EditorWindow(Image.new("RGB", (60, 40), "white"), settings)
             item = shape("rect", QPointF(2, 2), QPointF(25, 20), "#ff0000", 3)
             editor.canvas.scene_data.addItem(item)
@@ -2088,15 +3569,38 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(mime.text(), str(editor.last_path))
             editor.close()
 
-    def test_finish_without_auto_save_emits_image(self):
+    def test_editor_saves_over_existing_capture_path(self):
         from config.config_manager import DEFAULTS
-        settings = {**DEFAULTS, "auto_save": False, "auto_copy": False}
-        editor = EditorWindow(Image.new("RGB", (25, 20), "#23bc58"), settings)
-        images = []
-        editor.image_completed.connect(images.append)
-        editor.finish()
-        self.assertEqual(len(images), 1)
-        self.assertEqual(images[0].pixelColor(10, 10).name(), "#23bc58")
+
+        with tempfile.TemporaryDirectory() as folder:
+            settings = dict(DEFAULTS, auto_dir=folder, manual_dir=folder, filename="capture", open_dir=False)
+            editor = EditorWindow(Image.new("RGB", (20, 12), "blue"), settings)
+            first = editor.save(automatic=True)
+            first_mtime = first.stat().st_mtime_ns
+            editor.canvas.image = Image.new("RGB", (20, 12), "red")
+            editor.canvas.refresh_image()
+            second = editor.save(copy_to_clipboard=True)
+            self.assertEqual(second, first)
+            self.assertEqual(list(Path(folder).glob("*.png")), [first])
+            self.assertGreaterEqual(first.stat().st_mtime_ns, first_mtime)
+            with Image.open(first) as saved:
+                self.assertEqual(saved.getpixel((0, 0))[:3], (255, 0, 0))
+            editor.canvas.image = Image.new("RGB", (20, 12), "#23bc58")
+            editor.canvas.refresh_image()
+            editor.execute("save")
+            self.assertFalse(editor.isVisible())
+            with Image.open(first) as saved:
+                self.assertEqual(saved.getpixel((0, 0))[:3], (35, 188, 88))
+
+    def test_manual_save_writes_image(self):
+        from config.config_manager import DEFAULTS
+        with tempfile.TemporaryDirectory() as folder:
+            settings = {**DEFAULTS, "manual_dir": folder, "filename": "manual_save"}
+            editor = EditorWindow(Image.new("RGB", (25, 20), "#23bc58"), settings)
+            editor.execute("save")
+            self.assertFalse(editor.isVisible())
+            with Image.open(Path(folder) / "manual_save.png") as saved:
+                self.assertEqual(saved.getpixel((10, 10))[:3], (35, 188, 88))
 
     def test_angle_preview_cancel_and_confirm(self):
         from PySide6.QtWidgets import QDialog, QDoubleSpinBox
@@ -2177,14 +3681,18 @@ class CoreTests(unittest.TestCase):
 
     def test_editor_double_click_saves_and_escape_discards(self):
         from config.config_manager import DEFAULTS
+        from PySide6.QtGui import QGuiApplication
         with tempfile.TemporaryDirectory() as folder:
-            settings = dict(DEFAULTS, auto_dir=folder, filename="double_click")
+            settings = dict(DEFAULTS, manual_dir=folder, filename="double_click")
             editor = EditorWindow(Image.new("RGB", (90, 70), "white"), settings)
             editor.show()
             self.app.processEvents()
+            QGuiApplication.clipboard().clear()
             QTest.mouseDClick(editor.canvas.viewport(), Qt.LeftButton, pos=QPoint(35, 30))
             self.assertFalse(editor.isVisible())
             self.assertEqual(len(list(Path(folder).glob("*.png"))), 1)
+            self.assertTrue(QGuiApplication.clipboard().mimeData().hasImage())
+            self.assertFalse(QGuiApplication.clipboard().mimeData().hasText())
             discarded = EditorWindow(Image.new("RGB", (90, 70)), settings)
             discarded.show()
             discarded.canvas.setFocus()
@@ -2231,8 +3739,9 @@ class CoreTests(unittest.TestCase):
         toolbar.tool_buttons["pen"].click()
         panel = next(action.defaultWidget() for action in toolbar.options_button.menu().actions()
                      if isinstance(action, QWidgetAction))
-        self.assertGreaterEqual(panel.minimumWidth(), 430)
-        self.assertGreaterEqual(toolbar.options_button.menu().sizeHint().width(), 430)
+        self.assertGreaterEqual(panel.minimumWidth(), 340)
+        self.assertLessEqual(panel.minimumWidth(), 380)
+        self.assertGreaterEqual(toolbar.options_button.menu().sizeHint().width(), 320)
         panel.show()
         self.app.processEvents()
         for row in (0,):
@@ -2283,6 +3792,10 @@ class CoreTests(unittest.TestCase):
                             marker.pixelColor(x, y).green() > 160 and
                             marker.pixelColor(x, y).blue() < 100
                             for x in range(marker.width()) for y in range(marker.height())))
+        text = toolbar.tool_buttons["text"].icon().pixmap(24, 24).toImage()
+        self.assertGreater(text.pixelColor(7, 5).alpha(), 0)
+        self.assertGreater(text.pixelColor(12, 17).alpha(), 0)
+        self.assertEqual(text.pixelColor(0, 0).alpha(), 0)
         self.assertFalse(toolbar.tool_buttons["arrow"].icon().isNull())
         self.assertFalse(toolbar.tool_buttons["crop"].icon().isNull())
 
@@ -2291,13 +3804,15 @@ class CoreTests(unittest.TestCase):
         settings = dict(DEFAULTS, hotkeys={**DEFAULTS["hotkeys"], "paste": "ctrl+alt+p"})
         editor = EditorWindow(Image.new("RGB", (30, 20), "white"), settings)
         paste = next(button for button in editor.toolbar.output_buttons if button.text() == "贴图")
+        self.assertTrue(paste.toolTip().startswith("<b>贴图</b><br>"))
         self.assertIn("Ctrl+Alt+P", paste.toolTip())
         editor.toolbar.set_hotkeys({**settings["hotkeys"], "paste": "f9"})
+        self.assertTrue(paste.toolTip().startswith("<b>贴图</b><br>"))
         self.assertIn("F9", paste.toolTip())
         self.assertNotIn("Ctrl+Alt+P", paste.toolTip())
         editor.close()
 
-    def test_crop_style_is_local_and_has_actionable_tooltips(self):
+    def test_crop_style_is_configured_and_has_actionable_tooltips(self):
         from config.config_manager import DEFAULTS
         editor_settings = dict(DEFAULTS)
         editor = EditorWindow(Image.new("RGB", (40, 30), "white"), editor_settings)
@@ -2308,13 +3823,35 @@ class CoreTests(unittest.TestCase):
         editor.toolbar.crop_style_changed.emit("crop_color", "#123abc")
         self.assertEqual(editor.canvas.crop_color, "#123abc")
         self.assertEqual(editor.canvas.stroke_pen().width(), 7)
-        self.assertNotIn("crop_color", editor_settings)
-        self.assertNotIn("crop_width", editor_settings)
+        self.assertEqual(editor_settings["crop_color"], "#123abc")
+        self.assertEqual(editor_settings["crop_width"], 7)
         self.assertIn("保存为 PNG", next(button for button in editor.toolbar.output_buttons
                                           if button.text() == "保存").toolTip())
         self.assertEqual((editor.toolbar.options_button.width(), editor.toolbar.options_button.height()),
                  (136, 34))
         editor.close()
+
+    def test_window_crop_settings_persist_and_restore(self):
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            settings = SettingsWindow(manager)
+            editor = EditorWindow(Image.new("RGB", (40, 30), "white"), manager.data)
+            editor.setting_changed.connect(settings.set_annotation_setting)
+            editor.toolbar.tool_buttons["crop"].click()
+            editor.toolbar.crop_width.setValue(7)
+            editor.toolbar.crop_style_changed.emit("crop_color", "#123abc")
+            reloaded = ConfigManager(manager.path).data
+            self.assertEqual((reloaded["crop_width"], reloaded["crop_color"]), (7, "#123abc"))
+            page = settings.pages.widget(3)
+            self.assertEqual(page.controls["crop_width"].value(), 7)
+            self.assertEqual(page.color_buttons["crop_color"].color, "#123abc")
+            reopened = EditorWindow(Image.new("RGB", (40, 30), "white"), reloaded)
+            self.assertEqual((reopened.canvas.crop_width, reopened.canvas.crop_color), (7, "#123abc"))
+            self.assertEqual(reopened.toolbar.crop_width.value(), 7)
+            self.assertEqual(reopened.toolbar.crop_color.color, "#123abc")
+            reopened.close()
+            editor.close()
+            settings.close()
 
     def test_tool_widths_are_independent_and_options_follow_tool(self):
         from config.config_manager import DEFAULTS, TOOL_WIDTH_KEYS, validate
@@ -2332,6 +3869,10 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(toolbar.options_button.text(), f"{toolbar.tool_buttons[tool].text()}设置")
             self.assertEqual(toolbar.option_rows[0][0].text(), "直径" if tool == "eraser" else "线宽")
             self.assertFalse(toolbar.pen_width.isHidden())
+            if tool == "rect":
+                self.assertFalse(toolbar.rect_style.isHidden())
+            if tool == "ellipse":
+                self.assertFalse(toolbar.ellipse_style.isHidden())
             toolbar.pen_width.setValue(width)
             self.assertIn((TOOL_WIDTH_KEYS[tool], width), changes)
             settings[TOOL_WIDTH_KEYS[tool]] = width
@@ -2355,6 +3896,33 @@ class CoreTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 validate({key: 51})
 
+    def test_options_menu_resizes_on_first_open_after_tool_change(self):
+        from editor.toolbar_widget import ToolbarWidget
+
+        toolbar = ToolbarWidget()
+        toolbar.show()
+        menu = toolbar.options_button.menu()
+        panel = menu.actions()[0].defaultWidget()
+        widths = []
+        for tool in ("arrow", "pen", "text", "eraser", "arrow"):
+            toolbar.tool_buttons[tool].click()
+            menu.popup(toolbar.mapToGlobal(QPoint(100, 100)))
+            self.app.processEvents()
+            widths.append(menu.width())
+            self.assertGreaterEqual(menu.width(), panel.width(), (tool, menu.size(), panel.size()))
+            self.assertGreaterEqual(panel.width(), toolbar.option_panel_width(tool), tool)
+            for row in toolbar.option_rows:
+                for widget in row:
+                    if widget.isVisible():
+                        self.assertLessEqual(widget.geometry().right(), panel.width(),
+                                             (tool, widget.geometry(), panel.size()))
+            menu.hide()
+            self.app.processEvents()
+        self.assertGreater(widths[0], widths[1], widths)
+        self.assertGreater(widths[2], widths[3], widths)
+        self.assertEqual(widths[0], widths[4], widths)
+        toolbar.close()
+
     def test_multirow_tool_options_fit_and_labels_are_vertically_centered(self):
         from PySide6.QtWidgets import QWidgetAction
         from editor.toolbar_widget import ToolbarWidget
@@ -2364,7 +3932,8 @@ class CoreTests(unittest.TestCase):
                      if isinstance(action, QWidgetAction))
         panel.show()
         for tool, rows in (("pen", (0,)), ("marker", (0, 1)), ("text", (2, 3, 4)),
-               ("mosaic", (5, 6)), ("arrow", (0, 7)), ("eraser", (0,)),
+               ("mosaic", (5, 6)), ("arrow", (0, 7)), ("rect", (0, 10)),
+               ("ellipse", (0, 11)), ("eraser", (0,)),
                ("crop", (8, 9))):
             toolbar.tool_buttons[tool].click()
             self.app.processEvents()
@@ -2374,7 +3943,8 @@ class CoreTests(unittest.TestCase):
             expected_labels = {0: "直径" if tool == "eraser" else "线宽",
                                1: "透明度", 2: "字体", 3: "字号", 4: "对齐",
                                5: "效果", 6: "颗粒", 7: "样式",
-                               8: "裁剪颜色", 9: "裁剪线宽"}
+                               8: "裁剪颜色", 9: "裁剪线宽",
+                               10: "矩形线型", 11: "椭圆线型"}
             for row in rows:
                 self.assertEqual(panel.layout().itemAtPosition(row, 0).widget().text(),
                                  expected_labels[row])
@@ -2393,8 +3963,12 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(toolbar.font_size.value(), 18)
             if tool == "arrow":
                 self.assertEqual(set(toolbar.choice_buttons["arrow_style"]),
-                                 {"filled", "open", "double", "double_filled"})
+                                  {"filled", "open", "double", "double_filled",
+                                   "solid_line", "open_line", "solid_dash", "open_dash"})
                 self.assertTrue(toolbar.choice_buttons["arrow_style"]["open"].isChecked() is False)
+                self.assertGreaterEqual(panel.minimumWidth(), 760)
+            if tool in ("rect", "ellipse"):
+                self.assertLessEqual(panel.minimumWidth(), 380)
         panel.close()
 
     def test_canvas_uses_each_tools_width(self):
@@ -2418,6 +3992,22 @@ class CoreTests(unittest.TestCase):
         image = canvas.render_image()
         self.assertEqual(image.pixelColor(40, 40).name(), "#ffffff")
         self.assertEqual(image.pixelColor(45, 40).name(), "#ff0000")
+
+    def test_canvas_uses_rect_and_ellipse_line_styles(self):
+        from config.config_manager import DEFAULTS
+
+        settings = dict(DEFAULTS, rect_style="dash", ellipse_style="dash")
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), settings)
+        for tool in ("rect", "ellipse"):
+            canvas.tool = tool
+            QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=canvas.mapFromScene(QPointF(10, 10)))
+            QTest.mouseMove(canvas.viewport(), canvas.mapFromScene(QPointF(60, 40)))
+            QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=canvas.mapFromScene(QPointF(60, 40)))
+            self.assertEqual(canvas.annotations()[-1].pen().style(), Qt.DashLine)
+        canvas.annotations()[-1].setSelected(True)
+        canvas.set_selected_line_style("solid")
+        self.assertEqual(canvas.annotations()[-1].pen().style(), Qt.SolidLine)
+        canvas.close()
 
     def test_color_dialog_chinese_labels_and_common_colors(self):
         from PySide6.QtGui import QColor
@@ -2443,7 +4033,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual([section.findChild(QLabel).text() for section in toolbar.sections],
                         ["标注", "编辑", "图像旋转", "输出"])
         self.assertEqual([button.text() for button in toolbar.output_buttons],
-                     ["贴图", "保存", "完成", "放弃"])
+                     ["贴图", "保存", "放弃", "关闭全部"])
         commands = []
         toolbar.command.connect(commands.append)
         buttons = toolbar.findChildren(QToolButton)
@@ -2455,11 +4045,12 @@ class CoreTests(unittest.TestCase):
         self.assertIsNotNone(options.menu())
         save = next(button for button in buttons if button.text() == "保存")
         save.click()
+        next(button for button in buttons if button.text() == "关闭全部").click()
         next(button for button in toolbar.findChildren(QToolButton)
              if button.text() == "旋转 180°").click()
         next(action for menu in toolbar.findChildren(QMenu) for action in menu.actions()
              if action.text() == "置顶").trigger()
-        self.assertEqual(commands, ["save", "half", "top"])
+        self.assertEqual(commands, ["save", "close_all_editors", "half", "top"])
 
     def test_visible_commands_have_text_and_icons(self):
         from PySide6.QtGui import QImage
@@ -2528,7 +4119,7 @@ class CoreTests(unittest.TestCase):
                 item = manager.add(EditorWindow(Image.new("RGB", (50, 40)), DEFAULTS).output_image())
                 item.move(12, 25)
                 manager.persist()
-                self.assertTrue((Path(folder) / "sticker_cache" / "sticker_0.png").is_file())
+                self.assertTrue(list((Path(folder) / "sticker_cache").glob("*.png")))
                 manager.close_all()
                 self.app.processEvents()
                 restored = StickerManager(DEFAULTS)
@@ -2538,6 +4129,75 @@ class CoreTests(unittest.TestCase):
                 restored.items[0].close()
                 self.app.processEvents()
                 self.assertEqual(len(restored.items), 0)
+
+    def test_sticker_restore_skips_invalid_records_and_backs_up_corrupt_session(self):
+        from config.config_manager import DEFAULTS
+        from PySide6.QtGui import QColor, QImage
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            path = Path(folder) / "stickers.json"
+            path.write_text("{invalid", encoding="utf-8")
+            manager = StickerManager(DEFAULTS)
+            manager.restore()
+            self.assertEqual(manager.items, [])
+            self.assertEqual(next(Path(folder).glob("stickers.json.broken-*")).read_text(encoding="utf-8"),
+                             "{invalid")
+            path.write_text(json.dumps([None, {}, {"source": "missing.png", "x": 1}]), encoding="utf-8")
+            manager.restore()
+            self.assertEqual(manager.items, [])
+            image = QImage(12, 8, QImage.Format_RGB32)
+            image.fill(QColor("red"))
+            item = manager.add(image)
+            valid = item.state()
+            manager.persist()
+            manager.close_all()
+            self.app.processEvents()
+            path.write_text(json.dumps([{}, valid, {"source": valid["source"]}]), encoding="utf-8")
+            restored = StickerManager(DEFAULTS)
+            restored.restore()
+            self.assertEqual(len(restored.items), 1)
+            self.assertTrue(Path(valid["source"]).exists())
+            restored.close_all()
+
+    def test_sticker_restore_without_session_cleans_orphan_cache(self):
+        from config.config_manager import DEFAULTS
+        from PySide6.QtGui import QColor, QImage
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            manager = StickerManager(DEFAULTS)
+            image = QImage(12, 8, QImage.Format_RGB32)
+            image.fill(QColor("red"))
+            item = manager.add(image)
+            cached = Path(item.source)
+            manager.close_all()
+            self.app.processEvents()
+            manager.restore()
+            self.assertFalse(cached.exists())
+
+    def test_sticker_cache_removes_only_unreferenced_images_after_persist(self):
+        from config.config_manager import DEFAULTS
+        from PySide6.QtGui import QColor, QImage
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            manager = StickerManager(DEFAULTS)
+            image = QImage(12, 8, QImage.Format_RGB32)
+            image.fill(QColor("red"))
+            retained = manager.add(image)
+            removed = manager.add(image)
+            retained_path = Path(retained.source)
+            removed_path = Path(removed.source)
+            removed.close()
+            self.app.processEvents()
+            manager.persist()
+            self.assertTrue(retained_path.exists())
+            self.assertFalse(removed_path.exists())
+            manager.close_all()
+            self.app.processEvents()
+            manager.persist()
+            self.assertFalse(retained_path.exists())
 
     def test_history_switch_reuses_one_sticker(self):
         from config.config_manager import DEFAULTS
@@ -2553,6 +4213,83 @@ class CoreTests(unittest.TestCase):
             manager.paste_latest()
             self.assertEqual(len(manager.items), 2)
             manager.close_all()
+
+    def test_paste_latest_skips_open_deleted_and_invalid_history(self):
+        from config.config_manager import DEFAULTS
+        import os
+
+        with tempfile.TemporaryDirectory() as folder:
+            paths = [Path(folder) / f"{index}.png" for index in range(4)]
+            for index, path in enumerate(paths):
+                Image.new("RGB", (20 + index, 20), "white").save(path)
+                os.utime(path, (index + 10, index + 10))
+            manager = StickerManager(dict(DEFAULTS, auto_dir=folder))
+            try:
+                for path in reversed(paths):
+                    self.assertTrue(manager.paste_latest())
+                    self.assertEqual(Path(manager.items[-1].source), path)
+                self.assertFalse(manager.paste_latest())
+                manager.items[1].close()
+                self.assertTrue(manager.paste_latest())
+                self.assertEqual(Path(manager.items[-1].source), paths[2])
+                manager.items[-1].close()
+                paths[2].unlink()
+                self.assertFalse(manager.paste_latest())
+                paths[2].write_bytes(b"not an image")
+                self.assertFalse(manager.paste_latest())
+            finally:
+                manager.close_all()
+                self.app.processEvents()
+
+    def test_history_cycle_skips_deleted_and_unreadable_files(self):
+        from config.config_manager import DEFAULTS
+
+        with tempfile.TemporaryDirectory() as folder:
+            paths = [Path(folder) / f"{index}.png" for index in range(3)]
+            for path in paths:
+                Image.new("RGB", (20, 20), "white").save(path)
+            manager = StickerManager(dict(DEFAULTS, auto_dir=folder))
+            try:
+                with patch.object(manager, "files", return_value=paths):
+                    paths[1].unlink()
+                    manager.cycle(1)
+                    self.assertEqual(manager.history_sticker.source, str(paths[2]))
+                    paths[0].write_bytes(b"invalid")
+                    paths[2].unlink()
+                    manager.cycle(1)
+                    self.assertEqual(manager.history_sticker.source, str(paths[2]))
+            finally:
+                manager.close_all()
+                self.app.processEvents()
+
+    def test_open_sticker_file_replaces_or_adds_without_changing_on_cancel(self):
+        from PySide6.QtGui import QImage
+        from config.config_manager import DEFAULTS
+        from sticker.sticker_menu import build_menu
+
+        with tempfile.TemporaryDirectory() as folder:
+            first = Path(folder) / "first.png"
+            second = Path(folder) / "second.png"
+            Image.new("RGB", (20, 20), "red").save(first)
+            Image.new("RGB", (40, 20), "blue").save(second)
+            manager = StickerManager(DEFAULTS)
+            sticker = manager.add(QImage(str(first)), first)
+            try:
+                actions = {action.text(): action for action in build_menu(sticker).actions()}
+                with patch("sticker.sticker_manager.QFileDialog.getOpenFileName", return_value=("", "")):
+                    actions["从文件打开替换此贴图"].trigger()
+                self.assertEqual(sticker.source, str(first))
+                with patch("sticker.sticker_manager.QFileDialog.getOpenFileName", return_value=(str(second), "")):
+                    actions["从文件打开替换此贴图"].trigger()
+                self.assertEqual(sticker.source, str(second))
+                self.assertEqual(len(manager.items), 1)
+                with patch("sticker.sticker_manager.QFileDialog.getOpenFileName", return_value=(str(first), "")):
+                    actions["从文件打开新贴图"].trigger()
+                self.assertEqual(len(manager.items), 2)
+                self.assertEqual(manager.items[-1].source, str(first))
+            finally:
+                manager.close_all()
+                self.app.processEvents()
 
 
 if __name__ == "__main__":

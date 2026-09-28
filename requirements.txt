@@ -3,3 +3,4 @@ mss>=9,<11
 keyboard>=0.13,<1
 Pillow==10.3.0
 pywin32>=306; sys_platform == "win32"
+pyinstaller>=6,<7

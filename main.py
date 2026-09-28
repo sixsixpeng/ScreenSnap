@@ -1,11 +1,37 @@
 """常驻托盘的程序入口。"""
 
-import logging
+import ctypes
+import os
 import sys
+
+
+def enable_windows_dpi_awareness():
+    """尽早启用每显示器 DPI 感知，减少 Windows 坐标虚拟化。"""
+    if os.name != "nt":
+        return
+    try:
+        # -4 == DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2。必须在 QApplication 前调用。
+        if ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4)):
+            return
+    except (AttributeError, OSError):
+        pass
+    try:
+        # 2 == PROCESS_PER_MONITOR_DPI_AWARE，兼容较旧的 Windows 版本。
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+        return
+    except (AttributeError, OSError):
+        pass
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
+
+enable_windows_dpi_awareness()
 
 from PySide6.QtCore import Qt, QRect, QTimer, QSignalBlocker
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen, QGuiApplication, QFont
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QMessageBox, QGraphicsView, QFileDialog
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QGraphicsView, QFileDialog
 
 from config import ConfigManager
 from config.config_manager import TOOL_WIDTH_KEYS
@@ -76,6 +102,7 @@ class Application:
             self.qt, lambda: self.start_capture("capture", from_tray=True), self.open_settings, self.qt.quit,
             lambda: self.dispatch("edit_clipboard"), lambda: self.dispatch("open_image"),
             self.config.data["hotkeys"],
+            open_sticker=self.stickers.open_file,
         )
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self.tray_clicked)
@@ -116,8 +143,16 @@ class Application:
         self.tray.setContextMenu(self.menu)
         if not self.hotkey_recording:
             self.hotkeys.register(self.config.data)
-        for editor in self.editors:
+        inline_editor = self.mask.session.inline_editor if isinstance(self.mask, MaskWindow) else None
+        for editor in [*self.editors, *([inline_editor] if inline_editor is not None else [])]:
             editor.toolbar.pen_color.set_color(self.config.data["pen_color"])
+            if editor is not inline_editor:
+                editor.toolbar.crop_color.set_color(self.config.data["crop_color"])
+                with QSignalBlocker(editor.toolbar.crop_width):
+                    editor.toolbar.crop_width.setValue(self.config.data["crop_width"])
+                editor.toolbar.crop_width_label.setText(f'{self.config.data["crop_width"]} px')
+                editor.canvas.crop_color = self.config.data["crop_color"]
+                editor.canvas.crop_width = self.config.data["crop_width"]
             for tool, key in TOOL_WIDTH_KEYS.items():
                 editor.toolbar.tool_widths[tool] = self.config.data[key]
             for control, key in ((editor.toolbar.mosaic_size, "mosaic_size"),
@@ -131,12 +166,14 @@ class Application:
                 editor.toolbar.font.setCurrentFont(QFont(self.config.data["font"] or "Microsoft YaHei"))
             with QSignalBlocker(editor.toolbar.font_size):
                 editor.toolbar.font_size.setValue(self.config.data["font_size"])
-            for key in ("mosaic_mode", "text_alignment", "arrow_style"):
+            for key in ("mosaic_mode", "text_alignment", "arrow_style", "rect_style", "ellipse_style"):
                 editor.toolbar.set_choice(key, self.config.data[key])
             editor.canvas.text_alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
                                             "right": Qt.AlignRight}[self.config.data["text_alignment"]]
             editor.toolbar.set_hotkeys(self.config.data["hotkeys"])
             tool = self.config.data["annotation_tool"]
+            if editor is inline_editor and tool == "crop":
+                tool = "select"
             editor.toolbar.tool_buttons[tool].setChecked(True)
             editor.canvas.tool = tool
             editor.canvas.setDragMode(QGraphicsView.RubberBandDrag if tool == "select"
@@ -147,8 +184,10 @@ class Application:
             editor.canvas.toggle_cursor(self.config.data["cursor"])
             editor.canvas.viewport().update()
         if self.mask is not None and self.mask.isVisible():
-            self.mask.settings = self.config.data
-            self.mask.update()
+            for view in getattr(self.mask, "session", self.mask).views if hasattr(self.mask, "session") else [self.mask]:
+                view.settings = self.config.data
+            self.mask.update_all() if hasattr(self.mask, "update_all") else self.mask.update()
+        self.stickers.refresh_style()
         self.logger.info("配置已更新")
 
     def pause_hotkeys(self, recording):
@@ -239,12 +278,24 @@ class Application:
             self.edit_images([(image.crop(crop), alternate.crop(crop) if alternate else None)])
             return
         self.mask = MaskWindow(image, bounds, monitors, self.config.data, mode, alternate)
+        self.mask.setAttribute(Qt.WA_DeleteOnClose)
         self.mask.last_region.connect(self.remember_region)
+        if hasattr(self, "settings_window"):
+            self.mask.annotation_setting_changed.connect(self.settings_window.set_annotation_setting)
+            self.mask.pen_color_changed.connect(self.settings_window.set_pen_color)
         self.mask.selected.connect(self.edit_images)
+        self.mask.image_saved.connect(self.saved)
+        self.mask.save_failed.connect(self.initial_save_failed)
+        self.mask.close_all_requested.connect(self.close_all_editors)
+        self.mask.sticker_requested.connect(self.add_sticker)
+        self.mask.destroyed.connect(lambda obj=None, current=self.mask: setattr(self, "mask", None)
+                                    if self.mask is current else None)
         self.mask.show()
         self.mask.raise_()
         self.mask.activateWindow()
         self.mask.setFocus()
+        for view in self.mask.session.views:
+            view.magnifier_overlay.sync()
         self.logger.info("开始截图: %s", mode)
 
     def remember_region(self, rect):
@@ -257,14 +308,19 @@ class Application:
         for image, alternate in images:
             editor = EditorWindow(image, self.config.data, alternate)
             editor.image_saved.connect(self.saved)
-            editor.image_completed.connect(self.completed)
             editor.sticker_requested.connect(self.add_sticker)
+            editor.close_all_requested.connect(self.close_all_editors)
             editor.status.connect(self.notify)
             editor.pen_color_changed.connect(self.settings_window.set_pen_color)
             editor.setting_changed.connect(self.settings_window.set_annotation_setting)
             editor.destroyed.connect(lambda obj=None, current=editor: self.editors.remove(current) if current in self.editors else None)
             editor.setAttribute(Qt.WA_DeleteOnClose)
             self.editors.append(editor)
+            if from_capture:
+                try:
+                    editor.save(automatic=True)
+                except OSError as error:
+                    self.initial_save_failed(f"初始保存失败: {error}")
             editor.show()
         if from_capture and images and self.config.data["bubble"] and self.config.data["capture_notification"]:
             if self.capture_notice is not None:
@@ -274,6 +330,15 @@ class Application:
         if from_capture and self.config.data["sound"]:
             QApplication.beep()
         self.logger.info("完成截图: %s 张" if from_capture else "打开图片编辑: %s 张", len(images))
+
+    def initial_save_failed(self, message):
+        self.logger.exception("%s", message)
+        self.notify(message)
+
+    def close_all_editors(self):
+        """关闭当前全部截图编辑器窗口。"""
+        for editor in list(self.editors):
+            editor.close()
 
     def add_sticker(self, image):
         """创建新贴图并根据独立设置决定是否显示托盘提示。"""
@@ -289,11 +354,6 @@ class Application:
             self.notify(f"图片已保存: {path}", "save_notification")
         if image is not None and self.config.data["sound"]:
             QApplication.beep()
-
-    def completed(self, image):
-        """未启用自动保存时仍提示最终合成图。"""
-        if self.config.data["bubble"] and self.config.data["capture_notification"]:
-            self.show_image_notice(image, "编辑完成")
 
     def show_image_notice(self, image, title, detail=""):
         """新的图片提示替换旧提示，避免多个窗口堆叠。"""

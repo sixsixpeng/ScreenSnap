@@ -5,7 +5,7 @@ from core.constants import shortcut_suffix
 
 
 def make_tray_menu(app, capture, settings, quit_app, edit_clipboard=None, open_image=None,
-                   hotkeys=None):
+                   hotkeys=None, open_sticker=None):
     """只组装菜单动作，截图与退出逻辑仍由主程序持有。"""
     menu = QMenu()
     menu.addAction(app.style().standardIcon(QStyle.SP_DesktopIcon),
@@ -23,6 +23,9 @@ def make_tray_menu(app, capture, settings, quit_app, edit_clipboard=None, open_i
     )
     if open_image is not None:
         open_action.triggered.connect(open_image)
+    if open_sticker is not None:
+        menu.addAction(app.style().standardIcon(QStyle.SP_DialogOpenButton),
+                       "从文件打开新贴图", open_sticker)
     menu.addSeparator()
     menu.addAction(app.style().standardIcon(QStyle.SP_FileDialogDetailedView), "设置", settings)
     menu.addSeparator()

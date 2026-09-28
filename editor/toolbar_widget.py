@@ -7,7 +7,7 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, Q
                                QSlider, QFontComboBox, QWidgetAction, QSizePolicy,
                                QRadioButton, QSpinBox)
 from ui.widgets.color_button import ColorButton
-from config.config_manager import TOOL_WIDTH_KEYS
+from config.config_manager import DEFAULTS, TOOL_WIDTH_KEYS
 from core.constants import shortcut_label
 
 
@@ -30,10 +30,9 @@ def text_icon():
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-    font = QFont("", 17, QFont.Bold)
-    painter.setFont(font)
-    painter.setPen(QColor("#355f68"))
-    painter.drawText(pixmap.rect(), Qt.AlignCenter, "T")
+    painter.setPen(QPen(QColor("#355f68"), 3, Qt.SolidLine, Qt.RoundCap))
+    painter.drawLine(5, 5, 19, 5)
+    painter.drawLine(12, 5, 12, 20)
     painter.end()
     return QIcon(pixmap)
 
@@ -108,6 +107,12 @@ def annotation_icon(tool):
     return QIcon(pixmap)
 
 
+def rich_tooltip(title, detail, binding=""):
+    """使用富文本确保 Qt 工具提示稳定分成标题和说明两行。"""
+    suffix = f"（快捷键: {binding}）" if binding else ""
+    return f"<b>{title}</b><br>{detail}{suffix}"
+
+
 class _OptionsPanel(QWidget):
     def showEvent(self, event):
         super().showEvent(event)
@@ -125,7 +130,7 @@ class ToolbarWidget(QWidget):
     setting_changed = Signal(str, object)
     crop_style_changed = Signal(str, object)
 
-    def __init__(self, pen_color="#ff5252", settings=None):
+    def __init__(self, pen_color=DEFAULTS["pen_color"], settings=None):
         super().__init__()
         settings = settings or {}
         self.hotkeys = settings.get("hotkeys", {})
@@ -150,7 +155,7 @@ class ToolbarWidget(QWidget):
         self.tools.setExclusive(True)
         self.tool_buttons = {}
         for label, key in [("选择", "select"), ("画笔", "pen"),
-                           ("荧光笔", "marker"), ("文字", "text"), ("箭头", "arrow"),
+                           ("记号笔", "marker"), ("文字", "text"), ("箭头", "arrow"),
                            ("矩形", "rect"), ("椭圆", "ellipse"), ("橡皮擦", "eraser"),
                            ("马赛克", "mosaic"), ("取色", "picker"), ("裁剪", "crop")]:
             button = QToolButton()
@@ -160,19 +165,19 @@ class ToolbarWidget(QWidget):
             button.setText(label)
             button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             tool_tips = {
-                "select": "选择、移动或调整现有标注",
-                "pen": "自由绘制线条；线宽和颜色可在更多设置中调整",
-                "marker": "绘制半透明荧光标记",
-                "text": "单击画布输入文字；字体、字号和对齐可在更多设置中调整",
-                "arrow": "拖动绘制箭头；可选实心、空心或双向样式",
-                "rect": "拖动绘制矩形",
-                "ellipse": "拖动绘制椭圆",
-                "eraser": "拖过标注以擦除内容",
-                "mosaic": "拖动区域应用马赛克效果",
-                "picker": "从截图中取色并设为当前标注颜色",
-                "crop": "拖动裁剪截图；边框颜色和线宽为本次编辑单独设置",
+                "select": "选择已有标注；可移动、缩放或调整层级",
+                "pen": "按住并拖动自由绘制线条；使用当前颜色和画笔线宽",
+                "marker": "绘制半透明重点标记；适合高亮文字或区域",
+                "text": "单击图片添加文字；字体、字号和对齐可在更多设置中调整",
+                "arrow": "拖动绘制箭头、线段或虚线；样式、线宽和颜色可调整",
+                "rect": "拖动绘制矩形边框；支持实线或虚线",
+                "ellipse": "拖动绘制椭圆边框；支持实线或虚线",
+                "eraser": "拖过已有标注，将经过的标注内容擦除",
+                "mosaic": "拖动区域添加马赛克；可选择方块、毛玻璃或细粒效果",
+                "picker": "从图片中取色，并设置为后续标注颜色",
+                "crop": "拖动裁剪图片；裁剪框颜色和线宽会保存为下次编辑的默认值",
             }
-            button.setToolTip(tool_tips[key])
+            button.setToolTip(rich_tooltip(label, tool_tips[key]))
             button.setAccessibleName(label)
             button.setCheckable(True)
             button.setMinimumHeight(40)
@@ -184,14 +189,14 @@ class ToolbarWidget(QWidget):
                                 (len(self.tool_buttons) - 1) % 6)
         self.tool_buttons[settings.get("annotation_tool", "select") if settings.get("annotation_tool") in self.tool_buttons else "select"].setChecked(True)
         self.tool_grid = tool_grid
-        self.tool_widths = {tool: settings.get(key, settings.get("pen_width", 3))
+        self.tool_widths = {tool: settings.get(key, DEFAULTS[key])
                     for tool, key in TOOL_WIDTH_KEYS.items()}
         self.pen_color = ColorButton(pen_color, self.color_changed.emit, compact=True)
         self.pen_color.setMinimumHeight(40)
         self.pen_color.setToolTip("标注颜色")
         self.pen_width = QSlider(Qt.Horizontal)
         self.pen_width.setRange(1, 50)
-        self.pen_width.setValue(self.tool_widths.get(settings.get("annotation_tool"), 3))
+        self.pen_width.setValue(self.tool_widths.get(settings.get("annotation_tool"), DEFAULTS["pen_width"]))
         self.pen_width.setMinimumWidth(220)
         self.pen_width.setMinimumHeight(38)
         self.pen_width.setToolTip("标注线条粗细")
@@ -247,20 +252,30 @@ class ToolbarWidget(QWidget):
         self.alignment.setToolTip("新建文字标注的对齐方式")
         self.arrow_style = self.radio_options(
             "arrow_style", (("实心", "filled"), ("空心", "open"),
-                            ("实心双向", "double_filled"), ("空心双向", "double")),
+                            ("实心双向", "double_filled"), ("空心双向", "double"),
+                            ("实心线段", "solid_line"), ("空心线段", "open_line"),
+                            ("实心虚线", "solid_dash"), ("空心虚线", "open_dash")),
             settings.get("arrow_style", "filled"), "设置新箭头的箭头头部样式")
         self.arrow_style.setToolTip("设置新箭头的箭头头部样式")
-        self.crop_color = ColorButton("#00ad91",
+        self.rect_style = self.radio_options(
+            "rect_style", (("实线", "solid"), ("虚线", "dash")),
+            settings.get("rect_style", "solid"), "设置新矩形的边框线型")
+        self.rect_style.setToolTip("设置新矩形使用实线或虚线边框")
+        self.ellipse_style = self.radio_options(
+            "ellipse_style", (("实线", "solid"), ("虚线", "dash")),
+            settings.get("ellipse_style", "solid"), "设置新椭圆的边框线型")
+        self.ellipse_style.setToolTip("设置新椭圆使用实线或虚线边框")
+        self.crop_color = ColorButton(settings.get("crop_color", DEFAULTS["crop_color"]),
                           lambda color: self.crop_style_changed.emit("crop_color", color),
-                          compact=True, purpose="本次裁剪框颜色")
+                          compact=True, purpose="裁剪框颜色")
         self.crop_color.setMinimumHeight(36)
         self.crop_width = QSlider(Qt.Horizontal)
         self.crop_width.setRange(1, 12)
-        self.crop_width.setValue(2)
+        self.crop_width.setValue(settings.get("crop_width", DEFAULTS["crop_width"]))
         self.crop_width.setMinimumWidth(240)
         self.crop_width.setMinimumHeight(36)
-        self.crop_width.setToolTip("设置当前截图裁剪框的边线宽度；不保存到全局配置")
-        self.crop_width_label = QLabel("2 px")
+        self.crop_width.setToolTip("设置裁剪框边线宽度，并保存为下次编辑的默认值")
+        self.crop_width_label = QLabel(f"{self.crop_width.value()} px")
         self.crop_width_label.setMinimumWidth(52)
         self.crop_width_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
         self.crop_width.valueChanged.connect(lambda value: self.crop_width_label.setText(f"{value} px"))
@@ -283,7 +298,7 @@ class ToolbarWidget(QWidget):
             "QToolButton:disabled { background: #607e83; color: white; "
             "border-color: #4c696e; }"
         )
-        options.setToolTip("线宽、透明度、字体、对齐、效果和箭头")
+        options.setToolTip(rich_tooltip("更多设置", "调整当前工具的线宽、样式、透明度、字体或效果"))
         options.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(options)
         panel = _OptionsPanel(menu)
@@ -317,7 +332,11 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(QLabel("裁剪线宽"), 9, 0)
         panel_layout.addWidget(self.crop_width, 9, 1)
         panel_layout.addWidget(self.crop_width_label, 9, 2)
-        for row in range(10):
+        panel_layout.addWidget(QLabel("矩形线型"), 10, 0)
+        panel_layout.addWidget(self.rect_style, 10, 1, 1, 2)
+        panel_layout.addWidget(QLabel("椭圆线型"), 11, 0)
+        panel_layout.addWidget(self.ellipse_style, 11, 1, 1, 2)
+        for row in range(12):
             label = panel_layout.itemAtPosition(row, 0).widget()
             label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
             label.setMinimumHeight(38)
@@ -327,7 +346,7 @@ class ToolbarWidget(QWidget):
                 panel_layout.setAlignment(widget, Qt.AlignVCenter)
         self.option_rows = [tuple(panel_layout.itemAtPosition(row, column).widget()
                                   for column in range(3) if panel_layout.itemAtPosition(row, column))
-                            for row in range(10)]
+                            for row in range(12)]
         panel_action = QWidgetAction(menu)
         panel_action.setDefaultWidget(panel)
         menu.addAction(panel_action)
@@ -379,8 +398,8 @@ class ToolbarWidget(QWidget):
         self.output_buttons = [self.button(self.output_grid, label, action, icon)
                                for label, action, icon in [("贴图", "paste", QStyle.SP_DesktopIcon),
                                                            ("保存", "save", QStyle.SP_DialogSaveButton),
-                                                           ("完成", "finish", QStyle.SP_DialogApplyButton),
-                                                           ("放弃", "discard", QStyle.SP_DialogCancelButton)]]
+                                                           ("放弃", "discard", QStyle.SP_DialogCancelButton),
+                                                           ("关闭全部", "close_all_editors", QStyle.SP_DialogCloseButton)]]
         self.edit_image_row = QWidget(self)
         self.edit_image_layout = QHBoxLayout(self.edit_image_row)
         self.edit_image_layout.setContentsMargins(0, 0, 0, 0)
@@ -407,6 +426,10 @@ class ToolbarWidget(QWidget):
             rows.update((0, 7))
         elif tool == "crop":
             rows.update((8, 9))
+        elif tool == "rect":
+            rows.add(10)
+        elif tool == "ellipse":
+            rows.add(11)
         # 同一个弹出面板只展示当前工具的参数，切换时保留各自的线宽。
         for index, widgets in enumerate(self.option_rows):
             for widget in widgets:
@@ -415,29 +438,57 @@ class ToolbarWidget(QWidget):
         name = self.tool_buttons[tool].text()
         self.options_button.setText(f"{name}设置" if rows else "更多设置")
         descriptions = {
-            "crop": "设置本次裁剪框的颜色和线宽，不影响全局配置",
+            "crop": "设置裁剪框的颜色和线宽，并保存为下次编辑的默认值",
             "text": "设置新文字的字体、字号与对齐方式",
             "arrow": "设置新箭头的线宽和箭头样式",
+            "rect": "设置新矩形的线宽和线型",
+            "ellipse": "设置新椭圆的线宽和线型",
             "mosaic": "设置马赛克类型和颗粒大小",
-            "marker": "设置荧光笔线宽和透明度",
+            "marker": "设置记号笔线宽和透明度",
             "eraser": "设置橡皮擦直径",
         }
-        self.options_button.setToolTip(descriptions.get(tool, f"设置{name}参数") if rows else
-                                       "当前工具没有可调整的专属参数")
+        self.options_button.setToolTip(rich_tooltip(
+            f"{name}设置" if rows else "更多设置",
+            descriptions.get(tool, f"设置{name}参数") if rows else "当前工具没有可调整的专属参数",
+        ))
         self.option_rows[0][0].setText("直径" if tool == "eraser" else "线宽")
         if tool in TOOL_WIDTH_KEYS:
             with QSignalBlocker(self.pen_width):
                 self.pen_width.setValue(self.tool_widths[tool])
             self.pen_width_label.setText(f"{self.pen_width.value()} px")
         panel = self.options_button.menu().actions()[0].defaultWidget()
-        panel.updateGeometry()
-        panel.adjustSize()
+        panel.setMinimumWidth(0)
+        panel.setMaximumWidth(16777215)
+        panel.setMinimumWidth(self.option_panel_width(tool))
         panel_layout = panel.layout()
         panel_layout.invalidate()
         panel_layout.activate()
-        self.options_button.menu().setMinimumHeight(0)
-        self.options_button.menu().setMinimumHeight(panel.sizeHint().height() + 4)
-        self.options_button.menu().adjustSize()
+        panel.setFixedWidth(max(self.option_panel_width(tool), panel.sizeHint().width()))
+        panel.updateGeometry()
+        panel.adjustSize()
+        panel_layout.invalidate()
+        panel_layout.activate()
+        menu = self.options_button.menu()
+        menu.setFixedWidth(panel.width())
+        menu.setMinimumHeight(0)
+        menu.setMinimumHeight(panel.sizeHint().height() + 4)
+        menu.adjustSize()
+
+    @staticmethod
+    def option_panel_width(tool):
+        """不同工具的选项数量不同，动态控制更多设置弹窗宽度。"""
+        widths = {
+            "arrow": 760,
+            "text": 540,
+            "marker": 460,
+            "mosaic": 430,
+            "crop": 430,
+            "rect": 360,
+            "ellipse": 360,
+            "pen": 340,
+            "eraser": 340,
+        }
+        return widths.get(tool, 340)
 
     def group(self, title):
         """标题紧贴自己的操作，不依赖其他组的宽度。"""
@@ -467,12 +518,14 @@ class ToolbarWidget(QWidget):
                       self.tool_buttons["select"],
                       *(self.tool_buttons[key] for key in
                         ("pen", "marker", "rect", "ellipse", "text", "arrow",
-                         "mosaic", "eraser", "picker", "crop"))]
+                                                 "mosaic", "eraser", "picker", "crop")
+                                                if key != "crop" or not self.property("inline_edit"))]
         gap = self.tool_grid.horizontalSpacing()
-        tool_widths = [max(widget.sizeHint().width(), widget.minimumWidth())
-                       for widget in tool_order]
-        for widget, required_width in zip(tool_order, tool_widths):
-            widget.setMinimumWidth(required_width)
+        tool_widths = ([widget.width() for widget in tool_order] if self.property("inline_edit") else
+                   [max(widget.sizeHint().width(), widget.minimumWidth()) for widget in tool_order])
+        if not self.property("inline_edit"):
+            for widget, required_width in zip(tool_order, tool_widths):
+                widget.setMinimumWidth(required_width)
         drawing_width = sum(tool_widths) + gap * (len(tool_order) - 1)
         other_widths = [sum(button.sizeHint().width() for button in buttons) +
                         grid.horizontalSpacing() * (len(buttons) - 1)
@@ -482,7 +535,9 @@ class ToolbarWidget(QWidget):
         margins = self.section_layout.contentsMargins()
         available = width - margins.left() - margins.right()
         wide_layout = available >= drawing_width + sum(other_widths) + 3 * self.section_layout.horizontalSpacing()
-        if wide_layout:
+        if self.property("inline_edit"):
+            positions = [(0, 0, 1), (2, 0, 1), (2, 1, 1), (1, 0, 1)]
+        elif wide_layout:
             positions = [(0, 0, 1), (0, 1, 1), (0, 2, 1), (0, 3, 1)]
         elif width >= 1200:
             positions = [(0, 0, 7), (1, 0, 7), (2, 0, 7)]
@@ -492,12 +547,15 @@ class ToolbarWidget(QWidget):
             positions = [(0, 0, 1), (1, 0, 1), (2, 0, 1), (3, 0, 1)]
         drawing_space = (available - sum(other_widths) - 3 * self.section_layout.horizontalSpacing()
                          if wide_layout else available)
-        columns = 2
-        for count in range(2, len(tool_order) + 1):
-            needed = sum(max(tool_widths[index] for index in range(column, len(tool_order), count))
-                         for column in range(count)) + gap * (count - 1)
-            if needed <= drawing_space:
-                columns = count
+        if self.property("inline_edit"):
+            columns = len(tool_order)
+        else:
+            columns = 2
+            for count in range(2, len(tool_order) + 1):
+                needed = sum(max(tool_widths[index] for index in range(column, len(tool_order), count))
+                             for column in range(count)) + gap * (count - 1)
+                if needed <= drawing_space:
+                    columns = count
         required_width = sum(max(tool_widths[index] for index in range(column, len(tool_order), columns))
                              for column in range(columns)) + gap * (columns - 1)
         self.sections[0].setMinimumWidth(required_width)
@@ -507,7 +565,8 @@ class ToolbarWidget(QWidget):
         if mode == self._layout_mode:
             return
         self._layout_mode = mode
-        trailing_column = 3 if wide_layout else 6 if width >= 1200 else 4 if width >= 875 else 0
+        trailing_column = (None if self.property("inline_edit") else
+                   3 if wide_layout else 6 if width >= 1200 else 4 if width >= 875 else 0)
         for index in range(7):
             self.section_layout.setColumnStretch(index, int(index == trailing_column))
         while self.tool_grid.count():
@@ -517,7 +576,7 @@ class ToolbarWidget(QWidget):
             self.tool_grid.addWidget(button, row, column, Qt.AlignVCenter)
         for grid, buttons, count in ((self.edit_grid, self.edit_buttons, 3 if width < 500 else 5),
                          (self.image_grid, self.image_buttons, image_columns),
-                         (self.output_grid, self.output_buttons, 2 if width < 500 else 4)):
+                         (self.output_grid, self.output_buttons, 3 if width < 500 else 5)):
             for index, button in enumerate(buttons):
                 grid.addWidget(button, index // count, index % count, Qt.AlignVCenter)
         for container in self.sections:
@@ -525,7 +584,7 @@ class ToolbarWidget(QWidget):
         self.section_layout.removeWidget(self.edit_image_row)
         for container in self.sections[1:3]:
             self.edit_image_layout.removeWidget(container)
-        if wide_layout or width < 875:
+        if self.property("inline_edit") or wide_layout or width < 875:
             for container, (row, column, span) in zip(self.sections, positions):
                 self.section_layout.addWidget(container, row, column, 1, span,
                                               Qt.AlignLeft | Qt.AlignTop)
@@ -549,11 +608,15 @@ class ToolbarWidget(QWidget):
         QTimer.singleShot(0, self.sync_height)
 
     def sync_height(self):
-        self.section_layout.invalidate()
-        self.section_layout.activate()
-        height = self.section_layout.sizeHint().height()
-        if self.height() != height:
-            self.setFixedHeight(height)
+        try:
+            self.section_layout.invalidate()
+            self.section_layout.activate()
+            height = self.section_layout.sizeHint().height()
+            if self.height() != height:
+                self.setFixedHeight(height)
+        except RuntimeError:
+            # 窗口快速关闭时，QTimer 延迟回调可能晚于底层 Qt 对象释放。
+            return
 
     def minimumSizeHint(self):
         return QSize(320, 0)
@@ -572,9 +635,9 @@ class ToolbarWidget(QWidget):
             "undo": "撤销上一步编辑操作", "redo": "重做已撤销的操作",
             "delete": "删除选中的标注", "reset": "重置当前标注参数",
             "paste": "将当前合成图像作为独立贴图打开",
-            "save": "保存为 PNG，并将图像和保存路径复制到剪贴板",
-            "finish": "按完成设置保存或复制图像，然后关闭编辑器",
+            "save": "保存为 PNG，复制图像和路径，然后退出编辑",
             "discard": "放弃编辑并关闭窗口，不保存当前更改",
+            "close_all_editors": "关闭当前已打开的全部截图编辑窗口",
             "left": "向左旋转 90°", "right": "向右旋转 90°",
             "half": "旋转 180°", "angle": "预览并应用自定义旋转角度",
             "reset_rotation": "恢复最近一次任意角度旋转；后续编辑后不可用",
@@ -583,7 +646,8 @@ class ToolbarWidget(QWidget):
         }
         binding = shortcut_label(self.hotkeys, action)
         tooltip = descriptions.get(action, label)
-        button.setToolTip(f"{tooltip} (快捷键: {binding})" if binding else tooltip)
+        button.setProperty("tooltip_detail", tooltip)
+        button.setToolTip(rich_tooltip(label, tooltip, binding))
         button.setAccessibleName(label)
         button.setFixedHeight(34)
         button.clicked.connect(lambda: self.command.emit(action))
@@ -608,7 +672,7 @@ class ToolbarWidget(QWidget):
                         "left": QStyle.SP_ArrowBack, "right": QStyle.SP_ArrowForward,
                         "half": QStyle.SP_BrowserReload, "angle": QStyle.SP_BrowserReload,
                         "horizontal": QStyle.SP_ArrowLeft, "vertical": QStyle.SP_ArrowDown,
-                        "copy": QStyle.SP_FileIcon, "path": QStyle.SP_FileLinkIcon}
+                        "copy": QStyle.SP_FileDialogContentsView, "path": QStyle.SP_FileLinkIcon}
         for title, action in actions:
             menu_action = menu.addAction(self.style().standardIcon(action_icons[action]), title,
                                          lambda checked=False, current=action: self.command.emit(current))
@@ -657,7 +721,8 @@ class ToolbarWidget(QWidget):
         self.hotkeys = hotkeys or {}
         for button, action in self.command_buttons:
             binding = shortcut_label(self.hotkeys, action)
-            button.setToolTip(f"{button.text()} (快捷键: {binding})" if binding else button.text())
+            detail = button.property("tooltip_detail") or button.text()
+            button.setToolTip(rich_tooltip(button.text(), detail, binding))
         for menu_button in self.menu_buttons:
             for action in menu_button.menu().actions():
                 binding = shortcut_label(self.hotkeys, action.data())

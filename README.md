@@ -1,6 +1,6 @@
 # ScreenSnap
 
-ScreenSnap 是一个基于 Python、PySide6 的 Windows 优先截图与贴图工具。程序启动后常驻系统托盘，没有常驻主窗口。支持虚拟桌面多区域截图、矢量标注、图像变换、PNG 保存、剪贴板导入导出和独立置顶贴图。
+ScreenSnap 是一个基于 Python、PySide6 的 Windows 优先截图与贴图工具。程序启动后常驻系统托盘，没有常驻主窗口。支持混合 DPI 多显示器截图、单选区原地编辑、多区域截图、矢量标注、图像变换、PNG 保存、剪贴板导入导出和独立置顶贴图。
 
 本文同时作为**用户操作手册**和**开发维护指南**。界面、快捷键、配置项或工作流发生变化时，应在同一改动中更新相应章节和测试说明。
 
@@ -13,14 +13,19 @@ ScreenSnap 是一个基于 Python、PySide6 的 Windows 优先截图与贴图工
 - [技术指南](#技术指南)
 - [测试与打包](#测试与打包)
 - [已知限制](#已知限制)
-- [文档维护约定](#文档维护约定)
 
 ## 快速开始
 
-需要 Python 3.10 或更高版本。在项目目录 `tools/ScreenSnap` 中执行：
+需要 Windows 和 Python 3.10 或更高版本（安装时勾选加入 PATH）。在项目目录运行
+[`start up.bat`](start%20up.bat)：脚本检查系统 Python；若缺失则中文提示并等待按键退出。
+若 `.venv\Scripts\pythonw.exe` 缺失，脚本会删除旧 `.venv` 并重建；随后激活虚拟环境、
+安装 [requirements.txt](requirements.txt)，最后以 `pythonw main.py` 启动托盘程序。
+首次运行需要能访问 pip 包源；安装失败会显示原因并等待按键，不启动程序。
+
+也可以手动执行：
 
 ```powershell
-py -3 -m venv .venv
+python -m venv .venv
 .\.venv\Scripts\python -m pip install -r requirements.txt
 .\.venv\Scripts\python main.py
 ```
@@ -33,13 +38,18 @@ py -3 -m venv .venv
 
 ### 截图
 
-- `F1` 开始自由选区。可在一个遮罩中创建多个矩形，按 Enter 或双击确认，按 Esc 取消。
+- `F1` 开始自由选区。可在一个遮罩中创建多个矩形，按 Enter 或双击确认；未选区时按 Esc 直接退出截图。
 - `Ctrl+Shift+F1` 选择整个虚拟桌面；`Ctrl+F1` 选择鼠标所在的当前显示器。
 - `Ctrl+Shift+F2` 重用上次选区的位置和大小，在新画面中重新截图。显示器布局变化后若选区已不在桌面范围内，程序会提示。
 - `Ctrl+F` 打开固定尺寸选区输入框；输入宽高后，在当前鼠标位置建立选区。
 - 拖动选区内部可移动；拖动四角或边缘中点可调整大小。选区接近屏幕或可见窗口边缘时会吸附。选中选区后使用方向键或 WASD 可微调位置。
 - 多显示器截图使用虚拟桌面坐标，支持显示器负坐标；显示器之间的间隙也处于虚拟桌面矩形内。
 - 截图提示显示首个选区的缩略图和选区总数，约 4 秒后关闭。提示、尺寸文字、十字线和放大镜不会写入截图。
+- 单选区且完整位于同一显示器内时，默认进入**原地编辑**：不会打开新编辑窗口，而是在选区上直接显示编辑画布和紧凑图标工具栏。多选区或跨屏选区会自动回退到独立编辑器窗口，避免多画布和跨屏 DPI 坐标冲突。
+- 进入原地编辑后不能继续新增选区，但可以拖动已有选区的角点或边中点调整大小；调整时会隐藏旧编辑层，释放鼠标后按新区域重新裁剪并重建编辑画布。调整选区会清空该区域已有标注，避免标注坐标与新截图区域错位。
+- 原地编辑会立即保存一次初始截图；点击保存或双击空白会覆盖同一个文件并退出；放弃会关闭编辑层但保留初始截图文件。
+- 未选区、调整选区和原地编辑时均可显示放大镜；原地编辑按 Esc 直接退出本次截图，不返回选区状态。“显示鼠标”开关只在本次截图存在带/不带鼠标两版时可用。
+- 原地编辑不提供裁剪工具；需要裁剪图片时可在独立编辑窗口中使用。取色后紧凑工具栏的颜色按钮仍只显示色块。
 
 遮罩深浅、锚点样式、十字线颜色和宽度、放大镜、光标捕获及通知均可在设置中调整。遮罩不透明度 0% 表示不遮盖选区外区域，100% 表示完全遮盖。
 
@@ -47,26 +57,27 @@ py -3 -m venv .venv
 
 #### 标注工具
 
-标注工具包括选择、画笔、荧光笔、文字、箭头、矩形、椭圆、橡皮擦、马赛克、取色和裁剪。编辑器默认大小为 1200×760。标注颜色位于标注区域第二个控件；“显示鼠标”位于标注区域第二行第一个位置。
+标注工具包括选择、画笔、记号笔、文字、箭头、矩形、椭圆、橡皮擦、马赛克、取色和裁剪。编辑器默认大小为 1200×760。标注颜色位于标注区域第二个控件；“显示鼠标”位于标注区域第二行第一个位置。单选区原地编辑使用紧凑图标工具栏，按钮名称与说明通过多行 tooltip 展示。
 
 “更多设置”随当前工具显示对应参数：
 
 | 工具 | 可调整参数 | 说明 |
 | --- | --- | --- |
-| 画笔、矩形、椭圆 | 独立线宽 | 1–50 px，只影响之后新建的标注 |
-| 箭头 | 线宽、实心/空心/实心双向/空心双向样式 | 箭头方向由拖动方向决定；杆部留白随线宽增加，双向两端均可向头部内衔接 |
-| 荧光笔 | 独立线宽、不透明度 | 不透明度 1%–100%；线条比普通画笔更粗 |
+| 画笔 | 独立线宽 | 1–50 px，只影响之后新建的画笔线条 |
+| 矩形、椭圆 | 独立线宽、实线/虚线线型 | 使用公共标注颜色；可对已选矩形/椭圆即时切换线型 |
+| 箭头 | 线宽、实心/空心/双向/线段/虚线样式 | 箭头方向由拖动方向决定；线段类型无箭头，虚线类型复用当前线宽和颜色 |
+| 记号笔 | 独立线宽、不透明度 | 不透明度 1%–100%；线条比普通画笔更粗，适合高亮重点 |
 | 文字 | 字体、字号、对齐 | 字号 6–200 pt；支持左对齐、居中、右对齐 |
 | 马赛克 | 方块/毛玻璃/细粒、颗粒度 | 作用于框选区域 |
 | 橡皮擦 | 直径 | 只擦除标注，不会擦除原始截图像素 |
-| 裁剪 | 本次裁剪框颜色、线宽 | 只影响当前编辑器中的裁剪预览，不写入全局设置 |
+| 裁剪 | 裁剪框颜色、线宽 | 仅独立编辑器提供；参数持久化到配置文件 |
 
-画笔、形状、箭头、荧光笔和文字共用编辑器设置顶部的标注颜色；线宽、文字样式、箭头样式及马赛克选项通过配置文件持久化。裁剪框颜色和线宽仅保存在当前编辑器实例内。
+画笔、形状、箭头、记号笔和文字共用标注颜色；各工具线宽、形状线型、文字样式、箭头样式、马赛克选项及裁剪框颜色和线宽均通过配置文件持久化。首次没有配置时标注颜色默认 `#ff0000`，各标注工具线宽默认 2 px，橡皮擦直径 30 px，马赛克颗粒度 10 px；已有配置优先。
 旧配置中的“双向”样式仍按空心双向显示；双向箭头的两端使用相同的尖角比例。编辑器导出时对标注边缘启用抗锯齿，以减轻斜线锯齿。
 
 - 选择工具可单击标注选中并拖动；在空白处拖框可多选。选中标注后可移动、调整大小、改变颜色/线宽；悬停标注显示四向移动光标，悬停右下角缩放手柄显示对角缩放光标。Delete 删除所选标注。
 - 在其他工具下双击已有标注可快速切到选择工具并显示选中框和缩放手柄；在选择工具下双击已有标注直接删除该标注，可撤销。右键单击标注可选择“删除标注”，文字标注还可选择“编辑文字”。
-- 双击空白画布按“完成”设置结束编辑；双击标注不会结束编辑。Esc 放弃编辑并关闭窗口。
+- 双击空白画布保存并退出；双击标注不会结束编辑。Esc 放弃编辑并关闭窗口。
 - 画笔、形状和箭头在拖动时显示预览。裁剪/马赛克框的预览不会直接作为标注导出；确认裁剪会改变底图并清除标注，撤销可恢复。
 - 取色工具选出的颜色会设为当前标注颜色并复制十六进制颜色值。
 
@@ -81,25 +92,26 @@ py -3 -m venv .venv
 
 #### 输出
 
-- **保存**：保存 PNG 到手动保存目录，并把图像数据和保存路径同时放入剪贴板。
+- **保存**：保存 PNG 到手动保存目录，按保存设置中两个独立开关复制图片和/或文件路径到剪贴板，然后退出编辑器；默认复制图片、不复制路径。
 - **贴图**：将当前合成图作为独立置顶窗口打开。
-- **完成**：按设置决定是否自动保存，再按设置决定是否复制图像，随后关闭编辑器。完成动作不等同于手动保存。
 - **放弃**或 Esc：关闭编辑器，不保存当前编辑结果。
-- 双击空白画布执行完成操作。保存成功及完成提示可显示最终图片缩略图。
+- 双击空白画布执行保存操作。保存成功提示可显示最终图片缩略图。
+
+原地编辑中的输出按钮含义更直接：**贴图** 会创建贴图并退出原地编辑；**保存** 会覆盖当前初始文件，按相同剪贴板开关复制内容并退出；双击空白画布执行同样的保存动作。初始自动保存不修改剪贴板，显式点击“复制图片”始终复制图片；**放弃** 会退出但不覆盖修改。单张原地编辑不显示“关闭全部”按钮。
 
 编辑器的滚轮和按键行为也会显示在画布下方的操作提示中；支持当前快捷键的按钮和菜单项会显示绑定提示。
 
 ### 贴图窗口
 
-每张贴图都是独立窗口。左键拖动移动；滚轮缩放（倍率限制 0.1–10）；方向键或 WASD 每次移动 1 像素；Esc 关闭当前贴图。
+每张贴图都是独立窗口。左键拖动移动；滚轮缩放（倍率限制 0.1–10）；方向键或 WASD 每次移动 1 像素；Esc 关闭当前贴图。贴图支持默认描边和阴影，外观可在设置的“贴图”页统一配置。
 
-右键菜单提供锁定/解锁、重置大小、复制图像、置顶开关、关闭当前贴图、透明度滑块及点击穿透。锁定后不能拖动、缩放或用方向键移动。点击穿透后无法从贴图本身打开右键菜单，使用 `Ctrl+Shift+T` 恢复贴图交互。
+右键菜单提供锁定/解锁、重置大小、复制图像、从文件打开替换此贴图、从文件打开新贴图、描边开关、阴影开关、置顶开关、关闭当前贴图、透明度滑块及点击穿透。替换会保留当前窗口的位置与缩放；取消文件选择不会更改贴图。锁定后不能拖动、缩放或用方向键移动。点击穿透后无法从贴图本身打开右键菜单，使用 `Ctrl+Shift+T` 恢复贴图交互。描边/阴影右键菜单只控制当前贴图是否显示，颜色、宽度和强度由全局设置控制。
 
-`F3` 从自动保存目录打开最新图片为新贴图。上一张/下一张热键切换自动目录中的 PNG 历史，并复用历史贴图窗口。隐藏/显示、关闭全部贴图也有全局热键。
+`F3` 按修改时间从自动保存目录打开最新且尚未贴出的有效 PNG；连续按下会依次寻找更早的未贴图片，全部已贴出时不重复创建。关闭某张贴图后可以再次用 F3 贴出；已删除或无法读取的历史图片会被跳过。上一张/下一张热键仍切换自动目录中的 PNG 历史，并复用历史贴图窗口。隐藏/显示、关闭全部贴图也有全局热键。
 
 ### 系统托盘
 
-托盘右键菜单包含：快速截图、编辑剪贴板图片、打开并编辑图片、设置、退出。菜单项的快捷键文字跟随设置中的当前绑定；快捷键被清除时，不显示过期提示。
+托盘右键菜单包含：快速截图、编辑剪贴板图片、打开并编辑图片、从文件打开新贴图、设置、退出。菜单项的快捷键文字跟随设置中的当前绑定；快捷键被清除时，不显示过期提示。
 
 ## 默认快捷键
 
@@ -123,14 +135,15 @@ py -3 -m venv .venv
 
 ## 设置和数据
 
-设置窗口分为常规、快捷键、保存、编辑器和日志五类：
+设置窗口分为常规、快捷键、保存、编辑器、日志和贴图六类：
 每页按使用场景显示带标题的设置组，较长的页面可在页内滚动；同一组件的颜色、线宽及其他参数集中在同一组。
 
 - **常规**：开机自动启动、光标捕获、放大镜、十字线、遮罩、锚点、通知和声音。
 - **快捷键**：全局热键开关、录制、清除和冲突检查。
-- **保存**：自动/手动目录、文件名模板、保存后打开目录、自动保存/复制。
-- **编辑器**：默认标注工具、公共标注颜色、线宽、字号、字体、文字对齐、箭头样式和马赛克选项。
+- **保存**：原地编辑初始截图目录、手动保存目录、文件名模板、保存后打开目录，以及保存时复制图片/文件路径的两个独立开关。
+- **编辑器**：默认标注工具、公共标注颜色、线宽、矩形/椭圆线型、字号、字体、文字对齐、箭头/线段样式和马赛克选项。
 - **日志**：日志开关、级别、轮转和保存目录设置。
+- **贴图**：新贴图默认描边、描边颜色/宽度、默认阴影、阴影颜色/强度。
 
 开机自动启动默认关闭，仅在 Windows 上可用；开启后写入当前用户的登录启动项，不需要管理员权限。旧配置缺少该选项时会补为关闭，但不会在启动时删除用户手动创建的同名启动项。
 源码运行时启动项指向当前 Python 和 `main.py`；用 PyInstaller 打包运行时指向当前 `.exe`，不依赖源码。移动打包后的程序后，手动运行新位置的程序一次即可更新启动路径。
@@ -143,6 +156,10 @@ py -3 -m venv .venv
 | 运行日志（默认） | 启动文件所在目录的 `logs` | 启动文件所在目录的 `logs` |
 | 自动保存与历史图片 | `~/Pictures/ScreenSnap/Auto` | `~/Pictures/ScreenSnap/Auto` |
 | 手动保存 | `~/Pictures/ScreenSnap/Manual` | `~/Pictures/ScreenSnap/Manual` |
+
+启动时若设置文件或贴图会话无法解析，会把原文件改名为带 `.broken-` 时间戳的备份；
+设置恢复默认值，贴图会话跳过无法恢复的记录。贴图私有缓存仅保留当前有效会话引用的图片，
+退出保存会话或下次启动时会清理孤儿缓存；损坏会话对应的缓存暂时保留，便于排查和恢复。
 
 日志保存目录可在日志设置中指定；只有目录已存在时才写入该位置。留空或指定目录不存在时，日志写入启动文件（源码运行时为 `main.py`，打包后为可执行文件）所在目录的 `logs` 子目录，不会尝试创建不存在的自定义目录。
 
@@ -171,10 +188,11 @@ Windows 用户目录按系统返回的图片目录解析。自动和手动目录
 
 1. `Application` 加载 `ConfigManager`，创建设置窗口、托盘和 `HotkeyManager`。
 2. `HotkeyManager` 在后台线程注册 `keyboard` 热键；触发时发出 Qt 信号，由主线程 `Application.dispatch()` 执行动作。
-3. 截图捕获返回图像、虚拟桌面边界和显示器信息；`MaskWindow` 管理选区，选区确认后传给 `EditorWindow`。
+3. 截图捕获返回图像、虚拟桌面边界和显示器信息；`MaskWindow` 管理选区。单选区单屏内默认进入 `InlineEditor` 原地编辑；多选区或跨屏选区传给 `EditorWindow`。
 4. `AnnotationCanvas` 持有底图和可编辑图元。绘制预览与最终图元尽量共用工厂/参数；`render_image()` 只导出底图和场景标注，不导出视图辅助提示。
-5. `EditorWindow` 发出保存、完成或贴图信号；`Application` 将结果交给保存、剪贴板或 `StickerManager`。
-6. 设置变更先经 `ConfigManager` 校验并保存，再刷新热键、托盘文字和已打开编辑器中的配置型控件。裁剪框颜色/宽度是当前编辑器局部状态，不进入该持久化链路。
+5. `EditorWindow` 发出保存或贴图信号；`Application` 将结果交给保存通知或 `StickerManager`。
+6. 设置变更先经 `ConfigManager` 校验并保存，再刷新热键、托盘文字、已打开编辑器中的配置型控件，以及已打开贴图的外观。裁剪框颜色/宽度是当前编辑器局部状态，不进入该持久化链路。
+7. 贴图创建时会把无源图片立即写入 `sticker_cache`，运行期主要持有显示用 `QPixmap` 和源文件路径；退出时保存贴图会话状态，重启后从源文件恢复。
 
 ### 修改功能时的检查清单
 
@@ -203,100 +221,39 @@ $env:QT_QPA_PLATFORM = 'offscreen'
 
 测试覆盖配置校验、热键录制、选区、编辑器工具和布局、箭头几何、裁剪、保存/剪贴板、贴图菜单与会话。离屏测试不能取代多显示器、混合 DPI、全局热键权限及真实桌面点击穿透验收。
 
-## Nuitka 打包
+## PyInstaller 打包
 
-准备环境（只需一次）：
+当前以 PyInstaller 为打包方式，它已包含在 [requirements.txt](requirements.txt) 中。Nuitka 暂有兼容问题，不在依赖清单中；如需使用，请单独安装并重新验证。
 
-```powershell
-python -m venv .venv
-.\.venv\Scripts\python -m pip install -r requirements.txt nuitka zstandard
-```
-
-打包前清理临时与调试文件：
-
-```powershell
-Remove-Item -Recurse -Force dist -ErrorAction SilentlyContinue
-Get-ChildItem -Recurse -Directory -Filter "__pycache__" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
-```
-
-下面四组命令覆盖「文件夹/单文件」×「无控制台/带控制台」，图标使用仓库根目录的 `icon.ico`。文件夹模式启动更快，适合开机自启；单文件模式只有一个 exe，便于分发。
+先按快速开始安装依赖，再选择文件夹或单文件、带控制台或无控制台模式构建。调试时优先使用带控制台模式。
 
 ### 文件夹模式 + 无控制台（成品）
 
 ```powershell
-nuitka --mode=standalone --enable-plugins=pyside6,upx --windows-console-mode=disable --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onedir --windowed --icon icon.ico --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
 ```
 
 ### 文件夹模式 + 带控制台（调试）
 
 ```powershell
-nuitka --mode=standalone --enable-plugins=pyside6,upx --windows-console-mode=force --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onedir --console --icon icon.ico --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
 ```
 
 ### 单文件模式 + 无控制台
 
 ```powershell
-nuitka --mode=onefile --enable-plugins=pyside6,upx --windows-console-mode=disable --onefile-no-compression --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --icon icon.ico --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
 ```
 
 ### 单文件模式 + 带控制台（调试）
 
 ```powershell
-nuitka --mode=onefile --enable-plugins=pyside6,upx --windows-console-mode=force --onefile-no-compression --windows-icon-from-ico=icon.ico --output-dir=dist --output-filename=ScreenSnap.exe --product-name=ScreenSnap --product-version=1.0.0.0 --file-version=1.0.0.0 --file-description=ScreenSnap --assume-yes-for-downloads --include-data-files=miniconda3\envs\base-py310\Library\bin\ffi.dll=ffi.dll --include-package=ui main.py
-```
-
-产物为 `dist\main.dist\ScreenSnap.exe`（文件夹模式，分发时拷贝整个目录）或 `dist\ScreenSnap.exe`（单文件模式）。建议先构建带控制台的版本确认无报错，再出无控制台成品。
-
-打包要点：
-
-- `--include-package=ui`：`ui/__init__.py` 用 `importlib` 懒加载子模块，Nuitka 静态分析不到，缺少时运行报 `No module named 'ui.settings_window'`。
-- `--include-data-files=...\ffi.dll=ffi.dll`：Conda/Miniconda 派生的 Python 把 libffi 命名为 `ffi.dll` 且放在环境 `Library\bin` 下，Nuitka 不会自动拷贝，缺少时启动即报 `IMPORT_HARD_CTYPES`。改用 python.org 官方 CPython 时不需要该参数。
-- `--windows-icon-from-ico` 只影响 exe 文件图标；托盘图标由 `main.py` 的 `tray_icon()` 现场绘制。
-- 单文件模式必须加 `--onefile-no-compression`，否则与 UPX 二次压缩反而更大更慢。
-- UPX 需在 PATH 中（本项目验证环境为 UPX 4.0.1），否则用 `--upx-binary=<upx.exe 路径>` 指定。
-- 无可用 MSVC 时 Nuitka 会自动下载 MinGW64，`--assume-yes-for-downloads` 用于免交互确认。
-- 调试阶段不要加 `--remove-output`，保留 `dist\main.build` 可增量编译；正式出包时再加。
-- 开机自动启动写入的是 exe 自身路径，程序每次启动会同步一次，移动 exe 后手动运行一次即可更新。
-
-## 可选：PyInstaller 打包
-
-Nuitka 是本项目的默认打包方式；PyInstaller 作为备选保留，命令更简单但产物更大、无编译优化。
-
-安装 PyInstaller：
-
-```powershell
-.\.venv\Scripts\python -m pip install pyinstaller
-```
-
-下面四组命令与 Nuitka 一一对应：「文件夹/单文件」×「无控制台/带控制台」。UPX 用 `--upx-dir` 指定目录（本机为 `dev_env\upx-4.0.1-win64`），upx.exe 不会被打进产物，运行时不需要它；不想压缩就删掉该参数。
-
-### 文件夹模式 + 无控制台（成品）
-
-```powershell
-.\.venv\Scripts\pyinstaller --noconfirm --clean --onedir --windowed --icon icon.ico --upx-dir "dev_env\upx-4.0.1-win64" --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
-```
-
-### 文件夹模式 + 带控制台（调试）
-
-```powershell
-.\.venv\Scripts\pyinstaller --noconfirm --clean --onedir --console --icon icon.ico --upx-dir "dev_env\upx-4.0.1-win64" --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
-```
-
-### 单文件模式 + 无控制台
-
-```powershell
-.\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --windowed --icon icon.ico --upx-dir "dev_env\upx-4.0.1-win64" --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
-```
-
-### 单文件模式 + 带控制台（调试）
-
-```powershell
-.\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --console --icon icon.ico --upx-dir "dev_env\upx-4.0.1-win64" --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
+.\.venv\Scripts\pyinstaller --noconfirm --clean --onefile --console --icon icon.ico --name ScreenSnap --hidden-import ui.settings_window --hidden-import ui.tray_menu --hidden-import ui.capture_notification main.py
 ```
 
 产物为 `dist\ScreenSnap\ScreenSnap.exe`（文件夹模式，分发时拷贝整个 `dist\ScreenSnap` 目录）或 `dist\ScreenSnap.exe`（单文件模式）。
 
-与 Nuitka 的对应关系：`--onedir`/`--onefile` 对应 `--mode=standalone`/`--mode=onefile`，`--windowed`/`--console` 对应 `--windows-console-mode=disable`/`force`，`--icon` 对应 `--windows-icon-from-ico`，`--hidden-import` 对应 `--include-package`。
+`--onedir` 生成可整体分发的文件夹，`--onefile` 生成单个可执行文件；`--console` 便于查看启动错误，`--windowed` 隐藏控制台。
 
 首次打包请**先选带控制台的两组中之一**构建，确认没有 traceback 后再出窗口版。
 
@@ -314,7 +271,7 @@ Nuitka 是本项目的默认打包方式；PyInstaller 作为备选保留，命�
 | 打包后热键不触发，源码运行正常 | `keyboard` 的全局钩子对不同权限等级的进程无效，和是否打包无关 | 以管理员身份运行，或对目标进程保持同级权限；详见「已知限制」 |
 | 开机自动启动写了源码路径 | 自查是否从源码运行；PyInstaller 同样会设置 `sys.frozen`，`core/startup.py` 会写入 exe 路径 | 用打包后的 exe 手动启动一次即可同步注册表；移动位置后再启动一次同样会更新 |
 
-PyInstaller 不会编译 Python 代码，产物通常明显大于 Nuitka；对体积敏感时优先使用上面的 Nuitka 命令。
+PyInstaller 当前为推荐打包方式；窗口版出现启动问题时先用带控制台模式定位错误。
 
 一般不需要管理员权限；只有明确需要操作受保护窗口时才考虑提升权限。Windows 全局热键在权限不同的应用上可能无法触发。
 
@@ -322,6 +279,8 @@ PyInstaller 不会编译 Python 代码，产物通常明显大于 Nuitka；对�
 
 - 混合 DPI 多显示器的物理像素映射需在目标设备验证。
 - 系统光标无法读取时，捕获光标与未捕获光标的两种截图可能相同。
+- 原地编辑首版只支持单选区且完整位于一个显示器内；多选区和跨屏选区会自动回退到完整编辑窗口。
+- 原地编辑首版隐藏图像旋转组，避免旋转/翻转改变画布尺寸后引发选区和 DPI 坐标错位。
 - 橡皮擦只移除标注，不擦除原始截图像素；马赛克和裁剪需要框选区域。
 - 贴图历史只读取自动保存目录中的 PNG，没有独立图库或历史文件删除界面。
 - 点击穿透依赖操作系统窗口输入行为；恢复交互通过全局快捷键完成。

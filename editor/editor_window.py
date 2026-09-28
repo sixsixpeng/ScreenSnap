@@ -4,11 +4,10 @@ import os
 import re
 import logging
 from datetime import datetime
-from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QSignalBlocker, QMimeData
 from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QMessageBox,
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                                QDialog, QDialogButtonBox, QDial, QDoubleSpinBox, QHBoxLayout, QLabel,
                                QStyle, QSlider, QSpinBox, QGraphicsView)
 
@@ -23,8 +22,8 @@ class EditorWindow(QMainWindow):
     """将工具栏命令接入画布，并统一处理保存、剪贴板与贴图输出。"""
 
     image_saved = Signal(str, object)
-    image_completed = Signal(object)
     sticker_requested = Signal(object)
+    close_all_requested = Signal()
     status = Signal(str)
     pen_color_changed = Signal(str)
     setting_changed = Signal(str, object)
@@ -57,9 +56,9 @@ class EditorWindow(QMainWindow):
         layout.addWidget(self.toolbar)
         layout.addWidget(self.canvas, 1)
         self.operation_tips = QLabel(
-            "拖动绘制标注 | 选择工具可移动或调整标注 | 滚轮上下滚动，Ctrl/Alt+滚轮横向移动 | "
-            "用滑块或数值调整缩放 | 右键/中键拖动或空格拖动平移 | "
-            "双击空白处完成保存 | Esc 放弃编辑"
+            "拖动绘制标注 | 选择工具可快速选中、移动或调整标注 | "
+            "双击空白处保存并退出 | 滚轮上下滚动，Ctrl/Alt+滚轮横向移动 | "
+            "用滑块或数值调整缩放 | 右键/中键拖动或空格拖动平移 | Esc 放弃编辑"
         )
         self.operation_tips.setObjectName("editorOperationTips")
         self.operation_tips.setWordWrap(True)
@@ -93,10 +92,10 @@ class EditorWindow(QMainWindow):
         self.toolbar.setting_changed.connect(self.set_annotation_setting)
         self.toolbar.crop_style_changed.connect(self.set_crop_style)
         self.toolbar.command.connect(self.execute)
-        # 画布取得焦点时仍由窗口级快捷键处理 Esc，避免误执行“完成”。
+        # 画布取得焦点时仍由窗口级快捷键处理 Esc，避免误执行保存。
         self.escape_shortcut = QShortcut(QKeySequence("Esc"), self)
         self.escape_shortcut.activated.connect(self.close)
-        self.canvas.confirmed.connect(self.finish)
+        self.canvas.confirmed.connect(lambda: self.execute("save"))
         self.canvas.cancelled.connect(self.close)
         self.canvas.color_picked.connect(self.apply_picked_color)
 
@@ -131,6 +130,8 @@ class EditorWindow(QMainWindow):
         self.settings[key] = value
         if key in TOOL_WIDTH_KEYS.values():
             self.canvas.set_selected_width(value)
+        elif key in ("rect_style", "ellipse_style"):
+            self.canvas.set_selected_line_style(value)
         elif key == "font":
             self.canvas.set_selected_font(value)
         elif key == "font_size":
@@ -146,6 +147,8 @@ class EditorWindow(QMainWindow):
             self.canvas.crop_color = value
         elif key == "crop_width":
             self.canvas.crop_width = value
+        self.settings[key] = value
+        self.setting_changed.emit(key, value)
         self.canvas.viewport().update()
 
     def update_cursor_switch(self):
@@ -157,8 +160,8 @@ class EditorWindow(QMainWindow):
         """所有导出操作共用同一张合成图，避免保存与剪贴板结果不一致。"""
         return self.canvas.render_image()
 
-    def save(self, automatic=False, copy_to_clipboard=False):
-        """分别使用自动/手动目录；同名文件追加序号，避免覆盖历史。"""
+    def allocate_path(self, automatic=False):
+        """首次保存时分配唯一文件名；之后保存复用 last_path 覆盖。"""
         directory = resolved_dir(self.settings, "auto_dir" if automatic else "manual_dir")
         directory.mkdir(parents=True, exist_ok=True)
         prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", datetime.now().strftime(self.settings["filename"])).strip(" .") or "Capture"
@@ -167,30 +170,27 @@ class EditorWindow(QMainWindow):
         while path.exists():
             path = directory / f"{prefix}_{number}.png"
             number += 1
+        return path
+
+    def save(self, automatic=False, copy_to_clipboard=False, force_copy_image=False):
+        """首次保存分配文件名；后续保存覆盖同一路径，避免重复文件。"""
+        path = self.last_path or self.allocate_path(automatic)
         result = self.output_image()
         if not result.save(str(path), "PNG"):
             raise OSError(f"图片保存失败：{path}")
         self.last_path = path
         self.image_saved.emit(str(path), result)
-        if copy_to_clipboard:
+        if (copy_to_clipboard and (self.settings["copy_saved_image"] or self.settings["copy_saved_path"])) or force_copy_image:
             payload = QMimeData()
-            payload.setText(str(path))
-            payload.setImageData(result)
+            if self.settings["copy_saved_path"]:
+                payload.setText(str(path))
+            if self.settings["copy_saved_image"] or force_copy_image:
+                payload.setImageData(result)
             QGuiApplication.clipboard().setMimeData(payload)
-            self.status.emit("图片和路径已复制")
+            self.status.emit("已复制保存内容")
         if self.settings["open_dir"]:
-            os.startfile(str(directory)) if os.name == "nt" else None
+            os.startfile(str(path.parent)) if os.name == "nt" else None
         return path
-
-    def finish(self):
-        """双击完成时按设置自动保存、复制，然后关闭编辑器。"""
-        if self.settings["auto_save"]:
-            self.save(automatic=True)
-        else:
-            self.image_completed.emit(self.output_image())
-        if self.settings["auto_copy"]:
-            QGuiApplication.clipboard().setImage(self.output_image())
-        self.close()
 
     def invalidate_rotation_reset(self):
         self.rotation_reset_state = None
@@ -294,14 +294,15 @@ class EditorWindow(QMainWindow):
             self.sticker_requested.emit(self.output_image())
         elif action == "save":
             self.save(copy_to_clipboard=True)
+            self.close()
         elif action == "copy":
-            self.save(copy_to_clipboard=True)
+            self.save(copy_to_clipboard=True, force_copy_image=True)
         elif action == "path":
             if not self.last_path:
                 self.save()
             QGuiApplication.clipboard().setText(str(self.last_path))
             self.status.emit("文件路径已复制")
-        elif action == "finish":
-            self.finish()
+        elif action == "close_all_editors":
+            self.close_all_requested.emit()
         elif action == "discard":
             self.close()

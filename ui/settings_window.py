@@ -11,6 +11,7 @@ from ui.settings_hotkey import HotkeyPage
 from ui.settings_save import SavePage
 from ui.settings_editor import EditorPage
 from ui.settings_log import LogPage
+from ui.settings_sticker import StickerPage
 from core.startup import set_start_on_boot
 
 
@@ -53,7 +54,8 @@ class SettingsWindow(QWidget):
                                   ("快捷键", QStyle.SP_ComputerIcon, HotkeyPage),
                                   ("保存", QStyle.SP_DialogSaveButton, SavePage),
                                   ("编辑器", QStyle.SP_FileDialogDetailedView, EditorPage),
-                                  ("日志", QStyle.SP_FileIcon, LogPage)]:
+                                  ("日志", QStyle.SP_FileIcon, LogPage),
+                                  ("贴图", QStyle.SP_DesktopIcon, StickerPage)]:
             self.navigation.addItem(QListWidgetItem(self.style().standardIcon(icon), title))
             self.pages.addWidget(page(self.config, self.persist, self.recording.emit)
                                  if page is HotkeyPage else page(self.config, self.persist))
@@ -90,11 +92,15 @@ class SettingsWindow(QWidget):
     def set_annotation_setting(self, key, value):
         """从编辑器工具栏更改默认标注参数并写入设置文件。"""
         self.config.data[key] = value
-        control = self.pages.widget(0 if key == "cursor" else 3).controls[key]
+        page = self.pages.widget(0 if key == "cursor" else 3)
+        control = page.color_buttons[key] if key == "crop_color" else page.controls[key]
         with QSignalBlocker(control):
-            if key == "cursor":
+            if key == "crop_color":
+                control.set_color(value)
+            elif key == "cursor":
                 control.setChecked(value)
-            elif key in ("font", "mosaic_mode", "annotation_tool", "text_alignment", "arrow_style"):
+            elif key in ("font", "mosaic_mode", "annotation_tool", "text_alignment", "arrow_style",
+                         "rect_style", "ellipse_style"):
                 control.setCurrentIndex(control.findData(value))
             else:
                 control.setValue(value)
@@ -126,7 +132,7 @@ class SettingsWindow(QWidget):
 
     def populate_pages_only(self):
         """配置导入后重建页面内容，保留原有导航分类和选中项。"""
-        for page in (GeneralPage, HotkeyPage, SavePage, EditorPage, LogPage):
+        for page in (GeneralPage, HotkeyPage, SavePage, EditorPage, LogPage, StickerPage):
             self.pages.addWidget(page(self.config, self.persist, self.recording.emit)
                                  if page is HotkeyPage else page(self.config, self.persist))
 

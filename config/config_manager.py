@@ -2,6 +2,8 @@
 
 import copy
 import json
+import logging
+from time import time_ns
 import re
 from pathlib import Path
 
@@ -23,20 +25,27 @@ DEFAULTS = {
         "touch": "ctrl+shift+t",
     },
     "bubble": True, "capture_notification": True, "save_notification": True,
-    "sticker_notification": True, "sound": False, "auto_copy": True,
-    "auto_save": True, "auto_dir": "", "manual_dir": "",
+    "sticker_notification": True, "sound": False,
+    "auto_dir": "", "manual_dir": "",
+    "inline_edit": True,
     "filename": "_%Y%m%d_%H%M%S", "open_dir": False,
+    "copy_saved_image": True, "copy_saved_path": False,
+    "sticker_border_enabled": True, "sticker_border_color": "#00ad91",
+    "sticker_border_width": 2, "sticker_shadow_enabled": True,
+    "sticker_shadow_color": "#000000", "sticker_shadow_strength": 35,
     "magnifier": True, "crosshair": True, "crosshair_color": "#ff0000", "crosshair_width": 1,
     "mask_theme": "dark", "mask_opacity": 50,
     "anchor_style": "border", "selection_border_color": "#ff0000",
     "cursor": False, "history_limit": 100,
     "last_capture_rect": [],
     "annotation_tool": "select", "text_alignment": "left", "arrow_style": "filled",
-    "pen_width": 3, "rect_width": 3, "ellipse_width": 3, "arrow_width": 3,
-    "marker_width": 3, "eraser_width": 3, "pen_color": "#ff5252",
+    "rect_style": "solid", "ellipse_style": "solid",
+    "pen_width": 2, "rect_width": 2, "ellipse_width": 2, "arrow_width": 2,
+    "marker_width": 2, "eraser_width": 30, "pen_color": "#ff0000",
+    "crop_color": "#00ad91", "crop_width": 2,
     "editor_border_color": "#000000", "editor_border_width": 1,
     "marker_opacity": 38, "font": "", "font_size": 18,
-    "line_spacing": 1.2, "mosaic_size": 12,
+    "line_spacing": 1.2, "mosaic_size": 10,
     "mosaic_mode": "blocks",
     "logging_enabled": True, "log_level": "INFO", "log_when": "midnight", "log_dir": "",
 }
@@ -75,6 +84,16 @@ def validate(data):
             raise ValueError("编辑区边框颜色必须是六位十六进制颜色")
         elif key == "editor_border_width" and not 1 <= value <= 12:
             raise ValueError("编辑区边框宽度必须在 1 到 12 像素之间")
+        elif key == "crop_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("裁剪框颜色必须是六位十六进制颜色")
+        elif key == "crop_width" and not 1 <= value <= 12:
+            raise ValueError("裁剪框线宽必须在 1 到 12 像素之间")
+        elif key in ("sticker_border_color", "sticker_shadow_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("贴图颜色必须是六位十六进制颜色")
+        elif key == "sticker_border_width" and not 0 <= value <= 20:
+            raise ValueError("贴图描边宽度必须在 0 到 20 像素之间")
+        elif key == "sticker_shadow_strength" and not 0 <= value <= 100:
+            raise ValueError("贴图阴影强度必须在 0 到 100 之间")
         elif key == "crosshair_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("十字线颜色必须是六位十六进制颜色")
         elif key == "crosshair_width" and not 1 <= value <= 8:
@@ -98,8 +117,13 @@ def validate(data):
                 raise ValueError("未知标注工具")
         elif key == "text_alignment" and value not in ("left", "center", "right"):
             raise ValueError("未知文字对齐方式")
-        elif key == "arrow_style" and value not in ("filled", "open", "double", "double_filled"):
+        elif key == "arrow_style" and value not in (
+            "filled", "open", "double", "double_filled",
+            "solid_line", "open_line", "solid_dash", "open_dash",
+        ):
             raise ValueError("未知箭头样式")
+        elif key in ("rect_style", "ellipse_style") and value not in ("solid", "dash"):
+            raise ValueError("未知线型样式")
         elif key == "last_capture_rect" and (value and (
             len(value) != 4 or any(type(number) is not int for number in value) or
             value[2] <= 0 or value[3] <= 0
@@ -126,8 +150,16 @@ class ConfigManager:
             self.data = copy.deepcopy(DEFAULTS)
             self.save()
             return self.data
-        loaded = json.loads(self.path.read_text(encoding="utf-8"))
-        self.data = validate(loaded)
+        try:
+            loaded = json.loads(self.path.read_text(encoding="utf-8"))
+            self.data = validate(loaded)
+        except (OSError, UnicodeError, ValueError) as error:
+            backup = self.path.with_name(f"{self.path.name}.broken-{time_ns()}")
+            self.path.replace(backup)
+            logging.getLogger("screensnap").warning("配置文件无效，已备份到 %s: %s", backup, error)
+            self.data = copy.deepcopy(DEFAULTS)
+            self.save()
+            return self.data
         if self.data != loaded:
             self.save()
         return self.data

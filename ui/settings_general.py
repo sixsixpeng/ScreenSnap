@@ -17,7 +17,6 @@ class GeneralPage(SettingsPage):
         self.check("sticker_notification", "贴图通知", "创建或粘贴贴图后显示托盘提示")
         self.check("sound", "完成音效", "完成截图时播放提示音")
         self.group("截图内容")
-        self.check("auto_copy", "自动复制图片", "确认编辑后复制到剪贴板")
         self.check("cursor", "捕获鼠标", "在截图原图中包含鼠标指针")
         self.group("定位辅助")
         self.check("magnifier", "实时放大镜", "截图时放大鼠标附近像素")

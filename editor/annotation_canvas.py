@@ -37,8 +37,8 @@ class AnnotationCanvas(QGraphicsView):
     def __init__(self, image, settings, alternate=None):
         super().__init__()
         self.settings = settings
-        self.crop_color = "#00ad91"
-        self.crop_width = 2
+        self.crop_color = settings["crop_color"]
+        self.crop_width = settings["crop_width"]
         self.original = image.copy()
         self.image = image.copy()
         self.alternate = alternate.copy() if alternate else None
@@ -235,6 +235,17 @@ class AnnotationCanvas(QGraphicsView):
         if selected:
             self.checkpoint()
 
+    def set_selected_line_style(self, style):
+        """对所选矩形或椭圆切换实线/虚线线型。"""
+        selected = [item for item in self.scene_data.selectedItems()
+                    if hasattr(item, "pen") and item.__class__.__name__ in ("QGraphicsRectItem", "QGraphicsEllipseItem")]
+        for item in selected:
+            pen = item.pen()
+            pen.setStyle(Qt.DashLine if style == "dash" else Qt.SolidLine)
+            item.setPen(pen)
+        if selected:
+            self.checkpoint()
+
     def set_selected_color(self, color):
         """当前选中的线条或文字使用新颜色，后续新标注也使用该颜色。"""
         selected = self.scene_data.selectedItems()
@@ -317,11 +328,13 @@ class AnnotationCanvas(QGraphicsView):
                         Qt.RoundCap, Qt.RoundJoin)
         color = QColor(self.settings["pen_color"])
         width = self.tool_width()
+        line_style = Qt.DashLine if self.tool in ("rect", "ellipse") and \
+            self.settings.get(f"{self.tool}_style", "solid") == "dash" else Qt.SolidLine
         if self.tool == "marker":
             # 百分比只作用于荧光笔，普通画笔保持不透明；预览与提交共用同一画笔。
             color.setAlpha(round(self.settings.get("marker_opacity", 38) * 255 / 100))
             width = max(12, width * 5)
-        return QPen(color, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
+        return QPen(color, width, line_style, Qt.RoundCap, Qt.RoundJoin)
 
     def tool_width(self):
         return self.settings.get(TOOL_WIDTH_KEYS.get(self.tool, "pen_width"),
@@ -676,10 +689,10 @@ class AnnotationCanvas(QGraphicsView):
                 self.start = None
                 return
             else:
+                style = self.settings.get(f"{self.tool}_style", "solid") if self.tool in ("rect", "ellipse") else \
+                    (self.settings.get("arrow_style", "filled") if self.tool == "arrow" else "filled")
                 item = shape(self.tool, self.start, end,
-                             self.settings["pen_color"], self.tool_width(),
-                             self.settings.get("arrow_style", "filled")
-                             if self.tool == "arrow" else "filled")
+                             self.settings["pen_color"], self.tool_width(), style)
             self.scene_data.addItem(item)
             self.start = None
             self.checkpoint()
