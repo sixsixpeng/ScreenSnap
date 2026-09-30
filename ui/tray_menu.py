@@ -2,40 +2,55 @@
 
 from PySide6.QtWidgets import QMenu, QStyle
 from core.constants import shortcut_suffix
+from ui.action_icons import action_icon
 
 
 def make_tray_menu(app, capture, settings, quit_app, edit_clipboard=None, open_image=None,
                    hotkeys=None, open_sticker=None, paste_clipboard=None, sticker_panel=None):
     """只组装菜单动作，截图与退出逻辑仍由主程序持有。"""
     menu = QMenu()
-    menu.addAction(app.style().standardIcon(QStyle.SP_DesktopIcon),
-                   f"快速截图{shortcut_suffix(hotkeys, 'capture')}", capture)
+
+    def add_action(icon, text, help_text, callback=None):
+        action = menu.addAction(icon, text)
+        action.setToolTip(help_text)
+        if callback is not None:
+            action.triggered.connect(callback)
+        return action
+
+    add_action(action_icon("camera"),
+               f"快速截图{shortcut_suffix(hotkeys, 'capture')}",
+               "立即启动全屏截图与区域选择。", capture)
     menu.addSeparator()
-    for label, icon, action, suffix in [("贴剪贴板内容", QStyle.SP_FileDialogContentsView,
+    for label, icon, action, suffix in [("贴剪贴板内容", action_icon("clipboard_image"),
                                          paste_clipboard, "paste_clipboard"),
-                                        ("贴图管理", QStyle.SP_FileDialogListView, sticker_panel,
+                                        ("贴图管理", action_icon("sticker"), sticker_panel,
                                          "sticker_panel")]:
         if action is None:
             continue
-        menu.addAction(app.style().standardIcon(icon),
-                       f"{label}{shortcut_suffix(hotkeys, suffix)}", action)
-    clipboard_action = menu.addAction(
-        app.style().standardIcon(QStyle.SP_FileDialogContentsView),
-        f"编辑剪贴板图片{shortcut_suffix(hotkeys, 'edit_clipboard')}"
+        help_text = ("将剪贴板中的图片或文件内容作为新贴图显示。" if suffix == "paste_clipboard"
+                     else "打开贴图管理窗口，查找和管理当前贴图。")
+        add_action(icon, f"{label}{shortcut_suffix(hotkeys, suffix)}", help_text, action)
+    clipboard_action = add_action(
+        action_icon("clipboard_edit"),
+        f"编辑剪贴板图片{shortcut_suffix(hotkeys, 'edit_clipboard')}",
+        "将剪贴板中的图片载入编辑器；剪贴板不是图片时不会打开。"
     )
     if edit_clipboard is not None:
         clipboard_action.triggered.connect(edit_clipboard)
-    open_action = menu.addAction(
-        app.style().standardIcon(QStyle.SP_DialogOpenButton),
-        f"打开并编辑图片{shortcut_suffix(hotkeys, 'open_image')}"
+    open_action = add_action(
+        action_icon("edit"),
+        f"打开并编辑图片{shortcut_suffix(hotkeys, 'open_image')}",
+        "从文件选择一张图片，在编辑器中标注、变换并保存。"
     )
     if open_image is not None:
         open_action.triggered.connect(open_image)
     if open_sticker is not None:
-        menu.addAction(app.style().standardIcon(QStyle.SP_DialogOpenButton),
-                       "从文件打开新贴图", open_sticker)
+        add_action(action_icon("sticker"),
+                   f"从文件打开新贴图{shortcut_suffix(hotkeys, 'open_sticker_file')}",
+                   "选择图片文件并直接创建一个贴图窗口。", open_sticker)
     menu.addSeparator()
-    menu.addAction(app.style().standardIcon(QStyle.SP_FileDialogDetailedView), "设置", settings)
+    add_action(action_icon("settings"), "设置", "打开设置窗口，调整截图、保存、快捷键和外观。", settings)
     menu.addSeparator()
-    menu.addAction(app.style().standardIcon(QStyle.SP_DialogCloseButton), "退出", quit_app)
+    add_action(app.style().standardIcon(QStyle.SP_DialogCloseButton), "退出",
+               "关闭 ScreenSnap 并结束后台运行。", quit_app)
     return menu

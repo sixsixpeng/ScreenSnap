@@ -16,6 +16,8 @@ class HotkeyPage(SettingsPage):
         self.group("全局热键")
         self.check("hotkeys_enabled", "启用全局热键", "关闭后所有全局快捷键暂停注册")
         self.group("截图快捷键")
+        self.check("capture_hotkey_suppress", "拦截截图快捷键输入",
+               "启用后，截图热键按下/释放会由系统钩子拦截，不传给当前前台应用；释放按键后解除拦截。某些系统权限策略可能限制此能力")
         for action, label in HOTKEY_LABELS.items():
             if action == "edit_clipboard":
                 self.group("编辑快捷键")

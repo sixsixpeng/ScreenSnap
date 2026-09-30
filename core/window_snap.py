@@ -11,11 +11,12 @@ from ctypes import wintypes
 from dataclasses import dataclass
 
 from PySide6.QtCore import QRect
+from PySide6.QtWidgets import QApplication
 
 from core.screen_mapping import logical_point_to_physical, native_rect, physical_rect_to_logical
 from logger.log_rate import log_every
 
-# 沿 Z 序取下一个窗口，用于跳过本进程的贴图。
+# 沿 Z 序取下一个窗口，用于跳过显式标记的截图遮罩和贴图。
 GW_HWNDNEXT = 2
 # GetAncestor 的取值：顶层根窗口。
 GA_ROOT = 2
@@ -77,9 +78,10 @@ def window_under_point(point):
 
 
 def top_window_at(x, y):
-    """按 Z 序找到第一个覆盖该物理点、可见且不属于本进程的顶层窗口。
+    """按 Z 序找到第一个覆盖该物理点、可见且不是本程序覆盖层的窗口。
 
-    遮罩与贴图都是本进程置顶窗口，命中测试会先碰到它们；这里一次枚举并命中即停，
+    遮罩与贴图会显式标记为穿透窗口；同进程的普通窗口仍可成为识别目标。
+    这里一次枚举并命中即停，
     比沿 Z 序逐个下移（可能上百个窗口）更快，也不会漏掉真正位于鼠标下的窗口。
     """
     if os.name != "nt":
@@ -88,7 +90,6 @@ def top_window_at(x, y):
     user32 = ctypes.windll.user32
     desktop = user32.GetDesktopWindow()
     shell = user32.GetShellWindow()
-    pid = os.getpid()
     found = []
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
@@ -98,7 +99,7 @@ def top_window_at(x, y):
         if (handle in (desktop, shell) or is_cloaked(handle)
                 or window_class(user32, handle) in IGNORED_CLASSES
                 or not user32.IsWindowVisible(handle) or user32.IsIconic(handle)
-                or process_of(user32, handle) == pid):
+                or ignored_app_window(handle)):
             return True
         if not covers(user32, handle, x, y):
             return True
@@ -125,6 +126,19 @@ def is_cloaked(handle):
         return False
 
 
+def ignored_app_window(handle):
+    """判断句柄是否对应本程序显式标记为穿透识别的 Qt 顶层窗口。"""
+    app = QApplication.instance()
+    if app is None:
+        return False
+    for widget in app.topLevelWidgets():
+        if not widget.property("screensnap_overlay"):
+            continue
+        if int(widget.winId()) == int(handle) or int(widget.effectiveWinId()) == int(handle):
+            return True
+    return False
+
+
 def is_tool_window(user32, handle):
     """WS_EX_TOOLWINDOW 是悬浮工具条/挂件窗口，不适合作为吸附目标。"""
     try:
@@ -135,7 +149,7 @@ def is_tool_window(user32, handle):
 
 
 def visible_targets():
-    """枚举可吸附的可见窗口（排除本进程与桌面），供拖动开始时缓存一次。"""
+    """枚举可吸附的可见窗口（排除桌面与本程序覆盖层），供拖动开始时缓存一次。"""
     if os.name != "nt":
         return []
     logger = logging.getLogger("screensnap")
@@ -143,14 +157,13 @@ def visible_targets():
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     desktop = user32.GetDesktopWindow()
     shell = user32.GetShellWindow()
-    pid = os.getpid()
     targets = []
 
     def collect(handle, unused):
         if handle in (desktop, shell) or is_cloaked(handle) or not user32.IsWindowVisible(handle) \
                 or user32.IsIconic(handle):
             return True
-        if window_class(user32, handle) in IGNORED_CLASSES or process_of(user32, handle) == pid:
+        if window_class(user32, handle) in IGNORED_CLASSES or ignored_app_window(handle):
             return True
         bounds = wintypes.RECT()
         if not user32.GetWindowRect(handle, ctypes.byref(bounds)):

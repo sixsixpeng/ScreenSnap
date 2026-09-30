@@ -24,7 +24,8 @@ class HotkeyManager(QObject):
 
     def register(self, settings):
         """拷贝当前设置，防止主线程修改字典时工作线程读到半成品。"""
-        self.requests.put(dict(enabled=settings["hotkeys_enabled"], bindings=settings["hotkeys"].copy()))
+        self.requests.put(dict(enabled=settings["hotkeys_enabled"], bindings=settings["hotkeys"].copy(),
+                    suppress_capture=bool(settings.get("capture_hotkey_suppress", False))))
 
     def set_paused(self, paused):
         """立即屏蔽回调，覆盖后台线程尚未完成热键注销的短暂窗口。"""
@@ -61,8 +62,10 @@ class HotkeyManager(QObject):
                 if not binding:
                     continue
                 try:
+                    suppress = request.get("suppress_capture", False) and action in (
+                        "capture", "repeat", "fullscreen", "monitor")
                     handle = keyboard.add_hotkey(
-                        binding, lambda current=action: self.emit_action(current), suppress=False
+                        binding, lambda current=action: self.emit_action(current), suppress=suppress
                     )
                 except (ValueError, OSError) as error:
                     # 单个热键被占用时记录并继续，其余可用热键仍然生效。

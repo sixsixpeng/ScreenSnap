@@ -2,36 +2,210 @@
 
 import json
 import logging
+import hashlib
 from time import time_ns
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QObject, Signal
-from PySide6.QtGui import QImage
+from PySide6.QtCore import Qt, QObject, Signal, QBuffer, QIODevice, QTimer, QPoint
+from PySide6.QtGui import QCursor, QGuiApplication, QImage
 from PySide6.QtWidgets import QFileDialog, QMessageBox
+from PIL import Image as PillowImage
 
-from core.path_utils import data_dir, resolved_dir
+from core.path_utils import configured_dir, data_dir
 from core.window_snap import window_logical_rect
-from sticker.clipboard_source import read_clipboard
+from logger.log_rate import log_every
+from sticker.clipboard_source import ClipboardSource, read_clipboard
 from sticker.sticker_item import StickerItem
 
 # 贴图会话中允许保留的原始剪贴板类型。
-ORIGIN_KINDS = ("text", "color", "files")
+ORIGIN_KINDS = ("text", "html", "color", "files")
+DEFAULT_HISTORY_LIMIT = 100
+MAX_STICKER_IMAGE_DIMENSION = 4096
 
 
 class StickerManager(QObject):
     """集中维护独立贴图、自动保存目录的历史及退出会话。"""
 
     changed = Signal()
+    edit_requested = Signal(object)
 
-    def __init__(self, settings):
+    def __init__(self, settings, clipboard=None):
         super().__init__()
         self.settings = settings
+        self.placement_states = self._load_placement_states()
+        self.last_placement = (list(self.placement_states.values())[-1]
+                       if self.placement_states else None)
         self.items = []
+        self.active_sticker = None
+        self.focused_sticker = None
+        self.selected_items = set()
         self.history_index = 0
         self.history_sticker = None
+        self.clipboard = clipboard or QGuiApplication.clipboard()
+        self.clipboard_history = []
+        self.clipboard_history_keys = []
+        self.clipboard_history_index = -1
+        self._clipboard_persist_timer = QTimer(self)
+        self._clipboard_persist_timer.setSingleShot(True)
+        self._clipboard_persist_timer.setInterval(350)
+        self._clipboard_persist_timer.timeout.connect(self.persist_clipboard_history)
+        self._load_clipboard_history()
+        self._persist_timer = QTimer(self)
+        self._persist_timer.setSingleShot(True)
+        self._persist_timer.setInterval(250)
+        self._persist_timer.timeout.connect(self.persist)
+        self.clipboard.dataChanged.connect(self._clipboard_changed)
+        self._clipboard_changed()
 
-    def add(self, image, source=None, origin=None):
+    @staticmethod
+    def _clipboard_source_key(source):
+        buffer = QBuffer()
+        buffer.open(QIODevice.WriteOnly)
+        source.image.save(buffer, "PNG")
+        image_digest = hashlib.sha256(bytes(buffer.data())).digest()
+        buffer.close()
+        return (source.kind, source.text, source.html, tuple(source.paths),
+                source.image.width(), source.image.height(), image_digest)
+
+    def _clipboard_changed(self):
+        """保存剪贴板变化的独立快照，供连续热键轮询。"""
+        try:
+            source = read_clipboard(self.settings, self.clipboard)
+            if source is None:
+                return
+            key = self._clipboard_source_key(source)
+            if self.clipboard_history_keys and self.clipboard_history_keys[0] == key:
+                return
+            if key in self.clipboard_history_keys:
+                index = self.clipboard_history_keys.index(key)
+                self.clipboard_history.pop(index)
+                self.clipboard_history_keys.pop(index)
+            snapshot = ClipboardSource(source.kind, source.image.copy(),
+                                       source.text, source.paths, source.html)
+            self.clipboard_history.insert(0, snapshot)
+            self.clipboard_history_keys.insert(0, key)
+            self._trim_clipboard_history()
+            self.clipboard_history_index = -1
+            self._clipboard_persist_timer.start()
+            logging.getLogger("screensnap").debug(
+                "记录剪贴板历史: 类型=%s 当前共 %d 条", source.kind,
+                len(self.clipboard_history))
+        except Exception as error:
+            logging.getLogger("screensnap").debug(
+                "读取剪贴板历史失败: %s", error)
+
+    def _load_clipboard_history(self):
+        path = data_dir() / "clipboard_history.json"
+        if not path.is_file():
+            return
+        try:
+            records = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(records, list):
+                raise ValueError("剪贴板历史必须是列表")
+        except (OSError, UnicodeError, ValueError) as error:
+            logging.getLogger("screensnap").warning("剪贴板历史无法读取: %s", error)
+            return
+        image_dir = data_dir() / "clipboard_history"
+        known_kinds = {"image", "text", "html", "color", "files"}
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            kind = record.get("kind")
+            filename = record.get("image")
+            if (kind not in known_kinds or not isinstance(filename, str) or
+                    Path(filename).name != filename):
+                continue
+            image_path = image_dir / filename
+            image = QImage(str(image_path))
+            if image.isNull():
+                continue
+            paths = record.get("paths", [])
+            if not isinstance(paths, list) or any(not isinstance(value, str) for value in paths):
+                paths = []
+            source = ClipboardSource(kind, image, str(record.get("text", "")),
+                                     paths, str(record.get("html", "")))
+            key = self._clipboard_source_key(source)
+            if key not in self.clipboard_history_keys:
+                self.clipboard_history.append(source)
+                self.clipboard_history_keys.append(key)
+        previous_count = len(self.clipboard_history)
+        self._trim_clipboard_history()
+        if len(self.clipboard_history) != previous_count:
+            self._clipboard_persist_timer.start()
+        logging.getLogger("screensnap").info(
+            "恢复剪贴板历史: %d 条", len(self.clipboard_history))
+
+    def persist_clipboard_history(self):
+        """把剪贴板历史图片和可再贴出的来源信息写入独立缓存。"""
+        self._clipboard_persist_timer.stop()
+        root = data_dir()
+        image_dir = root / "clipboard_history"
+        image_dir.mkdir(parents=True, exist_ok=True)
+        records = []
+        referenced = set()
+        for source in self.clipboard_history:
+            key = self._clipboard_source_key(source)
+            digest = hashlib.sha256(repr(key).encode("utf-8", errors="replace")).hexdigest()
+            filename = f"clipboard_{digest}.png"
+            image_path = image_dir / filename
+            if not image_path.is_file() or QImage(str(image_path)).isNull():
+                temporary_image = image_path.with_suffix(".tmp.png")
+                if not source.image.save(str(temporary_image), "PNG"):
+                    continue
+                temporary_image.replace(image_path)
+            origin = source.origin()
+            record = {"kind": source.kind, "image": filename}
+            record.update({key_name: value for key_name, value in origin.items()
+                           if key_name != "kind"})
+            records.append(record)
+            referenced.add(filename)
+        path = root / "clipboard_history.json"
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(records, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+        temporary.replace(path)
+        for cached_image in image_dir.glob("clipboard_*.png"):
+            if cached_image.name not in referenced:
+                try:
+                    cached_image.unlink()
+                except OSError as error:
+                    logging.getLogger("screensnap").warning(
+                        "无法清理剪贴板历史缓存 %s: %s", cached_image, error)
+
+    def _trim_clipboard_history(self):
+        """剪贴板快照与文件历史共用用户设置的历史数量上限。"""
+        limit = max(1, int(self.settings.get("history_limit", DEFAULT_HISTORY_LIMIT)))
+        del self.clipboard_history[limit:]
+        del self.clipboard_history_keys[limit:]
+        if self.clipboard_history_index >= len(self.clipboard_history):
+            self.clipboard_history_index = -1
+
+    def clear_clipboard_history(self):
+        """清空本次运行期间捕获的剪贴板历史。"""
+        count = len(self.clipboard_history)
+        self.clipboard_history.clear()
+        self.clipboard_history_keys.clear()
+        self.clipboard_history_index = -1
+        self._clipboard_persist_timer.stop()
+        self.persist_clipboard_history()
+        logging.getLogger("screensnap").info("清空剪贴板历史: %d 条", count)
+        return count
+
+    def add(self, image, source=None, origin=None, position=None, show=True):
         """创建并显示贴图；关闭时释放 Qt 对象并从列表中移除。"""
+        if isinstance(image, PillowImage.Image):
+            if max(image.size) > MAX_STICKER_IMAGE_DIMENSION:
+                image = image.copy()
+                image.thumbnail((MAX_STICKER_IMAGE_DIMENSION,
+                                 MAX_STICKER_IMAGE_DIMENSION),
+                                PillowImage.Resampling.LANCZOS)
+            from core.screen_capture import to_qimage
+
+            image = to_qimage(image)
+        elif max(image.width(), image.height()) > MAX_STICKER_IMAGE_DIMENSION:
+            image = image.scaled(
+                MAX_STICKER_IMAGE_DIMENSION, MAX_STICKER_IMAGE_DIMENSION,
+                Qt.KeepAspectRatio, Qt.SmoothTransformation)
         if source is None:
             cache = data_dir() / "sticker_cache"
             cache.mkdir(parents=True, exist_ok=True)
@@ -45,64 +219,384 @@ class StickerManager(QObject):
             if not image.save(str(source), "PNG"):
                 raise OSError(f"无法保存贴图缓存: {source}")
         item = StickerItem(image, str(source), self.settings, origin)
+        if position is None:
+            position = QCursor.pos() - QPoint(
+                item.padding() + item.pixmap.width() // 2,
+                item.padding() + item.pixmap.height() // 2)
+        else:
+            position = position - QPoint(item.padding(), item.padding())
+        item.move(position)
+        item.edit_requested.connect(self.edit_requested)
         item.open_file_replace = lambda: self.open_file(item)
         item.open_file_new = self.open_file
         item.setAttribute(Qt.WA_DeleteOnClose)
         item.closed.connect(lambda: self.remove(item))
-        item.destroyed.connect(lambda: self.remove(item))
+        item.state_changed.connect(self.schedule_persist)
+        item.activated.connect(lambda current=item: self._activate_sticker(current))
+        item.focus_changed.connect(self._sticker_focus_changed)
+        item.selection_requested.connect(self.select_item)
+        item.batch_moved.connect(self.move_selected)
+        item.batch_scaled.connect(self.scale_selected)
+        item.batch_opacity_changed.connect(self.set_selected_opacity)
+        item.manager = self
         self.items.append(item)
-        item.show()
+        if show:
+            self._remember_placement(item)
+        if show:
+            item.show()
         self.changed.emit()
+        self.schedule_persist()
         logging.getLogger("screensnap").info("创建贴图: %s", source or "临时图片")
         return item
 
+    @staticmethod
+    def _placement_key(source):
+        return str(Path(source).resolve())
+
+    def _load_placement_states(self):
+        path = data_dir() / "sticker_placements.json"
+        try:
+            records = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, ValueError):
+            records = []
+        if not isinstance(records, list):
+            records = []
+        try:
+            session = json.loads((path.parent / "stickers.json").read_text(encoding="utf-8"))
+            if isinstance(session, list):
+                records.extend(session)
+        except (OSError, UnicodeError, ValueError):
+            pass
+        states = {}
+        for record in records:
+            if (not isinstance(record, dict) or not isinstance(record.get("source"), str)
+                    or type(record.get("x")) is not int or type(record.get("y")) is not int
+                    or type(record.get("scale")) not in (int, float)
+                    or not 0.1 <= record["scale"] <= 10):
+                continue
+            key = self._placement_key(record["source"])
+            states.pop(key, None)
+            states[key] = {
+                key: record[key] for key in ("source", "x", "y", "scale", "width", "height")
+                if key in record
+            }
+        return states
+
+    def _save_placement_states(self):
+        path = data_dir() / "sticker_placements.json"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        limit = max(1, int(self.settings.get("history_limit", DEFAULT_HISTORY_LIMIT)))
+        records = list(self.placement_states.values())[-limit:]
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(records, ensure_ascii=False, indent=2),
+                             encoding="utf-8")
+        temporary.replace(path)
+
+    def _remember_placement(self, item, save=True):
+        if not item.source:
+            return
+        state = item.state()
+        key = self._placement_key(item.source)
+        self.placement_states.pop(key, None)
+        self.placement_states[key] = {
+            key: state[key] for key in ("source", "x", "y", "scale", "width", "height")
+        }
+        self.last_placement = self.placement_states[key]
+        if save:
+            try:
+                self._save_placement_states()
+            except (OSError, TypeError, ValueError) as error:
+                logging.getLogger("screensnap").warning("保存贴图布局失败: %s", error)
+
+    def _apply_placement(self, item, state):
+        item.move(state["x"], state["y"])
+        item.scale_factor = state["scale"]
+        item.resize(item.window_size())
+        if type(state.get("width")) is int and type(state.get("height")) is int:
+            item.resize(state["width"], state["height"])
+
+    def rotate_active(self, degrees):
+        """旋转最近操作的贴图；未选中时使用最新创建且仍打开的贴图。"""
+        item = self.active_sticker if self.active_sticker in self.items else None
+        item = item or (self.items[-1] if self.items else None)
+        if item is not None:
+            item.rotate(degrees)
+            return True
+        return False
+
+    def select_item(self, item, additive=False):
+        if item not in self.items:
+            return
+        if not additive:
+            if item not in self.selected_items:
+                self.selected_items = {item}
+        elif item in self.selected_items:
+            self.selected_items.remove(item)
+        else:
+            self.selected_items.add(item)
+        self.selected_items.intersection_update(self.items)
+        self.active_sticker = item
+        self._update_selection_visuals()
+        logging.getLogger("screensnap").debug(
+            "贴图多选更新: ctrl=%s 选中=%d 当前=%s", additive,
+            len(self.selected_items), item.source or "临时图片")
+        self.changed.emit()
+
+    def set_selected_items(self, items):
+        self.selected_items = {item for item in items if item in self.items}
+        if self.selected_items:
+            self.active_sticker = next(iter(self.selected_items))
+        self._update_selection_visuals()
+        logging.getLogger("screensnap").debug("管理面板更新贴图多选: %d 张", len(self.selected_items))
+
+    def _activate_sticker(self, item):
+        self.active_sticker = item
+        if item.hasFocus():
+            self.focused_sticker = item
+        self._update_selection_visuals()
+
+    def _sticker_focus_changed(self, item, focused):
+        if focused:
+            self.focused_sticker = item
+            self.active_sticker = item
+            self._update_selection_visuals()
+            return
+        QTimer.singleShot(0, lambda current=item: self._clear_sticker_focus(current))
+
+    def _clear_sticker_focus(self, item):
+        if self.focused_sticker is item and not item.hasFocus():
+            self.focused_sticker = None
+            self._update_selection_visuals()
+
+    def refresh_selection_visuals(self):
+        self._update_selection_visuals()
+
+    def _update_selection_visuals(self):
+        focused_group = (self.focused_sticker.group_name
+                         if self.focused_sticker in self.items else "")
+        multi_selection = len(self.selected_items) > 1
+        for candidate in self.items:
+            candidate.selected_for_batch = candidate in self.selected_items
+            candidate.selection_effect_active = (
+                self.settings.get("sticker_selection_effect_enabled", True) and
+                candidate.selected_for_batch and
+                (multi_selection or self.focused_sticker is not None and
+                 (candidate is self.focused_sticker or
+                  bool(focused_group) and candidate.group_name == focused_group)))
+            candidate.update()
+
+    def batch_targets(self, source):
+        selected = self.selected_items if source in self.selected_items else {source}
+        return [item for item in selected if item is not source and item in self.items]
+
+    def move_selected(self, source, delta):
+        for item in self.batch_targets(source):
+            item.move(item.pos() + delta)
+        self.schedule_persist()
+
+    def scale_selected(self, source, factor):
+        for item in self.batch_targets(source):
+            if item.locked:
+                continue
+            item.scale_factor = min(10, max(0.1, item.scale_factor * factor))
+            item.resize(item.window_size())
+            item.show_scale_hint()
+
+    def set_selected_opacity(self, source, value):
+        for item in self.batch_targets(source):
+            item.setWindowOpacity(value)
+            item.state_changed.emit()
+
+    def close_selected(self):
+        targets = list(self.selected_items)
+        for item in targets:
+            item.close()
+        return len(targets)
+
+    def group_names(self):
+        return sorted({item.group_name for item in self.items if item.group_name})
+
+    def assign_group(self, items, name):
+        name = str(name or "").strip()
+        for item in items:
+            if item in self.items:
+                item.group_name = name
+                item.state_changed.emit()
+        self._update_selection_visuals()
+        self.changed.emit()
+        self.schedule_persist()
+
+    def set_group_properties(self, name, properties):
+        """对组成员显式应用属性值，避免混合状态下使用 toggle。"""
+        members = [item for item in self.items if item.group_name == name]
+        if not members:
+            return 0
+
+        toggle_properties = {
+            "locked": ("locked", "toggle_lock"),
+            "always_on_top": ("always_on_top", "toggle_top"),
+            "border_enabled": ("border_enabled", "toggle_border"),
+            "shadow_enabled": ("shadow_enabled", "toggle_shadow"),
+            "click_through": ("click_through", "toggle_click_through"),
+        }
+        for item in members:
+            for key, value in properties.items():
+                if key == "opacity":
+                    item.set_opacity(min(1.0, max(0.1, float(value))))
+                elif key in toggle_properties:
+                    attribute, method_name = toggle_properties[key]
+                    if bool(getattr(item, attribute)) != bool(value):
+                        getattr(item, method_name)()
+                elif key == "reset_size" and value:
+                    item.reset_size()
+                elif key == "rotation":
+                    if value == "reset":
+                        item.reset_rotation()
+                    elif type(value) is int and -3600 <= value <= 3600:
+                        item.rotate(value)
+                else:
+                    continue
+                item.state_changed.emit()
+
+        self.schedule_persist()
+        logging.getLogger("screensnap").info(
+            "统一设置贴图组属性: 组=%s 成员=%d 属性=%s", name, len(members),
+            ",".join(sorted(properties)))
+        return len(members)
+
+    def set_group_visible(self, name, visible):
+        for item in self.items:
+            if item.group_name == name:
+                item.setVisible(visible)
+        self.schedule_persist()
+        logging.getLogger("screensnap").info("切换贴图组显示: 组=%s 显示=%s", name, visible)
+
+    def toggle_selected_visibility(self):
+        selected = [item for item in self.selected_items if item in self.items]
+        if not selected:
+            return False
+        visible = any(not item.isVisible() for item in selected)
+        for item in selected:
+            item.setVisible(visible)
+        self.schedule_persist()
+        return visible
+
+    def close_group(self, name):
+        members = [item for item in self.items if item.group_name == name]
+        for item in members:
+            item.close()
+        self._persist_timer.stop()
+        self.persist()
+        if members:
+            logging.getLogger("screensnap").info(
+                "关闭贴图组并保存会话: %s (%d)", name, len(members))
+        return len(members)
+
+    def move_group(self, name, delta):
+        members = [item for item in self.items if item.group_name == name]
+        for item in members:
+            item.move(item.pos() + delta)
+        if members:
+            self.schedule_persist()
+        return len(members)
+
     def paste_clipboard(self, clipboard=None):
-        """把剪贴板中的图片、文件、颜色或文字直接贴成新窗口。"""
-        source = read_clipboard(self.settings, clipboard)
-        if source is None:
+        """按当前内容到较早内容的顺序轮询剪贴板历史并创建新贴图。"""
+        if clipboard is not None:
+            source = read_clipboard(self.settings, clipboard)
+            if source is None:
+                return None
+            return self.add(source.image, origin=source.origin())
+        board = self.clipboard
+        source = read_clipboard(self.settings, board)
+        if source is not None and board is self.clipboard:
+            self._remember_clipboard_source(source)
+        self._trim_clipboard_history()
+        if not self.clipboard_history:
             return None
-        item = self.add(source.image, origin=source.origin())
-        logging.getLogger("screensnap").info("贴出剪贴板内容: %s", source.kind)
+        self.clipboard_history_index = (self.clipboard_history_index + 1) % len(self.clipboard_history)
+        source = self.clipboard_history[self.clipboard_history_index]
+        item = self.add(source.image.copy(), origin=source.origin())
+        logging.getLogger("screensnap").info(
+            "贴出剪贴板历史: %d/%d 类型=%s", self.clipboard_history_index + 1,
+            len(self.clipboard_history), source.kind)
         return item
 
+    def _remember_clipboard_source(self, source):
+        """同步热键触发时的最新剪贴板内容，避免信号尚未派发造成漏项。"""
+        key = self._clipboard_source_key(source)
+        if not self.clipboard_history_keys or self.clipboard_history_keys[0] != key:
+            snapshot = ClipboardSource(source.kind, source.image.copy(),
+                                      source.text, source.paths, source.html)
+            if key in self.clipboard_history_keys:
+                index = self.clipboard_history_keys.index(key)
+                self.clipboard_history.pop(index)
+                self.clipboard_history_keys.pop(index)
+            self.clipboard_history.insert(0, snapshot)
+            self.clipboard_history_keys.insert(0, key)
+            self._trim_clipboard_history()
+            self.clipboard_history_index = -1
+
     def open_file(self, replace=None):
-        """从磁盘打开图片，替换指定窗口或创建独立贴图。"""
-        path, _ = QFileDialog.getOpenFileName(
+        """多选打开图片；替换模式用第一张替换当前窗口，其余创建新贴图。"""
+        paths, _ = QFileDialog.getOpenFileNames(
             replace, "从文件打开贴图", "",
             "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff)",
         )
-        if not path:
+        if not paths:
             return False
-        image = QImage(path)
-        if image.isNull():
-            logging.getLogger("screensnap").warning("无法读取贴图图片: %s", path)
-            QMessageBox.warning(replace, "无法打开贴图", f"无法读取图片：{path}")
-            return False
-        logging.getLogger("screensnap").info("从文件打开贴图: %s", "替换当前窗口" if replace else path)
-        if replace is None:
-            self.add(image, path)
-        else:
-            replace.replace_image(image, path)
-        return True
+        opened = 0
+        failed = []
+        for path in paths:
+            image = QImage(path)
+            if image.isNull():
+                failed.append(path)
+                logging.getLogger("screensnap").warning("无法读取贴图图片: %s", path)
+                continue
+            if replace is not None and opened == 0:
+                replace.replace_image(image, path)
+            else:
+                self.add(image, path)
+            opened += 1
+        if failed:
+            QMessageBox.warning(replace, "部分图片无法打开", "以下图片无法读取：\n" + "\n".join(failed))
+        if opened:
+            logging.getLogger("screensnap").info("从文件打开贴图: %d 张", opened)
+        return opened > 0
 
     def remove(self, item):
         """贴图销毁后从会话列表移除，避免持久化已关闭窗口。"""
+        self._remember_placement(item)
+        for follower in self.items:
+            relation = follower.snap_target or {}
+            if relation.get("target") == "sticker" and \
+                    relation.get("sticker_id") == item.session_id:
+                follower.release_snap()
+        if self.history_sticker is item:
+            self.history_sticker = None
+        if self.active_sticker is item:
+            self.active_sticker = None
+        if self.focused_sticker is item:
+            self.focused_sticker = None
+        self.selected_items.discard(item)
         if item in self.items:
             self.items.remove(item)
+            self._update_selection_visuals()
             self.changed.emit()
+            self.schedule_persist()
             logging.getLogger("screensnap").debug("移除贴图: %s", item.source or "临时图片")
 
     def files(self):
         """按修改时间直接读取自动保存目录，不维护内部图片数据库。"""
         from core.image_io import saved_patterns
 
-        folder = resolved_dir(self.settings, "auto_dir")
+        folder = configured_dir(self.settings, "auto_dir")
         if not folder.is_dir():
             logging.getLogger("screensnap").debug("自动保存目录不存在: %s", folder)
             return []
         available = []
         for pattern in saved_patterns():
-            for path in folder.glob(pattern):
+            for path in folder.rglob(pattern):
                 try:
                     available.append((path.stat().st_mtime, path))
                 except OSError as error:
@@ -113,15 +607,36 @@ class StickerManager(QObject):
 
     def paste_latest(self):
         """按时间打开最新的尚未贴出的有效历史图片。"""
-        opened = {str(Path(item.source).resolve()) for item in self.items if item.source}
+        opened = {str(Path(item.source).resolve()): item
+                  for item in self.items if item.source}
+        most_recent_open_item = None
         for source in self.files():
-            if str(source.resolve()) in opened:
+            existing_item = opened.get(str(source.resolve()))
+            if existing_item is not None:
+                if most_recent_open_item is None:
+                    most_recent_open_item = existing_item
                 continue
             image = QImage(str(source))
             if image.isNull():
                 logging.getLogger("screensnap").warning("历史图片无法读取，已跳过: %s", source)
                 continue
-            self.add(image, source)
+            item = self.add(image, source, show=False)
+            placement = (self.placement_states.get(self._placement_key(source))
+                         or self.last_placement)
+            if placement is not None:
+                self._apply_placement(item, placement)
+            else:
+                screen = QGuiApplication.screenAt(QCursor.pos()) or QGuiApplication.primaryScreen()
+                bounds = screen.availableGeometry()
+                item.move(bounds.center() - QPoint(item.width() // 2, item.height() // 2))
+            item.show()
+            self._remember_placement(item)
+            return True
+        if most_recent_open_item is not None:
+            most_recent_open_item.show()
+            most_recent_open_item.raise_()
+            most_recent_open_item.activateWindow()
+            self.active_sticker = most_recent_open_item
             return True
         logging.getLogger("screensnap").debug("自动保存目录中没有可贴出的新图片")
         return False
@@ -164,19 +679,37 @@ class StickerManager(QObject):
         for item in self.items[:]:
             item.close()
         self.items.clear()
+        self.selected_items.clear()
         self.history_sticker = None
+        self._persist_timer.stop()
         self.changed.emit()
 
     def persist(self):
         """保存所有窗口的可序列化状态；无源贴图在创建时已写入私有缓存。"""
-        path = data_dir() / "stickers.json"
-        path.parent.mkdir(parents=True, exist_ok=True)
-        states = [item.state() for item in self.items]
-        temporary = path.with_suffix(".tmp")
-        temporary.write_text(json.dumps(states, indent=2), encoding="utf-8")
-        temporary.replace(path)
+        try:
+            path = data_dir() / "stickers.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            states = [item.state() for item in self.items]
+            for item in self.items:
+                self._remember_placement(item, save=False)
+            try:
+                self._save_placement_states()
+            except (OSError, TypeError, ValueError) as error:
+                logging.getLogger("screensnap").warning("保存贴图布局失败: %s", error)
+            temporary = path.with_suffix(".tmp")
+            temporary.write_text(json.dumps(states, indent=2), encoding="utf-8")
+            temporary.replace(path)
+        except (OSError, TypeError, ValueError) as error:
+            log_every(logging.getLogger("screensnap"), logging.ERROR,
+                      "sticker_session_persist", str(error), 60,
+                      "保存贴图会话失败: %s", error)
+            return False
         self.cleanup_cache(state["source"] for state in states)
-        logging.getLogger("screensnap").info("保存贴图会话: %d 张", len(self.items))
+        return True
+
+    def schedule_persist(self):
+        """合并连续的拖动和缩放事件，延迟写入最新会话状态。"""
+        self._persist_timer.start()
 
     def cleanup_cache(self, sources):
         """仅清理私有缓存中未被有效会话引用的贴图。"""
@@ -207,6 +740,8 @@ class StickerManager(QObject):
             return
         logger = logging.getLogger("screensnap")
         restored_sources = []
+        restored_items = {}
+        pending_sticker_snaps = []
         for state in states:
             if not isinstance(state, dict):
                 logger.warning("贴图会话记录格式错误，已跳过: %r", state)
@@ -216,6 +751,11 @@ class StickerManager(QObject):
                     any(type(state.get(key)) is not int for key in ("x", "y")) or
                     type(state.get("scale")) not in (int, float) or
                     not 0.1 <= state["scale"] <= 10 or
+                                        (("width" in state or "height" in state) and
+                                         (type(state.get("width")) is not int or
+                                            type(state.get("height")) is not int or
+                                            not 1 <= state["width"] <= 32768 or
+                                            not 1 <= state["height"] <= 32768)) or
                     type(state.get("opacity")) not in (int, float) or
                     not 0 <= state["opacity"] <= 1 or
                     type(state.get("locked")) is not bool or
@@ -229,19 +769,32 @@ class StickerManager(QObject):
             origin = state.get("origin")
             if not (isinstance(origin, dict) and origin.get("kind") in ORIGIN_KINDS):
                 origin = None
-            item = self.add(image, source, origin)
+            item = self.add(image, source, origin, show=False)
+            session_id = state.get("id")
+            if not isinstance(session_id, str) or not session_id or session_id in restored_items:
+                session_id = item.session_id
+            item.session_id = session_id
+            restored_items[session_id] = item
             restored_sources.append(source)
             item.move(state["x"], state["y"])
             item.scale_factor = state["scale"]
+            rotation = state.get("rotation", 0)
+            if type(rotation) is int and -3600 <= rotation <= 3600:
+                item.rotate(rotation)
             item.border_enabled = state.get("border", item.settings.get("sticker_border_enabled", True))
             item.shadow_enabled = state.get("shadow", item.settings.get("sticker_shadow_enabled", True))
+            item.group_name = str(state.get("group", ""))
+            item.set_background_mode(state.get("background_mode",
+                                              item.settings.get("sticker_background_mode", "transparent")))
             item.resize(item.window_size())
+            if "width" in state and "height" in state:
+                item.resize(state["width"], state["height"])
             item.setWindowOpacity(state["opacity"])
             item.locked = state["locked"]
-            if not state.get("top", True):
-                item.toggle_top()
-            if state.get("click_through", False):
-                item.toggle_click_through()
+            item.always_on_top = bool(state.get("top", True))
+            item.setWindowFlag(Qt.WindowStaysOnTopHint, item.always_on_top)
+            item.click_through = bool(state.get("click_through", False))
+            item.setWindowFlag(Qt.WindowTransparentForInput, item.click_through)
             snap = state.get("snap")
             if isinstance(snap, dict) and snap.get("target") == "window":
                 handle = snap.get("hwnd")
@@ -251,6 +804,16 @@ class StickerManager(QObject):
                     item.apply_restored_snap(snap, rect)
                 else:
                     logger.info("贴图吸附的目标窗口已失效，按原位置恢复: hwnd=%s", handle)
+            elif isinstance(snap, dict) and snap.get("target") == "sticker":
+                pending_sticker_snaps.append((item, snap))
+        for item, snap in pending_sticker_snaps:
+            target = restored_items.get(snap.get("sticker_id"))
+            if target is not None and target is not item:
+                item.apply_restored_sticker_snap(snap, target)
+            else:
+                logger.info("贴图跟随目标已失效，按原位置恢复: id=%s", snap.get("sticker_id"))
+        for item in restored_items.values():
+            item.show()
         self.cleanup_cache(restored_sources)
         if len(restored_sources) != len(states):
             logger.warning("贴图会话恢复不完整: %d/%d 张", len(restored_sources), len(states))

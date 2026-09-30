@@ -1,8 +1,8 @@
 """颜色选择按钮。"""
 
-from PySide6.QtCore import QLibraryInfo, QTranslator
+from PySide6.QtCore import QLibraryInfo, QSize, QTranslator, Qt
 from PySide6.QtWidgets import QApplication, QPushButton, QColorDialog, QLabel
-from PySide6.QtGui import QColor, QIcon, QPixmap
+from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
 COMMON_COLORS = (
     "#ff0000", "#00a000", "#0000ff", "#000000", "#ffffff",
@@ -58,9 +58,17 @@ class ColorButton(QPushButton):
         self.clicked.connect(self.choose)
 
     def update_color(self):
-        # Qt 没有颜色选择的标准图标；以当前颜色色块作图标便于识别实际值。
-        swatch = QPixmap(18, 18)
+        # 设置页留出更大的色样区域；工具栏保持紧凑，避免挤压控制项。
+        swatch_size = QSize(18, 18) if self.compact else QSize(48, 28)
+        self.setIconSize(swatch_size)
+        swatch = QPixmap(swatch_size)
         swatch.fill(QColor(self.color))
+        if not self.compact:
+            painter = QPainter(swatch)
+            painter.setPen(QPen(QColor("#718087"), 1))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawRect(swatch.rect().adjusted(0, 0, -1, -1))
+            painter.end()
         self.setIcon(QIcon(swatch))
         self.setText("" if self.property("icon_only") else
                  "颜色" if self.compact else f"选择颜色 {self.color}")

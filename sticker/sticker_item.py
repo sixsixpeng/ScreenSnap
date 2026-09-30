@@ -3,13 +3,16 @@
 import logging
 import os
 from pathlib import Path
+from uuid import uuid4
 
 from PySide6.QtCore import Qt, QPoint, QRect, QSize, Signal, QTimer
-from PySide6.QtGui import QGuiApplication, QPixmap, QPainter, QColor, QPen, QImage
+from PySide6.QtGui import (QGuiApplication, QPixmap, QPainter, QColor, QPen,
+                           QImage, QTransform, QBitmap, QRegion)
 from PySide6.QtWidgets import QWidget
 
 from core.window_snap import (visible_targets, window_logical_rect, window_present,
                               window_under_point)
+from core.constants import checker_tile_size
 from logger.log_context import log_scope
 from logger.log_rate import log_every
 from sticker.sticker_menu import show_menu
@@ -20,20 +23,41 @@ class StickerItem(QWidget):
     """独立悬浮贴图，单独维护尺寸、位置与输入状态。"""
 
     closed = Signal()
+    state_changed = Signal()
+    activated = Signal()
+    focus_changed = Signal(object, bool)
+    selection_requested = Signal(object, bool)
+    batch_moved = Signal(object, object)
+    batch_scaled = Signal(object, float)
+    batch_opacity_changed = Signal(object, float)
+    edit_requested = Signal(object)
 
     def __init__(self, image, source=None, settings=None, origin=None):
         super().__init__()
+        self.setProperty("screensnap_overlay", True)
+        self.session_id = uuid4().hex
         self.source = str(source) if source else None
         self.image = None if self.source else image
         self.origin = dict(origin) if isinstance(origin, dict) else None
         self.settings = settings or {}
-        self.pixmap = QPixmap.fromImage(image)
+        self.original_pixmap = QPixmap.fromImage(image)
+        self.pixmap = QPixmap(self.original_pixmap)
+        self.rotation_degrees = 0
         self.locked = False
         self.click_through = False
         self.always_on_top = True
         self.border_enabled = self.settings.get("sticker_border_enabled", True)
         self.shadow_enabled = self.settings.get("sticker_shadow_enabled", True)
+        self.background_mode = self.settings.get("sticker_background_mode", "transparent")
+        self.group_name = ""
+        self.selected_for_batch = False
+        self.selection_effect_active = False
         self.scale_factor = 1.0
+        self.scale_hint_text = ""
+        self.scale_hint_timer = QTimer(self)
+        self.scale_hint_timer.setSingleShot(True)
+        self.scale_hint_timer.setInterval(1000)
+        self.scale_hint_timer.timeout.connect(self.clear_scale_hint)
         self.drag_origin = None
         # 吸附关系：记录贴到了哪个目标以及相对偏移，跟随窗口时按它重新定位。
         self.snap_target = None
@@ -45,6 +69,7 @@ class StickerItem(QWidget):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
         self.resize(self.window_size())
+        self.update_input_mask()
         self.setFocusPolicy(Qt.StrongFocus)
 
     def padding(self):
@@ -61,6 +86,15 @@ class StickerItem(QWidget):
         image_size = self.pixmap.size() * self.scale_factor
         return QSize(image_size.width() + pad * 2, image_size.height() + pad * 2)
 
+    def moveEvent(self, event):
+        super().moveEvent(event)
+        self.state_changed.emit()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self.update_input_mask()
+        self.state_changed.emit()
+
     def apply_style(self):
         self.resize(self.window_size())
         self.update()
@@ -69,6 +103,15 @@ class StickerItem(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.SmoothPixmapTransform)
         rect = self.image_rect()
+        if self.background_mode in ("dark_checker", "light_checker"):
+            base = QColor("#252525" if self.background_mode == "dark_checker" else "#f0f0f0")
+            alternate = QColor("#3b3b3b" if self.background_mode == "dark_checker" else "#c8c8c8")
+            tile = checker_tile_size(self.scale_factor)
+            for row, top in enumerate(range(rect.top(), rect.bottom() + 1, tile)):
+                for column, left in enumerate(range(rect.left(), rect.right() + 1, tile)):
+                    painter.fillRect(left, top, min(tile, rect.right() - left + 1),
+                                     min(tile, rect.bottom() - top + 1),
+                                     base if (row + column) % 2 == 0 else alternate)
         if self.shadow_enabled and self.settings.get("sticker_shadow_strength", 35):
             color = QColor(self.settings.get("sticker_shadow_color", "#000000"))
             strength = self.settings.get("sticker_shadow_strength", 35)
@@ -84,9 +127,82 @@ class StickerItem(QWidget):
             # 吸附生效时沿图像外沿画一圈虚线，Padding 不足 1px 时不可见。
             painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
             painter.drawRect(rect.adjusted(-1, -1, 1, 1))
+        if (self.selection_effect_active and
+            self.settings.get("sticker_selection_effect_enabled", True)):
+            painter.setRenderHint(QPainter.Antialiasing)
+            painter.setBrush(Qt.NoBrush)
+            strength = self.settings.get("sticker_selection_effect_strength", 30)
+            for color, width, inset in ((QColor(40, 139, 255, round(42 * strength / 100)), 8, 5),
+                                        (QColor(40, 139, 255, round(96 * strength / 100)), 5, 3),
+                                        (QColor(72, 165, 255, round(230 * strength / 100)), 2, 2)):
+                painter.setPen(QPen(color, width, Qt.SolidLine, Qt.RoundCap,
+                                    Qt.RoundJoin))
+                painter.drawRoundedRect(self.rect().adjusted(
+                    inset, inset, -inset - 1, -inset - 1), 5, 5)
+        if self.scale_hint_text:
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing)
+            font = painter.font()
+            font.setBold(True)
+            font.setPixelSize(13)
+            painter.setFont(font)
+            width = painter.fontMetrics().horizontalAdvance(self.scale_hint_text) + 20
+            hint = QRect((self.width() - width) // 2,
+                         max(4, (self.height() - 28) // 2), width, 28)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(18, 42, 46, 225))
+            painter.drawRoundedRect(hint, 6, 6)
+            painter.setPen(QColor("#ffffff"))
+            painter.drawText(hint, Qt.AlignCenter, self.scale_hint_text)
+            painter.restore()
+
+    def show_scale_hint(self):
+        """显示当前缩放百分比，并在一秒后自动清除。"""
+        self.scale_hint_text = f"{round(self.scale_factor * 100)}%"
+        self.scale_hint_timer.start()
+        self.update()
+
+    def clear_scale_hint(self):
+        self.scale_hint_text = ""
+        self.update()
+
+    def set_background_mode(self, mode):
+        if mode not in ("transparent", "pseudo", "dark_checker", "light_checker"):
+            logging.getLogger("screensnap").warning("忽略无效贴图背景模式: %r", mode)
+            return
+        self.background_mode = mode
+        self.update_input_mask()
+        self.update()
+        self.state_changed.emit()
+
+    def update_input_mask(self):
+        """透明模式只让非透明像素命中；伪透明与棋盘模式保留整块拖动区域。"""
+        if self.background_mode != "transparent" or self.pixmap.isNull():
+            self.clearMask()
+            return
+        rect = self.image_rect()
+        mask = QImage(self.size(), QImage.Format_Mono)
+        mask.fill(1)
+        source = self.pixmap.toImage()
+        if source.isNull() or not source.hasAlphaChannel():
+            self.clearMask()
+            logging.getLogger("screensnap").debug(
+                "贴图输入遮罩跳过无透明通道图像: null=%s", source.isNull())
+            return
+        opaque = source.createAlphaMask().scaled(
+            max(1, rect.width()), max(1, rect.height()), Qt.IgnoreAspectRatio,
+            Qt.SmoothTransformation)
+        painter = QPainter(mask)
+        painter.drawImage(rect.topLeft(), opaque)
+        painter.end()
+        self.setMask(QRegion(QBitmap.fromImage(mask)))
 
     def mousePressEvent(self, event):
         # 记录全局鼠标到窗口左上角的偏移，跨显示器拖动仍保持原抓取位置。
+        self.activated.emit()
+        if event.button() == Qt.LeftButton:
+            self.selection_requested.emit(self, bool(event.modifiers() & Qt.ControlModifier))
+            self.setFocus()
         if event.button() == Qt.RightButton:
             show_menu(self, event.globalPosition().toPoint())
         elif event.button() == Qt.LeftButton and not self.locked:
@@ -98,7 +214,14 @@ class StickerItem(QWidget):
                 self.snap_enabled(), self.settings.get("sticker_snap_targets", "both"),
                 self.settings.get("sticker_snap_threshold", 8))
             self.begin_snap_session(cursor)
-            self.setFocus()
+
+    def focusInEvent(self, event):
+        super().focusInEvent(event)
+        self.focus_changed.emit(self, True)
+
+    def focusOutEvent(self, event):
+        super().focusOutEvent(event)
+        self.focus_changed.emit(self, False)
 
     def mouseMoveEvent(self, event):
         """以全局坐标拖动窗口，跨显示器时不重置抓取偏移；按住 Alt 临时不吸附。"""
@@ -110,12 +233,17 @@ class StickerItem(QWidget):
             position = self.apply_snap(position, cursor)
         else:
             self.release_snap()
+        old_position = self.pos()
         self.move(position)
+        delta = self.pos() - old_position
+        if delta.x() or delta.y():
+            self.batch_moved.emit(self, delta)
 
     def mouseReleaseEvent(self, event):
         """释放拖动状态，避免下一次鼠标移动继续平移。"""
         self.drag_origin = None
         self.refresh_snap_relation()
+        self.state_changed.emit()
 
     def snap_enabled(self):
         """吸附总开关；配置缺失时按默认开启处理。"""
@@ -134,7 +262,7 @@ class StickerItem(QWidget):
             (under.title or under.class_name) if under else None)
 
     def snap_candidates(self, cursor):
-        """按配置收集吸附目标：屏幕工作区边缘与所有可见窗口的边缘。"""
+        """按配置收集屏幕、普通窗口和其他可见贴图的边缘。"""
         mode = self.settings.get("sticker_snap_targets", "both")
         targets = []
         if mode in ("screen", "both"):
@@ -156,6 +284,20 @@ class StickerItem(QWidget):
                                 "left": rect.left(), "top": rect.top(),
                                 "right": rect.right() + 1, "bottom": rect.bottom() + 1,
                                 "allow_outside": True, "priority": 1})
+            manager = getattr(self, "manager", None)
+            if manager is not None:
+                moving = manager.selected_items if self in manager.selected_items else {self}
+                for candidate in manager.items:
+                    if candidate in moving or not candidate.isVisible():
+                        continue
+                    rect = candidate.geometry()
+                    targets.append({"key": f"sticker{candidate.session_id}", "kind": "sticker",
+                                    "sticker_id": candidate.session_id,
+                                    "title": Path(candidate.source).name if candidate.source else "贴图",
+                                    "left": rect.x(), "top": rect.y(),
+                                    "right": rect.x() + rect.width(),
+                                    "bottom": rect.y() + rect.height(),
+                                    "allow_outside": True, "priority": 2})
         keys = tuple(item["key"] for item in targets)
         # 拖动时每帧都会查询，候选集合不变就只记一次日志。
         if keys != self.snap_candidate_keys:
@@ -215,28 +357,59 @@ class StickerItem(QWidget):
             return
         relation = {"target": target["kind"], "key": key, "edge": edge,
                     "title": target.get("title") or ""}
-        if target["kind"] == "window":
-            relation["hwnd"] = target["hwnd"]
+        if target["kind"] in ("window", "sticker"):
             relation["rel_x"] = position.x() - target["left"]
             relation["rel_y"] = position.y() - target["top"]
+        if target["kind"] == "window":
+            relation["hwnd"] = target["hwnd"]
+            relation["follow"] = bool(self.settings.get("sticker_follow_window", True))
+        elif target["kind"] == "sticker":
+            relation["sticker_id"] = target["sticker_id"]
+            relation["follow"] = (bool(self.settings.get("sticker_follow_sticker", True)) and
+                                   self.can_follow_sticker(target["sticker_id"]))
         # 相对偏移随拖动每帧变化，比较身份时要排除，否则每次移动都记一条日志。
-        identity = {key: relation[key] for key in ("target", "key", "edge", "title", "hwnd")
+        identity = {key: relation[key] for key in
+                    ("target", "key", "edge", "title", "hwnd", "sticker_id")
                     if key in relation}
         previous = {key: self.snap_target[key] for key in identity
                     if self.snap_target and key in self.snap_target}
         changed = identity != previous
+        if not changed and self.snap_target:
+            relation["follow"] = self.snap_target.get("follow", self.following())
         self.snap_target = relation
         self.snap_hint = edge
         if not changed:
             return
+        target_label = {"window": "窗口", "sticker": "贴图",
+                        "screen": "屏幕工作区"}.get(relation["target"], "目标")
         logging.getLogger("screensnap").info(
             "贴图已吸附到%s %s：%s 边，位置(%d,%d)",
-            "窗口" if relation["target"] == "window" else "屏幕工作区",
+            target_label,
             relation["title"] or relation["key"], edge, position.x(), position.y())
-        if relation["target"] == "window" and self.settings.get("sticker_follow_window", True):
+        if relation["target"] == "window" and relation.get("follow"):
             self.start_follow()
-        elif relation["target"] != "window":
+        elif relation["target"] == "sticker" and relation.get("follow"):
+            self.start_follow()
+        elif relation["target"] not in ("window", "sticker") or not relation.get("follow"):
             self.stop_follow()
+
+    def can_follow_sticker(self, target_id):
+        """拒绝形成贴图跟随环路；跟随关系保持单向有向无环。"""
+        manager = getattr(self, "manager", None)
+        target = next((item for item in manager.items
+                       if item.session_id == target_id), None) if manager else None
+        visited = set()
+        while target is not None:
+            if target is self or target.session_id in visited:
+                return False
+            visited.add(target.session_id)
+            relation = target.snap_target or {}
+            if relation.get("target") != "sticker" or not target.following():
+                break
+            next_id = relation.get("sticker_id")
+            target = next((item for item in manager.items
+                           if item.session_id == next_id), None)
+        return True
 
     def release_snap(self):
         """离开吸附目标，或在菜单里手动解除吸附与跟随。"""
@@ -250,15 +423,26 @@ class StickerItem(QWidget):
         self.stop_follow()
 
     def refresh_snap_relation(self):
-        """位置或尺寸变化后重新记录与目标窗口的相对偏移。"""
+        """位置或尺寸变化后重新记录与目标的相对偏移。"""
         relation = self.snap_target
-        if not relation or relation.get("target") != "window":
+        if not relation:
             return
-        rect = window_logical_rect(relation.get("hwnd"))
-        if rect is None:
+        if relation.get("target") == "window":
+            rect = window_logical_rect(relation.get("hwnd"))
+            if rect is None:
+                return
+            target_x, target_y = rect.left(), rect.top()
+        elif relation.get("target") == "sticker":
+            manager = getattr(self, "manager", None)
+            target = next((item for item in manager.items
+                           if item.session_id == relation.get("sticker_id")), None) if manager else None
+            if target is None:
+                return
+            target_x, target_y = target.x(), target.y()
+        else:
             return
-        relation["rel_x"] = self.x() - rect.left()
-        relation["rel_y"] = self.y() - rect.top()
+        relation["rel_x"] = self.x() - target_x
+        relation["rel_y"] = self.y() - target_y
 
     def following(self):
         """当前是否正在跟随目标窗口。"""
@@ -289,17 +473,40 @@ class StickerItem(QWidget):
                                             (self.snap_target or {}).get("title"))
 
     def toggle_follow(self):
-        """右键菜单切换跟随；没有吸附到窗口时保持原状。"""
+        """右键菜单切换当前吸附目标的跟随状态。"""
+        relation = self.snap_target or {}
         if self.following():
+            relation["follow"] = False
             self.stop_follow()
-        elif (self.snap_target or {}).get("target") == "window":
+        elif relation.get("target") == "window":
+            relation["follow"] = True
+            self.start_follow()
+        elif (relation.get("target") == "sticker" and
+              self.can_follow_sticker(relation.get("sticker_id"))):
+            relation["follow"] = True
             self.start_follow()
         else:
-            logging.getLogger("screensnap").debug("贴图没有吸附到窗口，跳过跟随切换")
+            logging.getLogger("screensnap").debug("贴图没有可跟随的吸附目标，跳过跟随切换")
 
     def poll_follow(self):
-        """按目标窗口的最新位置移动贴图；窗口消失时自动解除吸附。"""
+        """按目标窗口或贴图的最新位置移动；目标关闭时自动解除吸附。"""
         relation = self.snap_target or {}
+        if relation.get("target") == "sticker":
+            manager = getattr(self, "manager", None)
+            target = next((item for item in manager.items
+                           if item.session_id == relation.get("sticker_id")), None) if manager else None
+            if target is None:
+                self.snap_target = None
+                self.snap_hint = None
+                self.stop_follow()
+                return
+            if not target.isVisible():
+                return
+            expected = QPoint(target.x() + relation.get("rel_x", 0),
+                              target.y() + relation.get("rel_y", 0))
+            if expected != self.pos():
+                self.move(expected)
+            return
         handle = relation.get("hwnd")
         rect = window_logical_rect(handle)
         if rect is None:
@@ -337,6 +544,20 @@ class StickerItem(QWidget):
         logging.getLogger("screensnap").info("恢复贴图吸附: 窗口 %r（%s 边）",
                                             snap.get("title") or snap.get("hwnd"), snap.get("edge"))
 
+    def apply_restored_sticker_snap(self, snap, target):
+        """恢复对另一张贴图的相对位置和跟随关系。"""
+        self.snap_target = {key: snap[key] for key in
+                            ("target", "key", "edge", "title", "sticker_id",
+                             "rel_x", "rel_y", "follow") if key in snap}
+        self.snap_hint = snap.get("edge")
+        self.move(target.x() + snap.get("rel_x", 0), target.y() + snap.get("rel_y", 0))
+        if snap.get("follow", self.settings.get("sticker_follow_sticker", True)) and \
+                self.can_follow_sticker(target.session_id):
+            self.snap_target["follow"] = True
+            self.start_follow()
+        else:
+            self.snap_target["follow"] = False
+
     def wheelEvent(self, event):
         """未锁定时按固定倍率缩放，并限制最小、最大尺寸。"""
         if self.locked:
@@ -344,6 +565,9 @@ class StickerItem(QWidget):
         factor = 1.1 if event.angleDelta().y() > 0 else 1 / 1.1
         self.scale_factor = min(10, max(0.1, self.scale_factor * factor))
         self.resize(self.window_size())
+        self.batch_scaled.emit(self, factor)
+        self.show_scale_hint()
+        event.accept()
 
     def keyPressEvent(self, event):
         """Esc 仅关闭当前贴图，方向键在未锁定时微移窗口。"""
@@ -363,16 +587,35 @@ class StickerItem(QWidget):
     def toggle_lock(self):
         """锁定后禁止鼠标拖动、滚轮缩放和方向键微调。"""
         self.locked = not self.locked
+        self.state_changed.emit()
+
+    def set_opacity(self, value):
+        self.setWindowOpacity(value)
+        self.batch_opacity_changed.emit(self, value)
+        self.state_changed.emit()
 
     def toggle_click_through(self):
         """穿透后无法右键自身，需通过恢复交互的全局热键重新启用输入。"""
         self.click_through = not self.click_through
         self.setWindowFlag(Qt.WindowTransparentForInput, self.click_through)
         self.show()
+        self.state_changed.emit()
 
     def reset_size(self):
         """恢复原始像素大小，不更换贴图内容。"""
         self.scale_factor = 1.0
+        self.resize(self.window_size())
+
+    def rotate(self, degrees):
+        """按指定角度旋转贴图显示，不修改源图片文件。"""
+        self.rotation_degrees = (self.rotation_degrees + degrees) % 360
+        self.pixmap = self.original_pixmap.transformed(
+            QTransform().rotate(self.rotation_degrees), Qt.SmoothTransformation)
+        self.resize(self.window_size())
+
+    def reset_rotation(self):
+        self.rotation_degrees = 0
+        self.pixmap = QPixmap(self.original_pixmap)
         self.resize(self.window_size())
 
     def replace_image(self, image, source):
@@ -380,7 +623,9 @@ class StickerItem(QWidget):
         self.source = str(source)
         self.image = None
         self.origin = None
-        self.pixmap = QPixmap.fromImage(image)
+        self.original_pixmap = QPixmap.fromImage(image)
+        self.rotation_degrees = 0
+        self.pixmap = QPixmap(self.original_pixmap)
         self.resize(self.window_size())
         self.update()
 
@@ -403,22 +648,28 @@ class StickerItem(QWidget):
     def toggle_border(self):
         self.border_enabled = not self.border_enabled
         self.apply_style()
+        self.state_changed.emit()
 
     def toggle_shadow(self):
         self.shadow_enabled = not self.shadow_enabled
         self.apply_style()
+        self.state_changed.emit()
 
     def state(self):
         """返回可写入 JSON 的窗口状态，源路径必须为字符串。"""
-        snap = dict(self.snap_target) if self.snap_target else None
-        if snap is not None:
+        snap = (dict(self.snap_target) if self.snap_target
+                and self.snap_target.get("target") in ("window", "sticker") else None)
+        if snap is not None and snap.get("target") == "window":
             # 句柄必须转成普通整数才能写入 JSON。
             snap["hwnd"] = int(snap.get("hwnd", 0))
-        return {"source": self.source, "x": self.x(), "y": self.y(),
-                "scale": self.scale_factor, "opacity": self.windowOpacity(),
+        return {"id": self.session_id, "source": self.source, "x": self.x(), "y": self.y(),
+            "width": self.width(), "height": self.height(),
+            "scale": self.scale_factor, "opacity": self.windowOpacity(),
+            "rotation": self.rotation_degrees,
                 "locked": self.locked, "top": self.always_on_top,
                 "click_through": self.click_through, "border": self.border_enabled,
-                "shadow": self.shadow_enabled, "origin": self.origin, "snap": snap}
+                "shadow": self.shadow_enabled, "background_mode": self.background_mode,
+                "group": self.group_name, "origin": self.origin, "snap": snap}
 
     def thumbnail(self, width=96, height=72):
         """贴图管理窗口使用的等比缩略图。"""
@@ -444,7 +695,7 @@ class StickerItem(QWidget):
     def origin_text(self):
         """文字与颜色贴图可复制回剪贴板的原始文本。"""
         origin = self.origin or {}
-        return origin.get("text") if origin.get("kind") in ("text", "color") else None
+        return origin.get("text") if origin.get("kind") in ("text", "html", "color") else None
 
     def origin_paths(self):
         """文件贴图记录的原始路径，恢复后仍可直接打开。"""
@@ -454,9 +705,15 @@ class StickerItem(QWidget):
         return [path for path in origin.get("paths") or [] if isinstance(path, str) and os.path.exists(path)]
 
     def copy_origin_text(self):
-        """把文字或颜色值放回剪贴板。"""
+        """把文字/颜色或富文本内容放回剪贴板。"""
         text = self.origin_text()
-        if text:
+        if (self.origin or {}).get("kind") == "html":
+            from PySide6.QtCore import QMimeData
+            mime = QMimeData()
+            mime.setHtml(self.origin.get("html", ""))
+            mime.setText(text or "")
+            QGuiApplication.clipboard().setMimeData(mime)
+        elif text:
             QGuiApplication.clipboard().setText(text)
 
     def open_origin(self):

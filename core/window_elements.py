@@ -24,7 +24,8 @@ GW_HWNDNEXT = 2
 MIN_SIZE = 8
 
 
-def element_chain(point, max_depth=3, use_uia=False, exclude_hwnd=None):
+def element_chain(point, max_depth=3, use_uia=False, exclude_hwnd=None,
+                  debug_tree=False):
     """返回覆盖该点的窗口矩形链，由外到内；失败或非 Windows 时返回空列表。
 
     use_uia 为真时先用 UIA 识别自绘界面内部的控件，拿不到结果再退回窗口句柄。
@@ -35,7 +36,7 @@ def element_chain(point, max_depth=3, use_uia=False, exclude_hwnd=None):
     if use_uia:
         from core.window_uia import element_chain as uia_chain
 
-        chain = uia_chain(point, int(max_depth), exclude_hwnd)
+        chain = uia_chain(point, int(max_depth), exclude_hwnd, debug_tree=debug_tree)
         if chain:
             return chain
     try:

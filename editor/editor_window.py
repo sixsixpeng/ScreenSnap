@@ -15,8 +15,12 @@ from core.image_io import save_image, saved_extension
 from core.path_utils import resolved_dir
 from config.config_manager import TOOL_WIDTH_KEYS
 from editor.annotation_canvas import AnnotationCanvas
+from editor.image_effects import apply_output_effects
+from core.screen_capture import qimage_to_pillow
 from editor.image_transform import transform
 from editor.toolbar_widget import ToolbarWidget
+
+ANNOTATION_COLOR_TOOLS = frozenset(("pen", "rect", "ellipse", "arrow", "marker", "text"))
 
 
 class EditorWindow(QMainWindow):
@@ -24,14 +28,18 @@ class EditorWindow(QMainWindow):
 
     image_saved = Signal(str, object)
     sticker_requested = Signal(object)
+    recapture_requested = Signal()
     close_all_requested = Signal()
     status = Signal(str)
     pen_color_changed = Signal(str)
+    tool_color_changed = Signal(str, str)
     setting_changed = Signal(str, object)
 
-    def __init__(self, image, settings, alternate=None):
+    def __init__(self, image, settings, alternate=None, from_capture=False):
         super().__init__()
         self.settings = settings
+        self.from_capture = from_capture
+        self.round_corners = bool(settings.get("editor_image_round_corners", True))
         self.last_path = None
         self.setWindowTitle("截图编辑器")
         self.resize(1200, 760)
@@ -39,10 +47,15 @@ class EditorWindow(QMainWindow):
         layout = QVBoxLayout(container)
         layout.setContentsMargins(8, 6, 8, 8)
         layout.setSpacing(4)
-        self.toolbar = ToolbarWidget(settings["pen_color"], settings)
+        self.toolbar = ToolbarWidget(settings["pen_color"], settings,
+                         show_capture_actions=False)
         self.canvas = AnnotationCanvas(image, settings, alternate)
-        self.canvas.tool = next((key for key, button in self.toolbar.tool_buttons.items()
-                                 if button.isChecked()), "select")
+        self.canvas.set_round_corner_preview(
+            self.round_corners, settings.get("editor_image_corner_radius", 16))
+        self.canvas.set_tool(next((key for key, button in self.toolbar.tool_buttons.items()
+                       if button.isChecked()), "select"))
+        self.last_color_tool = self.canvas.tool if self.canvas.tool in ANNOTATION_COLOR_TOOLS else "pen"
+        self.toolbar.set_active_tool(self.canvas.tool, self.last_color_tool)
         self.canvas.setDragMode(QGraphicsView.RubberBandDrag if self.canvas.tool == "select"
                     else QGraphicsView.NoDrag)
         self.canvas.text_alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
@@ -63,10 +76,6 @@ class EditorWindow(QMainWindow):
         )
         self.operation_tips.setObjectName("editorOperationTips")
         self.operation_tips.setWordWrap(True)
-        self.operation_tips.setStyleSheet(
-            "QLabel { color: #34434a; background: #eef2f3; "
-            "border-radius: 4px; padding: 6px 9px; }"
-        )
         layout.addWidget(self.operation_tips)
         zoom_row = QHBoxLayout()
         zoom_row.addWidget(QLabel("缩放"))
@@ -102,37 +111,64 @@ class EditorWindow(QMainWindow):
 
     def set_tool(self, tool):
         """将工具栏的标注工具切换同步到画布。"""
-        self.canvas.tool = tool
-        if tool != "select":
-            self.canvas.unsetCursor()
+        if tool in ANNOTATION_COLOR_TOOLS:
+            self.last_color_tool = tool
+        self.canvas.set_tool(tool)
         self.canvas.selection_area = None
         self.canvas.selection_start = None
         self.canvas.selection_end = None
         self.canvas.setDragMode(QGraphicsView.RubberBandDrag if tool == "select" else QGraphicsView.NoDrag)
         self.canvas.eraser_point = None
         self.canvas.viewport().update()
+        self.toolbar.set_active_tool(tool, self.last_color_tool)
         self.set_annotation_setting("annotation_tool", tool)
 
     def set_pen_color(self, color):
-        """更新当前画笔并通知设置页将新颜色写入配置。"""
-        self.settings["pen_color"] = color
+        """更新当前标注工具颜色，并同步已选图元与设置页。"""
+        tool = self.canvas.tool if self.canvas.tool in ANNOTATION_COLOR_TOOLS else self.last_color_tool
+        key = "pen_color" if tool == "pen" else f"{tool}_color"
+        self.settings[key] = color
+        self.toolbar.sync_tool_color(key, color)
+        self.canvas.settings[key] = color
         self.canvas.set_selected_color(color)
         self.canvas.update()
-        self.pen_color_changed.emit(color)
+        self.tool_color_changed.emit(tool, color)
+        if tool == "pen":
+            self.pen_color_changed.emit(color)
 
     def apply_picked_color(self, color):
-        """将取样颜色设为当前标注色，同时复制十六进制值便于粘贴使用。"""
-        self.toolbar.pen_color.set_color(color)
+        """将取样色写入吸管前最近使用的可调色工具，并复制色值。"""
         self.set_pen_color(color)
+        self.toolbar.set_active_tool(self.canvas.tool, self.last_color_tool)
+        self.toolbar.pen_color.set_color(color)
         QGuiApplication.clipboard().setText(color)
 
     def set_annotation_setting(self, key, value):
         """保存当前工具参数，并更新适用的已选标注。"""
         self.settings[key] = value
+        self.canvas.settings[key] = value
+        if key in self.toolbar.tool_color_buttons:
+            self.toolbar.sync_tool_color(key, value)
+            if key == f"{self.canvas.tool}_color":
+                self.canvas.set_selected_color(value)
+                self.canvas.update()
+        if key == "editor_image_round_corners":
+            self.round_corners = value
+        if key in ("editor_image_round_corners", "editor_image_corner_radius"):
+            self.canvas.set_round_corner_preview(
+                self.round_corners, self.settings.get("editor_image_corner_radius", 16))
         if key in TOOL_WIDTH_KEYS.values():
             self.canvas.set_selected_width(value)
         elif key in ("rect_style", "ellipse_style"):
             self.canvas.set_selected_line_style(value)
+        elif key in ("rect_fill_enabled", "rect_fill_opacity"):
+            self.canvas.set_selected_fill(
+                "rect", self.settings.get("rect_fill_enabled", False),
+                self.settings.get("rect_fill_opacity", 35))
+        elif key in ("ellipse_fill_enabled", "ellipse_fill_opacity"):
+            self.canvas.set_selected_fill(
+                "ellipse", self.settings.get("ellipse_fill_enabled", False),
+                self.settings.get("ellipse_fill_opacity", 35))
         elif key == "font":
             self.canvas.set_selected_font(value)
         elif key == "font_size":
@@ -159,7 +195,9 @@ class EditorWindow(QMainWindow):
 
     def output_image(self):
         """所有导出操作共用同一张合成图，避免保存与剪贴板结果不一致。"""
-        return self.canvas.render_image()
+        return apply_output_effects(self.canvas.render_image(), self.settings,
+                                    self.round_corners,
+                                    self.settings.get("editor_image_corner_radius", 16))
 
     def allocate_path(self, automatic=False):
         """首次保存时分配唯一文件名；之后保存复用 last_path 覆盖。"""
@@ -301,7 +339,24 @@ class EditorWindow(QMainWindow):
             self.canvas.transform_annotations(annotations, action, 0, old_size)
             self.canvas.checkpoint()
         elif action == "paste":
-            self.sticker_requested.emit(self.output_image())
+            image = self.output_image()
+            logging.getLogger("screensnap").debug(
+                "编辑器请求创建贴图: %dx%d", image.width(), image.height())
+            self.sticker_requested.emit(image)
+            self.suppress_save_notification = True
+            try:
+                self.save(automatic=True)
+            except OSError as error:
+                logging.getLogger("screensnap").error(
+                    "贴图已创建但编辑器自动保存失败: %s", error, exc_info=True)
+                self.status.emit(f"贴图已创建，但自动保存失败: {error}")
+            finally:
+                self.suppress_save_notification = False
+                self.close()
+        elif action == "custom_size":
+            self.set_custom_size()
+        elif action == "recapture":
+            self.recapture_requested.emit()
         elif action == "save":
             self.save(copy_to_clipboard=True)
             self.close()
@@ -316,3 +371,43 @@ class EditorWindow(QMainWindow):
             self.close_all_requested.emit()
         elif action == "discard":
             self.close()
+
+    def set_custom_size(self):
+        dialog = QDialog(self)
+        dialog.setWindowTitle("自定义画布尺寸")
+        layout = QFormLayout(dialog)
+        width_input = QSpinBox(dialog)
+        width_input.setRange(1, 16384)
+        width_input.setValue(self.canvas.image.width)
+        height_input = QSpinBox(dialog)
+        height_input.setRange(1, 16384)
+        height_input.setValue(self.canvas.image.height)
+        layout.addRow("宽度", width_input)
+        layout.addRow("高度", height_input)
+        buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel, parent=dialog)
+        buttons.accepted.connect(dialog.accept)
+        buttons.rejected.connect(dialog.reject)
+        layout.addRow(buttons)
+        if dialog.exec() != QDialog.Accepted:
+            return
+
+        size = width_input.value(), height_input.value()
+        rendered = qimage_to_pillow(self.canvas.render_image())
+        left = max(0, (rendered.width - size[0]) // 2)
+        top = max(0, (rendered.height - size[1]) // 2)
+        right, bottom = min(rendered.width, left + size[0]), min(rendered.height, top + size[1])
+        cropped = rendered.crop((left, top, right, bottom))
+        if cropped.size != size:
+            from PIL import Image
+            canvas = Image.new("RGBA", size, (0, 0, 0, 0))
+            canvas.paste(cropped, (max(0, (size[0] - cropped.width) // 2),
+                                   max(0, (size[1] - cropped.height) // 2)))
+            cropped = canvas
+        self.canvas.image = cropped
+        self.canvas.alternate = None
+        self.canvas.cursor_enabled = False
+        self.toolbar.cursor_switch.setChecked(False)
+        self.toolbar.cursor_switch.setEnabled(False)
+        self.canvas.refresh_image()
+        self.canvas.restore([])
+        self.canvas.checkpoint()

@@ -4,14 +4,18 @@ import math
 
 from PIL import Image, ImageFilter
 from PySide6.QtCore import Qt, QPointF, QRectF, Signal
-from PySide6.QtGui import QPainter, QPainterPath, QPen, QColor, QPixmap, QImage, QTextCursor, QTransform, QCursor
+from PySide6.QtGui import QBrush, QPainter, QPainterPath, QPen, QColor, QPixmap, QImage, QTextCursor, QTransform, QCursor
 from PySide6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-                               QGraphicsItem, QGraphicsTextItem, QInputDialog, QMenu,
+                               QGraphicsItem, QGraphicsRectItem, QGraphicsEllipseItem,
+                               QGraphicsTextItem, QInputDialog, QMenu,
                                QStyleOptionGraphicsItem)
 
 from core.screen_capture import to_qimage
 from config.config_manager import TOOL_WIDTH_KEYS
-from editor.annotation_items import shape, text_item, editable
+from editor.annotation_items import (shape, text_item, editable, RoundedRectItem,
+                                     AnnotationRectItem, AnnotationEllipseItem,
+                                     AnnotationPathItem, AnnotationTextItem,
+                                     AnnotationPixmapItem)
 
 
 def mosaic_image(sample, mode, size):
@@ -50,6 +54,15 @@ class AnnotationCanvas(QGraphicsView):
         # 底图固定在所有标注之下，且不会进入标注快照。
         self.base.setZValue(-10000)
         self.scene_data.addItem(self.base)
+        self.round_corner_preview = False
+        self.corner_radius = settings.get("editor_image_corner_radius", 16)
+        checker = QPixmap(12, 12)
+        checker.fill(QColor("#ffffff"))
+        checker_painter = QPainter(checker)
+        checker_painter.fillRect(0, 0, 6, 6, QColor("#d8d8d8"))
+        checker_painter.fillRect(6, 6, 6, 6, QColor("#d8d8d8"))
+        checker_painter.end()
+        self.corner_preview_brush = QBrush(checker)
         self.refresh_image()
         self.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
@@ -58,14 +71,20 @@ class AnnotationCanvas(QGraphicsView):
         self.setAlignment(Qt.AlignCenter)
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.tool = "select"
+        self._picker_cursor = self._create_picker_cursor()
         self.text_alignment = Qt.AlignLeft
         self.start = None
         self.drawing = None
         self.preview_end = None
         self.resizing = None
+        self.resize_handle = None
         self.resize_anchor = None
-        self.resize_distance = 1
+        self.resize_anchor_local = None
         self.resize_scale = 1
+        self.resize_transform = None
+        self.resize_origin = None
+        self.resize_position = None
+        self.resize_start = None
         self.eraser_last = None
         self.eraser_point = None
         self.erasing = False
@@ -80,6 +99,42 @@ class AnnotationCanvas(QGraphicsView):
         self.cursor_index = 0
         self.zoom_percent = 100
 
+    @staticmethod
+    def _create_picker_cursor():
+        """创建尖端定位明确、深浅对比清晰的滴管光标。"""
+        pixmap = QPixmap(32, 32)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        body = QPainterPath(QPointF(4, 28))
+        body.lineTo(9, 23)
+        body.lineTo(19, 13)
+        body.lineTo(25, 19)
+        body.lineTo(15, 29)
+        body.lineTo(8, 31)
+        body.closeSubpath()
+        painter.setPen(QPen(QColor("#142c32"), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(QColor("#f7fbfa"))
+        painter.drawPath(body)
+        painter.setPen(QPen(QColor("#315c66"), 2, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(8, 26), QPointF(19, 15))
+        painter.setPen(QPen(QColor("#142c32"), 2, Qt.SolidLine, Qt.RoundCap))
+        painter.setBrush(QColor("#00ad91"))
+        painter.drawEllipse(QPointF(24, 8), 4, 4)
+        painter.setPen(QPen(QColor("#f7fbfa"), 1.5, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(22, 8), QPointF(26, 8))
+        painter.end()
+        return QCursor(pixmap, 4, 28)
+
+    def set_tool(self, tool):
+        """切换标注工具并同步其专属光标。"""
+        previous = self.tool
+        self.tool = tool
+        if tool == "picker":
+            self.setCursor(self._picker_cursor)
+        elif previous == "picker" or tool != "select":
+            self.unsetCursor()
+
     def set_zoom(self, percent):
         percent = min(800, max(1, int(percent)))
         if percent == self.zoom_percent:
@@ -92,6 +147,12 @@ class AnnotationCanvas(QGraphicsView):
         """图片尺寸变化后同步更新场景范围，避免旋转后的坐标错位。"""
         self.base.setPixmap(QPixmap.fromImage(to_qimage(self.image)))
         self.scene_data.setSceneRect(0, 0, self.image.width, self.image.height)
+
+    def set_round_corner_preview(self, enabled, radius=None):
+        self.round_corner_preview = bool(enabled)
+        if radius is not None:
+            self.corner_radius = radius
+        self.viewport().update()
 
     def image_point(self, point):
         bounds = self.sceneRect()
@@ -119,13 +180,27 @@ class AnnotationCanvas(QGraphicsView):
         # 使用图元的深拷贝代价较高；记录图元类型与属性以支持撤销/重做。
         records = []
         for item in reversed(self.annotations()):
-            data = {"type": type(item).__name__, "pos": (item.pos().x(), item.pos().y()),
-                "scale": item.scale(), "z": item.zValue(), "transform": QTransform(item.transform())}
+            kind = ("RoundedRectItem" if isinstance(item, RoundedRectItem) else
+                    "QGraphicsRectItem" if isinstance(item, AnnotationRectItem) else
+                    "QGraphicsEllipseItem" if isinstance(item, AnnotationEllipseItem) else
+                    "QGraphicsPathItem" if isinstance(item, AnnotationPathItem) else
+                    "QGraphicsTextItem" if isinstance(item, AnnotationTextItem) else
+                    "QGraphicsPixmapItem" if isinstance(item, AnnotationPixmapItem) else
+                    type(item).__name__)
+            data = {"type": kind, "pos": (item.pos().x(), item.pos().y()),
+                "scale": item.scale(), "z": item.zValue(), "transform": QTransform(item.transform()),
+                "origin": (item.transformOriginPoint().x(), item.transformOriginPoint().y())}
+            if hasattr(item, "corner_radius"):
+                data["corner_radius"] = item.corner_radius
             if hasattr(item, "pen"):
                 data["pen"] = QPen(item.pen())
-            if data["type"] in ("QGraphicsRectItem", "QGraphicsEllipseItem"):
+            if hasattr(item, "brush"):
+                data["brush"] = item.brush()
+            if data["type"] in ("QGraphicsRectItem", "RoundedRectItem", "QGraphicsEllipseItem"):
                 rect = item.rect()
                 data["rect"] = (rect.x(), rect.y(), rect.width(), rect.height())
+                if data["type"] == "RoundedRectItem":
+                    data["corner_radius"] = item.corner_radius
             elif data["type"] == "QGraphicsPathItem":
                 data["path"] = QPainterPath(item.path())
             elif data["type"] == "QGraphicsTextItem":
@@ -142,28 +217,32 @@ class AnnotationCanvas(QGraphicsView):
         """清除现有标注，再按快照重建类型、样式和图层。"""
         for item in self.annotations():
             self.scene_data.removeItem(item)
-        from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsEllipseItem, QGraphicsPathItem, QGraphicsTextItem
         for data in records:
             kind = data["type"]
-            if kind == "QGraphicsRectItem":
-                item = QGraphicsRectItem(QRectF(*data["rect"]))
+            if kind == "RoundedRectItem":
+                item = RoundedRectItem(QRectF(*data["rect"]), data.get("corner_radius", 0))
+            elif kind == "QGraphicsRectItem":
+                item = AnnotationRectItem(QRectF(*data["rect"]))
             elif kind == "QGraphicsEllipseItem":
-                item = QGraphicsEllipseItem(QRectF(*data["rect"]))
+                item = AnnotationEllipseItem(QRectF(*data["rect"]))
             elif kind == "QGraphicsPathItem":
-                item = QGraphicsPathItem(data["path"])
+                item = AnnotationPathItem(data["path"])
             elif kind == "QGraphicsTextItem":
-                item = QGraphicsTextItem()
+                item = AnnotationTextItem()
                 item.setHtml(data["text"])
                 item.setFont(data["font"])
                 item.document().setTextWidth(data["text_width"])
                 item.setDefaultTextColor(QColor(data["color"]))
             else:
-                item = QGraphicsPixmapItem(data["pixmap"])
+                item = AnnotationPixmapItem(data["pixmap"])
                 item.setOffset(QPointF(*data.get("offset", (0, 0))))
             if "pen" in data:
                 item.setPen(QPen(data["pen"]))
+            if "brush" in data and hasattr(item, "setBrush"):
+                item.setBrush(data["brush"])
             editable(item)
             item.setPos(QPointF(*data["pos"]))
+            item.setTransformOriginPoint(QPointF(*data.get("origin", (0, 0))))
             item.setScale(data["scale"])
             item.setTransform(data.get("transform", QTransform()))
             item.setZValue(data["z"])
@@ -238,7 +317,7 @@ class AnnotationCanvas(QGraphicsView):
     def set_selected_line_style(self, style):
         """对所选矩形或椭圆切换实线/虚线线型。"""
         selected = [item for item in self.scene_data.selectedItems()
-                    if hasattr(item, "pen") and item.__class__.__name__ in ("QGraphicsRectItem", "QGraphicsEllipseItem")]
+                if isinstance(item, (QGraphicsRectItem, QGraphicsEllipseItem))]
         for item in selected:
             pen = item.pen()
             pen.setStyle(Qt.DashLine if style == "dash" else Qt.SolidLine)
@@ -256,8 +335,27 @@ class AnnotationCanvas(QGraphicsView):
                 replacement.setAlpha(pen.color().alpha())
                 pen.setColor(replacement)
                 item.setPen(pen)
+                if isinstance(item, (QGraphicsRectItem, QGraphicsEllipseItem)) and item.brush().style() != Qt.NoBrush:
+                    fill = QColor(color)
+                    fill.setAlpha(item.brush().color().alpha())
+                    item.setBrush(fill)
             elif isinstance(item, QGraphicsTextItem):
                 item.setDefaultTextColor(QColor(color))
+        if selected:
+            self.checkpoint()
+
+    def set_selected_fill(self, tool, enabled, opacity):
+        """实时更新选中矩形或椭圆的填充与透明度。"""
+        item_type = QGraphicsRectItem if tool == "rect" else QGraphicsEllipseItem
+        selected = [item for item in self.scene_data.selectedItems()
+                    if isinstance(item, item_type)]
+        for item in selected:
+            if not enabled:
+                item.setBrush(Qt.NoBrush)
+                continue
+            fill = QColor(item.pen().color())
+            fill.setAlpha(round(255 * max(0, min(100, opacity)) / 100))
+            item.setBrush(fill)
         if selected:
             self.checkpoint()
 
@@ -326,7 +424,7 @@ class AnnotationCanvas(QGraphicsView):
         if self.tool == "crop":
             return QPen(QColor(self.crop_color), self.crop_width, Qt.SolidLine,
                         Qt.RoundCap, Qt.RoundJoin)
-        color = QColor(self.settings["pen_color"])
+        color = QColor(self.settings.get(f"{self.tool}_color", self.settings["pen_color"]))
         width = self.tool_width()
         line_style = Qt.DashLine if self.tool in ("rect", "ellipse") and \
             self.settings.get(f"{self.tool}_style", "solid") == "dash" else Qt.SolidLine
@@ -335,6 +433,10 @@ class AnnotationCanvas(QGraphicsView):
             color.setAlpha(round(self.settings.get("marker_opacity", 38) * 255 / 100))
             width = max(12, width * 5)
         return QPen(color, width, line_style, Qt.RoundCap, Qt.RoundJoin)
+
+    def tool_color(self, tool=None):
+        tool = tool or self.tool
+        return self.settings.get(f"{tool}_color", self.settings.get("pen_color", "#ff0000"))
 
     def tool_width(self):
         return self.settings.get(TOOL_WIDTH_KEYS.get(self.tool, "pen_width"),
@@ -357,7 +459,7 @@ class AnnotationCanvas(QGraphicsView):
                 painter.translate(-bounds.topLeft())
                 item.paint(painter, QStyleOptionGraphicsItem(), None)
                 painter.end()
-                replacement = editable(QGraphicsPixmapItem(QPixmap.fromImage(image)))
+                replacement = editable(AnnotationPixmapItem(QPixmap.fromImage(image)))
                 replacement.setOffset(bounds.topLeft())
                 replacement.setPos(item.pos())
                 replacement.setTransform(item.transform())
@@ -384,6 +486,20 @@ class AnnotationCanvas(QGraphicsView):
 
     def drawForeground(self, painter, rect):
         """只在视图预览正在绘制的标注和缩放手柄，导出不包含这些辅助线。"""
+        if self.round_corner_preview and self.corner_radius > 0:
+            bounds = self.sceneRect()
+            radius = min(self.corner_radius, bounds.width() / 2, bounds.height() / 2)
+            rounded = QPainterPath()
+            rounded.addRoundedRect(bounds, radius, radius)
+            corners = QPainterPath()
+            corners.setFillRule(Qt.OddEvenFill)
+            corners.addRect(bounds)
+            corners.addPath(rounded)
+            painter.save()
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setBrushOrigin(0, 0)
+            painter.fillPath(corners, self.corner_preview_brush)
+            painter.restore()
         width = self.settings.get("editor_border_width", 1)
         bounds = self.sceneRect().adjusted(width / 2, width / 2, -width / 2, -width / 2)
         if not bounds.isEmpty():
@@ -422,18 +538,31 @@ class AnnotationCanvas(QGraphicsView):
                 painter.drawPath(self.drawing)
             elif self.tool == "arrow":
                 arrow = shape("arrow", self.start, self.preview_end,
-                              self.settings["pen_color"], self.tool_width(),
+                              self.tool_color("arrow"), self.tool_width(),
                               self.settings.get("arrow_style", "filled"))
                 painter.setBrush(arrow.brush())
                 painter.drawPath(arrow.path())
         if self.tool != "select":
             return
         painter.setPen(QPen(QColor("#00ad91"), 1))
-        painter.setBrush(QColor("white"))
+        painter.setBrush(Qt.NoBrush)
         for item in self.scene_data.selectedItems():
-            painter.drawRect(item.sceneBoundingRect())
-            corner = item.sceneBoundingRect().bottomRight()
-            painter.drawRect(QRectF(corner.x() - 4, corner.y() - 4, 8, 8))
+            bounds = item.sceneBoundingRect()
+            painter.drawRect(bounds)
+            for handle in self.resize_handles(bounds).values():
+                handle_rect = QRectF(handle.x() - 4, handle.y() - 4, 8, 8)
+                painter.fillRect(handle_rect, QColor("white"))
+                painter.drawRect(handle_rect)
+
+    @staticmethod
+    def resize_handles(bounds):
+        center = bounds.center()
+        return {
+            "nw": bounds.topLeft(), "n": QPointF(center.x(), bounds.top()),
+            "ne": bounds.topRight(), "e": QPointF(bounds.right(), center.y()),
+            "se": bounds.bottomRight(), "s": QPointF(center.x(), bounds.bottom()),
+            "sw": bounds.bottomLeft(), "w": QPointF(bounds.left(), center.y()),
+        }
 
     def mousePressEvent(self, event):
         """根据工具决定选中图元、取色或开始新的标注。"""
@@ -455,17 +584,25 @@ class AnnotationCanvas(QGraphicsView):
             self.viewport().update()
             for item in self.scene_data.selectedItems():
                 bounds = item.sceneBoundingRect()
-                corner = bounds.bottomRight()
-                if abs(point.x() - corner.x()) <= 8 and abs(point.y() - corner.y()) <= 8:
-                    anchor_local = item.mapFromScene(bounds.topLeft())
-                    anchor_scene = item.mapToScene(anchor_local)
-                    item.setTransformOriginPoint(anchor_local)
-                    item.setPos(item.pos() + anchor_scene - item.mapToScene(anchor_local))
-                    self.resizing = item
-                    self.resize_anchor = bounds.topLeft()
-                    self.resize_distance = max(1, ((corner.x() - bounds.left()) ** 2 +
-                                                   (corner.y() - bounds.top()) ** 2) ** 0.5)
+                handle = self.resize_handle_at(bounds, point)
+                if handle is not None:
+                    handles = self.resize_handles(bounds)
+                    anchor_name = {"nw": "se", "n": "s", "ne": "sw", "e": "w",
+                                   "se": "nw", "s": "n", "sw": "ne", "w": "e"}[handle]
+                    anchor_scene = handles[anchor_name]
+                    anchor_local = item.mapFromScene(anchor_scene)
+                    original_scene_anchor = item.mapToScene(anchor_local)
+                    self.resize_transform = item.transform()
                     self.resize_scale = item.scale()
+                    self.resize_origin = item.transformOriginPoint()
+                    self.resize_position = item.pos()
+                    item.setTransformOriginPoint(anchor_local)
+                    item.setPos(item.pos() + original_scene_anchor - item.mapToScene(anchor_local))
+                    self.resizing = item
+                    self.resize_handle = handle
+                    self.resize_anchor = anchor_scene
+                    self.resize_anchor_local = anchor_local
+                    self.resize_start = handles[handle]
                     event.accept()
                     return
             if self.scene_data.itemAt(point, self.transform()) in (None, self.base):
@@ -532,9 +669,19 @@ class AnnotationCanvas(QGraphicsView):
             return
         if self.resizing is not None:
             point = self.image_point(self.mapToScene(event.position().toPoint()))
-            distance = ((point.x() - self.resize_anchor.x()) ** 2 +
-                (point.y() - self.resize_anchor.y()) ** 2) ** 0.5
-            self.resizing.setScale(min(10, max(0.1, self.resize_scale * distance / self.resize_distance)))
+            handle = self.resize_handle
+            scale_x, scale_y = 1.0, 1.0
+            if "w" in handle or "e" in handle:
+                start_width = self.resize_start.x() - self.resize_anchor.x()
+                scale_x = self.clamp_resize_ratio((point.x() - self.resize_anchor.x()) / start_width)
+            if "n" in handle or "s" in handle:
+                start_height = self.resize_start.y() - self.resize_anchor.y()
+                scale_y = self.clamp_resize_ratio((point.y() - self.resize_anchor.y()) / start_height)
+            self.resizing.setTransform(self.resize_transform)
+            self.resizing.setScale(self.resize_scale)
+            self.resizing.setTransform(QTransform().scale(scale_x, scale_y), True)
+            current_anchor = self.resizing.mapToScene(self.resize_anchor_local)
+            self.resizing.setPos(self.resizing.pos() + self.resize_anchor - current_anchor)
             self.constrain_item(self.resizing)
             self.viewport().update()
             event.accept()
@@ -557,14 +704,36 @@ class AnnotationCanvas(QGraphicsView):
             self.unsetCursor()
             return
         for item in self.scene_data.selectedItems() if self.tool == "select" else ():
-            corner = item.sceneBoundingRect().bottomRight()
-            if abs(point.x() - corner.x()) <= 8 and abs(point.y() - corner.y()) <= 8:
-                self.setCursor(Qt.SizeFDiagCursor)
+            bounds = item.sceneBoundingRect()
+            handle = self.resize_handle_at(bounds, point)
+            cursors = {"nw": Qt.SizeFDiagCursor, "se": Qt.SizeFDiagCursor,
+                       "ne": Qt.SizeBDiagCursor, "sw": Qt.SizeBDiagCursor,
+                       "n": Qt.SizeVerCursor, "s": Qt.SizeVerCursor,
+                       "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor}
+            if handle:
+                self.setCursor(cursors[handle])
                 return
             if item.contains(item.mapFromScene(point)):
                 self.setCursor(Qt.SizeAllCursor)
                 return
         self.unsetCursor()
+
+    @staticmethod
+    def resize_handle_at(bounds, point):
+        """返回距指针 8 像素内最近的边角控制点。"""
+        candidates = AnnotationCanvas.resize_handles(bounds)
+        nearest = min(candidates, key=lambda name:
+                      (candidates[name].x() - point.x()) ** 2 +
+                      (candidates[name].y() - point.y()) ** 2)
+        handle = candidates[nearest]
+        return nearest if ((handle.x() - point.x()) ** 2 +
+                           (handle.y() - point.y()) ** 2) <= 64 else None
+
+    @staticmethod
+    def clamp_resize_ratio(ratio):
+        """允许跨过锚点翻转方向，但避免零尺寸和过度放大。"""
+        sign = -1 if ratio < 0 else 1
+        return sign * min(10.0, max(0.02, abs(ratio)))
 
     def leaveEvent(self, event):
         self.eraser_point = None
@@ -602,7 +771,7 @@ class AnnotationCanvas(QGraphicsView):
 
     def show_annotation_menu(self, item, position):
         if self.tool != "select":
-            self.tool = "select"
+            self.set_tool("select")
             self.setDragMode(QGraphicsView.RubberBandDrag)
             self.selection_requested.emit()
         self.scene_data.clearSelection()
@@ -654,14 +823,13 @@ class AnnotationCanvas(QGraphicsView):
             self._update_resize_cursor(event.position().toPoint())
             return
         if self.start is not None:
-            from PySide6.QtWidgets import QGraphicsPathItem
             end = self.image_point(self.mapToScene(event.position().toPoint()))
             if self.tool in ("pen", "marker"):
                 self.drawing.lineTo(end)
             self.preview_end = None
             self.viewport().update()
             if self.tool in ("pen", "marker"):
-                item = QGraphicsPathItem(self.drawing)
+                item = AnnotationPathItem(self.drawing)
                 item.setPen(self.stroke_pen())
                 editable(item)
             elif self.tool == "mosaic":
@@ -674,7 +842,7 @@ class AnnotationCanvas(QGraphicsView):
                 size = self.settings["mosaic_size"]
                 mode = self.settings.get("mosaic_mode", "blocks")
                 result = mosaic_image(sample, mode, size)
-                item = editable(QGraphicsPixmapItem(QPixmap.fromImage(to_qimage(result))))
+                item = editable(AnnotationPixmapItem(QPixmap.fromImage(to_qimage(result))))
                 item.setPos(area.topLeft())
             elif self.tool == "crop":
                 area = QRectF(self.start, end).normalized().toRect().intersected(self.sceneRect().toRect())
@@ -692,7 +860,12 @@ class AnnotationCanvas(QGraphicsView):
                 style = self.settings.get(f"{self.tool}_style", "solid") if self.tool in ("rect", "ellipse") else \
                     (self.settings.get("arrow_style", "filled") if self.tool == "arrow" else "filled")
                 item = shape(self.tool, self.start, end,
-                             self.settings["pen_color"], self.tool_width(), style)
+                             self.tool_color(), self.tool_width(), style,
+                             self.settings.get("rect_corner_radius", 0)
+                             if self.tool == "rect" and self.settings.get("rect_corner_enabled", False)
+                             else 0,
+                             self.settings.get(f"{self.tool}_fill_enabled", False),
+                             self.settings.get(f"{self.tool}_fill_opacity", 35))
             self.scene_data.addItem(item)
             self.start = None
             self.checkpoint()
@@ -715,7 +888,7 @@ class AnnotationCanvas(QGraphicsView):
                 self.remove_selected()
                 self._update_resize_cursor(event.position().toPoint())
                 return
-            self.tool = "select"
+            self.set_tool("select")
             self.setDragMode(QGraphicsView.RubberBandDrag)
             self.selection_requested.emit()
             self.scene_data.clearSelection()

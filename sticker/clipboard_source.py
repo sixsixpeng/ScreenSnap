@@ -6,9 +6,9 @@ import re
 from html import unescape
 from pathlib import Path
 
-from PySide6.QtCore import QFileInfo, Qt
+from PySide6.QtCore import QFileInfo, Qt, QRectF
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QImage,
-                           QPainter)
+                           QPainter, QTextDocument)
 from PySide6.QtWidgets import QFileIconProvider
 
 # 文件贴图最多展示的条目数量，超出部分只统计数量。
@@ -21,17 +21,21 @@ SHORT_HEX = re.compile(r"[0-9a-fA-F]{3}")
 class ClipboardSource:
     """统一描述剪贴板内容；image 始终是可以直接贴出的 QImage。"""
 
-    def __init__(self, kind, image, text="", paths=None):
+    def __init__(self, kind, image, text="", paths=None, html=""):
         self.kind = kind
         self.image = image
         self.text = text
         self.paths = [str(path) for path in (paths or [])]
+        self.html = str(html or "")
 
     def origin(self):
         """写入贴图会话的最小元信息，恢复后仍可用于复制或打开。"""
         data = {"kind": self.kind}
         if self.kind in ("text", "color"):
             data["text"] = self.text
+        if self.kind == "html":
+            data["text"] = self.text
+            data["html"] = self.html
         elif self.kind == "files":
             data["paths"] = self.paths
         return data
@@ -41,6 +45,9 @@ class ClipboardSource:
         if self.kind == "text":
             first = self.text.strip().splitlines()[0] if self.text.strip() else ""
             return f"文字 · {first[:18]}" if first else "文字"
+        if self.kind == "html":
+            first = self.text.strip().splitlines()[0] if self.text.strip() else ""
+            return f"富文本 · {first[:18]}" if first else "富文本"
         if self.kind == "color":
             return f"颜色 {self.text}"
         if self.kind == "files":
@@ -116,6 +123,35 @@ def render_text_card(text, settings):
         painter.drawText(padding, padding + index * spacing + metrics.ascent(), line)
     painter.end()
     return image
+
+
+def render_html_card(markup, text, settings):
+    """保留网页复制的段落、强调、列表、链接等结构绘制为贴图。"""
+    font = card_font(settings, "text_sticker_font", 18)
+    width = int(settings.get("text_sticker_width", 420))
+    padding = max(12, font.pointSize())
+    document = QTextDocument()
+    document.setDefaultFont(font)
+    document.setDocumentMargin(0)
+    document.setHtml(markup[:1_000_000])
+    document.setTextWidth(max(40, width - padding * 2))
+    size = document.size().toSize()
+    max_height = max(80, QFontMetrics(font).lineSpacing() *
+                     int(settings.get("text_sticker_lines", 40)))
+    height = min(size.height(), max_height) + padding * 2
+    card = QImage(min(width, max(100, size.width() + padding * 2)), height,
+                  QImage.Format_ARGB32_Premultiplied)
+    card.fill(QColor(str(settings.get("text_sticker_background", "#1f6f5c"))))
+    painter = QPainter(card)
+    painter.setRenderHint(QPainter.Antialiasing)
+    painter.setRenderHint(QPainter.TextAntialiasing)
+    painter.translate(padding, padding)
+    document.drawContents(painter, QRectF(0, 0, card.width() - padding * 2, max_height))
+    painter.end()
+    logging.getLogger("screensnap").debug(
+        "渲染剪贴板富文本贴图: html_bytes=%d text_chars=%d output=%dx%d",
+        len(markup.encode("utf-8", errors="replace")), len(text), card.width(), card.height())
+    return card
 
 
 def render_color_card(color, settings):
@@ -231,6 +267,12 @@ def read_clipboard(settings, clipboard=None):
             logger.debug("剪贴板识别为文件: %d 个 %s", len(paths), paths[:3])
             return ClipboardSource("files", render_file_card(paths, settings), paths=paths)
         logger.debug("剪贴板含 URL 但没有本地存在的文件，继续按文本识别")
+    if mime.hasHtml():
+        html = mime.html()
+        text = plain_text(mime)
+        if html.strip() and text:
+            return ClipboardSource("html", render_html_card(html, text, settings),
+                                   text=text, html=html)
     text = plain_text(mime)
     if not text:
         logger.debug("剪贴板没有可用文本: board.text()=%r 格式=%s", board.text(), mime.formats())

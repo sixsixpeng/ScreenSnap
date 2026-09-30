@@ -6,7 +6,6 @@ import os
 
 import mss
 from PIL import Image
-from PySide6.QtCore import QBuffer, QIODevice
 from PySide6.QtGui import QImage
 
 
@@ -101,12 +100,9 @@ def to_qimage(image):
 
 
 def qimage_to_pillow(image):
-    """通过内存 PNG 将剪贴板 QImage 转为独立的 Pillow 图像。"""
+    """通过原始 RGBA 像素缓冲区转为独立的 Pillow 图像。"""
     if image.isNull():
         raise ValueError("剪贴板中没有图片")
-    buffer = QBuffer()
-    if not buffer.open(QIODevice.WriteOnly) or not image.save(buffer, "PNG"):
-        raise ValueError("无法读取剪贴板图片")
-    result = Image.open(BytesIO(bytes(buffer.data()))).copy()
-    buffer.close()
-    return result
+    rgba = image.convertToFormat(QImage.Format_RGBA8888)
+    return Image.frombuffer("RGBA", (rgba.width(), rgba.height()), rgba.constBits(),
+                            "raw", "RGBA", rgba.bytesPerLine(), 1).copy()

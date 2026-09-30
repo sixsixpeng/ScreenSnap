@@ -1,4 +1,4 @@
-"""设置表单共享控件与悬浮提示样式。"""
+"""设置表单共享控件与提示文案绑定。"""
 
 import copy
 import logging
@@ -10,9 +10,6 @@ from PySide6.QtWidgets import (QWidget, QFormLayout, QCheckBox, QSpinBox, QDoubl
 
 from ui.widgets.color_button import ColorButton
 from ui.widgets.file_path_edit import FilePathEdit
-
-
-TOOLTIP_STYLE = "QToolTip { background: #213640; color: white; border: 1px solid #00ad91; padding: 8px; border-radius: 5px; }"
 
 
 class SettingsPage(QWidget):

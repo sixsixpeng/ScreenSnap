@@ -23,19 +23,39 @@ DEFAULTS = {
         "previous": "ctrl+alt+left", "next": "ctrl+alt+right",
         "hide": "ctrl+shift+h", "close_all": "ctrl+shift+x",
         "touch": "ctrl+shift+t", "paste_clipboard": "ctrl+f3",
+        "open_sticker_file": "ctrl+alt+n",
         "sticker_panel": "ctrl+alt+p",
+        "sticker_rotate_left": "ctrl+alt+shift+left",
+        "sticker_rotate_right": "ctrl+alt+shift+right",
     },
     "capture_delay": 0,
-    "bubble": True, "capture_notification": True, "save_notification": True,
-    "sticker_notification": True, "sound": False,
+    "capture_hotkey_suppress": False,
+    "theme": "system",
+    "bubble": True, "notification_backend": "win11toast",
+    "capture_notification": True, "save_notification": True,
+    "sticker_notification": True, "open_notification_file": True, "sound": False,
     "auto_dir": "", "manual_dir": "",
+    "archive_by_month": True, "archive_by_day": False,
     "inline_edit": True,
+    "capture_after_selection": "edit",
     "filename": "_%Y%m%d_%H%M%S", "open_dir": False,
     "copy_saved_image": True, "copy_saved_path": False,
     "save_format": "png", "save_quality": 90, "save_background": "#ffffff",
-    "sticker_border_enabled": True, "sticker_border_color": "#00ad91",
+    "sticker_border_enabled": True, "sticker_border_color": "#ff0000",
     "sticker_border_width": 2, "sticker_shadow_enabled": True,
+    "sticker_selection_effect_enabled": True,
+    "sticker_selection_effect_strength": 30,
     "sticker_shadow_color": "#000000", "sticker_shadow_strength": 35,
+    "sticker_background_mode": "transparent",
+    "editor_image_round_corners": True, "editor_image_corner_radius": 16,
+    "rect_corner_enabled": False, "rect_corner_radius": 12,
+    "editor_image_border_enabled": False, "editor_image_border_width": 2,
+    "editor_image_border_color": "#ffffff",
+    "editor_image_shadow_enabled": False, "editor_image_shadow_size": 12,
+    "editor_image_shadow_strength": 25, "editor_image_shadow_color": "#000000",
+    "capture_quick_sticker_enabled": False,
+    "capture_quick_sticker_shortcut": "Space",
+    "capture_save_shortcut": "S",
     "text_sticker_font": "", "text_sticker_font_size": 18,
     "text_sticker_color": "#ffffff", "text_sticker_background": "#1f6f5c",
     "text_sticker_width": 420, "text_sticker_lines": 40,
@@ -45,17 +65,28 @@ DEFAULTS = {
     "sticker_panel_thumb": 96,
     "sticker_snap_enabled": True, "sticker_snap_threshold": 8,
     "sticker_snap_targets": "both", "sticker_follow_window": True,
+    "sticker_follow_sticker": True,
     "sticker_follow_interval": 120,
     "magnifier": True, "crosshair": True, "crosshair_color": "#ff0000", "crosshair_width": 1,
-    "mask_theme": "dark", "mask_opacity": 50,
-    "window_detection": True, "window_auto_select": False, "element_depth": 3,
+    "mask_color": "#000000", "mask_opacity": 60,
+    "window_detection": True, "window_auto_select": False, "element_depth": 12,
     "window_hover_detect": True, "window_uia_detect": True,
-    "window_hover_interval": 80,
+    "uia_debug_tree": False,
+    "window_hover_interval": 80, "window_hover_color": "#168CFF",
+    "window_hover_border_color": "#ff0000",
+    "window_hover_text_color": "#F4FFFC",
+    "window_hover_badge_color": "#102A31",
+    "window_hover_border_width": 2, "window_hover_font_size": 12,
+    "window_hover_opacity": 35, "window_hover_fill_mode": "reveal",
     "anchor_style": "border", "selection_border_color": "#ff0000",
     "cursor": False, "history_limit": 100,
     "last_capture_rect": [],
     "annotation_tool": "select", "text_alignment": "left", "arrow_style": "filled",
     "rect_style": "solid", "ellipse_style": "solid",
+    "rect_color": "#ff0000", "ellipse_color": "#ff0000",
+    "arrow_color": "#ff0000", "marker_color": "#ff0000", "text_color": "#ff0000",
+    "rect_fill_enabled": False, "rect_fill_opacity": 35,
+    "ellipse_fill_enabled": False, "ellipse_fill_opacity": 35,
     "pen_width": 2, "rect_width": 2, "ellipse_width": 2, "arrow_width": 2,
     "marker_width": 2, "eraser_width": 30, "pen_color": "#ff0000",
     "crop_color": "#00ad91", "crop_width": 2,
@@ -64,6 +95,7 @@ DEFAULTS = {
     "line_spacing": 1.2, "mosaic_size": 10,
     "mosaic_mode": "blocks",
     "logging_enabled": True, "log_level": "INFO", "log_when": "midnight", "log_dir": "",
+    "log_monthly_folder": True,
 }
 
 
@@ -88,6 +120,22 @@ def validate(data):
         raise ValueError("配置必须是 JSON 对象")
     # 用默认值补齐旧版本配置，避免缺少新选项时界面访问失败。
     result = copy.deepcopy(DEFAULTS)
+    if "archive_by_month" not in data and "archive_by_day" not in data:
+        if "archive_images" in data:
+            if type(data["archive_images"]) is not bool:
+                raise ValueError("旧版图片归档开关必须是布尔值")
+            if data.get("image_archive_period", "month") not in ("month", "day"):
+                raise ValueError("旧版图片归档周期必须是 month 或 day")
+            archived = data.get("archive_images") is True
+            period = data.get("image_archive_period", "month")
+            result["archive_by_month"] = archived and period == "month"
+            result["archive_by_day"] = archived and period == "day"
+    if "mask_color" not in data:
+        legacy_theme = data.get("mask_theme")
+        if legacy_theme == "dark":
+            result["mask_color"] = "#000000"
+        elif legacy_theme == "light":
+            result["mask_color"] = "#FFFFFF"
     for key, value in data.items():
         if key not in result:
             continue
@@ -103,6 +151,15 @@ def validate(data):
             raise ValueError(f"配置项 {key} 类型错误")
         elif key == "selection_border_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("截图选区边框颜色必须是六位十六进制颜色")
+        elif key == "window_hover_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("控件识别高亮颜色必须是六位十六进制颜色")
+        elif key == "window_hover_fill_mode" and value not in ("fill", "reveal"):
+            raise ValueError("控件候选框显示模式无效")
+        elif key in ("window_hover_border_color", "window_hover_text_color",
+                     "window_hover_badge_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("控件提示样式颜色必须是六位十六进制颜色")
+        elif key == "mask_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("截图遮罩颜色必须是六位十六进制颜色")
         elif key == "editor_border_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("编辑区边框颜色必须是六位十六进制颜色")
         elif key == "editor_border_width" and not 1 <= value <= 12:
@@ -111,12 +168,38 @@ def validate(data):
             raise ValueError("裁剪框颜色必须是六位十六进制颜色")
         elif key == "crop_width" and not 1 <= value <= 12:
             raise ValueError("裁剪框线宽必须在 1 到 12 像素之间")
+        elif key in ("capture_quick_sticker_shortcut", "capture_save_shortcut"):
+            from PySide6.QtGui import QKeySequence
+
+            sequence = QKeySequence(value.strip())
+            if sequence.isEmpty() or sequence.count() > 1:
+                raise ValueError("截图快捷键必须是一个有效按键或组合")
+            result[key] = sequence.toString(QKeySequence.PortableText)
         elif key in ("sticker_border_color", "sticker_shadow_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("贴图颜色必须是六位十六进制颜色")
+        elif key in ("pen_color", "rect_color", "ellipse_color", "arrow_color", "marker_color", "text_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("标注工具颜色必须是六位十六进制颜色")
+        elif key in ("rect_fill_opacity", "ellipse_fill_opacity") and not 0 <= value <= 100:
+            raise ValueError("形状填充不透明度必须在 0 到 100 之间")
+        elif key in ("editor_image_border_color", "editor_image_shadow_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("输出边框或阴影颜色必须是六位十六进制颜色")
         elif key == "sticker_border_width" and not 0 <= value <= 20:
             raise ValueError("贴图描边宽度必须在 0 到 20 像素之间")
         elif key == "sticker_shadow_strength" and not 0 <= value <= 100:
             raise ValueError("贴图阴影强度必须在 0 到 100 之间")
+        elif key == "sticker_selection_effect_strength" and not 0 <= value <= 100:
+            raise ValueError("贴图选中光晕强度必须在 0 到 100 之间")
+        elif key == "sticker_background_mode" and value not in (
+                "transparent", "pseudo", "dark_checker", "light_checker"):
+            raise ValueError("未知贴图透明背景模式")
+        elif key in ("editor_image_corner_radius", "rect_corner_radius") and not 0 <= value <= 100:
+            raise ValueError("圆角半径必须在 0 到 100 像素之间")
+        elif key == "editor_image_border_width" and not 0 <= value <= 20:
+            raise ValueError("输出边框宽度必须在 0 到 20 像素之间")
+        elif key == "editor_image_shadow_size" and not 0 <= value <= 60:
+            raise ValueError("输出阴影尺寸必须在 0 到 60 像素之间")
+        elif key == "editor_image_shadow_strength" and not 0 <= value <= 100:
+            raise ValueError("输出阴影强度必须在 0 到 100 之间")
         elif key == "save_format" and value not in _save_formats():
             raise ValueError("未知保存格式")
         elif key == "save_quality" and not 1 <= value <= 100:
@@ -143,6 +226,10 @@ def validate(data):
             raise ValueError("贴图吸附距离必须在 1 到 40 像素之间")
         elif key == "sticker_snap_targets" and value not in ("screen", "window", "both"):
             raise ValueError("未知贴图吸附目标")
+        elif key == "notification_backend" and value not in ("win11toast", "legacy"):
+            raise ValueError("未知通知方式")
+        elif key == "theme" and value not in ("system", "dark", "light"):
+            raise ValueError("未知应用主题")
         elif key == "sticker_follow_interval" and not 30 <= value <= 1000:
             raise ValueError("贴图跟随刷新间隔必须在 30 到 1000 毫秒之间")
         elif key == "save_background" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
@@ -160,16 +247,26 @@ def validate(data):
             raise ValueError("十字线宽度必须在 1 到 8 像素之间")
         elif key == "mask_opacity" and not 0 <= value <= 100:
             raise ValueError("遮罩透明度必须在 0 到 100 之间")
-        elif key == "element_depth" and not 1 <= value <= 8:
-            raise ValueError("窗口元素识别层级必须在 1 到 8 之间")
+        elif key == "element_depth" and not 1 <= value <= 32:
+            raise ValueError("窗口元素识别层级必须在 1 到 32 之间")
+        elif key in ("archive_by_month", "archive_by_day") and type(value) is not bool:
+            raise ValueError("图片归档开关必须是布尔值")
         elif key == "window_hover_interval" and not 16 <= value <= 500:
             raise ValueError("悬停识别刷新间隔必须在 16 到 500 毫秒之间")
+        elif key == "window_hover_opacity" and not 0 <= value <= 100:
+            raise ValueError("控件识别高亮不透明度必须在 0 到 100 之间")
+        elif key == "window_hover_border_width" and not 1 <= value <= 6:
+            raise ValueError("控件提示边线宽必须在 1 到 6 像素之间")
+        elif key == "window_hover_font_size" and not 8 <= value <= 32:
+            raise ValueError("控件尺寸标签字号必须在 8 到 32 像素之间")
         elif key == "marker_opacity" and not 1 <= value <= 100:
             raise ValueError("荧光笔不透明度必须在 1 到 100 之间")
         elif key == "font_size" and not 6 <= value <= 200:
             raise ValueError("字号必须在 6 到 200 之间")
+        elif key == "eraser_width" and not 10 <= value <= 100:
+            raise ValueError("橡皮擦直径必须在 10 到 100 之间")
         elif key in ("pen_width", "rect_width", "ellipse_width", "arrow_width",
-                     "marker_width", "eraser_width") and not 1 <= value <= 50:
+                     "marker_width") and not 1 <= value <= 50:
             raise ValueError("标注线宽必须在 1 到 50 之间")
         elif key == "annotation_tool" and value not in (
             "select", "rect", "ellipse", "arrow", "pen", "eraser", "text",
@@ -181,6 +278,8 @@ def validate(data):
                 raise ValueError("未知标注工具")
         elif key == "text_alignment" and value not in ("left", "center", "right"):
             raise ValueError("未知文字对齐方式")
+        elif key == "capture_after_selection" and value not in ("save", "edit"):
+            raise ValueError("截图选区后的行为必须是仅保存或进入编辑")
         elif key == "arrow_style" and value not in (
             "filled", "open", "double", "double_filled",
             "solid_line", "open_line", "solid_dash", "open_dash",
@@ -198,7 +297,22 @@ def validate(data):
     bindings = [canonical_hotkey(binding) for binding in result["hotkeys"].values() if binding]
     if len(bindings) != len(set(bindings)):
         raise ValueError("快捷键冲突：不能为多个操作设置同一热键")
+    if result["archive_by_month"] and result["archive_by_day"]:
+        raise ValueError("按月和按日归档不能同时开启")
     return result
+
+
+def migrate_legacy_settings(data):
+    if not isinstance(data, dict):
+        return data
+    migrated = dict(data)
+    for old_key, new_key in (
+            ("capture_round_corners", "editor_image_round_corners"),
+            ("capture_corner_radius", "editor_image_corner_radius")):
+        if old_key in migrated:
+            migrated.setdefault(new_key, migrated[old_key])
+            del migrated[old_key]
+    return migrated
 
 
 def repair(data):
@@ -246,7 +360,7 @@ class ConfigManager:
             return self.data
         loaded = None
         try:
-            loaded = json.loads(text)
+            loaded = migrate_legacy_settings(json.loads(text))
             self.data = validate(loaded)
         except ValueError as error:
             backup = self.backup()
@@ -301,7 +415,8 @@ class ConfigManager:
 
     def import_from(self, path):
         """导入成功后才更新内存与本机配置，错误文件不会覆盖原设置。"""
-        imported = validate(json.loads(Path(path).read_text(encoding="utf-8")))
+        imported = validate(migrate_legacy_settings(
+            json.loads(Path(path).read_text(encoding="utf-8"))))
         self.data.clear()
         self.data.update(imported)
         self.save()

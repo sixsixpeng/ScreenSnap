@@ -2,10 +2,41 @@
 
 import logging
 import sys
+from datetime import datetime
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
 from logger.log_context import ContextFilter
+
+
+class MonthlyDirectoryTimedRotatingFileHandler(TimedRotatingFileHandler):
+    """按月切换日志目录，同时保留配置的日/小时文件轮转。"""
+
+    def __init__(self, directory, filename, **kwargs):
+        self.directory = Path(directory)
+        self.filename = filename
+        self.month = datetime.now().strftime("%Y-%m")
+        target = self.directory / self.month / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        super().__init__(target, **kwargs)
+
+    def emit(self, record):
+        month = datetime.now().strftime("%Y-%m")
+        if month != self.month:
+            self.acquire()
+            try:
+                if self.stream:
+                    self.stream.flush()
+                    self.stream.close()
+                    self.stream = None
+                self.month = month
+                target = self.directory / month / self.filename
+                target.parent.mkdir(parents=True, exist_ok=True)
+                self.baseFilename = str(target.resolve())
+                self.stream = self._open()
+            finally:
+                self.release()
+        super().emit(record)
 
 
 def configure_logging(settings):
@@ -32,9 +63,14 @@ def configure_logging(settings):
         startup = sys.executable if getattr(sys, "frozen", False) else sys.argv[0]
         directory = Path(startup).resolve().parent / "logs"
         directory.mkdir(parents=True, exist_ok=True)
-    handler = TimedRotatingFileHandler(
-        directory / "app.log", when=settings["log_when"], backupCount=14, encoding="utf-8"
-    )
+    if settings.get("log_monthly_folder", True):
+        handler = MonthlyDirectoryTimedRotatingFileHandler(
+            directory, "app.log", when=settings["log_when"], backupCount=14,
+            encoding="utf-8")
+    else:
+        handler = TimedRotatingFileHandler(
+            directory / "app.log", when=settings["log_when"], backupCount=14,
+            encoding="utf-8")
     logger.addFilter(ContextFilter())
     # 位置信息用 模块:行号 函数名，方括号内是鼠标、前台窗口与当前操作对象。
     handler.setFormatter(logging.Formatter(
