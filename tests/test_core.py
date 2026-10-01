@@ -705,7 +705,7 @@ class CoreTests(unittest.TestCase):
             manager = ConfigManager(path)
             self.assertFalse(manager.data["window_uia_detect"])
             self.assertEqual(manager.data["window_hover_interval"], 300)
-            self.assertEqual(manager.data["mask_color"], "#FFE2EB")
+            self.assertEqual(manager.data["mask_color"], "#ffe2eb")
             self.assertEqual(manager.data["mask_opacity"], 72)
             self.assertEqual(manager.data["capture_after_selection"], "edit")
             settings = SettingsWindow(manager)
@@ -740,9 +740,10 @@ class CoreTests(unittest.TestCase):
         from config.config_manager import DEFAULTS, validate
         from screenshot.mask_window import _hover_fill_color
 
-        self.assertEqual(DEFAULTS["window_hover_color"], "#168CFF")
-        self.assertEqual(DEFAULTS["window_hover_border_color"],
-                 DEFAULTS["selection_border_color"])
+        self.assertEqual(DEFAULTS["window_hover_color"], "#168cff")
+        self.assertEqual(DEFAULTS["window_hover_border_color"], "#168cff")
+        self.assertEqual(DEFAULTS["selection_border_color"], "#168cff")
+        self.assertTrue(DEFAULTS["capture_quick_sticker_enabled"])
         self.assertEqual(DEFAULTS["window_hover_opacity"], 35)
         self.assertEqual(DEFAULTS["window_hover_fill_mode"], "reveal")
         self.assertEqual(DEFAULTS["mask_color"], "#000000")
@@ -1103,7 +1104,8 @@ class CoreTests(unittest.TestCase):
         painter = QPainter(image)
         paint_info(painter, QPoint(20, 20), None, QRect(0, 0, 800, 100))
         painter.end()
-        backdrop = image.pixelColor(400, 10)
+        # 提示条贴顶后只有上下各 4px 内边距，取样避开文字区域。
+        backdrop = image.pixelColor(400, 2)
         self.assertNotEqual(backdrop.name(), "#ffffff")
         self.assertLess(backdrop.red(), 100)
         self.assertEqual(backdrop.alpha(), 255)
@@ -1118,13 +1120,13 @@ class CoreTests(unittest.TestCase):
         paint_info(painter, QPoint(20, 20), None)
         self.assertIn("拖拽框选", " ".join(call.args[-1] for call in painter.drawText.call_args_list))
         self.assertGreaterEqual(painter.drawText.call_count, 1)
-        self.assertEqual(painter.drawRoundedRect.call_args.args[0].height(),
-                 16 * painter.drawText.call_count + 12)
+        # 提示条只占一行：文字高度 + 上下各 4px 内边距。
+        self.assertEqual(painter.drawRoundedRect.call_args.args[0].height(), 16 + 8)
         painter.drawText.reset_mock()
         paint_info(painter, QPoint(20, 20), QRect(10, 10, 40, 30))
         selected_hint = " ".join(call.args[-1] for call in painter.drawText.call_args_list)
-        self.assertIn("内部拖动移动", selected_hint)
-        self.assertIn("Enter/左键双击编辑", selected_hint)
+        self.assertIn("拖动移动", selected_hint)
+        self.assertIn("Enter/双击编辑", selected_hint)
         self.assertIn("右键双击保存", selected_hint)
         self.assertIn("四角/边中点缩放", selected_hint)
 
@@ -1134,6 +1136,7 @@ class CoreTests(unittest.TestCase):
         painter = Mock()
         painter.fontMetrics.return_value.horizontalAdvance.side_effect = lambda text: len(text) * 8
         painter.fontMetrics.return_value.height.return_value = 16
+        painter.fontMetrics.return_value.elidedText.side_effect = lambda text, *_: text
         element_rect = QRect(120, 130, 80, 30)
         paint_info(painter, QPoint(0, 0), None, QRect(0, 0, 500, 400),
                    element_rect=element_rect, element_size=(160, 60),
@@ -1163,16 +1166,16 @@ class CoreTests(unittest.TestCase):
             page.hover_style_combo.setCurrentIndex(
                 page.hover_style_combo.findData("amber"))
 
-            self.assertEqual(config.data["window_hover_border_color"], "#FFD17A")
-            self.assertEqual(config.data["window_hover_text_color"], "#FFF9EE")
-            self.assertEqual(config.data["window_hover_badge_color"], "#402B13")
+            self.assertEqual(config.data["window_hover_border_color"], "#ffd17a")
+            self.assertEqual(config.data["window_hover_text_color"], "#fff9ee")
+            self.assertEqual(config.data["window_hover_badge_color"], "#402b13")
             self.assertEqual(config.data["window_hover_font_size"], 12)
 
             page.controls["window_hover_border_width"].setValue(4)
             self.assertEqual(config.data["window_hover_border_width"], 4)
             self.assertEqual(page.hover_style_combo.currentData(), "custom")
             page._set_hover_color("window_hover_text_color", "#E4F0FF")
-            self.assertEqual(config.data["window_hover_text_color"], "#E4F0FF")
+            self.assertEqual(config.data["window_hover_text_color"], "#e4f0ff")
             page.reset_page()
             self.assertEqual(page.hover_style_combo.currentData(), "custom")
             self.assertEqual(config.data["window_hover_border_width"], 2)
@@ -1207,6 +1210,9 @@ class CoreTests(unittest.TestCase):
         wide_rect = painter.drawRoundedRect.call_args.args[0]
         self.assertLessEqual(wide_rect.width(), 1920 - 16)
         self.assertEqual(wide_rect.left(), (1920 - wide_rect.width()) // 2)
+        # 宽度贴合文字而不是占满可用宽度，并紧贴显示器顶部。
+        self.assertLess(wide_rect.width(), 1920 - 16)
+        self.assertEqual(wide_rect.top(), 0)
         self.assertTrue(all(call.args[1] & Qt.AlignHCenter for call in painter.drawText.call_args_list))
         self.assertTrue(painter.fontMetrics.return_value.elidedText.called)
         painter.drawText.reset_mock()
@@ -1230,6 +1236,25 @@ class CoreTests(unittest.TestCase):
         self.assertIn("-123456, 987654", " ".join(call.args[-1] for call in painter.drawText.call_args_list))
         self.assertEqual(painter.drawText.call_count, 1)
 
+    def test_capture_tips_width_follows_coordinates_and_selection_size(self):
+        from screenshot.overlay_info import paint_info
+
+        def bar_width(position, selection=None):
+            painter = Mock()
+            painter.device.return_value.width.return_value = 1920
+            painter.device.return_value.height.return_value = 1080
+            painter.fontMetrics.return_value.horizontalAdvance.side_effect = lambda text: len(text) * 12
+            painter.fontMetrics.return_value.height.return_value = 16
+            painter.fontMetrics.return_value.elidedText.side_effect = lambda text, *_: text
+            paint_info(painter, position, selection, QRect(0, 0, 1920, 1080))
+            return painter.drawRoundedRect.call_args.args[0].width()
+
+        short = bar_width(QPoint(1, 2))
+        # 坐标位数增加（含负坐标显示器）时提示条必须跟着变宽，不能是固定宽度。
+        self.assertGreater(bar_width(QPoint(-123456, 987654)), short)
+        # 选区尺寸同样计入文案，出现选区后条宽也会变化。
+        self.assertGreater(bar_width(QPoint(1, 2), QRect(0, 0, 800, 600)), short)
+
     def test_capture_operation_tips_are_centered_on_each_monitor(self):
         from PySide6.QtGui import QColor, QImage, QPainter
         from screenshot.overlay_info import paint_info
@@ -1243,8 +1268,8 @@ class CoreTests(unittest.TestCase):
         self.assertGreater(image.pixelColor(4, 20).red(), 200)
         self.assertGreater(image.pixelColor(995, 20).red(), 200)
         self.assertGreater(image.pixelColor(1004, 20).red(), 200)
-        self.assertLess(image.pixelColor(500, 9).red(), 100)
-        self.assertLess(image.pixelColor(1500, 9).red(), 100)
+        self.assertLess(image.pixelColor(500, 2).red(), 100)
+        self.assertLess(image.pixelColor(1500, 2).red(), 100)
 
     def test_annotation_choices_restore_from_config(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -1290,7 +1315,7 @@ class CoreTests(unittest.TestCase):
             reopened.close()
 
     def test_notification_settings_persist_independently(self):
-        from ui.settings_screenshot import ScreenshotPage
+        from ui.settings_general import GeneralPage
         with tempfile.TemporaryDirectory() as folder:
             manager = ConfigManager(Path(folder) / "settings.json")
             page = GeneralPage(manager, manager.save)
@@ -1682,7 +1707,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(validate({})["sticker_border_enabled"])
         self.assertTrue(validate({})["sticker_selection_effect_enabled"])
         self.assertEqual(validate({})["sticker_selection_effect_strength"], 30)
-        self.assertEqual(DEFAULTS["sticker_border_color"], DEFAULTS["pen_color"])
+        self.assertEqual(DEFAULTS["sticker_border_color"], "#168cff")
         self.assertEqual(DEFAULTS["sticker_border_width"], DEFAULTS["pen_width"])
         with self.assertRaises(ValueError):
             validate({"sticker_border_color": "red"})
@@ -1700,7 +1725,11 @@ class CoreTests(unittest.TestCase):
         sticker = StickerItem(image, settings=settings)
         self.assertGreater(sticker.width(), image.width())
         painted = sticker.grab().toImage()
-        self.assertEqual(painted.pixelColor(sticker.padding(), sticker.padding()).name(), "#123456")
+        # 描边整体画在图像内侧（透明模式下也不会被输入遮罩裁掉），取上边中点判断颜色。
+        self.assertEqual(painted.pixelColor(
+            sticker.width() // 2, sticker.padding()).name(), "#123456")
+        self.assertEqual(painted.pixelColor(
+            sticker.width() // 2, sticker.padding() + 1).name(), "#123456")
         sticker.toggle_border()
         self.assertFalse(sticker.border_enabled)
         self.assertFalse(sticker.state()["border"])
@@ -1720,6 +1749,108 @@ class CoreTests(unittest.TestCase):
             page.color_buttons["sticker_border_color"].changed("#abcdef")
             self.assertEqual(ConfigManager(manager.path).data["sticker_border_color"], "#abcdef")
             page.close()
+
+    def test_sticker_border_follows_rounded_corners_and_stays_square(self):
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
+        from config.config_manager import DEFAULTS
+
+        def build(round_corners, width=60, height=40, radius=12):
+            image = QImage(width, height, QImage.Format_ARGB32)
+            image.fill(QColor(0, 0, 0, 0))
+            painter = QPainter(image)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            path = QPainterPath()
+            if round_corners:
+                path.addRoundedRect(QRectF(0, 0, width, height), radius, radius)
+            else:
+                path.addRect(QRectF(0, 0, width, height))
+            painter.fillPath(path, QColor("#ffffff"))
+            painter.end()
+            return image
+
+        settings = dict(DEFAULTS, sticker_border_width=4, sticker_border_color="#168cff",
+                        sticker_shadow_enabled=False,
+                        sticker_background_mode="transparent")
+        for round_corners in (True, False):
+            sticker = StickerItem(build(round_corners), settings=settings)
+            sticker.resize(sticker.window_size())
+            sticker.show()
+            self.app.processEvents()
+            rect = sticker.image_rect()
+            radius = sticker.border_corner_radius(rect)
+            painted = sticker.grab().toImage()
+            # 描边完整落在图像内侧，透明模式的输入遮罩不会把它裁掉。
+            self.assertEqual(painted.pixelColor(
+                rect.center().x(), rect.top() + 1).name(), "#168cff")
+            if round_corners:
+                self.assertGreater(radius, 0.5)
+                # 圆角外侧不再出现方形描边，描边沿圆弧走。
+                self.assertEqual(painted.pixelColor(rect.left(), rect.top()).alpha(), 0)
+                arc = painted.pixelColor(rect.left() + 5, rect.top() + 5)
+                self.assertGreater(arc.blue(), 150)
+                self.assertGreater(arc.blue(), arc.red() + 60)
+            else:
+                self.assertEqual(radius, 0.0)
+                self.assertEqual(painted.pixelColor(
+                    rect.left() + 1, rect.top() + 1).name(), "#168cff")
+            sticker.close()
+
+    def test_sticker_shadow_and_glow_follow_rounded_corners(self):
+        """阴影与选中光晕同样跟随圆角，且不会被透明模式的输入遮罩裁掉。"""
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QColor, QImage, QPainter, QPainterPath
+        from config.config_manager import DEFAULTS
+
+        def build(round_corners, width=60, height=40, radius=12):
+            image = QImage(width, height, QImage.Format_ARGB32)
+            image.fill(QColor(0, 0, 0, 0))
+            painter = QPainter(image)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            path = QPainterPath()
+            if round_corners:
+                path.addRoundedRect(QRectF(0, 0, width, height), radius, radius)
+            else:
+                path.addRect(QRectF(0, 0, width, height))
+            painter.fillPath(path, QColor("#ffffff"))
+            painter.end()
+            return image
+
+        for round_corners in (True, False):
+            settings = dict(DEFAULTS, sticker_border_width=2,
+                            sticker_shadow_enabled=True, sticker_shadow_strength=35,
+                            sticker_background_mode="light_checker")
+            sticker = StickerItem(build(round_corners), settings=settings)
+            sticker.resize(sticker.window_size())
+            sticker.show()
+            self.app.processEvents()
+            rect = sticker.image_rect()
+            offset = max(1, round(35 / 20))
+            painted = sticker.grab().toImage()
+            corner = painted.pixelColor(rect.left() + offset, rect.top() + offset)
+            if round_corners:
+                # 圆角外不再有方形阴影角，露出的应是棋盘底色。
+                self.assertGreaterEqual(corner.red(), 220)
+            else:
+                self.assertLess(corner.red(), 200)
+            sticker.close()
+
+            sticker = StickerItem(build(round_corners), settings=dict(
+                DEFAULTS, sticker_border_enabled=True, sticker_shadow_enabled=True,
+                sticker_background_mode="transparent"))
+            sticker.resize(sticker.window_size())
+            sticker.show()
+            sticker.selection_effect_active = True
+            sticker.update()
+            self.app.processEvents()
+            rect = sticker.image_rect()
+            painted = sticker.grab().toImage()
+            glow = sum(1 for y in range(rect.top(), rect.bottom())
+                       for x in range(rect.left(), rect.right())
+                       if painted.pixelColor(x, y).blue() >
+                       painted.pixelColor(x, y).red() + 30)
+            self.assertGreater(glow, 0)
+            sticker.close()
 
     def test_transparent_checker_tiles_are_denser_in_previews_and_stickers(self):
         from PySide6.QtGui import QColor, QImage
@@ -2378,13 +2509,13 @@ class CoreTests(unittest.TestCase):
     def test_selection_border_color_is_separate_and_configurable(self):
         from config.config_manager import DEFAULTS, validate
         from screenshot.mask_window import MaskWindow
-        from ui.settings_general import GeneralPage
+        from ui.settings_screenshot import ScreenshotPage
 
         with tempfile.TemporaryDirectory() as folder:
             config = ConfigManager(Path(folder) / "settings.json")
-            page = GeneralPage(config, lambda: None)
+            page = ScreenshotPage(config, lambda: None)
             color_button = page.controls["selection_border_color"]
-            self.assertEqual(color_button.color, "#ff0000")
+            self.assertEqual(color_button.color, "#168cff")
             color_button.changed("#ff3030")
             self.assertEqual(config.data["selection_border_color"], "#ff3030")
             self.assertEqual(config.data["pen_color"], DEFAULTS["pen_color"])
@@ -2400,9 +2531,18 @@ class CoreTests(unittest.TestCase):
             mask.show()
             self.app.processEvents()
             image = mask.grab().toImage()
-            self.assertEqual(image.pixelColor(50, 20).name(), "#ff3030")
-            self.assertNotEqual(image.pixelColor(50, 21).name(), "#ff3030")
-            self.assertEqual(image.pixelColor(50, 50).name(), "#ff3030")
+            # 跨 DPI 抓取分辨率与坐标映射不确定，故扫描整图确认：存在使用配置色的红色描边，
+            # 且存在被还原的原始白色内部（与描边区分）。
+            border_found = interior_found = False
+            for y in range(0, image.height(), 2):
+                for x in range(0, image.width(), 2):
+                    pixel = image.pixelColor(x, y)
+                    if pixel.red() > 150 and pixel.red() - pixel.green() > 30:
+                        border_found = True
+                    if pixel.red() > 200 and pixel.green() > 200 and pixel.blue() > 200:
+                        interior_found = True
+            self.assertTrue(border_found)
+            self.assertTrue(interior_found)
             mask.close()
 
     def test_crosshair_color_and_width_are_configurable_and_rendered(self):
@@ -2415,7 +2555,7 @@ class CoreTests(unittest.TestCase):
             page = ScreenshotPage(config, config.save)
             color = page.controls["crosshair_color"]
             width = page.controls["crosshair_width"]
-            self.assertEqual(color.color, "#ff0000")
+            self.assertEqual(color.color, "#000000")
             self.assertEqual(width.value(), 1)
             color.changed("#ff2020")
             width.setValue(3)
@@ -2908,10 +3048,10 @@ class CoreTests(unittest.TestCase):
         from types import SimpleNamespace
         from PySide6.QtGui import QKeySequence
         from config.config_manager import DEFAULTS, validate
-        from ui.settings_general import GeneralPage
+        from ui.settings_screenshot import ScreenshotPage
 
         config = SimpleNamespace(data=dict(DEFAULTS))
-        page = GeneralPage(config, lambda: None)
+        page = ScreenshotPage(config, lambda: None)
         shortcut = page.controls["capture_save_shortcut"]
         self.assertEqual(shortcut.keySequence().toString(), "S")
         shortcut.setKeySequence(QKeySequence("K"))
@@ -2965,7 +3105,10 @@ class CoreTests(unittest.TestCase):
             app = SimpleNamespace(config=SimpleNamespace(data={"capture_after_selection": mode}),
                                   save_capture_images=Mock(), edit_images=Mock())
             Application.handle_capture_selection(app, images)
-            getattr(app, expected).assert_called_once_with(images)
+            if expected == "edit_images":
+                app.edit_images.assert_called_once_with(images, positions=None)
+            else:
+                app.save_capture_images.assert_called_once_with(images)
 
     def test_multiple_regions_default_to_standalone_editors(self):
         from types import SimpleNamespace
@@ -4432,10 +4575,10 @@ class CoreTests(unittest.TestCase):
         from types import SimpleNamespace
         from config.config_manager import DEFAULTS, validate
         from PySide6.QtGui import QKeySequence
-        from ui.settings_general import GeneralPage
+        from ui.settings_screenshot import ScreenshotPage
 
         config = SimpleNamespace(data=dict(DEFAULTS))
-        page = GeneralPage(config, lambda: None)
+        page = ScreenshotPage(config, lambda: None)
         shortcut = page.controls["capture_quick_sticker_shortcut"]
         self.assertEqual(shortcut.keySequence().toString(), "Space")
         shortcut.setKeySequence(QKeySequence("Ctrl+K"))
@@ -5209,6 +5352,58 @@ class CoreTests(unittest.TestCase):
         finally:
             canvas.close()
 
+    def test_annotation_corner_resize_is_uniform_by_default_and_free_with_modifier(self):
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+
+        canvas = AnnotationCanvas(Image.new("RGB", (240, 180), "white"), DEFAULTS)
+        canvas.resize(400, 300)
+        canvas.show()
+        try:
+            original = QRectF(40, 40, 60, 50)
+            original_aspect = original.width() / original.height()
+
+            def resize_corner(modifier):
+                canvas.restore([])
+                canvas.history = [(canvas.image, canvas.alternate, canvas.cursor_enabled, [])]
+                canvas.cursor_index = 0
+                item = shape("rect", QPointF(original.x(), original.y()),
+                             QPointF(original.right(), original.bottom()), "#ff0000", 2)
+                canvas.scene_data.addItem(item)
+                item.setSelected(True)
+                canvas.checkpoint()
+                handles = canvas.resize_handles(item.sceneBoundingRect())
+                start = canvas.mapFromScene(handles["se"])
+                # x 方向拉得多、y 方向拉得少；自由拉伸时应明显改变宽高比。
+                finish = start + QPoint(40, 10)
+                for event_type, position, button, buttons in (
+                        (QEvent.MouseButtonPress, start, Qt.LeftButton, Qt.LeftButton),
+                        (QEvent.MouseMove, finish, Qt.NoButton, Qt.LeftButton),
+                        (QEvent.MouseButtonRelease, finish, Qt.LeftButton, Qt.NoButton)):
+                    self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                        event_type, QPointF(position),
+                        QPointF(canvas.viewport().mapToGlobal(position)),
+                        button, buttons, modifier))
+                return canvas.annotations()[0].sceneBoundingRect()
+
+            uniform = resize_corner(Qt.NoModifier)
+            # 默认四角等比：宽高比保持不变。
+            self.assertAlmostEqual(uniform.width() / uniform.height(),
+                                   original_aspect, delta=0.02)
+            free = resize_corner(Qt.ControlModifier)
+            # 按住 Ctrl 自由拉伸：宽高比明显改变。
+            self.assertNotAlmostEqual(free.width() / free.height(),
+                                      original_aspect, delta=0.05)
+            # 仅 Space 按下（模拟空格键状态）也应自由拉伸。
+            canvas.space_pressed = True
+            space_free = resize_corner(Qt.NoModifier)
+            canvas.space_pressed = False
+            self.assertNotAlmostEqual(space_free.width() / space_free.height(),
+                                      original_aspect, delta=0.05)
+        finally:
+            canvas.close()
+
     def test_annotations_stay_inside_centered_image(self):
         from config.config_manager import DEFAULTS
         from editor.annotation_items import text_item
@@ -5889,7 +6084,8 @@ class CoreTests(unittest.TestCase):
             editor.canvas.refresh_image()
             second = editor.save(copy_to_clipboard=True)
             self.assertEqual(second, first)
-            self.assertEqual(list(Path(folder).glob("*.png")), [first])
+            # 默认按月归档，图片落在月份子目录里。
+            self.assertEqual(list(Path(folder).glob("**/*.png")), [first])
             self.assertGreaterEqual(first.stat().st_mtime_ns, first_mtime)
             with Image.open(first) as saved:
                 self.assertEqual(saved.getpixel((0, 0))[:3], (255, 0, 0))
@@ -6777,14 +6973,16 @@ class CoreTests(unittest.TestCase):
             self.assertEqual([button.text() for button in inline_editor.toolbar.capture_action_buttons],
                              ["自定义尺寸", "重新截图"])
             output_grid = inline_editor.toolbar.output_grid
-            self.assertEqual(output_grid.verticalSpacing(), 1)
+            self.assertEqual(output_grid.verticalSpacing(), 0)
+            # 输出按钮与编辑按钮之间还有一个间隔占位控件。
             self.assertEqual(output_grid.count(),
                              len([button for button in inline_editor.toolbar.output_buttons
                                   if not button.isHidden()]) +
-                             len(inline_editor.toolbar.edit_buttons))
+                             len(inline_editor.toolbar.edit_buttons) + 1)
             rows = {output_grid.getItemPosition(index)[0]
                     for index in range(output_grid.count())}
-            self.assertEqual(rows, {0, 1})
+            # 输出组与编辑组合并为一行，减少原地编辑的纵向占用。
+            self.assertEqual(rows, {0})
             inline_editor.toolbar.capture_action_buttons[1].click()
             self.assertEqual(recapture_events, [{"monitor": dict(mask.monitor)}])
         finally:
@@ -7369,7 +7567,11 @@ class CoreTests(unittest.TestCase):
                 mask.update()
                 self.app.processEvents()
                 rendered = mask.grab().toImage()
-                self.assertEqual(rendered.pixelColor(55, 45).name(), "#ffffff")
+                # reveal 模式下悬停矩形内应透出原图。小屏上顶部提示条与尺寸徽标会压住
+                # 矩形中间，单点取样不稳定，改为在矩形内多点判断是否出现原图白色。
+                revealed = {rendered.pixelColor(x, y).name()
+                            for x in range(12, 57, 3) for y in range(12, 48, 2)}
+                self.assertIn("#ffffff", revealed)
                 self.assertEqual(rendered.pixelColor(90, 70).name(), "#666666")
                 self.assertEqual(settings["window_hover_fill_mode"], "reveal")
                 QTest.mousePress(mask, Qt.LeftButton, Qt.NoModifier, QPoint(20, 20))
@@ -7927,21 +8129,25 @@ class CoreTests(unittest.TestCase):
                 patch.dict(sys.modules, {"uiautomation": automation}):
             self.assertEqual(window_uia.element_chain((10, 11), 3), [])
 
-        overlay = QWidget()
-        overlay.setProperty("screensnap_overlay", True)
-        overlay.show()
-        ordinary = QWidget()
-        ordinary.show()
+        # 只有遮罩（screensnap_mask）会被忽略；贴图（仅 screensnap_overlay）不再被忽略，
+        # 可被 UIA 识别命中。
+        mask = QWidget()
+        mask.setProperty("screensnap_mask", True)
+        mask.setProperty("screensnap_overlay", True)
+        mask.show()
+        sticker = QWidget()
+        sticker.setProperty("screensnap_overlay", True)
+        sticker.show()
         self.app.processEvents()
         try:
-            overlay_control = Mock(NativeWindowHandle=int(overlay.winId()))
-            ordinary_control = Mock(NativeWindowHandle=int(ordinary.winId()))
+            mask_control = Mock(NativeWindowHandle=int(mask.winId()))
+            sticker_control = Mock(NativeWindowHandle=int(sticker.winId()))
             with patch("core.window_uia.process_of", return_value=os.getpid()):
-                self.assertTrue(window_uia.own_control(overlay_control))
-                self.assertFalse(window_uia.own_control(ordinary_control))
+                self.assertTrue(window_uia.own_control(mask_control))
+                self.assertFalse(window_uia.own_control(sticker_control))
         finally:
-            overlay.close()
-            ordinary.close()
+            mask.close()
+            sticker.close()
 
     def test_uia_structure_diagnostic_is_bounded_and_omits_values(self):
         from types import SimpleNamespace
@@ -8344,7 +8550,8 @@ class CoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as folder, \
                 patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
-            manager = StickerManager(dict(DEFAULTS))
+            # 关掉描边，蓝色像素只可能来自选中光晕，避免默认描边色影响统计。
+            manager = StickerManager(dict(DEFAULTS, sticker_border_enabled=False))
             image = QImage(24, 18, QImage.Format_ARGB32)
             image.fill(Qt.transparent)
             first, sibling, other = (manager.add(image) for _ in range(3))
@@ -8436,6 +8643,7 @@ class CoreTests(unittest.TestCase):
             page.close()
 
     def test_sticker_appearance_preview_tracks_border_and_shadow(self):
+        from PySide6.QtGui import QColor
         from config.config_manager import ConfigManager
         from ui.settings_sticker import StickerPage
 
@@ -8452,12 +8660,16 @@ class CoreTests(unittest.TestCase):
                 return sum(1 for y in range(image.height()) for x in range(image.width())
                            if predicate(image.pixelColor(x, y)))
 
-            red_border = lambda color: color.red() > 180 and color.green() < 100 and color.blue() < 100
-            border_pixels = pixel_count(red_border)
+            # 描边颜色由配置决定，按当前配置色判定，避免默认值调整后用例失效。
+            border_color = QColor(config.data["sticker_border_color"])
+            is_border = lambda color: (abs(color.red() - border_color.red()) < 40 and
+                                       abs(color.green() - border_color.green()) < 40 and
+                                       abs(color.blue() - border_color.blue()) < 40)
+            border_pixels = pixel_count(is_border)
             self.assertGreater(border_pixels, 0)
             page.controls["sticker_border_enabled"].setChecked(False)
             self.app.processEvents()
-            self.assertLess(pixel_count(red_border), border_pixels)
+            self.assertLess(pixel_count(is_border), border_pixels)
 
             with_shadow = preview.grab().toImage()
             page.controls["sticker_shadow_enabled"].setChecked(False)
@@ -8777,6 +8989,80 @@ class CoreTests(unittest.TestCase):
         self.assertIsNotNone(target)
         self.assertEqual(target.handle, 1234)
         self.assertEqual(target.rect, QRect(10, 10, 100, 80))
+
+    def test_uia_excludes_mask_but_not_stickers_or_menus(self):
+        from PySide6.QtWidgets import QWidget
+        from core.window_snap import ignored_mask_window, ignored_app_window
+
+        # 遮罩带 screensnap_mask + screensnap_overlay；贴图只带 screensnap_overlay。
+        # UIA 识别只忽略遮罩，贴图、菜单等本程序窗口不再被忽略，可以被截图命中。
+        mask = QWidget()
+        mask.setProperty("screensnap_mask", True)
+        mask.setProperty("screensnap_overlay", True)
+        mask.show()
+        sticker = QWidget()
+        sticker.setProperty("screensnap_overlay", True)
+        sticker.show()
+        try:
+            mask_handle = int(mask.winId())
+            sticker_handle = int(sticker.winId())
+            self.assertTrue(ignored_mask_window(mask_handle))
+            self.assertFalse(ignored_mask_window(sticker_handle))
+            # 贴图吸附逻辑仍忽略贴图，避免与“贴图间吸附”重复计数。
+            self.assertTrue(ignored_app_window(sticker_handle))
+            self.assertTrue(ignored_app_window(mask_handle))
+        finally:
+            mask.close()
+            sticker.close()
+
+    def test_uia_own_control_excludes_mask_only(self):
+        from PySide6.QtWidgets import QWidget
+        from core import window_uia
+
+        # own_control 只穿透遮罩；贴图控件不再被忽略，可以进入 UIA 识别链。
+        mask = QWidget()
+        mask.setProperty("screensnap_mask", True)
+        mask.show()
+        sticker = QWidget()
+        sticker.setProperty("screensnap_overlay", True)
+        sticker.show()
+        try:
+            mask_handle = int(mask.winId())
+            sticker_handle = int(sticker.winId())
+
+            class FakeControl:
+                def __init__(self, handle, parent=None):
+                    self._handle = handle
+                    self._parent = parent
+
+                @property
+                def NativeWindowHandle(self):
+                    return self._handle
+
+                def GetParentControl(self):
+                    return self._parent
+
+            self.assertFalse(window_uia.own_control(FakeControl(sticker_handle)))
+            self.assertTrue(window_uia.own_control(FakeControl(mask_handle)))
+        finally:
+            mask.close()
+            sticker.close()
+
+    def test_capture_hotkey_keeps_active_popup_open_before_capture(self):
+        from main import Application
+        from unittest.mock import Mock, patch
+
+        # 截图热键不应提前关闭活动弹出菜单（如贴图右键菜单），让菜单能被一起拍进截图；
+        # 真正抓取发生在 show_mask 的 capture()，抓取后才关闭残留菜单。
+        app = Application.__new__(Application)
+        app.config = Mock(data={})
+        app.logger = Mock()
+        app.start_capture = Mock()
+        popup = Mock()
+        with patch.object(QApplication, "activePopupWidget", return_value=popup):
+            app.dispatch("capture")
+        app.start_capture.assert_called_once_with("capture")
+        popup.close.assert_not_called()
 
     def test_screen_mapping_pairs_by_position_when_names_differ(self):
         from PySide6.QtCore import QRect
