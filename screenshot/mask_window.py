@@ -30,6 +30,10 @@ from screenshot.magnifier_widget import magnifier_rect, paint_magnifier
 
 # 鼠标移动时悬停识别的刷新间隔由设置“window_hover_interval”控制（毫秒），避免每个移动事件都调用系统 API。
 
+# 原地编辑两排图标条的紧凑尺寸：按钮边长与图标边长，尽量减少对截图区域的遮挡。
+INLINE_BUTTON_SIZE = 24
+INLINE_ICON_SIZE = 16
+
 
 def _hover_fill_color(settings):
     color = QColor(settings.get("window_hover_color", "#168CFF"))
@@ -243,16 +247,21 @@ class InlineEditor(QWidget):
         self.toolbar.setProperty("inline_edit", True)
         self.toolbar.tool_buttons["crop"].hide()
         for header in getattr(self.toolbar, "section_headers", []):
+            header.setContentsMargins(0, 0, 0, 0)
             for index in range(header.count()):
                 widget = header.itemAt(index).widget()
                 if isinstance(widget, QLabel):
                     widget.hide()
+                    widget.setFixedHeight(0)
+        for section in self.toolbar.sections:
+            section.layout().setSpacing(0)
         for grid in (self.toolbar.tool_grid, self.toolbar.edit_grid, self.toolbar.image_grid,
                      self.toolbar.output_grid):
             grid.setHorizontalSpacing(2)
-            grid.setVerticalSpacing(1)
-        self.toolbar.section_layout.setHorizontalSpacing(6)
-        self.toolbar.section_layout.setVerticalSpacing(2)
+            grid.setVerticalSpacing(0)
+        self.toolbar.section_layout.setContentsMargins(3, 1, 3, 1)
+        self.toolbar.section_layout.setHorizontalSpacing(2)
+        self.toolbar.section_layout.setVerticalSpacing(1)
         self.toolbar.image_buttons = []
         self.toolbar.sections[2].hide()
         self.toolbar.sections[1].hide()
@@ -260,20 +269,22 @@ class InlineEditor(QWidget):
         self.toolbar.cursor_switch.setText("")
         self.toolbar.cursor_switch.setToolTip("显示鼠标")
         self.toolbar.cursor_switch.setAccessibleName("显示鼠标")
-        self.toolbar.cursor_switch.setFixedSize(30, 30)
+        self.toolbar.cursor_switch.setFixedSize(INLINE_BUTTON_SIZE, INLINE_BUTTON_SIZE)
         self.toolbar.pen_color.setText("")
         self.toolbar.pen_color.setProperty("icon_only", True)
-        self.toolbar.pen_color.setFixedSize(30, 30)
+        self.toolbar.pen_color.setFixedSize(INLINE_BUTTON_SIZE, INLINE_BUTTON_SIZE)
         self.toolbar.options_button.setText("")
-        self.toolbar.options_button.setFixedSize(30, 30)
+        self.toolbar.options_button.setFixedSize(INLINE_BUTTON_SIZE, INLINE_BUTTON_SIZE)
         self.arrange_inline_output_edit()
 
     def apply_compact_buttons(self):
+        icon_size = QSize(INLINE_ICON_SIZE, INLINE_ICON_SIZE)
         for button in self.toolbar.findChildren(QToolButton):
             button.setToolButtonStyle(Qt.ToolButtonIconOnly)
-            button.setFixedSize(30, 30)
-            button.setMinimumWidth(30)
-            button.setMaximumWidth(30)
+            button.setIconSize(icon_size)
+            button.setFixedSize(INLINE_BUTTON_SIZE, INLINE_BUTTON_SIZE)
+            button.setMinimumWidth(INLINE_BUTTON_SIZE)
+            button.setMaximumWidth(INLINE_BUTTON_SIZE)
 
     def arrange_inline_output_edit(self):
         """输出组和编辑组合并为一行：先输出，空一格，再显示上一步/下一步等编辑按钮。"""
@@ -283,7 +294,7 @@ class InlineEditor(QWidget):
                           if not button.isHidden()]
         if not hasattr(self, "output_edit_spacer"):
             self.output_edit_spacer = QWidget(self.toolbar)
-            self.output_edit_spacer.setFixedSize(30, 30)
+            self.output_edit_spacer.setFixedSize(8, INLINE_BUTTON_SIZE)
         widgets = [*output_buttons, self.output_edit_spacer,
                    *self.toolbar.edit_buttons]
         for column, widget in enumerate(widgets):
@@ -316,7 +327,7 @@ class InlineEditor(QWidget):
         self.toolbar.adjustSize()
         margin = 8
         toolbar_size = self.toolbar.sizeHint().expandedTo(self.toolbar.minimumSizeHint())
-        toolbar_size.setWidth(min(available, max(toolbar_size.width(), 420)))
+        toolbar_size.setWidth(min(available, max(toolbar_size.width(), row_width)))
         toolbar_size.setHeight(max(toolbar_size.height(), self.toolbar.section_layout.sizeHint().height()))
         safe_area = self.view.rect().adjusted(margin, margin, -margin, -margin)
         selection_with_handles = selection.adjusted(-16, -16, 16, 16)
@@ -354,6 +365,10 @@ class InlineEditor(QWidget):
         self.toolbar.setGeometry(x, y, toolbar_size.width(), toolbar_size.height())
         self.toolbar.section_layout.invalidate()
         self.toolbar.section_layout.activate()
+        logging.getLogger("screensnap").debug(
+            "原地编辑工具栏布局：选区 %sx%s，工具栏 %sx%s，位置 (%s,%s)%s",
+            selection.width(), selection.height(), toolbar_size.width(), toolbar_size.height(),
+            x, y, "" if target is not None else "，空间不足回退到选区内部")
 
     def reset_region(self, rect, image, alternate, cursor_enabled):
         """选区尺寸调整后重置内联编辑底图，并保留同一个保存路径。"""
@@ -591,6 +606,9 @@ class MaskWindow(QWidget):
                  preferred_monitor=None):
         super().__init__()
         self.setProperty("screensnap_overlay", True)
+        # screensnap_mask 单独标记截图遮罩：UIA 与点击识别只穿透它，
+        # 贴图、菜单等其它本程序窗口不再被忽略，可以被截图识别命中。
+        self.setProperty("screensnap_mask", True)
         self.image = image
         self.alternate = alternate
         self.preview = to_qimage(image)
@@ -712,9 +730,18 @@ class MaskWindow(QWidget):
         for button in (custom_size, recapture, window_edit):
             button.setFixedHeight(32)
             button.setIconSize(QSize(14, 14))
-        custom_size.setToolTip(rich_tooltip("自定义尺寸", "按指定宽高创建选区，并放到当前鼠标位置。"))
-        recapture.setToolTip(rich_tooltip("重新截图", "保留选区位置和大小，重新捕获屏幕画面。"))
-        window_edit.setToolTip(rich_tooltip("窗口编辑", "在独立编辑器中打开选区，使用完整工具栏编辑。"))
+        custom_size.setToolTip(rich_tooltip(
+            "自定义尺寸",
+            "按指定宽高创建选区：宽高默认填整屏像素，可改成任意尺寸（如 1920 × 1080），"
+            "选区左上角对齐当前鼠标位置；截图时按 Ctrl+F 也能打开。"))
+        recapture.setToolTip(rich_tooltip(
+            "重新截图",
+            "放弃当前这一屏已冻结的画面，回到同一显示器重新框选；"
+            "适合画面还没准备好或想换区域的情况，当前标注不会保留。"))
+        window_edit.setToolTip(rich_tooltip(
+            "窗口编辑",
+            "把当前选区送进独立编辑器窗口，使用完整工具栏编辑；"
+            "适合标注较多，或需要缩放、旋转、裁剪、调外观的场景。"))
         self.capture_action_buttons = (custom_size, recapture, window_edit)
         actions.adjustSize()
         return actions
@@ -1053,7 +1080,7 @@ class MaskWindow(QWidget):
             painter.setClipPath(selection_path)
             painter.drawImage(logical_rect, self.preview, clipped)
             painter.restore()
-            painter.setPen(QPen(QColor(self.settings.get("selection_border_color", "#ff0000")), 1))
+            painter.setPen(QPen(QColor(self.settings.get("selection_border_color", "#168cff")), 1))
             painter.drawPath(selection_path)
             painter.setPen(QPen(QColor("#00d7aa"), 2))
             for handle, _, _, axis in self.selection.handles_for(rect):
@@ -1088,7 +1115,7 @@ class MaskWindow(QWidget):
             paint_info(painter, global_position, current_selection, monitor_area, quick_sticker,
                        self.settings.get("capture_save_shortcut", "S"), element_rect,
                        element_size,
-                       self.settings.get("window_hover_border_color", "#168CFF"),
+                       self.settings.get("window_hover_border_color", "#168cff"),
                        self.settings.get("window_hover_text_color", "#F4FFFC"),
                        self.settings.get("window_hover_badge_color", "#102A31"),
                        self.settings.get("window_hover_font_size", 12),
