@@ -162,6 +162,8 @@ class ToolbarWidget(QWidget):
         self.section_layout.setVerticalSpacing(3)
         self._layout_mode = None
 
+        self._apply_hover_style()
+
         drawing = self.group("标注")
         tool_grid = QGridLayout()
         tool_grid.setContentsMargins(0, 0, 0, 0)
@@ -634,6 +636,42 @@ class ToolbarWidget(QWidget):
         self.edit_image_layout.addStretch()
         self.reflow(1100)
 
+    def _apply_hover_style(self):
+        """给工具按钮加一层非常轻微的悬停/按下反馈，保持系统原生外观。
+
+        只作用于 QToolButton（不含颜色按钮等 QPushButton），浅/深色主题各自取
+        近乎透明的叠加色，避免明显色块变化；边框平时透明，悬停时浅描边以防布局跳动。
+        """
+        from PySide6.QtCore import Qt
+        app = QApplication.instance()
+        dark = False
+        if app is not None:
+            try:
+                dark = app.styleHints().colorScheme() == Qt.ColorScheme.Dark
+            except Exception:
+                dark = False
+        if dark:
+            hover_bg = "rgba(255, 255, 255, 0.10)"
+            hover_border = "rgba(255, 255, 255, 0.22)"
+            pressed_bg = "rgba(255, 255, 255, 0.16)"
+        else:
+            hover_bg = "rgba(0, 0, 0, 0.06)"
+            hover_border = "rgba(0, 0, 0, 0.14)"
+            pressed_bg = "rgba(0, 0, 0, 0.10)"
+        self.setStyleSheet(f"""
+            QToolButton {{
+                border: 1px solid transparent;
+                border-radius: 4px;
+            }}
+            QToolButton:hover {{
+                background: {hover_bg};
+                border: 1px solid {hover_border};
+            }}
+            QToolButton:pressed {{
+                background: {pressed_bg};
+            }}
+        """)
+
     def refresh_previews(self):
         """参数变化后重绘“更多设置”里的实时预览。"""
         for widget in self.previews.values():
@@ -931,6 +969,8 @@ class ToolbarWidget(QWidget):
             "reset_rotation": "恢复最近一次任意角度旋转；后续编辑后不可用",
             "horizontal": "沿水平方向翻转截图及标注",
             "vertical": "沿垂直方向翻转截图及标注",
+            "custom_size": "按指定宽高重设选区，中心位置保持不变，并立即按新尺寸重新载入该区域画面",
+            "recapture": "放弃当前画面并重新进入截图，可等画面变化后再框选同一区域",
         }
         binding = shortcut_label(self.hotkeys, action)
         tooltip = descriptions.get(action, label)

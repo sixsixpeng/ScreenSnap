@@ -7,7 +7,7 @@ from PySide6.QtCore import Qt, QPointF, QRectF, Signal
 from PySide6.QtGui import QBrush, QPainter, QPainterPath, QPen, QColor, QPixmap, QImage, QTextCursor, QTransform, QCursor
 from PySide6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
                                QGraphicsItem, QGraphicsRectItem, QGraphicsEllipseItem,
-                               QGraphicsTextItem, QInputDialog, QMenu,
+                               QGraphicsTextItem, QInputDialog, QMenu, QToolTip,
                                QStyleOptionGraphicsItem)
 
 from core.screen_capture import to_qimage
@@ -85,6 +85,8 @@ class AnnotationCanvas(QGraphicsView):
         self.resize_origin = None
         self.resize_position = None
         self.resize_start = None
+        # 空格同时是临时平移键；这里单独记录其按下状态，用于四角自由拉伸判定。
+        self.space_pressed = False
         self.eraser_last = None
         self.eraser_point = None
         self.erasing = False
@@ -603,6 +605,7 @@ class AnnotationCanvas(QGraphicsView):
                     self.resize_anchor = anchor_scene
                     self.resize_anchor_local = anchor_local
                     self.resize_start = handles[handle]
+                    QToolTip.hideText()
                     event.accept()
                     return
             if self.scene_data.itemAt(point, self.transform()) in (None, self.base):
@@ -677,6 +680,11 @@ class AnnotationCanvas(QGraphicsView):
             if "n" in handle or "s" in handle:
                 start_height = self.resize_start.y() - self.resize_anchor.y()
                 scale_y = self.clamp_resize_ratio((point.y() - self.resize_anchor.y()) / start_height)
+            # 四角默认等比缩放（保持宽高比）；按住 Ctrl/Alt/Shift/Space 任意其一则自由拉伸变形。
+            is_corner = ("w" in handle or "e" in handle) and ("n" in handle or "s" in handle)
+            if is_corner and not self._free_distortion(event):
+                driver = scale_x if abs(scale_x - 1) >= abs(scale_y - 1) else scale_y
+                scale_x = scale_y = driver
             self.resizing.setTransform(self.resize_transform)
             self.resizing.setScale(self.resize_scale)
             self.resizing.setTransform(QTransform().scale(scale_x, scale_y), True)
@@ -698,10 +706,17 @@ class AnnotationCanvas(QGraphicsView):
                     self.constrain_item(item)
                 self._update_resize_cursor(event.position().toPoint())
 
+    def _free_distortion(self, event):
+        """四角是否允许自由拉伸：按住 Ctrl/Alt/Shift 或 Space 任意其一。"""
+        modifiers = event.modifiers()
+        return bool(modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier)) \
+            or self.space_pressed
+
     def _update_resize_cursor(self, position):
         point = self.mapToScene(position)
         if not self.sceneRect().contains(point):
             self.unsetCursor()
+            QToolTip.hideText()
             return
         for item in self.scene_data.selectedItems() if self.tool == "select" else ():
             bounds = item.sceneBoundingRect()
@@ -712,11 +727,20 @@ class AnnotationCanvas(QGraphicsView):
                        "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor}
             if handle:
                 self.setCursor(cursors[handle])
+                if handle in ("nw", "ne", "sw", "se"):
+                    QToolTip.showText(
+                        self.viewport().mapToGlobal(position),
+                        "拖动四角等比缩放；按住 Ctrl / Alt / Shift / Space 任意键可自由拉伸变形",
+                        self)
+                else:
+                    QToolTip.hideText()
                 return
             if item.contains(item.mapFromScene(point)):
                 self.setCursor(Qt.SizeAllCursor)
+                QToolTip.hideText()
                 return
         self.unsetCursor()
+        QToolTip.hideText()
 
     @staticmethod
     def resize_handle_at(bounds, point):
@@ -903,6 +927,7 @@ class AnnotationCanvas(QGraphicsView):
         if event.key() == Qt.Key_Escape:
             self.cancelled.emit()
         elif event.key() == Qt.Key_Space:
+            self.space_pressed = True
             self.setDragMode(QGraphicsView.ScrollHandDrag)
         elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self.remove_selected()
@@ -912,9 +937,15 @@ class AnnotationCanvas(QGraphicsView):
     def keyReleaseEvent(self, event):
         """松开空格后退出临时平移状态。"""
         if event.key() == Qt.Key_Space:
+            self.space_pressed = False
             self.setDragMode(QGraphicsView.RubberBandDrag if self.tool == "select"
                              else QGraphicsView.NoDrag)
         super().keyReleaseEvent(event)
+
+    def focusOutEvent(self, event):
+        # 焦点丢失时清空空格状态，避免拖拽判定残留。
+        self.space_pressed = False
+        super().focusOutEvent(event)
 
     def wheelEvent(self, event):
         """默认纵向滚动；Ctrl 或 Alt 将滚轮映射为横向移动。"""
