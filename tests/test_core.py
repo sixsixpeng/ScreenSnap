@@ -27,6 +27,22 @@ class CoreTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
+        # 关闭会抢系统前台/注册系统键盘钩子的兜底逻辑，避免自动化测试干扰真实按键。
+        from core import window_focus
+        from screenshot import mask_window
+
+        cls._foreground_fallback = window_focus.FOREGROUND_FALLBACK
+        cls._escape_fallback = mask_window.ESCAPE_FALLBACK_ENABLED
+        window_focus.FOREGROUND_FALLBACK = False
+        mask_window.ESCAPE_FALLBACK_ENABLED = False
+
+    @classmethod
+    def tearDownClass(cls):
+        from core import window_focus
+        from screenshot import mask_window
+
+        window_focus.FOREGROUND_FALLBACK = cls._foreground_fallback
+        mask_window.ESCAPE_FALLBACK_ENABLED = cls._escape_fallback
 
     def test_group_properties_persist_and_unassign_keeps_stickers(self):
         from PySide6.QtGui import QColor, QImage
@@ -4171,6 +4187,71 @@ class CoreTests(unittest.TestCase):
         QTest.keyClick(mask.session.views[2], Qt.Key_Escape)
         self.app.processEvents()
         self.assertTrue(all(not view.isVisible() for view in mask.session.views))
+
+    def test_capture_escape_fallback_tracks_window_activation(self):
+        """拿不到焦点时用全局钩子兜底 Esc，拿到焦点后立刻交还给 Qt。"""
+        from config.config_manager import DEFAULTS
+        from screenshot import mask_window
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = dict(DEFAULTS, crosshair=False, magnifier=False, window_detection=False)
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (120, 80), "white"), bounds, [bounds], settings)
+        try:
+            mask.show()
+            self.app.processEvents()
+            installed = []
+            released = []
+            mask._install_escape_fallback = lambda: (installed.append("esc"), "hook")[1]
+            mask._release_escape_fallback = lambda: released.append("released")
+            with patch.object(mask_window, "ESCAPE_FALLBACK_ENABLED", True):
+                with patch.object(mask, "isActiveWindow", return_value=False):
+                    mask._sync_escape_fallback()
+                self.assertEqual(mask.escape_fallback, "hook")
+                self.assertEqual(installed, ["esc"])
+                with patch.object(mask, "isActiveWindow", return_value=True):
+                    mask._sync_escape_fallback()
+                self.assertEqual(released, ["released"])
+                with patch.object(mask, "isActiveWindow", return_value=False):
+                    mask._sync_escape_fallback()
+                mask.close()
+                # 关闭时一定释放；期间焦点变化触发的同步可能额外释放一次。
+                self.assertGreaterEqual(len(released), 2)
+        finally:
+            mask.close()
+
+    def test_capture_global_escape_signal_closes_capture(self):
+        """全局钩子线程只发信号，关闭动作仍在 Qt 主线程完成。"""
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = dict(DEFAULTS, crosshair=False, magnifier=False, window_detection=False)
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (120, 80), "white"), bounds, [bounds], settings)
+        mask.show()
+        self.app.processEvents()
+        self.assertTrue(mask.isVisible())
+        mask._global_escape()
+        self.app.processEvents()
+        self.assertFalse(mask.isVisible())
+
+    def test_window_focus_reports_foreground_state(self):
+        from PySide6.QtWidgets import QWidget
+        from core import window_focus
+
+        widget = QWidget()
+        widget.show()
+        self.app.processEvents()
+        handle = window_focus.widget_handle(widget)
+        self.assertNotEqual(handle, 0)
+        with patch.object(window_focus.os, "name", "nt"), \
+                patch.object(window_focus, "foreground_handle", return_value=handle):
+            self.assertTrue(window_focus.activate_window(widget))
+        with patch.object(window_focus.os, "name", "posix"):
+            self.assertFalse(window_focus.activate_window(widget))
+        widget.close()
 
     def test_mask_escape_before_selection_and_fixed_size(self):
         from PySide6.QtWidgets import QDialog
