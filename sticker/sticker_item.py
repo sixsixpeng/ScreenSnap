@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, QPoint, QRect, QSize, Signal, QTimer
+from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QSize, Signal, QTimer
 from PySide6.QtGui import (QGuiApplication, QPixmap, QPainter, QColor, QPen,
                            QImage, QTransform, QBitmap, QRegion)
 from PySide6.QtWidgets import QWidget
@@ -72,6 +72,37 @@ class StickerItem(QWidget):
         self.update_input_mask()
         self.setFocusPolicy(Qt.StrongFocus)
 
+    def image_corner_radius(self):
+        """按图像左上角估算圆角半径（源图像像素）；直角或透明留白返回 0。"""
+        key = (self.pixmap.cacheKey(), self.scale_factor)
+        if getattr(self, "_corner_radius_key", None) == key:
+            return self._corner_radius
+        radius = 0.0
+        source = self.pixmap.toImage()
+        if not source.isNull():
+            # 圆角边缘有抗锯齿，按“接近完全不透明”判定，避免把半透明边缘算进半径。
+            opaque = lambda color: color.alpha() >= 250
+            limit = min(source.width(), source.height()) // 2
+            measured = 0
+            for offset in range(limit):
+                if opaque(source.pixelColor(offset, 0)) and opaque(source.pixelColor(0, offset)):
+                    break
+                measured = offset + 1
+            else:
+                # 整条边都是透明的：不是圆角，按方形描边处理。
+                measured = 0
+            # 圆角的透明区应是圆弧：对角线同距离处已经不透明，否则视为透明留白。
+            if measured and opaque(source.pixelColor(measured, measured)):
+                radius = float(measured)
+        self._corner_radius_key = key
+        self._corner_radius = radius
+        return radius
+
+    def border_corner_radius(self, rect):
+        """描边圆角半径（窗口像素）：跟随贴图圆角，直角贴图为 0。"""
+        radius = self.image_corner_radius() * self.scale_factor
+        return max(0.0, min(radius, rect.width() / 2.0, rect.height() / 2.0))
+
     def padding(self):
         border = self.settings.get("sticker_border_width", 2) if self.border_enabled else 0
         shadow = round(self.settings.get("sticker_shadow_strength", 35) / 5) if self.shadow_enabled else 0
@@ -117,28 +148,58 @@ class StickerItem(QWidget):
             strength = self.settings.get("sticker_shadow_strength", 35)
             color.setAlpha(round(255 * strength / 100))
             offset = max(1, round(strength / 20))
-            painter.fillRect(rect.translated(offset, offset), color)
+            # 阴影同样跟随圆角，否则圆角贴图会露出方形阴影角、透明模式下还会被裁掉。
+            shadow_radius = self.border_corner_radius(rect)
+            painter.setBrush(color)
+            painter.setPen(Qt.NoPen)
+            if shadow_radius > 0.5:
+                painter.drawRoundedRect(QRectF(rect).translated(offset, offset),
+                                        shadow_radius, shadow_radius)
+            else:
+                painter.fillRect(rect.translated(offset, offset), color)
         painter.drawPixmap(rect, self.pixmap)
         if self.border_enabled and self.settings.get("sticker_border_width", 2):
-            painter.setPen(QPen(QColor(self.settings.get("sticker_border_color", "#00ad91")),
-                                self.settings.get("sticker_border_width", 2)))
-            painter.drawRect(rect.adjusted(0, 0, -1, -1))
+            width = float(self.settings.get("sticker_border_width", 2))
+            painter.setPen(QPen(QColor(self.settings.get("sticker_border_color", "#168cff")),
+                                width))
+            # 透明模式下窗口遮罩只保留图像不透明区域，描边因此整体画在图像内侧：
+            # 圆角贴图沿圆角走，直角贴图保持直角，两种情况下都不会被裁掉。
+            half = width / 2.0
+            frame = QRectF(rect).adjusted(half, half, -half, -half)
+            radius = self.border_corner_radius(rect)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            if radius > 0.5:
+                corner = max(0.0, radius - half)
+                painter.drawRoundedRect(frame, corner, corner)
+            else:
+                painter.drawRect(frame)
+            painter.setRenderHint(QPainter.Antialiasing, False)
         if self.snap_hint:
-            # 吸附生效时沿图像外沿画一圈虚线，Padding 不足 1px 时不可见。
+            # 吸附虚线画在图像内侧：画在外沿时透明模式会被输入遮罩裁掉，圆角贴图同样跟随圆角。
             painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
-            painter.drawRect(rect.adjusted(-1, -1, 1, 1))
+            radius = self.border_corner_radius(rect)
+            hint_frame = QRectF(rect).adjusted(0.5, 0.5, -1.5, -1.5)
+            if radius > 0.5:
+                painter.drawRoundedRect(hint_frame, max(0.0, radius - 0.5),
+                                        max(0.0, radius - 0.5))
+            else:
+                painter.drawRect(hint_frame.toRect())
         if (self.selection_effect_active and
             self.settings.get("sticker_selection_effect_enabled", True)):
             painter.setRenderHint(QPainter.Antialiasing)
             painter.setBrush(Qt.NoBrush)
             strength = self.settings.get("sticker_selection_effect_strength", 30)
+            # 光晕围绕图像矩形向内画：原来按窗口矩形画会落在 padding 上，
+            # 透明模式下被输入遮罩裁掉；圆角半径也跟随贴图圆角，不再固定 5px。
+            radius = self.border_corner_radius(rect)
             for color, width, inset in ((QColor(40, 139, 255, round(42 * strength / 100)), 8, 5),
                                         (QColor(40, 139, 255, round(96 * strength / 100)), 5, 3),
                                         (QColor(72, 165, 255, round(230 * strength / 100)), 2, 2)):
                 painter.setPen(QPen(color, width, Qt.SolidLine, Qt.RoundCap,
                                     Qt.RoundJoin))
-                painter.drawRoundedRect(self.rect().adjusted(
-                    inset, inset, -inset - 1, -inset - 1), 5, 5)
+                corner = max(0.0, radius - inset)
+                painter.drawRoundedRect(QRectF(rect).adjusted(
+                    inset, inset, -inset - 1, -inset - 1), corner, corner)
         if self.scale_hint_text:
             painter.save()
             painter.setRenderHint(QPainter.Antialiasing)
