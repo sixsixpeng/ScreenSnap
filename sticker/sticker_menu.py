@@ -6,7 +6,6 @@ from PySide6.QtWidgets import (QMenu, QWidgetAction, QSlider, QStyle, QWidget,
                                QHBoxLayout, QLabel)
 from core.constants import shortcut_suffix
 from ui.action_icons import action_icon
-from editor.toolbar_widget import rich_tooltip
 
 
 def show_menu(sticker, position):
@@ -16,6 +15,7 @@ def show_menu(sticker, position):
 
 def build_menu(sticker):
     """生成当前贴图的菜单，透明度滑块直接作用于该窗口。"""
+    from editor.toolbar_widget import rich_tooltip
     menu = QMenu(sticker)
     for label, icon, callback in [
         ("解锁" if sticker.locked else "锁定", action_icon("unlock" if sticker.locked else "lock"), sticker.toggle_lock),

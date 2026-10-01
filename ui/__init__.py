@@ -1,20 +1,16 @@
-"""用户界面包。"""
+"""用户界面包。
 
-from importlib import import_module
+直接以静态绝对导入公开顶层 UI 组件，便于 PyInstaller 的静态分析识别，
+避免运行时 `importlib.import_module` 这类动态导入被漏打包。"""
 
-_EXPORTS = {
-	"SettingsWindow": "ui.settings_window",
-	"CaptureNotification": "ui.capture_notification",
-	"StickerPanel": "ui.sticker_panel",
-	"make_tray_menu": "ui.tray_menu",
-}
-__all__ = list(_EXPORTS)
+from ui.capture_notification import CaptureNotification
+from ui.settings_window import SettingsWindow
+from ui.sticker_panel import StickerPanel
+from ui.tray_menu import make_tray_menu
 
-
-def __getattr__(name):
-	"""按需公开顶层 UI 组件，避免编辑器导入子控件时触发循环引用。"""
-	if name not in _EXPORTS:
-		raise AttributeError(name)
-	value = getattr(import_module(_EXPORTS[name]), name)
-	globals()[name] = value
-	return value
+__all__ = [
+    "SettingsWindow",
+    "CaptureNotification",
+    "StickerPanel",
+    "make_tray_menu",
+]
