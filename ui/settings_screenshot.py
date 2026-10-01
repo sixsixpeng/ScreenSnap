@@ -4,9 +4,14 @@ from PySide6.QtCore import QSignalBlocker, QRectF, Qt
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen
 from PySide6.QtWidgets import QKeySequenceEdit, QComboBox, QSizePolicy, QWidget
 
-from editor.toolbar_widget import rich_tooltip
 from ui.widgets.color_button import ColorButton
 from ui.widgets.tooltip import SettingsPage
+
+
+def rich_tooltip(*args, **kwargs):
+    """延迟导入避免 ui 包与 editor.toolbar_widget 的循环依赖。"""
+    from editor.toolbar_widget import rich_tooltip as _rich_tooltip
+    return _rich_tooltip(*args, **kwargs)
 
 
 class ScreenshotEffectPreview(QWidget):
@@ -61,7 +66,7 @@ class ScreenshotEffectPreview(QWidget):
                 fill.setAlpha(round(self.config.data.get("window_hover_opacity", 35) * 2.55))
                 painter.fillRect(candidate, fill)
             painter.setBrush(Qt.NoBrush)
-            painter.setPen(QPen(QColor(self.config.data.get("window_hover_border_color", "#168CFF")),
+            painter.setPen(QPen(QColor(self.config.data.get("window_hover_border_color", "#168cff")),
                                 self.config.data.get("window_hover_border_width", 2)))
             painter.drawRect(candidate)
             badge = QRectF(candidate.left(), candidate.top(), candidate.width() * 0.54, 18)
@@ -80,7 +85,7 @@ class ScreenshotEffectPreview(QWidget):
             painter.setClipRect(selected)
             painter.fillRect(selected, QColor("#f7f9fa"))
             painter.restore()
-            border = QColor(self.config.data.get("selection_border_color", "#ff0000"))
+            border = QColor(self.config.data.get("selection_border_color", "#168cff"))
             painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(border, 2))
             painter.drawRect(selected)
@@ -94,37 +99,37 @@ class ScreenshotEffectPreview(QWidget):
 
 HOVER_STYLE_PRESETS = (
     ("海湾青", "lagoon", {
-        "window_hover_color": "#0C887B",
-        "window_hover_border_color": "#54E0C5",
-        "window_hover_text_color": "#F2FFFC",
-        "window_hover_badge_color": "#103B3A",
+        "window_hover_color": "#0c887b",
+        "window_hover_border_color": "#54e0c5",
+        "window_hover_text_color": "#f2fffc",
+        "window_hover_badge_color": "#103b3a",
         "window_hover_opacity": 17,
         "window_hover_border_width": 2,
         "window_hover_font_size": 12,
     }),
     ("冰蓝", "ice", {
-        "window_hover_color": "#286CB3",
-        "window_hover_border_color": "#83C9FF",
-        "window_hover_text_color": "#F4FAFF",
-        "window_hover_badge_color": "#152E47",
+        "window_hover_color": "#286cb3",
+        "window_hover_border_color": "#83c9ff",
+        "window_hover_text_color": "#f4faff",
+        "window_hover_badge_color": "#152e47",
         "window_hover_opacity": 18,
         "window_hover_border_width": 2,
         "window_hover_font_size": 12,
     }),
     ("琥珀", "amber", {
-        "window_hover_color": "#A96812",
-        "window_hover_border_color": "#FFD17A",
-        "window_hover_text_color": "#FFF9EE",
-        "window_hover_badge_color": "#402B13",
+        "window_hover_color": "#a96812",
+        "window_hover_border_color": "#ffd17a",
+        "window_hover_text_color": "#fff9ee",
+        "window_hover_badge_color": "#402b13",
         "window_hover_opacity": 18,
         "window_hover_border_width": 2,
         "window_hover_font_size": 12,
     }),
     ("玫瑰", "rose", {
-        "window_hover_color": "#A8385C",
-        "window_hover_border_color": "#FF9EB8",
-        "window_hover_text_color": "#FFF5F8",
-        "window_hover_badge_color": "#421D2B",
+        "window_hover_color": "#a8385c",
+        "window_hover_border_color": "#ff9eb8",
+        "window_hover_text_color": "#fff5f8",
+        "window_hover_badge_color": "#421d2b",
         "window_hover_opacity": 17,
         "window_hover_border_width": 2,
         "window_hover_font_size": 12,
@@ -194,6 +199,13 @@ class ScreenshotPage(SettingsPage):
         hover_opacity_control.setEnabled(fill_mode.currentData() == "fill")
         fill_mode.currentIndexChanged.connect(
             lambda _index: hover_opacity_control.setEnabled(fill_mode.currentData() == "fill"))
+        # 透出模式下候选框不填充，填充颜色同样不参与绘制，随模式一起置灰。
+        hover_fill_control = self.controls["window_hover_color"]
+        hover_fill_control.setEnabled(fill_mode.currentData() == "fill")
+        hover_fill_control.setToolTip("自定义候选框填充颜色；仅在“半透明颜色填充”模式下生效，"
+                                      "透出原图模式下候选框没有填充")
+        fill_mode.currentIndexChanged.connect(
+            lambda _index: hover_fill_control.setEnabled(fill_mode.currentData() == "fill"))
         self.check("window_uia_detect", "优先用无障碍识别 (UIA)",
                    "默认开启：截图识别会先用 Windows 无障碍树识别，能读到浏览器网页控件、\n"
                    "WPF、Qt、Electron 等自绘界面内部的按钮、标签、编辑框；\n"
@@ -310,6 +322,8 @@ class ScreenshotPage(SettingsPage):
             with QSignalBlocker(fill_mode):
                 fill_mode.setCurrentIndex(fill_mode.findData("fill"))
             self.controls["window_hover_opacity"].setEnabled(True)
+            if "window_hover_color" in self.controls:
+                self.controls["window_hover_color"].setEnabled(True)
         for name in ("window_hover_color", "window_hover_border_color",
                      "window_hover_text_color", "window_hover_badge_color"):
             self.color_buttons[name].set_color(style[name])
@@ -323,12 +337,12 @@ class ScreenshotPage(SettingsPage):
     def _mask_color_controls(self, config):
         key = "mask_color"
         presets = (
-            ("清透蓝", "#D9EDFF"),
-            ("薄荷绿", "#DDF5E4"),
-            ("奶油黄", "#FFF3CC"),
-            ("樱花粉", "#FFE2EB"),
-            ("淡紫", "#EEE7FF"),
-            ("柔白", "#FFFFFF"),
+            ("清透蓝", "#d9edff"),
+            ("薄荷绿", "#ddf5e4"),
+            ("奶油黄", "#fff3cc"),
+            ("樱花粉", "#ffe2eb"),
+            ("淡紫", "#eee7ff"),
+            ("柔白", "#ffffff"),
             ("石墨黑", "#000000"),
         )
         current = config.data[key]

@@ -41,7 +41,7 @@ DEFAULTS = {
     "filename": "_%Y%m%d_%H%M%S", "open_dir": False,
     "copy_saved_image": True, "copy_saved_path": False,
     "save_format": "png", "save_quality": 90, "save_background": "#ffffff",
-    "sticker_border_enabled": True, "sticker_border_color": "#ff0000",
+    "sticker_border_enabled": True, "sticker_border_color": "#168cff",
     "sticker_border_width": 2, "sticker_shadow_enabled": True,
     "sticker_selection_effect_enabled": True,
     "sticker_selection_effect_strength": 30,
@@ -53,7 +53,7 @@ DEFAULTS = {
     "editor_image_border_color": "#ffffff",
     "editor_image_shadow_enabled": False, "editor_image_shadow_size": 12,
     "editor_image_shadow_strength": 25, "editor_image_shadow_color": "#000000",
-    "capture_quick_sticker_enabled": False,
+    "capture_quick_sticker_enabled": True,
     "capture_quick_sticker_shortcut": "Space",
     "capture_save_shortcut": "S",
     "text_sticker_font": "", "text_sticker_font_size": 18,
@@ -67,18 +67,18 @@ DEFAULTS = {
     "sticker_snap_targets": "both", "sticker_follow_window": True,
     "sticker_follow_sticker": True,
     "sticker_follow_interval": 120,
-    "magnifier": True, "crosshair": True, "crosshair_color": "#ff0000", "crosshair_width": 1,
+    "magnifier": True, "crosshair": True, "crosshair_color": "#000000", "crosshair_width": 1,
     "mask_color": "#000000", "mask_opacity": 60,
     "window_detection": True, "window_auto_select": False, "element_depth": 12,
     "window_hover_detect": True, "window_uia_detect": True,
     "uia_debug_tree": False,
-    "window_hover_interval": 80, "window_hover_color": "#168CFF",
-    "window_hover_border_color": "#ff0000",
-    "window_hover_text_color": "#F4FFFC",
-    "window_hover_badge_color": "#102A31",
+    "window_hover_interval": 80, "window_hover_color": "#168cff",
+    "window_hover_border_color": "#168cff",
+    "window_hover_text_color": "#f4fffc",
+    "window_hover_badge_color": "#102a31",
     "window_hover_border_width": 2, "window_hover_font_size": 12,
     "window_hover_opacity": 35, "window_hover_fill_mode": "reveal",
-    "anchor_style": "border", "selection_border_color": "#ff0000",
+    "anchor_style": "border", "selection_border_color": "#168cff",
     "cursor": False, "history_limit": 100,
     "last_capture_rect": [],
     "annotation_tool": "select", "text_alignment": "left", "arrow_style": "filled",
@@ -299,6 +299,11 @@ def validate(data):
         raise ValueError("快捷键冲突：不能为多个操作设置同一热键")
     if result["archive_by_month"] and result["archive_by_day"]:
         raise ValueError("按月和按日归档不能同时开启")
+    # 颜色值统一规范为小写，避免大小写不一致带来的比较/日志隐患（如 #168CFF 与 #168cff）。
+    # 仅作用于六位十六进制颜色字符串；同时兜底历史配置或手改的大写值。
+    for key, value in result.items():
+        if isinstance(value, str) and re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            result[key] = value.lower()
     return result
 
 
