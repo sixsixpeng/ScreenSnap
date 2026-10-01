@@ -77,12 +77,15 @@ def window_under_point(point):
     return target
 
 
-def top_window_at(x, y):
+def top_window_at(x, y, skip_stickers=True):
     """按 Z 序找到第一个覆盖该物理点、可见且不是本程序覆盖层的窗口。
 
     遮罩与贴图会显式标记为穿透窗口；同进程的普通窗口仍可成为识别目标。
     这里一次枚举并命中即停，
     比沿 Z 序逐个下移（可能上百个窗口）更快，也不会漏掉真正位于鼠标下的窗口。
+
+    skip_stickers 为 True 时贴图也跳过（供贴图吸附使用，避免与贴图间吸附重复）；
+    UIA 识别传 False，只跳过遮罩，让贴图、菜单等本程序窗口也能被命中。
     """
     if os.name != "nt":
         return None
@@ -91,6 +94,7 @@ def top_window_at(x, y):
     desktop = user32.GetDesktopWindow()
     shell = user32.GetShellWindow()
     found = []
+    skip = ignored_mask_window if not skip_stickers else ignored_app_window
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
     def collect(handle, unused):
@@ -99,7 +103,7 @@ def top_window_at(x, y):
         if (handle in (desktop, shell) or is_cloaked(handle)
                 or window_class(user32, handle) in IGNORED_CLASSES
                 or not user32.IsWindowVisible(handle) or user32.IsIconic(handle)
-                or ignored_app_window(handle)):
+                or skip(handle)):
             return True
         if not covers(user32, handle, x, y):
             return True
@@ -127,12 +131,32 @@ def is_cloaked(handle):
 
 
 def ignored_app_window(handle):
-    """判断句柄是否对应本程序显式标记为穿透识别的 Qt 顶层窗口。"""
+    """判断句柄是否对应本程序显式标记为穿透识别的 Qt 顶层窗口。
+
+    遮罩与贴图都带 screensnap_overlay：贴图吸附时被跳过，避免与贴图间吸附重复。
+    """
     app = QApplication.instance()
     if app is None:
         return False
     for widget in app.topLevelWidgets():
         if not widget.property("screensnap_overlay"):
+            continue
+        if int(widget.winId()) == int(handle) or int(widget.effectiveWinId()) == int(handle):
+            return True
+    return False
+
+
+def ignored_mask_window(handle):
+    """判断句柄是否对应本程序的截图遮罩；只有遮罩必须被识别穿透。
+
+    贴图、菜单等其它本程序窗口不再被忽略，UIA 识别与点击选择都能命中它们；
+    但贴图吸附仍由 ignored_app_window 排除，不会与贴图间吸附重复。
+    """
+    app = QApplication.instance()
+    if app is None:
+        return False
+    for widget in app.topLevelWidgets():
+        if not widget.property("screensnap_mask"):
             continue
         if int(widget.winId()) == int(handle) or int(widget.effectiveWinId()) == int(handle):
             return True

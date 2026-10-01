@@ -301,12 +301,8 @@ class Application:
         """在 Qt 主线程把热键动作分发给截图或贴图模块。"""
         self.logger.info("触发热键: %s", action)
         if action in ("capture", "fullscreen", "monitor", "repeat"):
-            popup = QApplication.activePopupWidget()
-            if popup is not None:
-                self.logger.debug("截图热键关闭活动弹出菜单后继续: %s", action)
-                popup.close()
-                QTimer.singleShot(0, lambda requested=action: self.start_capture(requested))
-                return
+            # 不在此关闭活动弹出菜单：贴图右键菜单等本程序菜单应当能被一起拍进截图；
+            # 真正抓取发生在 show_mask 的 capture()，抓取后再由 show_mask 关闭残留菜单。
             self.start_capture(action)
         elif action == "paste":
             if self.stickers.paste_latest():
@@ -398,6 +394,11 @@ class Application:
         """保存两版画面并显示覆盖虚拟桌面的选区遮罩。"""
         # 同一时刻保留带光标和不带光标的画面，供编辑器临时切换。
         image, bounds, monitors, alternate = capture(self.config.data["cursor"], alternatives=True)
+        # 抓取完成后再关闭本程序残留的活动弹出菜单（如贴图右键菜单），
+        # 让它留在冻结画面里，又不会继续悬浮在遮罩之上。
+        popup = QApplication.activePopupWidget()
+        if popup is not None and popup is not getattr(self, "menu", None):
+            popup.close()
         if mode == "repeat":
             rect = QRect(*self.config.data["last_capture_rect"]).intersected(
                 QRect(bounds["left"], bounds["top"], bounds["width"], bounds["height"]))

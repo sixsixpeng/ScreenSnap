@@ -11,7 +11,7 @@ import time
 from ctypes import wintypes
 
 from core.window_snap import top_window_at
-from core.window_snap import ignored_app_window
+from core.window_snap import ignored_mask_window
 
 # 自绘界面里过小的控件没有识别价值；4 像素仍能选中图标这类小控件。
 MIN_SIZE = 4
@@ -134,7 +134,7 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
     try:
         # 鼠标下最上面的一定是本进程的遮罩，而 UIA 是树结构没有 Z 序概念，
         # 所以先用 Win32 找到遮罩下面的外部窗口，识别结果必须落在它里面。
-        handle = top_window_at(x, y)
+        handle = top_window_at(x, y, skip_stickers=False)
         if not handle:
             logger.debug("UIA 之前未取到外部窗口: 物理点(%d,%d)", x, y)
             return []
@@ -223,14 +223,18 @@ def control_from_point(automation, x, y, logger, exclude_hwnd=None):
 
 
 def own_control(control):
-    """命中控件是否属于需穿透的截图遮罩或贴图窗口。"""
+    """命中控件是否属于需穿透的截图遮罩。
+
+    只有遮罩窗口（screensnap_mask）会被忽略；贴图、菜单等其它本程序窗口
+    不再被排除，UIA 识别可以正常命中它们。
+    """
     current = control
     for _ in range(PARENT_LIMIT):
         if current is None:
             return False
         handle = handle_of(current)
         if handle:
-            if process_of(handle) == os.getpid() and ignored_app_window(handle):
+            if process_of(handle) == os.getpid() and ignored_mask_window(handle):
                 return True
         current = parent_of(current)
     return False
