@@ -19,6 +19,7 @@ from core.path_utils import resolved_dir
 from core.screen_capture import to_qimage
 from core.window_boundaries import visible_windows
 from core.window_elements import element_chain
+from core.window_focus import activate_window
 from logger.log_rate import log_every
 from editor.annotation_canvas import AnnotationCanvas
 from editor.image_effects import apply_output_effects
@@ -29,6 +30,9 @@ from screenshot.overlay_info import paint_info
 from screenshot.magnifier_widget import magnifier_rect, paint_magnifier
 
 # 鼠标移动时悬停识别的刷新间隔由设置“window_hover_interval”控制（毫秒），避免每个移动事件都调用系统 API。
+
+# 没抢到焦点时的全局 Esc 兜底需要系统键盘钩子；自动化测试会置为 False，避免吃掉真实按键。
+ESCAPE_FALLBACK_ENABLED = os.name == "nt"
 
 # 原地编辑两排图标条的紧凑尺寸：按钮边长与图标边长，尽量减少对截图区域的遮挡。
 INLINE_BUTTON_SIZE = 24
@@ -600,6 +604,7 @@ class MaskWindow(QWidget):
     annotation_setting_changed = Signal(str, object)
     pen_color_changed = Signal(str)
     tool_color_changed = Signal(str, str)
+    cancel_requested = Signal()
 
     def __init__(self, image, bounds, monitors, settings, mode="capture", alternate=None,
                  session=None, monitor=None, primary=True, initial_rect=None,
@@ -653,10 +658,13 @@ class MaskWindow(QWidget):
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
+        # 全局 Esc 兜底句柄：只有遮罩确实没抢到焦点时才会注册。
+        self.escape_fallback = None
         if primary:
             self.cancel_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
             self.cancel_shortcut.setContext(Qt.ApplicationShortcut)
             self.cancel_shortcut.activated.connect(self.close)
+            self.cancel_requested.connect(self.close)
         self.setGeometry(self.mapper.physical_local_rect_to_native_global_rect(self.monitor_rect).toRect())
         self.quick_sticker_shortcut = None
         if primary:
@@ -757,8 +765,7 @@ class MaskWindow(QWidget):
                 QWidget.show(view)
                 view.magnifier_overlay.sync()
                 view.update_capture_actions()
-            self.activateWindow()
-            self.raise_()
+            activate_window(self)
             self.setFocus(Qt.ActiveWindowFocusReason)
             QTimer.singleShot(0, self._focus_capture)
         else:
@@ -767,15 +774,61 @@ class MaskWindow(QWidget):
             self.update_capture_actions()
             self.activateWindow()
             self.setFocus(Qt.ActiveWindowFocusReason)
+        self._sync_escape_fallback()
 
     def _focus_capture(self):
         """显示完成后重试一次焦点交接，避免全局热键启动时窗口尚未激活。"""
         if self.primary and not self.session.closing and self.isVisible():
-            self.raise_()
-            self.activateWindow()
+            activate_window(self)
             self.setFocus(Qt.ActiveWindowFocusReason)
+            self._sync_escape_fallback()
+
+    def _install_escape_fallback(self):
+        """注册全局 Esc 热键；由全局钩子线程回调，只发信号不直接关窗口。"""
+        try:
+            import keyboard
+
+            return keyboard.add_hotkey("esc", self._global_escape, suppress=True)
+        except (ImportError, ValueError, OSError, RuntimeError) as error:
+            logging.getLogger("screensnap").debug("注册 Esc 兜底热键失败: %s", error)
+            return None
+
+    def _release_escape_fallback(self):
+        if self.escape_fallback is None:
+            return
+        handle, self.escape_fallback = self.escape_fallback, None
+        try:
+            import keyboard
+
+            keyboard.remove_hotkey(handle)
+        except (ImportError, ValueError, OSError, RuntimeError) as error:
+            logging.getLogger("screensnap").debug("移除 Esc 兜底热键失败: %s", error)
+
+    def _global_escape(self):
+        """全局钩子线程里只发信号，关闭动作交回 Qt 主线程执行。"""
+        self.cancel_requested.emit()
+
+    def _sync_escape_fallback(self):
+        """只有遮罩确实拿不到焦点时才用全局钩子兜底，保证 Esc 一定能退出截图。"""
+        if not ESCAPE_FALLBACK_ENABLED:
+            self._release_escape_fallback()
+            return
+        if not self.primary or self.session.closing or not self.isVisible():
+            self._release_escape_fallback()
+            return
+        if self.isActiveWindow():
+            self._release_escape_fallback()
+        elif self.escape_fallback is None:
+            self.escape_fallback = self._install_escape_fallback()
+
+    def changeEvent(self, event):
+        """焦点状态变化后同步兜底：拿到焦点就交还给 Qt 的正常按键处理。"""
+        super().changeEvent(event)
+        if event.type() == QEvent.ActivationChange:
+            self._sync_escape_fallback()
 
     def hide(self):
+        self._release_escape_fallback()
         if self.primary:
             for view in self.session.views:
                 QWidget.hide(view)
@@ -783,6 +836,7 @@ class MaskWindow(QWidget):
             QWidget.hide(self)
 
     def close(self):
+        self._release_escape_fallback()
         if self.session.closing:
             QWidget.close(self)
             return
