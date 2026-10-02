@@ -7,7 +7,7 @@ from uuid import uuid4
 
 from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QSize, Signal, QTimer
 from PySide6.QtGui import (QGuiApplication, QPixmap, QPainter, QColor, QPen,
-                           QImage, QTransform, QBitmap, QRegion)
+                           QImage, QTransform, QBitmap, QRegion, QPainterPath)
 from PySide6.QtWidgets import QWidget
 
 from core.window_snap import (visible_targets, window_logical_rect, window_present,
@@ -103,6 +103,18 @@ class StickerItem(QWidget):
         radius = self.image_corner_radius() * self.scale_factor
         return max(0.0, min(radius, rect.width() / 2.0, rect.height() / 2.0))
 
+    def shadow_blur(self):
+        """阴影模糊半径（窗口像素），由阴影强度推导；关闭时为 0。"""
+        if not self.shadow_enabled:
+            return 0
+        return max(2, round(self.settings.get("sticker_shadow_strength", 35) * 0.4))
+
+    def shadow_offset(self):
+        """阴影向下偏移（窗口像素），让投影更自然；关闭时为 0。"""
+        if not self.shadow_enabled:
+            return 0
+        return max(1, round(self.shadow_blur() * 0.3))
+
     def padding(self):
         border = self.settings.get("sticker_border_width", 2) if self.border_enabled else 0
         shadow = round(self.settings.get("sticker_shadow_strength", 35) / 5) if self.shadow_enabled else 0
@@ -143,21 +155,44 @@ class StickerItem(QWidget):
                     painter.fillRect(left, top, min(tile, rect.right() - left + 1),
                                      min(tile, rect.bottom() - top + 1),
                                      base if (row + column) % 2 == 0 else alternate)
-        if self.shadow_enabled and self.settings.get("sticker_shadow_strength", 35):
-            color = QColor(self.settings.get("sticker_shadow_color", "#000000"))
-            strength = self.settings.get("sticker_shadow_strength", 35)
-            color.setAlpha(round(255 * strength / 100))
-            offset = max(1, round(strength / 20))
-            # 阴影同样跟随圆角，否则圆角贴图会露出方形阴影角、透明模式下还会被裁掉。
-            shadow_radius = self.border_corner_radius(rect)
-            painter.setBrush(color)
-            painter.setPen(Qt.NoPen)
-            if shadow_radius > 0.5:
-                painter.drawRoundedRect(QRectF(rect).translated(offset, offset),
-                                        shadow_radius, shadow_radius)
-            else:
-                painter.fillRect(rect.translated(offset, offset), color)
+        # 先画图片，再画投影：投影裁剪在贴图形状之外（偏移形状减去原形状），
+        # 既保证不会压在图片上导致整体变暗，圆角透明处也不会在贴图内部露黑；
+        # 图片先用干净画笔状态绘制，避免半透明阴影画笔影响贴图主体亮度。
         painter.drawPixmap(rect, self.pixmap)
+        if self.shadow_enabled:
+            # 把阴影画到独立透明图层再用 drawPixmap 合成，避免半透明笔刷直接作用于主画布
+            #（在 WA_TranslucentBackground 下会让贴图主体被压暗）；阴影只落在贴图形状之外。
+            strength = self.settings.get("sticker_shadow_strength", 35)
+            color = QColor(self.settings.get("sticker_shadow_color", "#000000"))
+            radius = self.border_corner_radius(rect)
+            base = 2
+            blur = self.shadow_blur()
+            shadow_pix = QPixmap(self.size())
+            shadow_pix.fill(Qt.transparent)
+            sp = QPainter(shadow_pix)
+            sp.setRenderHint(QPainter.Antialiasing)
+            sp.setPen(Qt.NoPen)
+            layers = max(1, blur // 3)
+            for k in range(layers):
+                off = base + k
+                alpha = round(255 * strength / 100 * (1 - k / (layers + 1)))
+                shade = QColor(color)
+                shade.setAlpha(max(0, alpha))
+                sp.setBrush(shade)
+                offset_rect = QRectF(rect).translated(off, off)
+                outer = QPainterPath()
+                if radius > 0.5:
+                    outer.addRoundedRect(offset_rect, radius, radius)
+                else:
+                    outer.addRect(offset_rect)
+                inner = QPainterPath()
+                if radius > 0.5:
+                    inner.addRoundedRect(QRectF(rect), radius, radius)
+                else:
+                    inner.addRect(QRectF(rect))
+                sp.fillPath(outer.subtracted(inner), shade)
+            sp.end()
+            painter.drawPixmap(0, 0, shadow_pix)
         if self.border_enabled and self.settings.get("sticker_border_width", 2):
             width = float(self.settings.get("sticker_border_width", 2))
             painter.setPen(QPen(QColor(self.settings.get("sticker_border_color", "#168cff")),
@@ -256,7 +291,13 @@ class StickerItem(QWidget):
         painter = QPainter(mask)
         painter.drawImage(rect.topLeft(), opaque)
         painter.end()
-        self.setMask(QRegion(QBitmap.fromImage(mask)))
+        region = QRegion(QBitmap.fromImage(mask))
+        # 阴影画在内边距里、绕贴图一圈，需把这块区域也纳入命中区，否则阴影会被遮罩裁掉看不见。
+        if self.shadow_enabled:
+            margin = self.shadow_blur() + self.shadow_offset() + 1
+            expanded = rect.adjusted(-margin, -margin, margin, margin) & self.rect()
+            region |= QRegion(expanded)
+        self.setMask(region)
 
     def mousePressEvent(self, event):
         # 记录全局鼠标到窗口左上角的偏移，跨显示器拖动仍保持原抓取位置。

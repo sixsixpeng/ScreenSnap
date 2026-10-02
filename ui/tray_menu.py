@@ -1,12 +1,13 @@
 """托盘菜单。"""
 
 from PySide6.QtWidgets import QMenu, QStyle
-from core.constants import shortcut_suffix
+from core.constants import shortcut_suffix, shortcut_label
 from ui.action_icons import action_icon
 
 
 def make_tray_menu(app, capture, settings, quit_app, edit_clipboard=None, open_image=None,
-                   hotkeys=None, open_sticker=None, paste_clipboard=None, sticker_panel=None):
+                   hotkeys=None, open_sticker=None, paste_clipboard=None, sticker_panel=None,
+                   recycle_bin=None):
     """只组装菜单动作，截图与退出逻辑仍由主程序持有。"""
     menu = QMenu()
 
@@ -24,11 +25,19 @@ def make_tray_menu(app, capture, settings, quit_app, edit_clipboard=None, open_i
     for label, icon, action, suffix in [("贴剪贴板内容", action_icon("clipboard_image"),
                                          paste_clipboard, "paste_clipboard"),
                                         ("贴图管理", action_icon("sticker"), sticker_panel,
-                                         "sticker_panel")]:
+                                         "sticker_panel"),
+                                        ("贴图回收站", action_icon("recycle"), recycle_bin,
+                                         "recycle_bin")]:
         if action is None:
             continue
-        help_text = ("将剪贴板中的图片或文件内容作为新贴图显示。" if suffix == "paste_clipboard"
-                     else "打开贴图管理窗口，查找和管理当前贴图。")
+        if suffix == "paste_clipboard":
+            help_text = "将剪贴板中的图片或文件内容作为新贴图显示。"
+        elif suffix == "recycle_bin":
+            binding = shortcut_label(hotkeys, "recycle_bin")
+            help_text = "打开贴图回收站窗口，恢复或彻底删除已关闭的贴图。" + (
+                f"（快捷键: {binding}）" if binding else "")
+        else:
+            help_text = "打开贴图管理窗口，查找和管理当前贴图。"
         add_action(icon, f"{label}{shortcut_suffix(hotkeys, suffix)}", help_text, action)
     clipboard_action = add_action(
         action_icon("clipboard_edit"),

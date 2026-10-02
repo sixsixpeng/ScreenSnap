@@ -7,10 +7,12 @@ from ui.capture_notification import CaptureNotification
 from ui.settings_window import SettingsWindow
 from ui.sticker_panel import StickerPanel
 from ui.tray_menu import make_tray_menu
+from ui.recycle_window import RecycleWindow
 
 __all__ = [
     "SettingsWindow",
     "CaptureNotification",
     "StickerPanel",
     "make_tray_menu",
+    "RecycleWindow",
 ]

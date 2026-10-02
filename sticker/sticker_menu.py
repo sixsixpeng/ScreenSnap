@@ -127,6 +127,23 @@ def build_menu(sticker):
     menu.addAction(action_icon("click_through"), click_through_label,
                    sticker.toggle_click_through)
     menu.addSeparator()
+    if manager is not None:
+        from pathlib import Path
+        recycle = menu.addMenu(sticker.style().standardIcon(QStyle.SP_DialogDiscardButton), "回收站")
+        recycle.setToolTip(rich_tooltip("回收站", "恢复或清空已关闭并进入回收站的贴图；关闭贴图默认进入回收站而非直接删除。"))
+        recycle.menuAction().setToolTip(recycle.toolTip())
+        items = manager.recycle_items()
+        if items:
+            for index, item in enumerate(items):
+                name = item.source or f"贴图 {index + 1}"
+                recycle.addAction(action_icon("sticker"), f"恢复 {Path(name).name}",
+                                  lambda checked=False, target=item: manager.recycle_restore(target))
+            recycle.addSeparator()
+            recycle.addAction(sticker.style().standardIcon(QStyle.SP_DialogDiscardButton),
+                             "清空回收站", manager.empty_recycle)
+        else:
+            empty = recycle.addAction("回收站为空")
+            empty.setEnabled(False)
     menu.addAction(sticker.style().standardIcon(QStyle.SP_DialogCloseButton),
                    "关闭当前贴图", sticker.close)
     return menu

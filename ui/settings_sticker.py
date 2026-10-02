@@ -90,12 +90,19 @@ class StickerSelectionPreview(QWidget):
         sticker = QRectF(area.center().x() - 54, area.center().y() - 23, 108, 46)
         if self.config.data.get("sticker_shadow_enabled", True):
             shadow_strength = self.config.data.get("sticker_shadow_strength", 35)
-            shadow = QColor(self.config.data.get("sticker_shadow_color", "#000000"))
-            shadow.setAlpha(round(shadow_strength * 2.55))
-            offset = max(1, round(shadow_strength / 20))
+            base = QColor(self.config.data.get("sticker_shadow_color", "#000000"))
+            blur = max(2, round(shadow_strength * 0.4))
+            offset = max(1, round(blur * 0.3))
             painter.setPen(Qt.NoPen)
-            painter.setBrush(shadow)
-            painter.drawRoundedRect(sticker.translated(offset, offset + 1), 4, 4)
+            # 多层叠加近似柔和阴影，绕贴图一圈而非只在右下露出一条。
+            for expand in range(blur, 0, -max(1, blur // 3)):
+                alpha = round(255 * shadow_strength / 100 * (1 - expand / (blur + 1)))
+                color = QColor(base)
+                color.setAlpha(max(0, alpha))
+                painter.setBrush(color)
+                painter.drawRoundedRect(
+                    sticker.adjusted(-expand, -expand + offset, expand, expand + offset),
+                    6, 6)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor("#ffffff"))
         painter.drawRoundedRect(sticker, 4, 4)
@@ -175,4 +182,9 @@ class StickerPage(SettingsPage):
         self.group("贴图管理窗口")
         self.number("sticker_panel_thumb", "缩略图宽度", 48, 200,
                     "管理窗口中每行缩略图的宽度，高度按 4:3 推导；重新打开窗口后生效")
+        self.group("回收站")
+        self.check("sticker_recycle_enabled", "关闭贴图进入回收站",
+                   "关闭的贴图先进入回收站（右键菜单可恢复），避免误删；关闭此选项则直接删除")
+        self.number("sticker_recycle_limit", "回收站上限", 1, 200,
+                    "回收站最多保留的贴图数量，超出时丢弃最早进入的项")
 

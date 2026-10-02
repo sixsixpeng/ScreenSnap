@@ -36,6 +36,7 @@ class StickerManager(QObject):
         self.last_placement = (list(self.placement_states.values())[-1]
                        if self.placement_states else None)
         self.items = []
+        self.recycle_bin = []
         self.active_sticker = None
         self.focused_sticker = None
         self.selected_items = set()
@@ -584,7 +585,66 @@ class StickerManager(QObject):
             self._update_selection_visuals()
             self.changed.emit()
             self.schedule_persist()
-            logging.getLogger("screensnap").debug("移除贴图: %s", item.source or "临时图片")
+            if self.settings.get("sticker_recycle_enabled", True) and item not in self.recycle_bin:
+                # 进入回收站时关闭自动销毁，保留窗口以便之后从回收站恢复；
+                # 清空回收站或超出上限时再显式 deleteLater。
+                item.setAttribute(Qt.WA_DeleteOnClose, False)
+                item.hide()
+                self.recycle_bin.append(item)
+                self._enforce_recycle_limit()
+                logging.getLogger("screensnap").debug("贴图进入回收站: %s", item.source or "临时图片")
+            else:
+                # 不进回收站（关闭回收站开关或已不在回收站）则恢复关闭即销毁。
+                item.setAttribute(Qt.WA_DeleteOnClose, True)
+                logging.getLogger("screensnap").debug("移除贴图: %s", item.source or "临时图片")
+
+    def _enforce_recycle_limit(self):
+        """回收站超过上限时丢弃最旧的条目（已关闭隐藏，直接销毁）。"""
+        limit = self.settings.get("sticker_recycle_limit", 50)
+        while len(self.recycle_bin) > limit:
+            old = self.recycle_bin.pop(0)
+            old.deleteLater()
+
+    def recycle_items(self):
+        """返回当前回收站中的贴图（按进入顺序）。"""
+        return list(self.recycle_bin)
+
+    def recycle_restore(self, item):
+        """把回收站中的贴图恢复回活动列表并重新显示。"""
+        if item not in self.recycle_bin:
+            return
+        self.recycle_bin.remove(item)
+        try:
+            item.closed.disconnect()
+        except (RuntimeError, TypeError):
+            pass
+        item.closed.connect(lambda: self.remove(item))
+        item.setAttribute(Qt.WA_DeleteOnClose, True)
+        self.items.append(item)
+        if not item.isVisible():
+            item.show()
+        item.raise_()
+        self._update_selection_visuals()
+        self.changed.emit()
+        self.schedule_persist()
+        logging.getLogger("screensnap").info("从回收站恢复贴图: %s", item.source or "临时图片")
+
+    def recycle_delete(self, item):
+        """把回收站中的单张贴图彻底删除（不再恢复）。"""
+        if item not in self.recycle_bin:
+            return
+        self.recycle_bin.remove(item)
+        item.deleteLater()
+        self.changed.emit()
+        logging.getLogger("screensnap").info("从回收站彻底删除贴图: %s", item.source or "临时图片")
+
+    def empty_recycle(self):
+        """清空回收站，真正销毁其中所有贴图。"""
+        for item in self.recycle_bin:
+            item.deleteLater()
+        self.recycle_bin.clear()
+        self.changed.emit()
+        logging.getLogger("screensnap").info("清空贴图回收站")
 
     def files(self):
         """按修改时间直接读取自动保存目录，不维护内部图片数据库。"""
