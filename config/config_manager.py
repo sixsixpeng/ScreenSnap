@@ -36,6 +36,7 @@ DEFAULTS = {
     "capture_hotkey_suppress": False,
     "theme": "system",
     "bubble": True, "notification_backend": "win11toast",
+    "notification_timeout": 2,
     "capture_notification": True, "save_notification": True,
     "sticker_notification": True, "open_notification_file": True, "sound": False,
     "auto_dir": "", "manual_dir": "",
@@ -242,6 +243,8 @@ def validate(data):
             raise ValueError("未知贴图吸附目标")
         elif key == "notification_backend" and value not in ("win11toast", "legacy"):
             raise ValueError("未知通知方式")
+        elif key == "notification_timeout" and not 0 <= value <= 60:
+            raise ValueError("通知时长必须在 0 到 60 秒之间")
         elif key == "theme" and value not in ("system", "dark", "light"):
             raise ValueError("未知应用主题")
         elif key == "sticker_follow_interval" and not 30 <= value <= 1000:

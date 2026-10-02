@@ -1,7 +1,7 @@
 """颜色选择按钮。"""
 
 from PySide6.QtCore import QLibraryInfo, QSize, QTranslator, Qt
-from PySide6.QtWidgets import QApplication, QPushButton, QColorDialog, QLabel
+from PySide6.QtWidgets import QApplication, QWidget, QPushButton, QColorDialog, QLabel
 from PySide6.QtGui import QColor, QIcon, QPainter, QPen, QPixmap
 
 COMMON_COLORS = (
@@ -20,6 +20,17 @@ _FALLBACK_LABELS = {
 }
 
 
+def _outermost_window(widget):
+    """向上回溯到最外层的顶层窗口（任意含 Window 位的窗口类型）。"""
+    top = widget
+    result = None
+    while isinstance(top, QWidget):
+        if top.windowFlags() & Qt.Window:
+            result = top
+        top = top.parent()
+    return result
+
+
 def color_dialog(initial, parent):
     """固定使用可翻译的 Qt 对话框，并在自定义色板中预置常用色。"""
     global _color_translator, _common_colors_initialized
@@ -34,9 +45,20 @@ def color_dialog(initial, parent):
         for index, value in enumerate(COMMON_COLORS):
             QColorDialog.setCustomColor(index, QColor(value))
         _common_colors_initialized = True
-    dialog = QColorDialog(QColor(initial), parent)
+    # 取色对话框不能以“更多设置”这类 QMenu 弹出层为父：弹出层在对话框以模态打开时会关闭，
+    # 而被其拥有的窗口会被窗口管理器一并隐藏，表现为“看不到 / 被压到最后”。同样也不要以
+    # 置顶遮罩（Qt.Tool）为父，重挂载会破坏对话框外壳。因此只对普通顶层窗口（设置页、独立
+    # 编辑器窗口）沿用父级以保留居中；遇到弹出层或置顶遮罩则改为无父的置顶独立窗口，
+    # 既不随弹出层关闭而消失，也始终浮在置顶遮罩之上。
+    # 取色对话框的所属窗口要“越过”可能关闭的弹出层，直接挂到最外层的稳定窗口（置顶遮罩）下。
+    # 若以“更多设置”这类 QMenu 弹出层为父，弹出层在对话框以模态打开时会关闭，被其拥有的窗口
+    # 会被窗口管理器一并隐藏（看不到 / 被压到最后）。遮罩始终稳定且置顶，对话框作为它的所属窗口
+    # 既能恒浮其前、又能随截图一起关闭，且构造期指定父级不会破坏对话框外壳。
+    dialog_parent = _outermost_window(parent)
+    dialog = QColorDialog(QColor(initial), dialog_parent)
     dialog.setOption(QColorDialog.DontUseNativeDialog)
     dialog.setWindowTitle("选择颜色")
+    dialog.setWindowFlag(Qt.WindowStaysOnTopHint)
     if _color_translator is None:
         for widget in (*dialog.findChildren(QLabel), *dialog.findChildren(QPushButton)):
             text = widget.text().replace("&", "")

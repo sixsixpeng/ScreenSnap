@@ -575,7 +575,8 @@ class Application:
                 self.capture_notice.close()
             self.capture_notice = CaptureNotification(
                 images[0][0], len(images),
-                backend=self.config.data["notification_backend"])
+                backend=self.config.data["notification_backend"],
+                close_after=self.config.data["notification_timeout"])
             self.capture_notice.file_activated.connect(self.open_notification_target)
             if capture_editor is not None:
                 capture_editor.capture_notification = self.capture_notice
@@ -617,7 +618,8 @@ class Application:
         if self.config.data["capture_notification"]:
             # 复制反馈的核心是“看到复制了什么”，强制本地预览以保证缩略图一定可见；
             # 不依赖系统 Toast 是否能可靠附带图片（Win11 Toast 的 hero 图有时不显示）。
-            notice = CaptureNotification(image, title="已复制到剪贴板", backend="legacy")
+            notice = CaptureNotification(image, title="已复制到剪贴板", backend="legacy",
+                                      close_after=self.config.data["notification_timeout"])
             notice.file_activated.connect(self.open_notification_target)
             if self.capture_notice is not None:
                 self.capture_notice.close()
@@ -729,7 +731,8 @@ class Application:
             self.capture_notice.close()
         self.capture_notice = CaptureNotification(image, title=title, detail=detail,
                               target_path=target_path,
-                              backend=self.config.data["notification_backend"])
+                              backend=self.config.data["notification_backend"],
+                              close_after=self.config.data["notification_timeout"])
         self.capture_notice.file_activated.connect(self.open_notification_target)
         self.capture_notice.show_preview()
 

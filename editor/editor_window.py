@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 
 from PySide6.QtCore import Qt, Signal, QSignalBlocker, QMimeData
-from PySide6.QtGui import QGuiApplication, QKeySequence, QShortcut
+from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                                QDialog, QDialogButtonBox, QDial, QDoubleSpinBox, QHBoxLayout, QLabel,
                                QStyle, QSlider, QSpinBox, QGraphicsView)
@@ -102,11 +102,12 @@ class EditorWindow(QMainWindow):
         self.toolbar.setting_changed.connect(self.set_annotation_setting)
         self.toolbar.crop_style_changed.connect(self.set_crop_style)
         self.toolbar.command.connect(self.execute)
-        # 画布取得焦点时仍由窗口级快捷键处理 Esc，避免误执行保存。
-        self.escape_shortcut = QShortcut(QKeySequence("Esc"), self)
-        self.escape_shortcut.activated.connect(self.close)
+        # 不再把 Esc 绑定为“退出编辑”：取色、字体等模态对话框也用 Esc 关闭，
+        # 窗口级快捷键会在对话框打开时一并触发，导致关掉对话框的同时直接退出编辑。
         self.canvas.confirmed.connect(lambda: self.execute("save"))
-        self.canvas.cancelled.connect(self.close)
+        # 不再把画布上的 Esc 绑定为“退出编辑”：取色、字体等模态框打开时焦点可能落在画布，
+        # Esc 会被画布接收并直接关掉整个编辑窗口。改为仅取消当前选中，不关闭窗口。
+        self.canvas.cancelled.connect(lambda: self.canvas.scene_data.clearSelection())
         self.canvas.color_picked.connect(self.apply_picked_color)
 
     def set_tool(self, tool):

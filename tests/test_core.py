@@ -1160,6 +1160,45 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(pixmap.size(), QSize(48, 28))
         self.assertEqual(pixmap.toImage().pixelColor(24, 14).name(), "#abcdef")
 
+    def test_color_dialog_stays_on_top(self):
+        from PySide6.QtWidgets import QColorDialog
+        from ui.widgets.color_button import color_dialog
+
+        dialog = color_dialog("#12ab34", None)
+        self.assertTrue(dialog.windowFlags() & Qt.WindowStaysOnTopHint)
+        self.assertEqual(dialog.windowTitle(), "选择颜色")
+        dialog.deleteLater()
+
+    def test_color_dialog_parents_to_stable_outermost_window(self):
+        from PySide6.QtWidgets import QWidget
+        from ui.widgets.color_button import color_dialog
+
+        # 模拟“更多设置”结构：置顶遮罩(Tool) -> 工具栏 -> QMenu 弹出层 -> 色块。
+        mask = QWidget()
+        mask.setWindowFlags(Qt.WindowStaysOnTopHint | Qt.Tool)
+        toolbar = QWidget(mask)
+        popup = QWidget(toolbar)  # 实际是 QMenu，这里只验证 owner 回溯与稳定父级。
+        button = QWidget(popup)
+        dialog = color_dialog("#12ab34", button)
+        # 不能挂在会随取色关闭的弹出层下；应挂到最外层稳定窗口（遮罩），随截图关闭且不丢外壳。
+        self.assertIs(dialog.parent(), mask)
+        self.assertTrue(dialog.windowFlags() & Qt.WindowStaysOnTopHint)
+        dialog.deleteLater()
+        mask.deleteLater()
+
+    def test_color_dialog_keeps_normal_window_parent(self):
+        from PySide6.QtWidgets import QWidget
+        from ui.widgets.color_button import color_dialog
+
+        window = QWidget()
+        window.setWindowFlags(Qt.Window)
+        button = QWidget(window)
+        dialog = color_dialog("#12ab34", button)
+        self.assertIs(dialog.parent(), window)
+        self.assertTrue(dialog.windowFlags() & Qt.WindowStaysOnTopHint)
+        dialog.deleteLater()
+        window.deleteLater()
+
     def test_picked_color_updates_active_annotation_color(self):
         from PySide6.QtGui import QGuiApplication
         from config.config_manager import DEFAULTS

@@ -15,12 +15,14 @@ class CaptureNotification(QWidget):
     native_activated = Signal()
 
     def __init__(self, image, count=1, title="截图完成", detail="", target_path=None,
-                 backend="win11toast"):
+                 backend="win11toast", close_after=4):
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint |
                          Qt.WindowDoesNotAcceptFocus)
         self.setAttribute(Qt.WA_ShowWithoutActivating)
         self.setObjectName("captureNotification")
         self.setAutoFillBackground(True)
+        # 自动关闭时长（秒）；0 表示不自动关闭，需手动点击关闭。
+        self.close_after = close_after
         self.target_path = None
         self.backend = backend
         self._pressed = False
@@ -106,7 +108,8 @@ class CaptureNotification(QWidget):
             area = screen.availableGeometry()
             self.move(area.right() - self.width() - 16, area.bottom() - self.height() - 16)
         self.show()
-        QTimer.singleShot(4000, self.close)
+        if self.close_after and self.close_after > 0:
+            QTimer.singleShot(self.close_after * 1000, self.close)
 
     def mousePressEvent(self, event):
         self._pressed = event.button() == Qt.LeftButton

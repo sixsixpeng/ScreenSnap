@@ -10,7 +10,7 @@ from datetime import datetime
 from PySide6.QtCore import Qt, Signal, QPoint, QPointF, QRect, QEvent, QMimeData, QTimer, QSize
 from PySide6.QtGui import (QColor, QCursor, QPainter, QPainterPath, QPen, QGuiApplication,
                            QMouseEvent, QShortcut, QKeySequence)
-from PySide6.QtWidgets import (QWidget, QDialog, QDialogButtonBox, QFormLayout, QSpinBox, QStyle,
+from PySide6.QtWidgets import (QWidget, QApplication, QDialog, QDialogButtonBox, QFormLayout, QSpinBox, QStyle,
                                QFrame, QGraphicsView, QToolButton, QLabel,
                                QHBoxLayout, QPushButton)
 
@@ -86,8 +86,12 @@ class MagnifierOverlay(QWidget):
     def sync(self):
         view = self.view
         editor = view.session.inline_editor
+        # 任意模态对话框或下拉弹出层（如取色框、字体选择下拉）打开时都隐藏放大镜，
+        # 避免它作为置顶浮层盖住这些控件。
         visible = (view.isVisible() and view.settings.get("magnifier", False) and
                    view.monitor_rect.contains(view.position) and
+                   QGuiApplication.modalWindow() is None and
+                   QApplication.activePopupWidget() is None and
                    not (editor is not None and editor.toolbar.options_button.menu().isVisible()))
         if not visible:
             self.hide()
@@ -178,7 +182,11 @@ class InlineEditor(QWidget):
         self.toolbar.crop_style_changed.connect(self.set_crop_style)
         self.toolbar.command.connect(self.execute)
         self.canvas.confirmed.connect(lambda: self.execute("save"))
-        self.canvas.cancelled.connect(self.discard)
+        # 取色、字体等模态框或下拉弹出层打开时，画布上的 Esc 由它们自身处理，不要再关掉原地编辑。
+        self.canvas.cancelled.connect(
+            lambda: self.discard()
+            if (QGuiApplication.modalWindow() is None and
+                QApplication.activePopupWidget() is None) else None)
         self.canvas.color_picked.connect(self.apply_picked_color)
         self.canvas.selection_requested.connect(self.toolbar.tool_buttons["select"].click)
         options_menu = self.toolbar.options_button.menu()
@@ -212,8 +220,12 @@ class InlineEditor(QWidget):
             return super().eventFilter(watched, event)
         event_type = event.type()
         if event_type == QEvent.KeyPress and event.key() == Qt.Key_Escape:
-            view.close()
-            return True
+            # 取色、字体等模态框或下拉弹出层打开时，Esc 由它们自身处理，不要再关掉原地编辑。
+            if (QGuiApplication.modalWindow() is None and
+                    QApplication.activePopupWidget() is None):
+                view.close()
+                return True
+            return super().eventFilter(watched, event)
         if (event_type == QEvent.KeyPress and watched in (self.canvas, self.canvas.viewport()) and
                 event.modifiers() == Qt.NoModifier and
                 event.key() in (Qt.Key_W, Qt.Key_A, Qt.Key_S, Qt.Key_D,
@@ -672,8 +684,8 @@ class MaskWindow(QWidget):
         if primary:
             self.cancel_shortcut = QShortcut(QKeySequence(Qt.Key_Escape), self)
             self.cancel_shortcut.setContext(Qt.ApplicationShortcut)
-            self.cancel_shortcut.activated.connect(self.close)
-            self.cancel_requested.connect(self.close)
+            self.cancel_shortcut.activated.connect(self._request_cancel)
+            self.cancel_requested.connect(self._request_cancel)
         self.setGeometry(self.mapper.physical_local_rect_to_native_global_rect(self.monitor_rect).toRect())
         self.quick_sticker_shortcut = None
         if primary:
@@ -825,12 +837,24 @@ class MaskWindow(QWidget):
         """全局钩子线程里只发信号，关闭动作交回 Qt 主线程执行。"""
         self.cancel_requested.emit()
 
+    def _request_cancel(self):
+        """放弃截图/退出原地编辑；取色、字体等模态框或下拉弹出层打开时 Esc 应交由它们处理。"""
+        if (QGuiApplication.modalWindow() is not None or
+                QApplication.activePopupWidget() is not None):
+            return
+        self.close()
+
     def _sync_escape_fallback(self):
         """只有遮罩确实拿不到焦点时才用全局钩子兜底，保证 Esc 一定能退出截图。"""
         if not ESCAPE_FALLBACK_ENABLED:
             self._release_escape_fallback()
             return
         if not self.primary or self.session.closing or not self.isVisible():
+            self._release_escape_fallback()
+            return
+        # 取色、字体等模态框或下拉弹出层打开时，Esc 应交由它们处理：既不要吞掉按键，也不要关掉截图。
+        if (QGuiApplication.modalWindow() is not None or
+                QApplication.activePopupWidget() is not None):
             self._release_escape_fallback()
             return
         if self.isActiveWindow():
