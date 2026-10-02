@@ -7,6 +7,9 @@ from time import time_ns
 import re
 from pathlib import Path
 
+# 工具线宽键的间接映射：标注画布按工具名解析对应的 *_width 配置键，
+# 因此 rect_width/ellipse_width/arrow_width/pen_width/marker_width/eraser_width 不会以字面量
+# 直接出现在读取处。做“配置是否被使用”的静态审计时需先解析本表，否则会误报为死配置。
 TOOL_WIDTH_KEYS = {
     "rect": "rect_width", "ellipse": "ellipse_width", "arrow": "arrow_width",
     "pen": "pen_width", "marker": "marker_width", "eraser": "eraser_width",
@@ -27,6 +30,7 @@ DEFAULTS = {
         "sticker_panel": "ctrl+alt+p",
         "sticker_rotate_left": "ctrl+alt+shift+left",
         "sticker_rotate_right": "ctrl+alt+shift+right",
+        "recycle_bin": "ctrl+alt+r",
     },
     "capture_delay": 0,
     "capture_hotkey_suppress": False,
@@ -38,7 +42,7 @@ DEFAULTS = {
     "archive_by_month": True, "archive_by_day": False,
     "inline_edit": True,
     "capture_after_selection": "edit",
-    "filename": "_%Y%m%d_%H%M%S", "open_dir": False,
+    "filename": "ScreenSnap_%Y%m%d_%H%M%S", "open_dir": False,
     "copy_saved_image": True, "copy_saved_path": False,
     "save_format": "png", "save_quality": 90, "save_background": "#ffffff",
     "sticker_border_enabled": True, "sticker_border_color": "#168cff",
@@ -94,6 +98,16 @@ DEFAULTS = {
     "marker_opacity": 38, "font": "", "font_size": 18,
     "line_spacing": 1.2, "mosaic_size": 10,
     "mosaic_mode": "blocks",
+    # 截图取色与定位辅助增强
+    "capture_picker_shortcut": "C",
+    "magnifier_grid": True, "magnifier_grid_color": "#cccccc",
+    "ruler_enabled": True, "ruler_color": "#00ad91",
+    # 标注：序号
+    "sequence_font_size": 14, "sequence_start": 1,
+    "sequence_shape": "circle", "sequence_text_color": "#ffffff",
+    "sequence_fill_color": "#ff0000",     "sequence_preset": "custom",
+    # 贴图：回收站
+    "sticker_recycle_enabled": True, "sticker_recycle_limit": 50,
     "logging_enabled": True, "log_level": "INFO", "log_when": "midnight", "log_dir": "",
     "log_monthly_folder": True,
 }
@@ -270,7 +284,7 @@ def validate(data):
             raise ValueError("标注线宽必须在 1 到 50 之间")
         elif key == "annotation_tool" and value not in (
             "select", "rect", "ellipse", "arrow", "pen", "eraser", "text",
-            "mosaic", "picker", "crop", "marker"
+            "mosaic", "picker", "crop", "marker", "number"
         ):
             if value in ("wide", "square"):
                 result[key] = "select"
@@ -278,8 +292,8 @@ def validate(data):
                 raise ValueError("未知标注工具")
         elif key == "text_alignment" and value not in ("left", "center", "right"):
             raise ValueError("未知文字对齐方式")
-        elif key == "capture_after_selection" and value not in ("save", "edit"):
-            raise ValueError("截图选区后的行为必须是仅保存或进入编辑")
+        elif key == "capture_after_selection" and value not in ("save", "edit", "copy"):
+            raise ValueError("截图选区后的行为必须是仅保存、进入编辑或仅复制")
         elif key == "arrow_style" and value not in (
             "filled", "open", "double", "double_filled",
             "solid_line", "open_line", "solid_dash", "open_dash",
@@ -292,6 +306,30 @@ def validate(data):
             value[2] <= 0 or value[3] <= 0
         )):
             raise ValueError("上次截图区域格式错误")
+        elif key == "capture_picker_shortcut":
+            from PySide6.QtGui import QKeySequence
+            sequence = QKeySequence(value.strip())
+            if sequence.isEmpty() or sequence.count() > 1:
+                raise ValueError("取色快捷键必须是一个有效按键或组合")
+            result[key] = sequence.toString(QKeySequence.PortableText)
+        elif key in ("magnifier_grid_color", "ruler_color",
+                      "sequence_text_color", "sequence_fill_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("颜色必须是六位十六进制颜色")
+        elif key == "sequence_font_size" and not 6 <= value <= 200:
+            raise ValueError("序号字号必须在 6 到 200 之间")
+        elif key == "sequence_shape" and value not in (
+                "circle", "square", "triangle", "diamond", "pentagon", "hexagon", "star",
+                "heart", "arrow", "bubble", "cloud", "plus", "drop"):
+            raise ValueError("未知序号形状")
+        elif key == "sequence_preset" and value not in (
+                "custom", "red_circle", "blue_square", "green_star",
+                "amber_diamond", "purple_pentagon", "teal_hexagon",
+                "red_heart", "blue_arrow"):
+            raise ValueError("未知序号预设")
+        elif key == "sequence_start" and not 0 <= value <= 999:
+            raise ValueError("序号起始值必须在 0 到 999 之间")
+        elif key == "sticker_recycle_limit" and not 1 <= value <= 200:
+            raise ValueError("贴图回收站上限必须在 1 到 200 之间")
         else:
             result[key] = value
     bindings = [canonical_hotkey(binding) for binding in result["hotkeys"].values() if binding]

@@ -21,6 +21,7 @@ HOTKEY_LABELS = {
     "sticker_panel": "贴图管理窗口",
     "sticker_rotate_left": "贴图逆时针旋转",
     "sticker_rotate_right": "贴图顺时针旋转",
+    "recycle_bin": "贴图回收站",
 }
 
 
