@@ -5,6 +5,7 @@ import logging
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 
@@ -56,6 +57,7 @@ from logger import configure_logging
 from screenshot import MaskWindow
 from sticker import StickerManager
 from ui import SettingsWindow, make_tray_menu, CaptureNotification, StickerPanel
+from ui.recycle_window import RecycleWindow
 from ui.theme import apply_theme
 from PIL import Image
 
@@ -127,6 +129,57 @@ def acquire_single_instance_lock(path=None):
     return lock if lock.tryLock(0) else None
 
 
+class QApp(QApplication):
+    """重写 notify 捕获 Qt 事件/槽中的未处理异常并写入日志（默认会静默崩溃）。"""
+
+    def notify(self, receiver, event):
+        try:
+            return super().notify(receiver, event)
+        except Exception:
+            logging.getLogger("screensnap").exception(
+                "未捕获异常（事件类型 0x%x，接收者 %s）",
+                event.type() if event is not None else -1,
+                type(receiver).__name__ if receiver is not None else None)
+            return False
+
+
+def _log_uncaught(exc_type, exc_value, exc_traceback):
+    """把未捕获异常写入 screensnap 日志；若日志尚未配置处理器，额外兜底写入文件。"""
+    logger = logging.getLogger("screensnap")
+    logger.exception("未捕获的全局异常", exc_info=(exc_type, exc_value, exc_traceback))
+    # 日志处理器在 Application.__init__ 中才配置；在此之前崩溃也要保证写进文件。
+    if not logger.handlers:
+        try:
+            log_dir = Path("logs") / _now_month()
+            log_dir.mkdir(parents=True, exist_ok=True)
+            import traceback as _tb
+            with open(log_dir / "app.log", "a", encoding="utf-8") as fh:
+                fh.write("\n=== 未捕获全局异常（日志未配置时的兜底写入）===\n")
+                _tb.print_exception(exc_type, exc_value, exc_traceback, file=fh)
+        except Exception:
+            pass
+
+
+def _now_month():
+    from datetime import datetime
+    return datetime.now().strftime("%Y-%m")
+
+
+def install_exception_hooks():
+    """安装全局兜底：主线程顶层异常、Qt 事件异常、子线程异常都写入日志，避免静默崩溃。"""
+    sys.excepthook = _log_uncaught
+    if hasattr(threading, "excepthook"):
+        _orig = threading.excepthook
+
+        def _thread_hook(args):
+            try:
+                _log_uncaught(args.exc_type, args.exc_value, args.exc_traceback)
+            finally:
+                _orig(args)
+
+        threading.excepthook = _thread_hook
+
+
 class Application:
     """集中连接托盘、热键和窗口；具体业务交由各模块处理。"""
 
@@ -134,7 +187,7 @@ class Application:
     logger = logging.getLogger("screensnap")
 
     def __init__(self):
-        self.qt = QApplication(sys.argv)
+        self.qt = QApp(sys.argv)
         enable_windows_app_id()
         # 应用级图标会被设置、编辑器、贴图管理等所有未显式设置图标的窗口继承。
         self.qt.setWindowIcon(tray_icon())
@@ -173,11 +226,13 @@ class Application:
             open_sticker=lambda: self.dispatch("open_sticker_file"),
             paste_clipboard=lambda: self.dispatch("paste_clipboard"),
             sticker_panel=self.open_sticker_panel,
+            recycle_bin=self.open_recycle_bin,
         )
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self.tray_clicked)
         self.tray.show()
         self.editors = []
+        self.recycle_window = None
         self.capture_notice = None
         # 持有顶层窗口引用，防止截图完成后窗口被 Python 提前回收。
         self.mask = None
@@ -215,6 +270,7 @@ class Application:
             open_sticker=lambda: self.dispatch("open_sticker_file"),
             paste_clipboard=lambda: self.dispatch("paste_clipboard"),
             sticker_panel=self.open_sticker_panel,
+            recycle_bin=self.open_recycle_bin,
         )
         self.tray.setContextMenu(self.menu)
         if not self.hotkey_recording:
@@ -331,6 +387,8 @@ class Application:
             self.stickers.rotate_active(-90)
         elif action == "sticker_rotate_right":
             self.stickers.rotate_active(90)
+        elif action == "recycle_bin":
+            self.open_recycle_bin()
         else:
             self.logger.warning("未处理的热键动作: %s", action)
 
@@ -422,6 +480,8 @@ class Application:
             view.selected.connect(self.handle_capture_selection)
             view.edit_requested.connect(self.edit_images)
             view.save_requested.connect(self.save_capture_images)
+            view.copy_done.connect(self.notify_capture_copied)
+            view.picker_copied.connect(self.notify_color_picked)
             view.image_saved.connect(self.saved)
             view.image_saved_silently.connect(
                 lambda path, image: self.saved(path, image, notify=False))
@@ -549,6 +609,27 @@ class Application:
         else:
             self.save_capture_images(images)
 
+    def notify_capture_copied(self, image=None):
+        """仅复制模式：选区已写入剪贴板，发送带缩略图的图片提示。"""
+        if image is None:
+            self.notify("已复制到剪贴板", "capture_notification")
+            return
+        if self.config.data["capture_notification"]:
+            # 复制反馈的核心是“看到复制了什么”，强制本地预览以保证缩略图一定可见；
+            # 不依赖系统 Toast 是否能可靠附带图片（Win11 Toast 的 hero 图有时不显示）。
+            notice = CaptureNotification(image, title="已复制到剪贴板", backend="legacy")
+            notice.file_activated.connect(self.open_notification_target)
+            if self.capture_notice is not None:
+                self.capture_notice.close()
+            self.capture_notice = notice
+            notice.show_preview()
+        else:
+            self.notify("已复制到剪贴板", "capture_notification")
+
+    def notify_color_picked(self, color):
+        """取色模式：色值已复制到剪贴板，发一次轻量提示。"""
+        self.notify(f"已复制颜色 {color}", "capture_notification")
+
     def save_capture_images(self, images, positions=None):
         """直接保存选区图片，但沿用编辑器最终效果与手动保存配置。"""
         for image, alternate in images:
@@ -621,6 +702,16 @@ class Application:
         self.sticker_panel.show()
         self.sticker_panel.raise_()
         self.sticker_panel.activateWindow()
+
+    def open_recycle_bin(self):
+        """复用同一个回收站窗口，打开时按当前回收内容重建列表。"""
+        if self.recycle_window is None:
+            self.recycle_window = RecycleWindow(self.stickers, self.config)
+        self.logger.debug("打开贴图回收站: %d 张", len(self.stickers.recycle_items()))
+        self.recycle_window.refresh()
+        self.recycle_window.show()
+        self.recycle_window.raise_()
+        self.recycle_window.activateWindow()
 
     def saved(self, path, image=None, notify=True):
         """记录保存结果并按保存通知设置显示提示。"""
@@ -696,5 +787,6 @@ if __name__ == "__main__":
     instance_lock = acquire_single_instance_lock()
     if instance_lock is None:
         sys.exit(0)
+    install_exception_hooks()
     program = Application()
     sys.exit(program.qt.exec())
