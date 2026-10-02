@@ -511,20 +511,16 @@ Windows 截图提示优先使用带缩略图的原生图片 Toast；无法导入
 
 ```powershell
 # 1) 带控制台 + 单文件：便于排错，启动慢、单一 exe 便于分发
-pyinstaller --name ScreenSnap --console --onefile --icon icon.ico `
-    --add-data "icon.ico;." --add-data "icon.png;." main.py
+pyinstaller --name ScreenSnap --console --onefile --icon icon.ico --add-data "icon.ico;." --add-data "icon.png;." main.py
 
 # 2) 带控制台 + 目录：便于排错，启动快、依赖散落在 dist 文件夹
-pyinstaller --name ScreenSnap --console --onedir --icon icon.ico `
-    --add-data "icon.ico;." --add-data "icon.png;." main.py
+pyinstaller --name ScreenSnap --console --onedir --icon icon.ico --add-data "icon.ico;." --add-data "icon.png;." main.py
 
 # 3) 不带控制台 + 单文件：面向最终用户，无黑框、单一 exe
-pyinstaller --name ScreenSnap --windowed --onefile --icon icon.ico `
-    --add-data "icon.ico;." --add-data "icon.png;." main.py
+pyinstaller --name ScreenSnap --windowed --onefile --icon icon.ico --add-data "icon.ico;." --add-data "icon.png;." main.py
 
 # 4) 不带控制台 + 目录：面向最终用户，无黑框、启动最快
-pyinstaller --name ScreenSnap --windowed --onedir --icon icon.ico `
-    --add-data "icon.ico;." --add-data "icon.png;." main.py
+pyinstaller --name ScreenSnap --windowed --onedir --icon icon.ico --add-data "icon.ico;." --add-data "icon.png;." main.py
 ```
 
 参数含义：
@@ -567,6 +563,7 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon icon.ico `
   - 序号形状/预设下拉、默认工具下拉补齐。
 - **通知**
   - 仅复制/复制类反馈一律应用内本地缩略图预览（保证可见）；保存/贴图提示优先 Win11 原生 Toast，失败回退应用内预览。
+  - 通知自动关闭时长可配置（`notification_timeout`，默认 2 秒，0 表示不自动关闭），截图完成/保存/复制反馈的本地预览按此时长自动关闭；取色/字体等弹层打开时 Esc 由弹层自身处理，不再误退编辑。
 - **工程/健壮性**
   - 全局兜底异常捕获：主线程 `QApplication.notify`、主线程 `sys.excepthook`、子线程 `threading.excepthook`；日志未配置时直接写 `logs/<YYYY-MM>/app.log`，启动期崩溃也能留痕。
   - README 结构去重（操作手册 vs 设置与数据 的贴图章节）。
@@ -634,6 +631,8 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon icon.ico `
 - 2026-10-02：修复长截图（滚动拼接）两个体验问题。① 闪烁：自动模式每 350ms 抓取一屏时 `_grab_screen` 反复 `hide()`/`show()` 整窗，导致遮罩 HUD/虚线边框忽隐忽现。改为抓取瞬间只抑制遮罩自身 HUD/边框绘制（透明填充即返回）并临时隐藏 HUD 标签，不再隐藏窗口，消除闪烁；`paintEvent` 长截图段在 `_long_grabbing` 时仅填透明即返回。② 快速滚动“滚动太小”：`core/long_capture.best_overlap_offset` 只在 `base_overlap±15` 窄窗内搜索重叠，快速滚动时两帧真实重叠远大于此窗，被迫取过小重叠、丢弃内容，拼接结果明显偏短。改为覆盖整段可能重叠（至少保留 16px 新内容）的粗扫+精修搜索，差异相等时按离 `base_overlap` 最近取舍；同时把自动模式采样间隔由 350ms 降到 150ms，减小单帧跳跃、降低零重叠风险。验证：新增 `test_long_capture_auto_alignment_handles_fast_scroll`（快速滚动应取到真实重叠、结果高度≥560，旧实现约 520）；`test_long_capture_stitch_combines_frames_by_overlap`/`test_long_capture_uses_selected_region` 仍通过；真实多机前台滚动与不同页面仍需桌面验收。
 
 - 2026-10-02：标注工具栏工具顺序调整。把「序号」标注工具由末尾移到「椭圆」与「文字标注」之间（两个编辑器共用同一 `editor/toolbar_widget.ToolbarWidget` 工具列表，故顺序改动同时作用于内联编辑器与独立编辑器）。仅调整网格排列顺序，工具 key 与功能不变，按 key 访问的现有用例不受影响。
+
+- 2026-10-02：修复取色/字体等弹层打开时按 Esc 误退出编辑，并把通知自动关闭时长改为可配置。① 内联（截图）与独立编辑器里，取色框、字体下拉（`QFontComboBox` 弹出层，属于 `Qt.Popup` 而非模态 `QDialog`）、「更多设置」菜单等打开时按 Esc，此前会因窗口级 Esc 退出编辑、全局 Esc 兜底钩子（`keyboard` 钩子 `suppress=True` 会吞掉按键）、画布 `cancelled`→关闭等链路直接关掉整个截图或编辑窗口。改为：遮罩的全局 Esc 钩子、快捷键、`eventFilter`、`canvas.cancelled` 以及放大镜显隐，在存在模态对话框或下拉弹出层（`QGuiApplication.modalWindow()`/`QApplication.activePopupWidget()`）时一律跳过关闭；弹出层打开时释放全局 Esc 钩子，使 Esc 正常落到弹层本身（取色框/字体下拉/菜单按 Esc 自行关闭，不再退出编辑）。② 取色对话框在构造期即挂到最外层稳定窗口（置顶遮罩）下，越过会随取色关闭的 `QMenu` 弹出层，避免被弹出层携带关闭或成为关闭截图后残留的孤儿窗口；保留 `WindowStaysOnTopHint`。③ 通知 `notification_timeout` 新增为可配置项（默认 2 秒，0 表示不自动关闭），截图完成/保存/复制反馈等应用内本地预览按此时长自动关闭；设置页「常规 > 启动与通知」新增数值控件（0–60 秒）。验证：改写 `test_color_dialog_stays_on_top`/`test_color_dialog_parents_to_stable_outermost_window`（取色框挂到稳定遮罩下、保持置顶）与取色对话框归属、置顶、独立父级相关用例；无 lint；Esc 误退编辑、放大镜遮挡、通知时长行为需桌面验收。
 
 - 2026-10-02：为贴图回收站补充全局快捷键。此前回收站仅能从托盘菜单或单张贴图右键「回收站」子菜单进入，没有快捷键。现把 `recycle_bin` 接入全局热键体系：默认绑定 `Ctrl+Alt+R` 并在「设置 > 快捷键 > 贴图快捷键」提供可录制/清除的字段；`main.Application.dispatch` 新增 `recycle_bin` 分支调用 `open_recycle_bin`；托盘菜单「贴图回收站」项除菜单文字带快捷键后缀外，tooltip 也补充“（快捷键: …）”提示。`HOTKEY_LABELS` 与 `DEFAULTS["hotkeys"]` 同步新增，`validate` 因以 DEFAULTS 为基准会自动补齐旧配置。验证：新增 `test_recycle_bin_shortcut_has_settings_entry_and_dispatch`（覆盖默认值、标签、设置页字段、热键分发、托盘菜单文字与 tooltip），`test_open_sticker_file_shortcut_has_settings_entry_and_dispatch`、托盘菜单与热键录制/冲突等既有用例仍通过；真实 Windows 全局热键权限仍应桌面验收。
 
