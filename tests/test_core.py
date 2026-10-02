@@ -107,6 +107,33 @@ class CoreTests(unittest.TestCase):
                 manager._persist_timer.stop()
                 manager.close_all()
 
+    def test_sticker_shadow_does_not_dim_image(self):
+        from PySide6.QtGui import QColor, QImage, QPixmap
+        from config.config_manager import DEFAULTS
+
+        settings = dict(DEFAULTS)
+        settings["sticker_shadow_enabled"] = True
+        settings["sticker_shadow_strength"] = 35
+        settings["sticker_shadow_color"] = "#000000"
+        settings["sticker_background_mode"] = "transparent"
+        image = QImage(160, 100, QImage.Format_RGB32)
+        image.fill(QColor("#ffffff"))
+        item = StickerItem(image, source=None, settings=settings)
+        item.setAttribute(Qt.WA_DeleteOnClose, False)
+        try:
+            w, h = item.width(), item.height()
+            pix = QPixmap(w, h)
+            pix.fill(QColor(0, 0, 0, 0))
+            item.render(pix)
+            res = pix.toImage()
+            center = res.pixelColor(w // 2, h // 2)
+            # 投影只应落在贴图外侧；主体像素应保持原亮度，不能被半透明阴影压暗。
+            self.assertGreaterEqual(center.red(), 250)
+            self.assertGreaterEqual(center.green(), 250)
+            self.assertGreaterEqual(center.blue(), 250)
+        finally:
+            item.close()
+
     def test_sticker_close_group_persists_removed_members_immediately(self):
         from PySide6.QtGui import QColor, QImage
         from config.config_manager import DEFAULTS
@@ -652,7 +679,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(manager.data, validate({}))
             self.assertEqual(set(manager.data), set(DEFAULTS))
             self.assertFalse(manager.data["start_on_boot"])
-            self.assertEqual(manager.data["filename"], "_%Y%m%d_%H%M%S")
+            self.assertEqual(manager.data["filename"], "ScreenSnap_%Y%m%d_%H%M%S")
             settings = SettingsWindow(manager)
             for index in range(settings.pages.count()):
                 for key in settings.pages.widget(index).controls:
@@ -742,6 +769,62 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(ConfigManager(path).data["mask_opacity"], DEFAULTS["mask_opacity"])
             self.assertEqual(manager.data["capture_after_selection"], "edit")
             self.assertEqual(screenshot.controls["capture_after_selection"].currentData(), "edit")
+            settings.close()
+
+    def test_new_feature_config_keys_initialized_and_reset(self):
+        """本轮新增配置键（标尺/取色/序号/回收站）必须：
+        ① 都写入 DEFAULTS 且类型正确；② 旧配置缺键时 validate 自动补齐默认值；
+        ③ 「恢复本页默认」能把被改掉的新增项还原并持久化。"""
+        from config.config_manager import DEFAULTS, validate, ConfigManager
+
+        new_keys = {
+            "capture_picker_shortcut": str, "magnifier_grid": bool,
+            "magnifier_grid_color": str, "ruler_enabled": bool, "ruler_color": str,
+            "sequence_font_size": int, "sequence_start": int, "sequence_shape": str,
+            "sequence_text_color": str, "sequence_fill_color": str,
+            "sequence_preset": str,
+            "sticker_recycle_enabled": bool, "sticker_recycle_limit": int,
+        }
+        for key, typ in new_keys.items():
+            self.assertIn(key, DEFAULTS, key)
+            self.assertIsInstance(DEFAULTS[key], typ, key)
+
+        # 旧配置只保留热键时，validate 应补齐全部新增键，且标尺默认开启。
+        stripped = {"hotkeys": DEFAULTS["hotkeys"]}
+        result = validate(stripped)
+        self.assertTrue(result["ruler_enabled"])
+        self.assertTrue(result["magnifier_grid"])
+        self.assertTrue(result["sticker_recycle_enabled"])
+        self.assertEqual(result["sequence_shape"], "circle")
+
+        from ui.settings_window import SettingsWindow
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            # 模拟用户把若干新增项改成非默认值（含把标尺关掉）。
+            path.write_text(json.dumps({
+                "ruler_enabled": False, "ruler_color": "#123456",
+                "sequence_shape": "star",
+                "capture_after_selection": "edit",
+            }), encoding="utf-8")
+            manager = ConfigManager(path)
+            self.assertFalse(manager.data["ruler_enabled"])
+            settings = SettingsWindow(manager)
+            screenshot = settings.page("截图")
+            editor = settings.page("编辑器")
+            # 截图页重置：标尺/标尺颜色回到默认。
+            screenshot.reset_page()
+            self.assertTrue(manager.data["ruler_enabled"])
+            self.assertEqual(manager.data["ruler_color"], DEFAULTS["ruler_color"])
+
+            # 编辑器页重置：序号形状回到默认。
+            editor.reset_page()
+            self.assertEqual(manager.data["sequence_shape"], DEFAULTS["sequence_shape"])
+            settings.flush_persist()
+            reloaded = ConfigManager(path).data
+            self.assertTrue(reloaded["ruler_enabled"])
+            self.assertEqual(reloaded["ruler_color"], DEFAULTS["ruler_color"])
+
+            self.assertEqual(reloaded["sequence_shape"], DEFAULTS["sequence_shape"])
             settings.close()
 
     def test_text_item_uses_shared_annotation_color(self):
@@ -1098,6 +1181,57 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(editor.settings["pen_color"], pen_color)
         self.assertEqual(editor.toolbar.active_color_label.text(), "marker 颜色")
         editor.close()
+
+
+
+
+
+
+
+
+
+
+
+    def test_capture_enhancement_settings(self):
+        from config.config_manager import DEFAULTS, validate
+        from PySide6.QtGui import QImage, QPainter, QColor
+        from PySide6.QtCore import QRect, QPoint
+        from screenshot.magnifier_widget import paint_magnifier
+
+        for key in ("capture_picker_shortcut", "magnifier_grid", "magnifier_grid_color",
+                    "ruler_enabled", "ruler_color",
+                    "sequence_font_size", "sequence_start",
+                    "sticker_recycle_enabled", "sticker_recycle_limit"):
+            self.assertIn(key, DEFAULTS)
+
+        valid = validate({
+            "capture_after_selection": "copy",
+            "capture_picker_shortcut": "C",
+            "magnifier_grid": True, "magnifier_grid_color": "#cccccc",
+            "ruler_enabled": False, "ruler_color": "#00ad91",
+            "sequence_font_size": 14,
+            "sequence_start": 1,
+            "sticker_recycle_enabled": True, "sticker_recycle_limit": 50,
+        })
+        self.assertEqual(valid["capture_after_selection"], "copy")
+        self.assertEqual(valid["capture_picker_shortcut"], "C")
+
+        for bad in ({"capture_after_selection": "weird"}, {"magnifier_grid_color": "red"},
+                    {"sequence_font_size": 999}, {"sequence_start": 1000},
+                    {"sticker_recycle_limit": 0},
+                    {"capture_picker_shortcut": ""}):
+            with self.assertRaises(ValueError):
+                validate(bad)
+
+        image = QImage(40, 40, QImage.Format_RGB32)
+        image.fill(QColor("#ffffff"))
+        target = QImage(60, 60, QImage.Format_RGB32)
+        painter = QPainter(target)
+        paint_magnifier(painter, image, QPoint(20, 20), QRect(0, 0, 800, 600), QPoint(20, 20))
+        paint_magnifier(painter, image, QPoint(20, 20), QRect(0, 0, 800, 600), QPoint(20, 20),
+                        grid=True, grid_color="#cccccc")
+        painter.end()
+        self.assertFalse(target.isNull())
 
     def test_editor_operation_tips_are_visible(self):
         from config.config_manager import DEFAULTS
@@ -1843,12 +1977,13 @@ class CoreTests(unittest.TestCase):
             rect = sticker.image_rect()
             offset = max(1, round(35 / 20))
             painted = sticker.grab().toImage()
-            corner = painted.pixelColor(rect.left() + offset, rect.top() + offset)
+            # 阴影需可见（透明模式也会裁掉），且沿贴图形状向右下偏移：右下 padding 处应有投影。
+            bottom_right = painted.pixelColor(rect.right() + 1, rect.bottom() + 1)
+            self.assertLess(bottom_right.red(), 200)
+            top_left = painted.pixelColor(rect.left() + offset, rect.top() + offset)
             if round_corners:
-                # 圆角外不再有方形阴影角，露出的应是棋盘底色。
-                self.assertGreaterEqual(corner.red(), 220)
-            else:
-                self.assertLess(corner.red(), 200)
+                # 圆角处不应露出方形阴影角，左上 padding 应露出背景底色而非阴影。
+                self.assertGreaterEqual(top_left.red(), 220)
             sticker.close()
 
             sticker = StickerItem(build(round_corners), settings=dict(
@@ -1997,6 +2132,65 @@ class CoreTests(unittest.TestCase):
             self.assertEqual((position.x(), position.y()), (321, 246))
             self.assertEqual(scale, 2.5)
             self.assertEqual(size, manager.items[0].window_size())
+            manager.close_all()
+
+    def test_sticker_recycle_bin_keeps_closed_stickers_and_restores(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QImage, QColor
+        from config.config_manager import DEFAULTS
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            manager = StickerManager(DEFAULTS)
+            item = manager.add(QImage(12, 8, QImage.Format_RGB32), show=False)
+            self.assertEqual(len(manager.items), 1)
+            item.close()
+            # 进入回收站时关闭自动销毁，窗口保留以便之后恢复（修复“恢复后不显示但发通知”）。
+            self.assertFalse(item.testAttribute(Qt.WA_DeleteOnClose))
+            self.assertEqual(len(manager.items), 0)
+            self.assertEqual(len(manager.recycle_items()), 1)
+            manager.recycle_restore(item)
+            self.assertEqual(len(manager.items), 1)
+            self.assertEqual(len(manager.recycle_items()), 0)
+            self.assertTrue(item.isVisible())
+            # 恢复后重新开启关闭即销毁，避免再次关闭时泄漏。
+            self.assertTrue(item.testAttribute(Qt.WA_DeleteOnClose))
+            manager.empty_recycle()
+            self.assertEqual(len(manager.recycle_items()), 0)
+            manager.close_all()
+
+    def test_recycle_window_builds_with_recycled_stickers(self):
+        from PySide6.QtGui import QImage
+        from config.config_manager import DEFAULTS
+        from ui.recycle_window import RecycleWindow
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            manager = StickerManager(DEFAULTS)
+            item = manager.add(QImage(12, 8, QImage.Format_RGB32), show=False)
+            item.close()
+            self.assertEqual(len(manager.recycle_items()), 1)
+            # 构造回收站窗口会触发 RecycleRow 构建；历史上曾因 Qt6 已移除的
+            # QStyle.SP_DialogTrashIcon 而崩溃，导致回收站始终打不开。
+            window = RecycleWindow(manager, dict(DEFAULTS))
+            self.assertEqual(window.list_layout.count(), 2)  # 1 行 + 1 个 stretch
+            window.close()
+            manager.close_all()
+
+    def test_recycle_delete_removes_item(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QImage
+        from config.config_manager import DEFAULTS
+        from sticker.sticker_item import StickerItem
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            manager = StickerManager(DEFAULTS)
+            item = manager.add(QImage(12, 8, QImage.Format_RGB32), show=False)
+            item.close()
+            self.assertEqual(len(manager.recycle_items()), 1)
+            manager.recycle_delete(item)
+            self.assertEqual(len(manager.recycle_items()), 0)
             manager.close_all()
 
     def test_annotation_font_size_and_arrow_style_persist(self):
@@ -3125,6 +3319,109 @@ class CoreTests(unittest.TestCase):
                 app.edit_images.assert_called_once_with(images, positions=None)
             else:
                 app.save_capture_images.assert_called_once_with(images)
+
+    def test_capture_after_selection_copy_writes_clipboard_and_closes(self):
+        from unittest.mock import Mock, patch
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 160, "height": 100}
+        monitors = [{"left": 0, "top": 0, "width": 160, "height": 100}]
+        screen_infos = [{"geometry": QRect(0, 0, 160, 100), "dpr": 1.0}]
+        settings = {**DEFAULTS, "crosshair": False, "magnifier": False,
+                    "sound": False, "capture_after_selection": "copy"}
+        clipboard = Mock()
+        with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+                patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos), \
+                patch("PySide6.QtGui.QGuiApplication.clipboard", return_value=clipboard):
+            mask = MaskWindow(Image.new("RGB", (160, 100), "blue"), bounds,
+                              monitors, settings)
+            copy_done = Mock()
+            for view in mask.session.views:
+                view.copy_done.connect(copy_done)
+            mask.show()
+            view = mask.session.views[0]
+            QTest.mousePress(view, Qt.LeftButton, Qt.NoModifier, QPoint(10, 10))
+            QTest.mouseMove(view, QPoint(60, 50))
+            QTest.mouseRelease(view, Qt.LeftButton, Qt.NoModifier, QPoint(60, 50))
+            self.app.processEvents()
+            QTest.mouseDClick(view, Qt.LeftButton, Qt.NoModifier, QPoint(35, 30))
+            self.app.processEvents()
+        copy_done.assert_called_once()
+        clipboard.setMimeData.assert_called_once()
+        self.assertFalse(mask.isVisible())
+
+    def test_annotation_sequence_supports_all_shapes(self):
+        from editor.annotation_items import AnnotationSequenceItem
+        from PySide6.QtGui import QImage, QPainter
+        for shape in ("circle", "square", "triangle", "diamond",
+                      "pentagon", "hexagon", "star"):
+            item = AnnotationSequenceItem(3, "#168cff", "#ffffff", 16, shape, "")
+            rect = item.boundingRect()
+            self.assertAlmostEqual(rect.width(), rect.height())
+            image = QImage(40, 40, QImage.Format_ARGB32)
+            image.fill(0)
+            painter = QPainter(image)
+            item.paint(painter, None, None)
+            painter.end()
+
+    def test_sequence_preset_applies_shape_and_colors(self):
+        from editor.annotation_items import apply_sequence_preset
+        settings = {}
+        apply_sequence_preset(settings, "green_star")
+        self.assertEqual(settings["sequence_shape"], "star")
+        self.assertEqual(settings["sequence_fill_color"], "#2e9e5b")
+        # custom 预设不覆盖任何单项，原有组合保持不变。
+        apply_sequence_preset(settings, "custom")
+        self.assertEqual(settings["sequence_shape"], "star")
+
+    def test_default_sequence_settings(self):
+        from config.config_manager import DEFAULTS, validate
+        self.assertEqual(DEFAULTS["filename"], "ScreenSnap_%Y%m%d_%H%M%S")
+        self.assertEqual(DEFAULTS["sequence_shape"], "circle")
+        self.assertIn("sequence_fill_color", DEFAULTS)
+        self.assertIn("sequence_text_color", DEFAULTS)
+        data = validate({})
+
+    def test_capture_picker_hint_visibility(self):
+        from unittest.mock import Mock, patch
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QPoint, QRect
+        from screenshot.overlay_info import paint_info
+        from screenshot.mask_window import MaskWindow
+
+        # 取色提示已并入顶部提示栏（paint_info），不再有独立 QLabel。
+        # 1) 取色模式下，paint_info 顶部提示栏始终显示取色说明（即便尚未取到色值）。
+        painter = Mock()
+        painter.fontMetrics.return_value.horizontalAdvance.side_effect = lambda text: len(text) * 8
+        painter.fontMetrics.return_value.height.return_value = 16
+        painter.fontMetrics.return_value.elidedText.side_effect = lambda text, *_: text
+        paint_info(painter, QPoint(20, 20), None, QRect(0, 0, 800, 100), picker_mode=True)
+        drawn = " ".join(call.args[-1] for call in painter.drawText.call_args_list)
+        self.assertIn("取色", drawn)
+        self.assertIn("退出取色", drawn)
+        self.assertNotIn("拖拽框选", drawn)
+        self.assertNotIn("拖动移动", drawn)
+        # 2) 非取色模式仍显示原始操作说明。
+        painter.drawText.reset_mock()
+        paint_info(painter, QPoint(20, 20), None, QRect(0, 0, 800, 100))
+        drawn = " ".join(call.args[-1] for call in painter.drawText.call_args_list)
+        self.assertIn("拖拽框选", drawn)
+        # 非取色模式顶部提示栏应说明如何进入取色模式。
+        self.assertIn("取色", drawn)
+        # 3) 真实遮罩不再持有独立 picker_hint 控件（避免与提示栏重叠）。
+        bounds = {"left": 0, "top": 0, "width": 160, "height": 100}
+        monitors = [{"left": 0, "top": 0, "width": 160, "height": 100}]
+        screen_infos = [{"geometry": QRect(0, 0, 160, 100), "dpr": 1.0}]
+        settings = {**DEFAULTS, "crosshair": False, "magnifier": False, "sound": False}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+                patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos):
+            mask = MaskWindow(Image.new("RGB", (160, 100), "blue"), bounds,
+                              monitors, settings)
+        self.assertFalse(hasattr(mask, "picker_hint"))
+        mask.close()
+
+
 
     def test_multiple_regions_default_to_standalone_editors(self):
         from types import SimpleNamespace
@@ -4317,7 +4614,7 @@ class CoreTests(unittest.TestCase):
         self.assertLessEqual(abs(actions.x() - (mask.width() - actions.width()) // 2), 1)
         self.assertEqual(actions.y(), 8 + mask.fontMetrics().height() + 18)
         buttons = actions.findChildren(QPushButton)
-        self.assertEqual([button.height() for button in buttons], [32, 32, 32])
+        self.assertEqual([button.height() for button in buttons], [32, 32, 32, 32])
         self.assertFalse(buttons[1].icon().isNull())
         self.assertNotEqual(buttons[0].icon().pixmap(24, 24).toImage(),
                     buttons[1].icon().pixmap(24, 24).toImage())
@@ -4359,7 +4656,7 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(actions.isVisible())
             self.assertEqual(actions.y(), 8 + view.fontMetrics().height() + 18)
             self.assertLessEqual(abs(actions.x() - (view.width() - actions.width()) // 2), 1)
-            self.assertEqual(len(actions.findChildren(QPushButton)), 3)
+            self.assertEqual(len(actions.findChildren(QPushButton)), 4)
         secondary_edit = mask.session.views[1].capture_action_buttons[2]
         self.assertEqual(secondary_edit.text(), "")
         edited = []
@@ -4846,6 +5143,88 @@ class CoreTests(unittest.TestCase):
         self.app.processEvents()
         self.assertEqual(canvas.viewport().grab().toImage().pixelColor(corner).name(),
                          "#d02020")
+        canvas.close()
+
+    def test_annotation_sequence_serializes_and_restores(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from editor.annotation_items import AnnotationSequenceItem
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QPointF
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), dict(DEFAULTS))
+        item = AnnotationSequenceItem(3, "#00ad91", "#ffffff", 16, "circle", "", QPointF(20, 20))
+        canvas.scene_data.addItem(item)
+        records = canvas.snapshot()
+        self.assertEqual(records[0]["type"], "AnnotationSequenceItem")
+        self.assertEqual(records[0]["number"], 3)
+        self.assertEqual(records[0]["sequence_fill_color"], "#00ad91")
+        self.assertEqual(records[0]["sequence_text_color"], "#ffffff")
+        for it in canvas.annotations():
+            canvas.scene_data.removeItem(it)
+        canvas.restore(records)
+        restored = [it for it in canvas.annotations()
+                   if isinstance(it, AnnotationSequenceItem)]
+        self.assertEqual(len(restored), 1)
+        self.assertEqual(restored[0].number, 3)
+        self.assertEqual(restored[0].sequence_fill_color, "#00ad91")
+        self.assertEqual(restored[0].sequence_font_size, 16)
+
+    def test_sequence_next_number_fills_gap_after_delete(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from editor.annotation_items import AnnotationSequenceItem
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QPointF
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), dict(DEFAULTS))
+        for value in (1, 2, 3, 4):
+            canvas.scene_data.addItem(
+                AnnotationSequenceItem(value, "#ff0000", "#ffffff", 14, "circle", "", QPointF(10, 10)))
+        # 删除中间一个（2），下一个编号应填补空缺而不是从最大值+1。
+        for it in canvas.annotations():
+            if isinstance(it, AnnotationSequenceItem) and it.number == 2:
+                canvas.scene_data.removeItem(it)
+        self.assertEqual(canvas.next_sequence_number(), 2)
+        # 再删一个（3），剩余 1/4，最小空缺仍是 2（先填前面的空）。
+        for it in canvas.annotations():
+            if isinstance(it, AnnotationSequenceItem) and it.number == 3:
+                canvas.scene_data.removeItem(it)
+        self.assertEqual(canvas.next_sequence_number(), 2)
+        canvas.close()
+
+    def test_sequence_renumber_after_deleting_middle(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from editor.annotation_items import AnnotationSequenceItem
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QPointF
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), dict(DEFAULTS))
+
+        def add(value):
+            item = AnnotationSequenceItem(value, "#ff0000", "#ffffff", 14, "circle", "",
+                                         QPointF(10, 10))
+            canvas.scene_data.addItem(item)
+            return item
+
+        for value in range(1, 8):  # 连续 1..7
+            add(value)
+        # 删除中间连续多个：2/3/4/5。
+        for it in canvas.annotations():
+            if isinstance(it, AnnotationSequenceItem) and it.number in (2, 3, 4, 5):
+                it.setSelected(True)
+        canvas.remove_selected()
+        numbers = sorted(it.number for it in canvas.annotations()
+                        if isinstance(it, AnnotationSequenceItem))
+        # 原 1/6/7 按序重排为 1/2/3，不再留空缺。
+        self.assertEqual(numbers, [1, 2, 3])
+        self.assertEqual(canvas.next_sequence_number(), 4)
+        # 再删除中间单个（2），剩余 1/3 重排为 1/2。
+        for it in canvas.annotations():
+            if isinstance(it, AnnotationSequenceItem) and it.number == 2:
+                it.setSelected(True)
+        canvas.remove_selected()
+        numbers = sorted(it.number for it in canvas.annotations()
+                        if isinstance(it, AnnotationSequenceItem))
+        self.assertEqual(numbers, [1, 2])
         canvas.close()
 
     def test_annotation_render_keeps_antialiased_edges_before_round_output(self):
@@ -9200,6 +9579,38 @@ class CoreTests(unittest.TestCase):
             app.dispatch("open_sticker_file")
             app.stickers.open_file.assert_called_once_with()
             page.close()
+
+    def test_recycle_bin_shortcut_has_settings_entry_and_dispatch(self):
+        from core.constants import HOTKEY_LABELS
+        from config.config_manager import DEFAULTS
+        from main import Application
+        from ui.settings_hotkey import HotkeyPage
+        from ui.tray_menu import make_tray_menu
+
+        self.assertEqual(DEFAULTS["hotkeys"]["recycle_bin"], "ctrl+alt+r")
+        self.assertEqual(HOTKEY_LABELS["recycle_bin"], "贴图回收站")
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            page = HotkeyPage(manager, Mock())
+            self.assertEqual(page.edit_recycle_bin.keySequence().toString(), "Ctrl+Alt+R")
+            page.close()
+
+        app = Application.__new__(Application)
+        app.logger = Mock()
+        app.open_recycle_bin = Mock()
+        app.dispatch("recycle_bin")
+        app.open_recycle_bin.assert_called_once_with()
+
+        calls = []
+        menu = make_tray_menu(self.app, lambda: None, lambda: None, lambda: None,
+                              hotkeys={"recycle_bin": "ctrl+alt+r"},
+                              recycle_bin=lambda: calls.append("recycle"))
+        actions = {action.text(): action for action in menu.actions() if not action.isSeparator()}
+        recycle = next(action for label, action in actions.items() if label.startswith("贴图回收站"))
+        self.assertIn("Ctrl+Alt+R", recycle.text())
+        self.assertIn("Ctrl+Alt+R", recycle.toolTip())
+        recycle.trigger()
+        self.assertIn("recycle", calls)
 
     def test_theme_setting_and_native_unchecked_checkbox(self):
         from PySide6.QtGui import QImage, QPainter, QPalette
