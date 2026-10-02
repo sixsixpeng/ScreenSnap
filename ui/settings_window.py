@@ -224,7 +224,7 @@ class SettingsWindow(QWidget):
                 f"当前设置会先备份到：\n{backup}\n然后全部恢复为默认值。是否继续？",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
             return
-            self._persist_timer.stop()
+        self._persist_timer.stop()
         try:
             if self.config.path.exists():
                 backup.write_bytes(self.config.path.read_bytes())

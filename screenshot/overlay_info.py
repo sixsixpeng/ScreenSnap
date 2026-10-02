@@ -13,19 +13,29 @@ def paint_info(painter, position, selection, area=None, quick_sticker=False,
                save_shortcut="S", element_rect=None, element_size=None,
                element_border_color="#00d7aa", element_text_color="#ffffff",
                element_background_color="#141c22", element_font_size=12,
-               element_border_width=1):
+               element_border_width=1, pick_color=None, picker_mode=False,
+               picker_shortcut="C"):
     """贴顶居中的单行提示条：宽度贴合文字、只占一行，尽量不影响截图观感。"""
-    size = f"  {selection.width()} x {selection.height()}" if selection else ""
     area = area or QRect(0, 0, painter.device().width(), painter.device().height())
-    instructions = (
-        "拖动移动 | 四角/边中点缩放 | Enter/双击编辑 | WASD/方向键微调 | Esc取消"
-        if selection else
-        "拖拽框选 | Enter/双击编辑 | WASD/方向键微调 | Esc取消 | Ctrl+F固定尺寸"
-    )
-    quick_shortcut = (quick_sticker if isinstance(quick_sticker, str) else "Space")
-    quick_hint = f" | {quick_shortcut} 贴图" if quick_sticker else ""
-    save_hint = f" | 右键双击保存 | {save_shortcut}保存"
-    text = f"{position.x()}, {position.y()}{size}  |  {instructions}{save_hint}{quick_hint}"
+    if picker_mode or pick_color:
+        # 取色模式下始终显示取色说明（即使鼠标暂不在图上、尚未取到色值）。
+        color_text = f"取色 {pick_color}  |  " if pick_color else ""
+        text = (f"{position.x()}, {position.y()}  |  {color_text}"
+                f"Alt/Ctrl+左键 取样复制到剪贴板 | C/Esc 退出取色")
+    else:
+        size = f"  {selection.width()} x {selection.height()}" if selection else ""
+        instructions = (
+            "拖动移动 | 四角/边中点缩放 | Enter/双击编辑 | WASD/方向键微调 | Esc取消"
+            if selection else
+            "拖拽框选 | Enter/双击编辑 | WASD/方向键微调 | Esc取消 | Ctrl+F固定尺寸"
+        )
+        quick_shortcut = (quick_sticker if isinstance(quick_sticker, str) else "Space")
+        quick_hint = f" | {quick_shortcut} 贴图" if quick_sticker else ""
+        save_hint = f" | 右键双击保存 | {save_shortcut}保存"
+        # 非取色模式下提示如何进入取色模式，避免用户不知道按 C 可进入。
+        picker_enter = f" | {picker_shortcut} 取色" if picker_shortcut else ""
+        text = (f"{position.x()}, {position.y()}{size}  |  "
+                f"{instructions}{save_hint}{quick_hint}{picker_enter}")
     metrics = painter.fontMetrics()
     available = max(1, area.width() - INFO_SIDE_MARGIN * 2)
     # 只在文字确实超出可用宽度时才省略；平时整条提示完整显示在一行里。

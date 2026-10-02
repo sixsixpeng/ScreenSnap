@@ -1,5 +1,6 @@
 """全屏统一遮罩与多选区事件分发。"""
 
+import ctypes
 import logging
 import os
 import re
@@ -28,6 +29,8 @@ from ui.action_icons import action_icon
 from screenshot.selection_rect import SelectionRects
 from screenshot.overlay_info import paint_info
 from screenshot.magnifier_widget import magnifier_rect, paint_magnifier
+
+# 长截图期间遮罩为鼠标穿透，真实滚轮/点击由系统直接投递给下方页面，不再自行转发。
 
 # 鼠标移动时悬停识别的刷新间隔由设置“window_hover_interval”控制（毫秒），避免每个移动事件都调用系统 API。
 
@@ -106,7 +109,9 @@ class MagnifierOverlay(QWidget):
         frame = magnifier_rect(view.to_logical_point(view.position), view.rect())
         painter.translate(-frame.x(), -frame.y())
         paint_magnifier(painter, view.preview, view.to_logical_point(view.position),
-                        view.rect(), view.position)
+                        view.rect(), view.position,
+                        grid=view.settings.get("magnifier_grid", False),
+                        grid_color=view.settings.get("magnifier_grid_color", "#cccccc"))
 
 
 class InlineEditor(QWidget):
@@ -599,6 +604,8 @@ class MaskWindow(QWidget):
     image_saved = Signal(str, object)
     image_saved_silently = Signal(str, object)
     save_failed = Signal(str)
+    copy_done = Signal(object)
+    picker_copied = Signal(str)
     close_all_requested = Signal()
     sticker_requested = Signal(object, object)
     annotation_setting_changed = Signal(str, object)
@@ -649,6 +656,8 @@ class MaskWindow(QWidget):
         self.quick_sticker_consumed = False
         self.capture_cursor_enabled = settings["cursor"]
         self.selection = self.session.selection
+        self.picker_mode = False
+        self.picker_color = None
         self.position = QPoint(self.session.position)
         self.resize_cursor = "nwse"
         # 鼠标悬停识别出的元素矩形（bounds 局部物理坐标）与上次检测时刻。
@@ -732,10 +741,14 @@ class MaskWindow(QWidget):
         window_edit = QPushButton("窗口编辑", actions)
         window_edit.setIcon(action_icon("window_edit"))
         window_edit.clicked.connect(owner.complete_in_window_editor)
+        copy_only = QPushButton("仅复制", actions)
+        copy_only.setIcon(action_icon("clipboard_image"))
+        copy_only.clicked.connect(self.copy_selection_to_clipboard)
         action_layout.addWidget(custom_size)
         action_layout.addWidget(recapture)
         action_layout.addWidget(window_edit)
-        for button in (custom_size, recapture, window_edit):
+        action_layout.addWidget(copy_only)
+        for button in (custom_size, recapture, window_edit, copy_only):
             button.setFixedHeight(32)
             button.setIconSize(QSize(14, 14))
         custom_size.setToolTip(rich_tooltip(
@@ -750,7 +763,11 @@ class MaskWindow(QWidget):
             "窗口编辑",
             "把当前选区送进独立编辑器窗口，使用完整工具栏编辑；"
             "适合标注较多，或需要缩放、旋转、裁剪、调外观的场景。"))
-        self.capture_action_buttons = (custom_size, recapture, window_edit)
+        copy_only.setToolTip(rich_tooltip(
+            "仅复制",
+            "把当前整屏截图（有选区时取选区）直接写入剪贴板并关闭遮罩，不落盘、不进入编辑器；"
+            "右键双击与快速保存快捷键仍直接保存。"))
+        self.capture_action_buttons = (custom_size, recapture, window_edit, copy_only)
         actions.adjustSize()
         return actions
 
@@ -880,8 +897,8 @@ class MaskWindow(QWidget):
         visible = bool(self.selection.rects) and not self.inline_active()
         self.capture_actions.setVisible(visible)
         if visible:
-            labels = ("自定义尺寸", "重新截图", "窗口编辑")
-            compact_labels = ("尺寸", "重截", "编辑")
+            labels = ("自定义尺寸", "重新截图", "窗口编辑", "仅复制")
+            compact_labels = ("尺寸", "重截", "编辑", "复制")
             for button, label in zip(self.capture_action_buttons, labels):
                 button.setText(label)
             self.capture_actions.adjustSize()
@@ -901,6 +918,24 @@ class MaskWindow(QWidget):
     def request_recapture(self):
         context = {"monitor": dict(self.monitor)}
         self.recapture_requested.emit(context)
+        self.close()
+
+    def copy_selection_to_clipboard(self):
+        """把整屏截图（或当前选区）写入剪贴板并关闭遮罩，不落盘、不进编辑器。"""
+        logger = logging.getLogger("screensnap")
+        if self.selection.rects:
+            region = self.selection.rects[-1].normalized()
+            area = (region.x(), region.y(), region.right() + 1, region.bottom() + 1)
+            image = self.image.crop(area)
+            label = "选区"
+        else:
+            image = self.image
+            label = "整屏"
+        payload = QMimeData()
+        payload.setImageData(to_qimage(image))
+        QGuiApplication.clipboard().setMimeData(payload)
+        logger.info("仅复制%s到剪贴板: %dx%d", label, image.width, image.height)
+        self.copy_done.emit(image)
         self.close()
 
     def complete_in_window_editor(self):
@@ -1047,6 +1082,15 @@ class MaskWindow(QWidget):
             images.append((image, alternate))
         positions = [self.mapper.physical_local_rect_to_logical_global_rect(region).toRect().topLeft()
                      for region in regions]
+        if self.settings.get("capture_after_selection") == "copy":
+            from PySide6.QtGui import QGuiApplication
+            from PySide6.QtCore import QMimeData
+            payload = QMimeData()
+            payload.setImageData(to_qimage(images[0][0]))
+            QGuiApplication.clipboard().setMimeData(payload)
+            self.copy_done.emit(images[0][0])
+            self.close()
+            return
         if save_direct:
             self.save_requested.emit(images, positions)
         elif force_window:
@@ -1166,6 +1210,13 @@ class MaskWindow(QWidget):
             quick_sticker = (self.settings.get("capture_quick_sticker_shortcut", "Space")
                              if self.settings.get("capture_quick_sticker_enabled", False)
                              else False)
+            pick_color = None
+            if self.picker_mode:
+                px = self.position.x() + self.bounds["left"]
+                py = self.position.y() + self.bounds["top"]
+                if 0 <= px < self.image.width and 0 <= py < self.image.height:
+                    r, g, b = self.image.convert("RGB").getpixel((px, py))
+                    pick_color = "#%02x%02x%02x" % (r, g, b)
             paint_info(painter, global_position, current_selection, monitor_area, quick_sticker,
                        self.settings.get("capture_save_shortcut", "S"), element_rect,
                        element_size,
@@ -1173,7 +1224,9 @@ class MaskWindow(QWidget):
                        self.settings.get("window_hover_text_color", "#F4FFFC"),
                        self.settings.get("window_hover_badge_color", "#102A31"),
                        self.settings.get("window_hover_font_size", 12),
-                       self.settings.get("window_hover_border_width", 2))
+                       self.settings.get("window_hover_border_width", 2),
+                       pick_color, picker_mode=self.picker_mode,
+                       picker_shortcut=self.settings.get("capture_picker_shortcut", "C"))
         painter.setPen(QPen(QColor(self.settings.get("selection_border_color", "#ff0000")), 1))
         painter.setBrush(Qt.NoBrush)
         for selection_path in selection_paths:
@@ -1191,6 +1244,39 @@ class MaskWindow(QWidget):
                     else _hover_fill_color(self.settings))
                 painter.drawRect(self.to_logical_rect(clipped))
                 painter.setBrush(Qt.NoBrush)
+        self._draw_ruler(painter)
+
+    def _draw_ruler(self, painter):
+        """在遮罩边缘绘制像素标尺（顶部/右侧仅短线，底部/左侧带数值），帮助定位。"""
+        if not self.settings.get("ruler_enabled", False):
+            return
+        from PySide6.QtGui import QFont
+        rect = self.rect()
+        color = QColor(self.settings.get("ruler_color", "#00ad91"))
+        painter.save()
+        painter.setPen(QPen(color, 1))
+        font = QFont()
+        font.setPixelSize(9)
+        painter.setFont(font)
+        step = 50
+        major = step * 5
+        small, big = 5, 9
+        for x in range(0, rect.width() + 1, step):
+            length = big if (x % major == 0) else small
+            painter.drawLine(x, 0, x, length)
+            painter.drawLine(x, rect.height() - length, x, rect.height())
+            if x % major == 0 and x > 0:
+                painter.drawText(x + 2, rect.height() - length - 2, str(x))
+        for y in range(0, rect.height() + 1, step):
+            length = big if (y % major == 0) else small
+            painter.drawLine(0, y, length, y)
+            painter.drawLine(rect.width() - length, y, rect.width(), y)
+            if y % major == 0 and y > 0:
+                painter.drawText(length + 2, y - 2, str(y))
+        painter.restore()
+
+    def wheelEvent(self, event):
+        super().wheelEvent(event)
 
     def mousePressEvent(self, event):
         """左键开始创建选区，已有选区的命中由选区对象判定。"""
@@ -1205,6 +1291,21 @@ class MaskWindow(QWidget):
                     if self.session.inline_editor is not None:
                         self.session.inline_editor.begin_region_resize()
             self.update_all()
+            return
+        if self.picker_mode and event.button() == Qt.LeftButton:
+            # 取色用 Alt/Ctrl + 左键取样，避免与左键框选 / UIA 自动识别选择冲突。
+            if QGuiApplication.keyboardModifiers() & (Qt.AltModifier | Qt.ControlModifier):
+                point = self.to_physical_point(event.position().toPoint())
+                x = point.x() + self.bounds["left"]
+                y = point.y() + self.bounds["top"]
+                if 0 <= x < self.image.width and 0 <= y < self.image.height:
+                    r, g, b = self.image.convert("RGB").getpixel((x, y))
+                    color = "#%02x%02x%02x" % (r, g, b)
+                    QGuiApplication.clipboard().setText(color)
+                    self.picker_color = color
+                    self.picker_copied.emit(color)
+                self.update_all()
+            # 不带 Alt/Ctrl 的左键在取色模式下不取样、也不触发选区/识别，直接忽略。
             return
         if event.button() == Qt.LeftButton:
             self.position = self.to_physical_point(event.position().toPoint())
@@ -1304,6 +1405,12 @@ class MaskWindow(QWidget):
         """处理取消、提交、固定尺寸创建与最后选区的像素微调。"""
         key = event.key()
         if key == Qt.Key_Escape and not self.inline_active():
+            if self.picker_mode:
+                self.picker_mode = False
+                self.picker_color = None
+                self.update_all()
+                event.accept()
+                return
             if self.primary:
                 self.close()
             event.accept()
@@ -1325,6 +1432,16 @@ class MaskWindow(QWidget):
                     self.update_inline_region()
                     view = self.focus_view_for_position(self.position)
                     QCursor.setPos(view.mapToGlobal(view.to_logical_point(self.position)))
+            return
+        # 取色快捷键跟随设置（默认 C），仅单字母 A-Z 生效，否则回退到 C。
+        picker_key = (self.settings.get("capture_picker_shortcut", "C") or "C")
+        picker_qt_key = Qt.Key_C
+        if len(picker_key) == 1 and "A" <= picker_key.upper() <= "Z":
+            picker_qt_key = Qt.Key_A + (ord(picker_key.upper()) - ord("A"))
+        if key == picker_qt_key and not self.inline_active():
+            self.picker_mode = not self.picker_mode
+            self.picker_color = None
+            self.update_all()
             return
         if key == Qt.Key_Tab:
             self.cycle_element(-1 if event.modifiers() & Qt.ShiftModifier else 1)
@@ -1348,6 +1465,7 @@ class MaskWindow(QWidget):
                     view = self.focus_view_for_position(self.position)
                     QCursor.setPos(view.mapToGlobal(view.to_logical_point(self.position)))
         self.update_all()
+
 
     def trigger_quick_sticker(self):
         if (self.quick_sticker_consumed or not self.quick_sticker_enabled or

@@ -2,7 +2,8 @@
 
 from PySide6.QtCore import QSignalBlocker, QRectF, Qt
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen
-from PySide6.QtWidgets import QKeySequenceEdit, QComboBox, QSizePolicy, QWidget
+from PySide6.QtWidgets import (QKeySequenceEdit, QComboBox, QSizePolicy, QWidget,
+                              QGroupBox, QFormLayout, QLabel)
 
 from ui.widgets.color_button import ColorButton
 from ui.widgets.tooltip import SettingsPage
@@ -39,6 +40,31 @@ class ScreenshotEffectPreview(QWidget):
             painter.drawLine(int(area.left() + area.width() * 0.5), y, int(area.right() - 16), y)
         if self.kind == "assist":
             center = area.center()
+            if self.config.data.get("ruler_enabled", False):
+                color = QColor(self.config.data.get("ruler_color", "#00ad91"))
+                painter.setPen(QPen(color, 1))
+                font = painter.font()
+                font.setPixelSize(9)
+                painter.setFont(font)
+                step = 20
+                major = 100
+                small, big = 4, 8
+                left = int(area.left())
+                top = int(area.top())
+                right = int(area.right())
+                bottom = int(area.bottom())
+                for x in range(left, right + 1, step):
+                    length = big if (x - left) % major == 0 else small
+                    painter.drawLine(x, top, x, top + length)
+                    painter.drawLine(x, bottom - length, x, bottom)
+                    if (x - left) % major == 0 and x > left:
+                        painter.drawText(x + 2, bottom - length - 2, str(x - left))
+                for y in range(top, bottom + 1, step):
+                    length = big if (y - top) % major == 0 else small
+                    painter.drawLine(left, y, left + length, y)
+                    painter.drawLine(right - length, y, right, y)
+                    if (y - top) % major == 0 and y > top:
+                        painter.drawText(left + length + 2, y - 2, str(y - top))
             if self.config.data.get("crosshair", True):
                 color = QColor(self.config.data.get("crosshair_color", "#ff0000"))
                 painter.setPen(QPen(color, self.config.data.get("crosshair_width", 1)))
@@ -46,6 +72,16 @@ class ScreenshotEffectPreview(QWidget):
                 painter.drawLine(int(area.left()), int(center.y()), int(area.right()), int(center.y()))
             if self.config.data.get("magnifier", True):
                 lens = QRectF(center.x() - 27, center.y() - 22, 54, 44)
+                if self.config.data.get("magnifier_grid", True):
+                    painter.save()
+                    painter.setClipRect(lens)
+                    painter.setPen(QPen(QColor(self.config.data.get("magnifier_grid_color", "#cccccc")), 1, Qt.DotLine))
+                    for index in range(1, 6):
+                        gx = lens.left() + lens.width() * index / 6
+                        gy = lens.top() + lens.height() * index / 6
+                        painter.drawLine(gx, lens.top(), gx, lens.bottom())
+                        painter.drawLine(lens.left(), gy, lens.right(), gy)
+                    painter.restore()
                 painter.setPen(QPen(QColor("#273b44"), 2))
                 painter.setBrush(QColor(255, 255, 255, 230))
                 painter.drawEllipse(lens)
@@ -154,9 +190,11 @@ class ScreenshotPage(SettingsPage):
         self.check("inline_edit", "原地编辑",
                    rich_tooltip("原地编辑", "仅单屏单选区在截图位置编辑；多选区、跨屏选区或关闭此项时使用独立编辑器。"))
         self.choice("capture_after_selection", "截图确认后",
-                    [("仅保存，不打开编辑器", "save"), ("进入编辑器", "edit")],
+                    [("仅保存，不打开编辑器", "save"), ("进入编辑器", "edit"),
+                     ("仅复制到剪贴板", "copy")],
                     rich_tooltip("截图确认后", "Enter、左键双击或确认选区后执行的默认动作；\n"
-                                 "右键双击和快速保存始终直接保存，窗口编辑按钮始终可手动打开编辑器。"))
+                                 "右键双击和快速保存始终直接保存，窗口编辑按钮始终可手动打开编辑器；\n"
+                                 "选择“仅复制到剪贴板”时不会落盘，也不进入编辑器，确认后直接把选区图片写入剪贴板。"))
         self.group("截图快捷操作")
         self.check("capture_quick_sticker_enabled", "启用快速贴图快捷键",
                    "选好截图区域后按指定按键立即贴图，不进入编辑")
@@ -164,8 +202,20 @@ class ScreenshotPage(SettingsPage):
                        "选区确认前可按此按键组合直接贴成贴图；支持单个按键或带修饰键的组合")
         self._shortcut("capture_save_shortcut", "快速保存按键", "S",
                        "选区存在时直接保存；沿用输出外观、保存格式、剪贴板和成功通知设置")
+        self._shortcut("capture_picker_shortcut", "取色按键", "C",
+                       "选区确认前按此键进入/退出取色模式；取色态下左键取样会把色值复制到剪贴板")
         self.group("定位辅助")
+        # 整体效果预览放到分组最前，避免被挤到末尾；下面用小节标题替代嵌套子框。
+        self._effect_preview("assist")
+        self._section("放大镜")
         self.check("magnifier", "实时放大镜", "截图时放大鼠标附近像素")
+        self.check("magnifier_grid", "放大镜像素网格", "放大镜内叠加像素网格线，便于 1px 级对齐")
+        grid_color = ColorButton(config.data["magnifier_grid_color"],
+                                 lambda color: self.update_value("magnifier_grid_color", color))
+        grid_color.setToolTip("设置放大镜像素网格颜色；仅在放大镜开启时生效")
+        self.controls["magnifier_grid_color"] = grid_color
+        self.form.addRow("网格颜色", grid_color)
+        self._section("十字线")
         self.check("crosshair", "全屏十字线", "在截图遮罩上显示定位辅助线")
         crosshair_color = ColorButton(config.data["crosshair_color"],
                                       lambda color: self.update_value("crosshair_color", color))
@@ -174,8 +224,15 @@ class ScreenshotPage(SettingsPage):
         self.form.addRow("十字线颜色", crosshair_color)
         self.number("crosshair_width", "十字线宽度 (px)", 1, 8,
                     "设置截图定位十字线宽度")
-        self._effect_preview("assist")
+        self._section("标尺")
+        self.check("ruler_enabled", "标尺", "在截图遮罩边缘显示像素标尺，辅助定位与测量")
+        ruler_color = ColorButton(config.data["ruler_color"],
+                                  lambda color: self.update_value("ruler_color", color))
+        ruler_color.setToolTip("设置标尺刻度与数值颜色")
+        self.controls["ruler_color"] = ruler_color
+        self.form.addRow("标尺颜色", ruler_color)
         self.group("窗口与控件识别")
+        self._section("基础识别")
         self.check("window_detection", "识别窗口与控件",
                    "截图时按 Tab 把选区切到鼠标下的窗口、分组容器或控件；\n"
                    "自绘界面（浏览器、Electron）没有子窗口句柄，只能识别到顶层窗口")
@@ -186,6 +243,7 @@ class ScreenshotPage(SettingsPage):
                    "左键单击即可选中高亮区域，按住拖动仍然手绘选区；\n"
                    "想选外层窗口或父容器时按 Tab 逐层切换")
         self._effect_preview("hover")
+        self._section("候选框外观")
         fill_mode = self.choice("window_hover_fill_mode", "候选区域显示方式",
                     (("透出原图（无填充）", "reveal"),
                      ("半透明颜色填充", "fill")),
@@ -206,6 +264,7 @@ class ScreenshotPage(SettingsPage):
                                       "透出原图模式下候选框没有填充")
         fill_mode.currentIndexChanged.connect(
             lambda _index: hover_fill_control.setEnabled(fill_mode.currentData() == "fill"))
+        self._section("无障碍识别与精度")
         self.check("window_uia_detect", "优先用无障碍识别 (UIA)",
                    "默认开启：截图识别会先用 Windows 无障碍树识别，能读到浏览器网页控件、\n"
                    "WPF、Qt、Electron 等自绘界面内部的按钮、标签、编辑框；\n"
@@ -248,6 +307,15 @@ class ScreenshotPage(SettingsPage):
         self.previews.append(preview)
         self.form.addRow(preview)
         return preview
+
+    def _section(self, title):
+        """在设置组里加一个粗体小节标题（跨两列），替代嵌套子框，避免框中框。"""
+        label = QLabel(title)
+        font = label.font()
+        font.setBold(True)
+        label.setFont(font)
+        self.form.addRow(label)
+        return label
 
     def _hover_style_controls(self, config):
         combo = QComboBox()
