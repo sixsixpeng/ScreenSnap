@@ -15,7 +15,7 @@ from config.config_manager import TOOL_WIDTH_KEYS
 from editor.annotation_items import (shape, text_item, editable, RoundedRectItem,
                                      AnnotationRectItem, AnnotationEllipseItem,
                                      AnnotationPathItem, AnnotationTextItem,
-                                     AnnotationPixmapItem)
+                                     AnnotationPixmapItem, AnnotationSequenceItem)
 
 
 def mosaic_image(sample, mode, size):
@@ -188,6 +188,7 @@ class AnnotationCanvas(QGraphicsView):
                     "QGraphicsPathItem" if isinstance(item, AnnotationPathItem) else
                     "QGraphicsTextItem" if isinstance(item, AnnotationTextItem) else
                     "QGraphicsPixmapItem" if isinstance(item, AnnotationPixmapItem) else
+                    "AnnotationSequenceItem" if isinstance(item, AnnotationSequenceItem) else
                     type(item).__name__)
             data = {"type": kind, "pos": (item.pos().x(), item.pos().y()),
                 "scale": item.scale(), "z": item.zValue(), "transform": QTransform(item.transform()),
@@ -212,8 +213,47 @@ class AnnotationCanvas(QGraphicsView):
             elif data["type"] == "QGraphicsPixmapItem":
                 data["pixmap"] = QPixmap(item.pixmap())
                 data["offset"] = (item.offset().x(), item.offset().y())
+            elif data["type"] == "AnnotationSequenceItem":
+                data["number"] = item.number
+                data["sequence_fill_color"] = item.sequence_fill_color
+                data["sequence_text_color"] = item.sequence_text_color
+                data["sequence_font_size"] = item.sequence_font_size
+                data["sequence_shape"] = item.sequence_shape
+                data["sequence_font_family"] = item.sequence_font_family
             records.append(data)
         return records
+
+    def next_sequence_number(self):
+        """序号标注的下一个编号：从 sequence_start 起取最小未被占用的整数。
+
+        删除中间序号后由 renumber_sequence_items 把剩余项重排为连续编号，
+        因此这里取到的通常是 start + 现有序号项数；min-unused 仅作兜底，
+        保证任何状态下都不会出现重复编号。
+        """
+        start = self.settings.get("sequence_start", 1)
+        used = {item.number for item in self.annotations()
+                if isinstance(item, AnnotationSequenceItem)}
+        number = start
+        while number in used:
+            number += 1
+        return number
+
+    def renumber_sequence_items(self):
+        """删除/变动后把现有序号标注按当前大小顺序重新连续编号（从 sequence_start 起）。
+
+        无论删除的是中间单个还是连续多个（如删掉 2/3/4/5），剩余项都会被重排为
+        1/2/3…，不留空缺；相对顺序保持不变。已是最优编号的项不会被改写，避免无谓重绘。
+        """
+        start = self.settings.get("sequence_start", 1)
+        items = sorted(
+            (item for item in self.annotations()
+             if isinstance(item, AnnotationSequenceItem)),
+            key=lambda item: item.number)
+        for index, item in enumerate(items):
+            new_number = start + index
+            if item.number != new_number:
+                item.number = new_number
+                item.update()
 
     def restore(self, records):
         """清除现有标注，再按快照重建类型、样式和图层。"""
@@ -235,6 +275,14 @@ class AnnotationCanvas(QGraphicsView):
                 item.setFont(data["font"])
                 item.document().setTextWidth(data["text_width"])
                 item.setDefaultTextColor(QColor(data["color"]))
+            elif kind == "AnnotationSequenceItem":
+                item = AnnotationSequenceItem(
+                    data["number"],
+                    data.get("sequence_fill_color", "#ff0000"),
+                    data.get("sequence_text_color", "#ffffff"),
+                    data.get("sequence_font_size", 14),
+                    data.get("sequence_shape", "circle"),
+                    data.get("sequence_font_family", ""))
             else:
                 item = AnnotationPixmapItem(data["pixmap"])
                 item.setOffset(QPointF(*data.get("offset", (0, 0))))
@@ -304,6 +352,7 @@ class AnnotationCanvas(QGraphicsView):
         """删除选中的标注并记录撤销历史。"""
         for item in self.scene_data.selectedItems():
             self.scene_data.removeItem(item)
+        self.renumber_sequence_items()
         self.checkpoint()
 
     def set_selected_width(self, width):
@@ -636,6 +685,18 @@ class AnnotationCanvas(QGraphicsView):
             if ok and text:
                 self.scene_data.addItem(text_item(point, text, self.settings, self.text_alignment))
                 self.checkpoint()
+            return
+        if self.tool == "number":
+            number = self.next_sequence_number()
+            item = AnnotationSequenceItem(
+                number,
+                self.settings.get("sequence_fill_color", "#ff0000"),
+                self.settings.get("sequence_text_color", "#ffffff"),
+                self.settings.get("sequence_font_size", 14),
+                self.settings.get("sequence_shape", "circle"),
+                self.settings.get("font", ""), point)
+            self.scene_data.addItem(item)
+            self.checkpoint()
             return
         if self.tool not in ("select", "hand") and event.button() == Qt.LeftButton:
             self.start = point

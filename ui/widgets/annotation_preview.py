@@ -1,8 +1,8 @@
 """设置页标注参数的实时预览画布。"""
 
 from PySide6.QtCore import QPointF, QRectF, Qt
-from PySide6.QtGui import (QColor, QLinearGradient, QImage, QPainter, QPainterPath, QPen,
-                           QPixmap)
+from PySide6.QtGui import (QColor, QFont, QLinearGradient, QImage, QPainter, QPainterPath,
+                           QPen, QPixmap)
 from PySide6.QtWidgets import (QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsScene, QSizePolicy, QWidget)
 
@@ -10,7 +10,7 @@ from config.config_manager import DEFAULTS
 from core.constants import CHECKER_TILE_SIZE
 from core.screen_capture import qimage_to_pillow, to_qimage
 from editor.annotation_canvas import mosaic_image
-from editor.annotation_items import shape, text_item
+from editor.annotation_items import shape, text_item, AnnotationSequenceItem
 from editor.image_effects import apply_output_effects
 
 # 示例文字同时包含中英文与数字，便于比较不同字体的观感。
@@ -207,4 +207,69 @@ class AnnotationPreview(QWidget):
             fill.setAlpha(50)
             frame.setBrush(fill)
             scene.addItem(frame)
+        elif self.kind == "sequence":
+            for index, offset in enumerate(((width * 0.30, height * 0.40),
+                                            (width * 0.52, height * 0.30),
+                                            (width * 0.70, height * 0.56))):
+                item = AnnotationSequenceItem(
+                    index + 1,
+                    settings.get("sequence_fill_color", "#ff0000"),
+                    settings.get("sequence_text_color", "#ffffff"),
+                    settings.get("sequence_font_size", 18),
+                    settings.get("sequence_shape", "circle"),
+                    settings.get("font", ""))
+                item.setPos(offset[0], offset[1])
+                scene.addItem(item)
+        elif self.kind == "picker":
+            # 取色工具预览：放大镜（可叠加像素网格）+ 中心十字线 + 取到的色值与十六进制色号。
+            preview_image = QImage(max(1, int(width)), max(1, int(height)), QImage.Format_ARGB32)
+            preview_image.fill(QColor("#f1f3f4"))
+            painter = QPainter(preview_image)
+            painter.setRenderHint(QPainter.Antialiasing)
+            scaled = background.scaled(int(width), int(height),
+                                      Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            painter.drawImage(0, 0, scaled)
+            center_x, center_y = width / 2, height / 2
+            radius = min(width, height) * 0.34
+            lens = QRectF(center_x - radius, center_y - radius, radius * 2, radius * 2)
+            lens_path = QPainterPath()
+            lens_path.addEllipse(lens)
+            painter.save()
+            painter.setClipPath(lens_path)
+            inner = background.scaled(int(radius * 2), int(radius * 2),
+                                     Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+            painter.drawImage(lens.topLeft(), inner)
+            if settings.get("magnifier_grid", True):
+                grid_color = QColor(settings.get("magnifier_grid_color", "#cccccc"))
+                painter.setPen(QPen(grid_color, 1, Qt.DotLine))
+                cells = 8
+                for index in range(1, cells):
+                    offset = radius * 2 * index / cells
+                    painter.drawLine(lens.left() + offset, lens.top(),
+                                     lens.left() + offset, lens.bottom())
+                    painter.drawLine(lens.left(), lens.top() + offset,
+                                     lens.right(), lens.top() + offset)
+            painter.restore()
+            painter.setPen(QPen(QColor("#273b44"), 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawEllipse(lens)
+            painter.setPen(QPen(QColor("#e34b5f"), 2))
+            painter.drawLine(center_x - radius * 0.5, center_y,
+                             center_x + radius * 0.5, center_y)
+            painter.drawLine(center_x, center_y - radius * 0.5,
+                             center_x, center_y + radius * 0.5)
+            sample = scaled.pixelColor(int(center_x), int(center_y))
+            swatch = QRectF(width - 92, height - 28, 20, 20)
+            painter.setPen(QPen(QColor("#333333"), 1))
+            painter.setBrush(QColor(sample))
+            painter.drawRect(swatch)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QColor("#1f2a30"))
+            label_font = QFont()
+            label_font.setPixelSize(11)
+            painter.setFont(label_font)
+            painter.drawText(swatch.right() + 6, swatch.top() + 15,
+                             "#%02x%02x%02x" % (sample.red(), sample.green(), sample.blue()))
+            painter.end()
+            scene.addItem(QGraphicsPixmapItem(QPixmap.fromImage(preview_image)))
         return scene

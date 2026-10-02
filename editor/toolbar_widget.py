@@ -3,7 +3,7 @@
 import logging
 from functools import lru_cache
 
-from PySide6.QtCore import Signal, Qt, QSize, QTimer, QSignalBlocker, QEvent
+from PySide6.QtCore import Signal, Qt, QSize, QTimer, QSignalBlocker, QEvent, QRectF
 from PySide6.QtGui import (QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QColor,
                            QGuiApplication)
 from PySide6.QtGui import QCursor
@@ -11,7 +11,8 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, Q
                                QCheckBox, QToolButton, QMenu, QStyle, QButtonGroup,
                                QSlider, QFontComboBox, QWidgetAction, QSizePolicy,
                                QRadioButton, QSpinBox, QScrollArea, QFrame,
-                               QApplication)
+                               QApplication, QComboBox)
+from editor.annotation_items import SEQUENCE_SHAPES, SEQUENCE_PRESETS
 from ui.widgets.color_button import ColorButton
 from ui.action_icons import action_icon
 from config.config_manager import DEFAULTS, TOOL_WIDTH_KEYS
@@ -20,7 +21,7 @@ from core.constants import shortcut_label
 # 每个工具在“更多设置”里对应的实时预览类型。
 PREVIEW_KINDS = {"pen": "pen", "rect": "rect", "ellipse": "ellipse", "arrow": "arrow",
                  "marker": "marker", "mosaic": "mosaic", "text": "text", "eraser": "eraser",
-                 "crop": "crop"}
+                 "crop": "crop", "number": "sequence", "picker": "picker"}
 
 
 @lru_cache(maxsize=1)
@@ -118,6 +119,16 @@ def annotation_icon(tool):
             painter.drawRect(x, y, 6, 6)
         painter.setBrush(Qt.NoBrush)
         painter.drawRect(4, 4, 14, 14)
+    elif tool == "number":
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor("#3a3a3a"), 2))
+        painter.drawEllipse(2, 2, 20, 20)
+        font = QFont()
+        font.setPixelSize(15)
+        font.setBold(True)
+        painter.setFont(font)
+        painter.setPen(QColor("#3a3a3a"))
+        painter.drawText(QRectF(2, 2, 20, 20), Qt.AlignCenter, "1")
     painter.end()
     return QIcon(pixmap)
 
@@ -174,9 +185,9 @@ class ToolbarWidget(QWidget):
         self.tools.setExclusive(True)
         self.tool_buttons = {}
         for label, key in [("选择", "select"), ("画笔", "pen"),
-                           ("记号笔", "marker"), ("文字", "text"), ("箭头", "arrow"),
-                           ("矩形", "rect"), ("椭圆", "ellipse"), ("橡皮擦", "eraser"),
-                           ("马赛克", "mosaic"), ("取色", "picker"), ("裁剪", "crop")]:
+                           ("记号笔", "marker"), ("箭头", "arrow"), ("矩形", "rect"),
+                           ("椭圆", "ellipse"), ("序号", "number"), ("文字", "text"),
+                           ("橡皮擦", "eraser"), ("马赛克", "mosaic"), ("取色", "picker"), ("裁剪", "crop")]:
             button = QToolButton()
             icon = action_icon("eraser") if key == "eraser" else annotation_icon(key)
             button.setIcon(icon)
@@ -194,6 +205,7 @@ class ToolbarWidget(QWidget):
                 "eraser": "拖过已有标注，将经过的标注内容擦除",
                 "mosaic": "拖动区域添加马赛克；可选择方块、毛玻璃或细粒效果",
                 "picker": "从图片中取色，并设置为后续标注颜色",
+                "number": "单击图片放置步骤序号；号码自动递增，颜色与字号在设置中调整",
                 "crop": "拖动裁剪图片；裁剪框颜色和线宽会保存为下次编辑的默认值",
             }
             button.setToolTip(rich_tooltip(label, tool_tips[key]))
@@ -378,7 +390,7 @@ class ToolbarWidget(QWidget):
         screen = QGuiApplication.primaryScreen()
         usable = screen.availableGeometry().height() if screen is not None else 900
         self.previews = {}
-        for kind in ("text", "arrow", "pen", "rect", "ellipse", "marker", "mosaic", "eraser", "crop"):
+        for kind in ("text", "arrow", "pen", "rect", "ellipse", "marker", "mosaic", "eraser", "crop", "sequence", "picker"):
             widget = AnnotationPreview(settings, kind, 88 if usable < 800 else 104)
             widget.setMinimumWidth(200)
             widget.setVisible(False)
@@ -438,7 +450,59 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(QLabel("填充透明度"), 18, 0)
         panel_layout.addWidget(self.ellipse_fill_opacity, 18, 1)
         panel_layout.addWidget(self.ellipse_fill_opacity_label, 18, 2)
-        for row in range(19):
+        # 序号标注专属参数：形状、填充色、文字色、字号、起始值与预设组合。
+        sequence_shape_options = (
+            ("圆形", "circle"), ("方形", "square"), ("三角", "triangle"),
+            ("菱形", "diamond"), ("五边形", "pentagon"), ("六边形", "hexagon"),
+            ("星形", "star"), ("心形", "heart"), ("箭头", "arrow"),
+            ("气泡", "bubble"), ("云", "cloud"), ("十字", "plus"),
+            ("水滴", "drop"))
+        self.sequence_shape = self.radio_options(
+            "sequence_shape", sequence_shape_options,
+            settings.get("sequence_shape", "circle"), "序号标记的形状",
+            columns=(len(sequence_shape_options) + 1) // 2)
+        self.sequence_fill = ColorButton(settings.get("sequence_fill_color", "#ff0000"),
+                          lambda color: self.setting_changed.emit("sequence_fill_color", color),
+                          compact=True, purpose="序号填充颜色")
+        self.sequence_text = ColorButton(settings.get("sequence_text_color", "#ffffff"),
+                          lambda color: self.setting_changed.emit("sequence_text_color", color),
+                          compact=True, purpose="序号文字颜色")
+        self.sequence_size = QSpinBox()
+        self.sequence_size.setRange(6, 200)
+        self.sequence_size.setValue(settings.get("sequence_font_size", 14))
+        self.sequence_size.setSuffix(" pt")
+        self.sequence_size.setToolTip("序号数字字号")
+        self.sequence_size.valueChanged.connect(lambda value: self.setting_changed.emit("sequence_font_size", value))
+        self.sequence_start = QSpinBox()
+        self.sequence_start.setRange(0, 999)
+        self.sequence_start.setValue(settings.get("sequence_start", 1))
+        self.sequence_start.setToolTip("第一个序号的号码，后续自动递增")
+        self.sequence_start.valueChanged.connect(lambda value: self.setting_changed.emit("sequence_start", value))
+        self.sequence_preset = QComboBox()
+        for label, key in (("自定义", "custom"), ("红圆", "red_circle"), ("蓝方", "blue_square"),
+                           ("绿星", "green_star"), ("琥珀菱形", "amber_diamond"),
+                           ("紫五边形", "purple_pentagon"), ("青六边形", "teal_hexagon"),
+                           ("红心", "red_heart"), ("蓝箭头", "blue_arrow")):
+            self.sequence_preset.addItem(label, key)
+        self.sequence_preset.setCurrentIndex(self.sequence_preset.findData(settings.get("sequence_preset", "custom")))
+        self.sequence_preset.setToolTip("一键套用形状与配色组合；选自定义后可逐项自由调整")
+        self.sequence_preset.currentIndexChanged.connect(
+            lambda _i: self._apply_sequence_preset(self.sequence_preset.currentData()))
+        panel_layout.addWidget(QLabel("序号形状"), 19, 0)
+        panel_layout.addWidget(self.sequence_shape, 19, 1, 1, 2)
+        panel_layout.addWidget(QLabel("填充颜色"), 20, 0)
+        panel_layout.addWidget(self.sequence_fill, 20, 1, 1, 2)
+        panel_layout.addWidget(QLabel("文字颜色"), 21, 0)
+        panel_layout.addWidget(self.sequence_text, 21, 1, 1, 2)
+        panel_layout.addWidget(QLabel("序号字号"), 22, 0)
+        panel_layout.addWidget(self.sequence_size, 22, 1, 1, 2)
+        panel_layout.addWidget(QLabel("起始值"), 23, 0)
+        panel_layout.addWidget(self.sequence_start, 23, 1, 1, 2)
+        panel_layout.addWidget(QLabel("预设组合"), 24, 0)
+        panel_layout.addWidget(self.sequence_preset, 24, 1, 1, 2)
+        self.sequence_rows = (19, 20, 21, 22, 23, 24)
+        option_row_count = 25
+        for row in range(option_row_count):
             label_item = panel_layout.itemAtPosition(row, 0)
             label = label_item.widget() if label_item is not None else None
             if label is not None:
@@ -448,9 +512,9 @@ class ToolbarWidget(QWidget):
             widget = panel_layout.itemAt(index).widget()
             if widget is not None:
                 panel_layout.setAlignment(widget, Qt.AlignVCenter)
-                self.option_rows = [tuple(panel_layout.itemAtPosition(row, column).widget()
-                            for column in range(3) if panel_layout.itemAtPosition(row, column))
-                            for row in range(19)]
+        self.option_rows = [tuple(panel_layout.itemAtPosition(row, column).widget()
+                    for column in range(3) if panel_layout.itemAtPosition(row, column))
+                    for row in range(option_row_count)]
         # 任何参数变化都重绘预览，弹窗尺寸随后按内容重新计算。
         self.setting_changed.connect(lambda *args: self.refresh_previews())
         self.crop_style_changed.connect(lambda *args: self.refresh_previews())
@@ -598,6 +662,7 @@ class ToolbarWidget(QWidget):
         self.output_buttons = [self.button(self.output_grid, label, action, icon)
                                for label, action, icon in [("贴图", "paste", QStyle.SP_DesktopIcon),
                                                            ("保存", "save", QStyle.SP_DialogSaveButton),
+                                                           ("仅复制", "copy_only", action_icon("clipboard_image")),
                                                            ("放弃", "discard", QStyle.SP_DialogCancelButton),
                                                            ("关闭全部", "close_all_editors", QStyle.SP_DialogCloseButton)]]
         next(button for button in self.output_buttons if button.text() == "贴图").setIcon(action_icon("sticker"))
@@ -711,6 +776,8 @@ class ToolbarWidget(QWidget):
             rows.update((10, 13, 14, 15, 16))
         elif tool == "ellipse":
             rows.update((11, 17, 18))
+        elif tool == "number":
+            rows.update(self.sequence_rows)
         if tool in ("pen", "rect", "ellipse", "arrow", "marker", "text"):
             rows.add(0)
         elif tool == "crop":
@@ -753,6 +820,8 @@ class ToolbarWidget(QWidget):
             "mosaic": "设置马赛克类型和颗粒大小",
             "marker": "设置记号笔线宽和透明度",
             "eraser": "设置橡皮擦直径",
+            "number": "设置序号标记的形状、填充色、文字色与字号",
+            "picker": "预览取色放大镜与像素网格；取到的色值会设为当前标注颜色",
         }
         self.options_button.setToolTip(rich_tooltip(
             f"{name}设置" if rows else "更多设置",
@@ -796,6 +865,7 @@ class ToolbarWidget(QWidget):
             "ellipse": 480,
             "pen": 480,
             "eraser": 340,
+            "number": 480,
         }
         return widths.get(tool, 340)
 
@@ -826,7 +896,7 @@ class ToolbarWidget(QWidget):
                       self.tool_buttons["select"],
                       *(self.tool_buttons[key] for key in
                         ("pen", "marker", "rect", "ellipse", "text", "arrow",
-                                                 "mosaic", "eraser", "picker", "crop")
+                                                 "mosaic", "eraser", "picker", "crop", "number")
                                                 if key != "crop" or not self.property("inline_edit"))]
         gap = self.tool_grid.horizontalSpacing()
         tool_widths = ([widget.width() for widget in tool_order] if self.property("inline_edit") else
@@ -881,7 +951,8 @@ class ToolbarWidget(QWidget):
             self.tool_grid.addWidget(button, row, column, Qt.AlignVCenter)
         for grid, buttons, count in ((self.edit_grid, self.edit_buttons, 3 if width < 500 else 5),
                          (self.image_grid, self.image_buttons, image_columns),
-                 (self.output_grid, self.output_buttons, 3 if width < 500 else 5)):
+                 (self.output_grid, self.output_buttons,
+                  3 if width < 500 else len(self.output_buttons))):
             for index, button in enumerate(buttons):
                 grid.addWidget(button, index // count, index % count, Qt.AlignVCenter)
         for container in self.sections:
@@ -962,6 +1033,7 @@ class ToolbarWidget(QWidget):
             "delete": "删除选中的标注", "reset": "重置当前标注参数",
             "paste": "将当前合成图像作为独立贴图打开",
             "save": "保存为 PNG，复制图像和路径，然后退出编辑",
+            "copy_only": "仅把当前合成图像复制到剪贴板，不保存文件、不退出编辑",
             "discard": "放弃编辑并关闭窗口，不保存当前更改",
             "close_all_editors": "关闭当前已打开的全部截图编辑窗口",
             "left": "向左旋转 90°", "right": "向右旋转 90°",
@@ -1034,22 +1106,37 @@ class ToolbarWidget(QWidget):
         layout.addWidget(button, 0, layout.count())
         return button
 
-    def radio_options(self, key, options, selected, tooltip):
+    def radio_options(self, key, options, selected, tooltip, columns=0):
         container = QWidget(self)
-        layout = QHBoxLayout(container)
-        layout.setContentsMargins(0, 0, 0, 0)
-        layout.setSpacing(10)
         group = QButtonGroup(self)
         buttons = {}
-        for label, value in options:
-            button = QRadioButton(label, container)
-            group.addButton(button)
-            button.setChecked(value == selected)
-            button.toggled.connect(
-                lambda checked, current=value: checked and self.setting_changed.emit(key, current))
-            layout.addWidget(button)
-            buttons[value] = button
-        layout.addStretch(1)
+        if columns and columns > 0:
+            layout = QGridLayout(container)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setHorizontalSpacing(10)
+            layout.setVerticalSpacing(4)
+            for index, (label, value) in enumerate(options):
+                button = QRadioButton(label, container)
+                group.addButton(button)
+                button.setChecked(value == selected)
+                button.toggled.connect(
+                    lambda checked, current=value: checked and self.setting_changed.emit(key, current))
+                row, column = divmod(index, columns)
+                layout.addWidget(button, row, column)
+                buttons[value] = button
+        else:
+            layout = QHBoxLayout(container)
+            layout.setContentsMargins(0, 0, 0, 0)
+            layout.setSpacing(10)
+            for label, value in options:
+                button = QRadioButton(label, container)
+                group.addButton(button)
+                button.setChecked(value == selected)
+                button.toggled.connect(
+                    lambda checked, current=value: checked and self.setting_changed.emit(key, current))
+                layout.addWidget(button)
+                buttons[value] = button
+            layout.addStretch(1)
         container.setToolTip(tooltip)
         self.choice_buttons[key] = buttons
         return container
@@ -1058,6 +1145,22 @@ class ToolbarWidget(QWidget):
         for option, button in self.choice_buttons[key].items():
             with QSignalBlocker(button):
                 button.setChecked(option == value)
+
+    def _apply_sequence_preset(self, preset_key):
+        """套用序号预设组合，同步本地控件与画布设置。"""
+        from editor.annotation_items import SEQUENCE_PRESETS
+        preset = SEQUENCE_PRESETS.get(preset_key)
+        if not preset:
+            return
+        for key, value in preset.items():
+            self.setting_changed.emit(key, value)
+            if key == "sequence_shape":
+                self.set_choice("sequence_shape", value)
+            elif key == "sequence_fill_color":
+                self.sequence_fill.set_color(value)
+            elif key == "sequence_text_color":
+                self.sequence_text.set_color(value)
+        self.refresh_previews()
 
     def toggle_appearance_menu(self, checked=False):
         if not checked:

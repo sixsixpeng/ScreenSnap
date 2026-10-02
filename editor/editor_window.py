@@ -240,6 +240,16 @@ class EditorWindow(QMainWindow):
                 logging.getLogger("screensnap").warning("打开保存目录失败 %s: %s", path.parent, error)
         return path
 
+    def copy_to_clipboard_only(self):
+        """仅把当前合成图复制到剪贴板，不落盘、不退出编辑。"""
+        logger = logging.getLogger("screensnap")
+        result = self.output_image()
+        payload = QMimeData()
+        payload.setImageData(result)
+        QGuiApplication.clipboard().setMimeData(payload)
+        self.status.emit("已复制到剪贴板")
+        logger.info("仅复制图片到剪贴板: %dx%d", result.width(), result.height())
+
     def invalidate_rotation_reset(self):
         self.rotation_reset_state = None
         self.toolbar.reset_rotation_button.setEnabled(False)
@@ -362,6 +372,8 @@ class EditorWindow(QMainWindow):
             self.close()
         elif action == "copy":
             self.save(copy_to_clipboard=True, force_copy_image=True)
+        elif action == "copy_only":
+            self.copy_to_clipboard_only()
         elif action == "path":
             if not self.last_path:
                 self.save()

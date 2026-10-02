@@ -87,20 +87,40 @@ def action_icon(name):
             painter.drawLine(12, 19, 15, 15)
     elif name in ("clipboard_image", "clipboard_edit", "sticker"):
         if name in ("clipboard_image", "clipboard_edit"):
-            painter.drawRoundedRect(QRectF(5, 4, 14, 18), 2, 2)
+            # 剪贴板底板 + 顶部夹子 + 内部“图片”符号（山+太阳）
+            painter.drawRoundedRect(QRectF(4, 5, 16, 16), 2.5, 2.5)
             painter.drawRoundedRect(QRectF(9, 2, 6, 4), 1, 1)
+            painter.drawLine(7, 7, 17, 7)
+            painter.drawRoundedRect(QRectF(7, 9.5, 10, 8.5), 1.5, 1.5)
+            painter.setPen(QPen(accent, 1.5))
+            painter.drawEllipse(QRectF(13.5, 10.5, 2, 2))
+            painter.setPen(QPen(ink, 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawLine(7.8, 16.5, 10.5, 13.8)
+            painter.drawLine(10.5, 13.8, 12.5, 15.6)
+            painter.drawLine(12.5, 15.6, 14.5, 13.4)
+            painter.drawLine(14.5, 13.4, 16.2, 16.5)
         else:
             painter.drawRoundedRect(QRectF(3, 6, 14, 14), 2, 2)
             painter.drawRoundedRect(QRectF(8, 3, 13, 14), 2, 2)
-        painter.drawRect(QRectF(8, 10, 8, 6))
-        painter.drawEllipse(QRectF(9, 11, 2, 2))
-        painter.drawLine(8, 16, 11, 13)
-        painter.drawLine(11, 13, 13, 15)
-        painter.drawLine(13, 15, 16, 12)
+        if name == "sticker":
+            painter.drawRect(QRectF(8, 10, 8, 6))
+            painter.drawEllipse(QRectF(9, 11, 2, 2))
+            painter.drawLine(8, 16, 11, 13)
+            painter.drawLine(11, 13, 13, 15)
+            painter.drawLine(13, 15, 16, 12)
         if name == "clipboard_edit":
             painter.setPen(QPen(accent, 2, Qt.SolidLine, Qt.RoundCap))
             painter.drawLine(14, 20, 21, 13)
             painter.drawLine(19, 12, 22, 15)
+    elif name == "recycle":
+        painter.setPen(QPen(ink, 1.8))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawRoundedRect(QRectF(5, 8, 14, 13), 2, 2)
+        painter.drawLine(8, 8, 8, 4)
+        painter.drawLine(16, 8, 16, 4)
+        painter.drawLine(6, 4, 18, 4)
+        painter.drawLine(9, 12, 9, 18)
+        painter.drawLine(15, 12, 15, 18)
     elif name == "layers":
         for offset in (0, 5, 10):
             path = QPainterPath()
