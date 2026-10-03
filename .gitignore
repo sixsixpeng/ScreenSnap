@@ -5,3 +5,5 @@ build/
 dist/
 *.spec
 .idea/
+.codebuddy/
+pyvenv.cfg
