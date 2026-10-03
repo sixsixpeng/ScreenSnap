@@ -296,10 +296,47 @@ class ToolbarWidget(QWidget):
         self.mosaic_size.valueChanged.connect(
             lambda value: self.mosaic_size_label.setText(f"{value} px"))
         self.mosaic_size.valueChanged.connect(lambda value: self.setting_changed.emit("mosaic_size", value))
+        self.mosaic_brush = QCheckBox("涂抹模式（自由笔刷）")
+        self.mosaic_brush.setChecked(settings.get("mosaic_brush", False))
+        self.mosaic_brush.setToolTip("开启后按住拖动可沿笔迹涂抹马赛克/模糊；关闭则为拖框选矩形")
+        self.mosaic_brush.toggled.connect(lambda value: self.setting_changed.emit("mosaic_brush", value))
+        self.eraser_erase_base = QCheckBox("同时擦除原图")
+        self.eraser_erase_base.setChecked(settings.get("eraser_erase_base", False))
+        self.eraser_erase_base.setToolTip("开启后橡皮擦同时擦掉截图原图；关闭则只擦标注、露出原图")
+        self.eraser_erase_base.toggled.connect(lambda value: self.setting_changed.emit("eraser_erase_base", value))
         self.alignment = self.radio_options(
             "text_alignment", (("左对齐", "left"), ("居中", "center"), ("右对齐", "right")),
             settings.get("text_alignment", "left"), "新建文字标注的对齐方式")
         self.alignment.setToolTip("新建文字标注的对齐方式")
+        self.text_background_enabled = QCheckBox("文字背景")
+        self.text_background_enabled.setChecked(settings.get("text_background_enabled", False))
+        self.text_background_enabled.setToolTip("为新建文字标注添加背景色块")
+        self.text_background_enabled.toggled.connect(
+            lambda value: self.setting_changed.emit("text_background_enabled", value))
+        self.text_background = ColorButton(
+            settings.get("text_background", "#fff3a0"),
+            lambda color: self.setting_changed.emit("text_background", color),
+            compact=True, purpose="文字背景颜色")
+        self.text_background.setMinimumHeight(34)
+        self.text_bold = QCheckBox("粗体")
+        self.text_bold.setChecked(settings.get("text_bold", False))
+        self.text_bold.toggled.connect(lambda v: self.setting_changed.emit("text_bold", v))
+        self.text_italic = QCheckBox("斜体")
+        self.text_italic.setChecked(settings.get("text_italic", False))
+        self.text_italic.toggled.connect(lambda v: self.setting_changed.emit("text_italic", v))
+        self.text_underline = QCheckBox("下划线")
+        self.text_underline.setChecked(settings.get("text_underline", False))
+        self.text_underline.toggled.connect(lambda v: self.setting_changed.emit("text_underline", v))
+        self.text_strikethrough = QCheckBox("删除线")
+        self.text_strikethrough.setChecked(settings.get("text_strikethrough", False))
+        self.text_strikethrough.toggled.connect(lambda v: self.setting_changed.emit("text_strikethrough", v))
+        text_format = QWidget()
+        text_format_layout = QHBoxLayout(text_format)
+        text_format_layout.setContentsMargins(0, 0, 0, 0)
+        text_format_layout.addWidget(self.text_bold)
+        text_format_layout.addWidget(self.text_italic)
+        text_format_layout.addWidget(self.text_underline)
+        text_format_layout.addWidget(self.text_strikethrough)
         self.arrow_style = self.radio_options(
             "arrow_style", (
                 ("箭头", "filled"), ("空心箭头", "open"), ("虚线箭头", "dashed"),
@@ -314,6 +351,16 @@ class ToolbarWidget(QWidget):
         self.arrow_chain.setToolTip("开启后，绘制一个箭头后可继续在上一个终点与下一个点之间连续绘制相连的多段箭头；"
                                     "按鼠标右键结束连续绘制并保留已画图形。")
         self.arrow_chain.toggled.connect(lambda value: self.setting_changed.emit("arrow_chain", value))
+        self.pen_chain = QCheckBox("多段绘制")
+        self.pen_chain.setChecked(settings.get("pen_chain", False))
+        self.pen_chain.setToolTip("开启后，画笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
+                                  "按鼠标右键结束连续绘制。按住 Ctrl+Alt 也可临时绘制单段直线。")
+        self.pen_chain.toggled.connect(lambda value: self.setting_changed.emit("pen_chain", value))
+        self.marker_chain = QCheckBox("多段绘制")
+        self.marker_chain.setChecked(settings.get("marker_chain", False))
+        self.marker_chain.setToolTip("开启后，记号笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
+                                    "按鼠标右键结束连续绘制。按住 Ctrl+Alt 也可临时绘制单段直线。")
+        self.marker_chain.toggled.connect(lambda value: self.setting_changed.emit("marker_chain", value))
         self.rect_style = self.radio_options(
             "rect_style", (("实线", "solid"), ("虚线", "dash")),
             settings.get("rect_style", "solid"), "设置新矩形的边框线型")
@@ -434,6 +481,8 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(QLabel("样式"), 8, 0)
         panel_layout.addWidget(self.arrow_style, 8, 1, 1, 2)
         panel_layout.addWidget(self.arrow_chain, 25, 0, 1, 3)
+        panel_layout.addWidget(self.pen_chain, 26, 0, 1, 3)
+        panel_layout.addWidget(self.marker_chain, 27, 0, 1, 3)
         panel_layout.addWidget(QLabel("裁剪线宽"), 9, 0)
         panel_layout.addWidget(self.crop_width, 9, 1)
         panel_layout.addWidget(self.crop_width_label, 9, 2)
@@ -458,6 +507,12 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(QLabel("填充透明度"), 18, 0)
         panel_layout.addWidget(self.ellipse_fill_opacity, 18, 1)
         panel_layout.addWidget(self.ellipse_fill_opacity_label, 18, 2)
+        # 文字背景：开关 + 取色，置于独立行（仅 text 工具可见）。
+        panel_layout.addWidget(self.text_background_enabled, 28, 0)
+        panel_layout.addWidget(self.text_background, 28, 1, 1, 2)
+        panel_layout.addWidget(text_format, 29, 0, 1, 3)
+        panel_layout.addWidget(self.mosaic_brush, 30, 0, 1, 3)
+        panel_layout.addWidget(self.eraser_erase_base, 31, 0, 1, 3)
         # 序号标注专属参数：形状、填充色、文字色、字号、起始值与预设组合。
         sequence_shape_options = (
             ("圆形", "circle"), ("方形", "square"), ("三角", "triangle"),
@@ -509,7 +564,7 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(QLabel("预设组合"), 24, 0)
         panel_layout.addWidget(self.sequence_preset, 24, 1, 1, 2)
         self.sequence_rows = (19, 20, 21, 22, 23, 24)
-        option_row_count = 26
+        option_row_count = 32
         for row in range(option_row_count):
             label_item = panel_layout.itemAtPosition(row, 0)
             label = label_item.widget() if label_item is not None else None
@@ -763,6 +818,7 @@ class ToolbarWidget(QWidget):
         self.set_active_tool(tool)
         rows = ({1} if tool in TOOL_WIDTH_KEYS else set())
         if tool == "eraser":
+            rows.add(31)
             self.tool_widths[tool] = max(10, min(100, self.tool_widths[tool]))
             with QSignalBlocker(self.pen_width):
                 self.pen_width.setRange(10, 100)
@@ -772,11 +828,13 @@ class ToolbarWidget(QWidget):
                 self.pen_width.setRange(1, 50)
                 self.pen_width.setValue(self.tool_widths[tool])
         if tool == "marker":
-            rows.add(2)
+            rows.update((2, 27))
+        elif tool == "pen":
+            rows.add(26)
         elif tool == "text":
-            rows.update((3, 4, 5))
+            rows.update((3, 4, 5, 28, 29))
         elif tool == "mosaic":
-            rows.update((6, 7))
+            rows.update((6, 7, 30))
         elif tool == "arrow":
             rows.update((8, 25))
         elif tool == "crop":
@@ -787,6 +845,9 @@ class ToolbarWidget(QWidget):
             rows.update((11, 17, 18))
         elif tool == "number":
             rows.update(self.sequence_rows)
+        elif tool == "select":
+            # 选择工具下展示「箭头样式」，便于对已有箭头后期改样式。
+            rows.update((8,))
         if tool in ("pen", "rect", "ellipse", "arrow", "marker", "text"):
             rows.add(0)
         elif tool == "crop":
@@ -827,7 +888,8 @@ class ToolbarWidget(QWidget):
             "rect": "设置新矩形的线宽和线型",
             "ellipse": "设置新椭圆的线宽和线型",
             "mosaic": "设置马赛克类型和颗粒大小",
-            "marker": "设置记号笔线宽和透明度",
+            "marker": "设置记号笔线宽和透明度；可开启多段绘制连续画直线",
+            "pen": "设置画笔线宽；可开启多段绘制连续画直线",
             "eraser": "设置橡皮擦直径",
             "number": "设置序号标记的形状、填充色、文字色与字号",
             "picker": "预览取色放大镜与像素网格；取到的色值会设为当前标注颜色",

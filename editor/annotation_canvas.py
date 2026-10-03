@@ -3,8 +3,10 @@
 import math
 
 from PIL import Image, ImageFilter
-from PySide6.QtCore import Qt, QPointF, QRectF, Signal
-from PySide6.QtGui import QBrush, QPainter, QPainterPath, QPen, QColor, QPixmap, QImage, QTextCursor, QTransform, QCursor
+from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, Signal
+from PySide6.QtGui import (QBrush, QPainter, QPainterPath, QPen, QColor, QPixmap, QImage,
+                             QPolygonF, QPainterPathStroker,
+                             QTextCursor, QTransform, QCursor, QKeySequence, QFont)
 from PySide6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
                                QGraphicsItem, QGraphicsRectItem, QGraphicsEllipseItem,
                                QGraphicsTextItem, QInputDialog, QMenu, QToolTip,
@@ -15,7 +17,11 @@ from config.config_manager import TOOL_WIDTH_KEYS
 from editor.annotation_items import (shape, text_item, editable, RoundedRectItem,
                                      AnnotationRectItem, AnnotationEllipseItem,
                                      AnnotationPathItem, AnnotationTextItem,
-                                     AnnotationPixmapItem, AnnotationSequenceItem)
+                                     AnnotationPixmapItem, AnnotationSequenceItem,
+                                     apply_text_format, read_text_format)
+
+# 直线/折线模式下单段最短位移（像素），低于此值视为“未确定第二点”，不绘制。
+STRAIGHT_MIN_DISTANCE = 3
 
 
 def mosaic_image(sample, mode, size):
@@ -77,12 +83,22 @@ class AnnotationCanvas(QGraphicsView):
         self.drawing = None
         self.preview_end = None
         self.chain_active = False
+        self.committed_segments = []
+        self.straight_drawing = False
         self.resizing = None
         self.resize_handle = None
         self.resize_anchor = None
         self.resize_anchor_local = None
         self.resize_scale = 1
         self.resize_transform = None
+        self.alignment_guides = []
+        self.rotating = None
+        self.rotation_center = None
+        self.rotation_start_angle = 0.0
+        self.rotation_start_value = 0.0
+        self.mosaic_drawing = None
+        self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
+        self.erase_mask_image.fill(Qt.transparent)
         self.resize_origin = None
         self.resize_position = None
         self.resize_start = None
@@ -98,7 +114,7 @@ class AnnotationCanvas(QGraphicsView):
         self.selection_start = None
         self.selection_end = None
         self.selection_area = None
-        self.history = [(self.image, self.alternate, self.cursor_enabled, [])]
+        self.history = [(self.image, self.alternate, self.cursor_enabled, [], self.erase_mask_image.copy())]
         self.cursor_index = 0
         self.zoom_percent = 100
 
@@ -135,12 +151,117 @@ class AnnotationCanvas(QGraphicsView):
             self.chain_active = False
             self.start = None
             self.preview_end = None
+            self.committed_segments = []
+            self.straight_drawing = False
         previous = self.tool
         self.tool = tool
         if tool == "picker":
             self.setCursor(self._picker_cursor)
         elif previous == "picker" or tool != "select":
             self.unsetCursor()
+
+    def _chain_tool(self):
+        """当前工具是否支持多段连续绘制（箭头/开启多段的画笔/记号笔）。"""
+        if self.tool == "arrow":
+            return True
+        if self.tool in ("pen", "marker"):
+            return bool(self.settings.get(f"{self.tool}_chain", False))
+        return False
+
+    def _pen_marker_straight(self, event):
+        """画笔/记号笔当前笔划是否按直线模式绘制：多段开关开启或按住 Ctrl+Alt。"""
+        modifiers = event.modifiers()
+        ctrl_alt = bool(modifiers & Qt.ControlModifier and modifiers & Qt.AltModifier)
+        return ctrl_alt or self._chain_tool() or self.chain_active
+
+    def _straight_preview_path(self, end):
+        """由已提交段与当前橡皮筋段拼出直线折线的预览路径。"""
+        path = QPainterPath()
+        for start, stop in self.committed_segments:
+            path.moveTo(start)
+            path.lineTo(stop)
+        if self.start is not None and end is not None:
+            path.moveTo(self.start)
+            path.lineTo(end)
+        return path
+
+    @staticmethod
+    def _smooth_freehand_path(path):
+        """把自由手绘的折线（moveTo + 一连串 lineTo）转成经过各点中点的二次贝塞尔曲线，
+        消除手绘毛刺；点数不足则原样返回。"""
+        points = []
+        for i in range(path.elementCount()):
+            element = path.elementAt(i)
+            if element.type in (QPainterPath.ElementType.MoveToElement,
+                                QPainterPath.ElementType.LineToElement):
+                points.append(QPointF(element.x, element.y))
+        if len(points) < 3:
+            return path
+        # 去除过于密集的重复点，减少噪声。
+        cleaned = [points[0]]
+        for point in points[1:]:
+            if (point - cleaned[-1]).manhattanLength() >= 1:
+                cleaned.append(point)
+        if len(cleaned) < 3:
+            return path
+        smoothed = QPainterPath()
+        smoothed.moveTo(cleaned[0])
+        for index in range(1, len(cleaned) - 1):
+            current = cleaned[index]
+            nxt = cleaned[index + 1]
+            mid = QPointF((current.x() + nxt.x()) / 2, (current.y() + nxt.y()) / 2)
+            smoothed.quadTo(current, mid)
+        smoothed.lineTo(cleaned[-1])
+        return smoothed
+
+    def _update_alignment_guides(self):
+        """拖动选中标注时，检测其边缘/中心与其它标注或画布边缘的对齐，绘制虚线参考并吸附。"""
+        self.alignment_guides = []
+        selected = self.scene_data.selectedItems()
+        if not selected:
+            return
+        # 以所有选中项的整体包围盒参与对齐，保持相对位置不变。
+        group = QRectF()
+        for item in selected:
+            group = group.united(item.sceneBoundingRect())
+        scene = self.sceneRect()
+        threshold = 6
+        candidate_x = [scene.left(), scene.center().x(), scene.right()]
+        candidate_y = [scene.top(), scene.center().y(), scene.bottom()]
+        for item in self.scene_data.items():
+            if item is self.base or item in selected:
+                continue
+            rect = item.sceneBoundingRect()
+            candidate_x.extend([rect.left(), rect.center().x(), rect.right()])
+            candidate_y.extend([rect.top(), rect.center().y(), rect.bottom()])
+        best_x = None
+        snap_x = None
+        for edge in (group.left(), group.center().x(), group.right()):
+            for candidate in candidate_x:
+                delta = candidate - edge
+                if abs(delta) <= threshold and (best_x is None or abs(delta) < abs(best_x)):
+                    best_x = delta
+                    snap_x = candidate
+        best_y = None
+        snap_y = None
+        for edge in (group.top(), group.center().y(), group.bottom()):
+            for candidate in candidate_y:
+                delta = candidate - edge
+                if abs(delta) <= threshold and (best_y is None or abs(delta) < abs(best_y)):
+                    best_y = delta
+                    snap_y = candidate
+        offset = QPointF(best_x or 0, best_y or 0)
+        if offset.x() == 0 and offset.y() == 0:
+            return
+        for item in selected:
+            item.setPos(item.pos() + offset)
+        if snap_x is not None:
+            self.alignment_guides.append(
+                QLineF(snap_x, scene.top(), snap_x, scene.bottom()))
+        if snap_y is not None:
+            self.alignment_guides.append(
+                QLineF(scene.left(), snap_y, scene.right(), snap_y))
+        self.viewport().update()
 
     def _finish_chain(self):
         """结束多段绘制：保留已画图形，复位连续绘制状态。"""
@@ -149,6 +270,9 @@ class AnnotationCanvas(QGraphicsView):
         self.chain_active = False
         self.start = None
         self.preview_end = None
+        self.committed_segments = []
+        self.straight_drawing = False
+        self.drawing = None
         self.viewport().update()
 
     def set_zoom(self, percent):
@@ -206,6 +330,7 @@ class AnnotationCanvas(QGraphicsView):
                     type(item).__name__)
             data = {"type": kind, "pos": (item.pos().x(), item.pos().y()),
                 "scale": item.scale(), "z": item.zValue(), "transform": QTransform(item.transform()),
+                "rotation": item.rotation(),
                 "origin": (item.transformOriginPoint().x(), item.transformOriginPoint().y())}
             if hasattr(item, "corner_radius"):
                 data["corner_radius"] = item.corner_radius
@@ -220,10 +345,19 @@ class AnnotationCanvas(QGraphicsView):
                     data["corner_radius"] = item.corner_radius
             elif data["type"] == "QGraphicsPathItem":
                 data["path"] = QPainterPath(item.path())
+                if getattr(item, "arrow_style", None) is not None:
+                    data["arrow_style"] = item.arrow_style
+                    data["start"] = item.start
+                    data["end"] = item.end
+                    data["line_color"] = item.line_color
+                    data["line_width"] = item.line_width
             elif data["type"] == "QGraphicsTextItem":
                 data.update(text=item.toHtml(), font=item.font(),
                             text_width=item.document().textWidth(),
-                            color=item.defaultTextColor().name())
+                            color=item.defaultTextColor().name(),
+                            background=item.background_color)
+                bold, italic, underline, strike = read_text_format(item)
+                data.update(bold=bold, italic=italic, underline=underline, strike=strike)
             elif data["type"] == "QGraphicsPixmapItem":
                 data["pixmap"] = QPixmap(item.pixmap())
                 data["offset"] = (item.offset().x(), item.offset().y())
@@ -283,12 +417,21 @@ class AnnotationCanvas(QGraphicsView):
                 item = AnnotationEllipseItem(QRectF(*data["rect"]))
             elif kind == "QGraphicsPathItem":
                 item = AnnotationPathItem(data["path"])
+                if "arrow_style" in data:
+                    item.start = data["start"]
+                    item.end = data["end"]
+                    item.arrow_style = data["arrow_style"]
+                    item.line_color = data["line_color"]
+                    item.line_width = data["line_width"]
             elif kind == "QGraphicsTextItem":
                 item = AnnotationTextItem()
                 item.setHtml(data["text"])
                 item.setFont(data["font"])
                 item.document().setTextWidth(data["text_width"])
                 item.setDefaultTextColor(QColor(data["color"]))
+                item.background_color = data.get("background")
+                apply_text_format(item, data.get("bold", False), data.get("italic", False),
+                                 data.get("underline", False), data.get("strike", False))
             elif kind == "AnnotationSequenceItem":
                 item = AnnotationSequenceItem(
                     data["number"],
@@ -309,6 +452,7 @@ class AnnotationCanvas(QGraphicsView):
             item.setTransformOriginPoint(QPointF(*data.get("origin", (0, 0))))
             item.setScale(data["scale"])
             item.setTransform(data.get("transform", QTransform()))
+            item.setRotation(data.get("rotation", 0))
             item.setZValue(data["z"])
             self.scene_data.addItem(item)
         self.changed.emit()
@@ -318,19 +462,29 @@ class AnnotationCanvas(QGraphicsView):
         for item in self.annotations():
             self.constrain_item(item)
         self.history = self.history[:self.cursor_index + 1]
-        self.history.append((self.image, self.alternate, self.cursor_enabled, self.snapshot()))
+        self.history.append((self.image, self.alternate, self.cursor_enabled,
+                             self.snapshot(), self.erase_mask_image.copy()))
         self.cursor_index += 1
         self.changed.emit()
 
     def restore_checkpoint(self):
         """从历史节点恢复底图与标注，通知工具栏同步光标开关。"""
-        image, alternate, cursor_enabled, records = self.history[self.cursor_index]
+        image, alternate, cursor_enabled, records, erase_mask = self.history[self.cursor_index]
         if self.image is not image:
             self.image = image
             self.refresh_image()
         self.alternate = alternate
         self.cursor_enabled = cursor_enabled
+        self.erase_mask_image = erase_mask.copy()
         self.restore(records)
+
+    def reset_history(self):
+        """重建初始历史（含空擦除遮罩），用于选区重置或外部重置。"""
+        self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
+        self.erase_mask_image.fill(Qt.transparent)
+        self.history = [(self.image, self.alternate, self.cursor_enabled, [],
+                        self.erase_mask_image.copy())]
+        self.cursor_index = 0
 
     def toggle_cursor(self, enabled):
         """只交换本次截图的两个版本，不修改全局捕获设置。"""
@@ -360,6 +514,8 @@ class AnnotationCanvas(QGraphicsView):
         self.cursor_enabled = self.settings["cursor"]
         self.refresh_image()
         self.restore([])
+        self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
+        self.erase_mask_image.fill(Qt.transparent)
         self.checkpoint()
 
     def remove_selected(self):
@@ -388,6 +544,33 @@ class AnnotationCanvas(QGraphicsView):
             pen.setStyle(Qt.DashLine if style == "dash" else Qt.SolidLine)
             item.setPen(pen)
         if selected:
+            self.checkpoint()
+
+    def set_selected_arrow_style(self, style):
+        """对已选中的箭头切换线型（实心/空心/双头/直线/矩形箭杆等）。"""
+        selected = [item for item in self.scene_data.selectedItems()
+                   if getattr(item, "arrow_style", None) is not None]
+        for item in selected:
+            rebuilt = shape("arrow", item.start, item.end, item.line_color,
+                            item.line_width, arrow_style=style)
+            item.setPath(rebuilt.path())
+            item.setPen(rebuilt.pen())
+            item.setBrush(rebuilt.brush())
+            item.arrow_style = style
+        if selected:
+            self.checkpoint()
+
+    def set_selected_text_format(self):
+        """把当前文字格式开关应用到选中的文字标注（整篇生效）。"""
+        changed = False
+        for item in self.scene_data.selectedItems():
+            if isinstance(item, QGraphicsTextItem):
+                apply_text_format(item, self.settings.get("text_bold", False),
+                                 self.settings.get("text_italic", False),
+                                 self.settings.get("text_underline", False),
+                                 self.settings.get("text_strikethrough", False))
+                changed = True
+        if changed:
             self.checkpoint()
 
     def set_selected_color(self, color):
@@ -476,13 +659,40 @@ class AnnotationCanvas(QGraphicsView):
         self.checkpoint()
 
     def render_image(self):
-        """仅渲染场景中的底图和标注；视图前景的缩放手柄不会导出。"""
-        output = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
+        """仅渲染场景中的底图和标注；视图前景的缩放手柄不会导出。
+
+        非破坏性橡皮擦：标注层先在独立透明图层渲染，再按擦除遮罩镂空（露出底图），
+        最后合成到底图之上；遮罩可作用于底图本身（由 eraser_erase_base 控制）。
+        """
+        width, height = self.image.width, self.image.height
+        output = QImage(width, height, QImage.Format_ARGB32)
         output.fill(Qt.transparent)
         painter = QPainter(output)
         painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
-        self.scene_data.render(painter, QRectF(output.rect()), self.scene_data.sceneRect())
+        painter.drawImage(0, 0, to_qimage(self.image))
         painter.end()
+        # 单独渲染标注层，便于按遮罩镂空而不破坏底图与矢量标注。
+        layer = QImage(width, height, QImage.Format_ARGB32)
+        layer.fill(Qt.transparent)
+        layer_painter = QPainter(layer)
+        layer_painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        self.base.hide()
+        self.scene_data.render(layer_painter, QRectF(layer.rect()), self.scene_data.sceneRect())
+        self.base.show()
+        layer_painter.end()
+        if self.erase_mask_image is not None and not self.erase_mask_image.isNull():
+            mask_painter = QPainter(layer)
+            mask_painter.setCompositionMode(QPainter.CompositionMode_DestinationOut)
+            mask_painter.drawImage(0, 0, self.erase_mask_image)
+            mask_painter.end()
+            if self.settings.get("eraser_erase_base", False):
+                base_painter = QPainter(output)
+                base_painter.setCompositionMode(QPainter.CompositionMode_DestinationOut)
+                base_painter.drawImage(0, 0, self.erase_mask_image)
+                base_painter.end()
+        compositor = QPainter(output)
+        compositor.drawImage(0, 0, layer)
+        compositor.end()
         return output
 
     def stroke_pen(self):
@@ -507,47 +717,27 @@ class AnnotationCanvas(QGraphicsView):
         return self.settings.get(TOOL_WIDTH_KEYS.get(self.tool, "pen_width"),
                                  self.settings["pen_width"])
 
+    def _ensure_mask_size(self):
+        """底图尺寸变化（如裁剪）后重建擦除遮罩，避免坐标错位。"""
+        if (self.erase_mask_image is None or self.erase_mask_image.isNull()
+                or self.erase_mask_image.width() != self.image.width
+                or self.erase_mask_image.height() != self.image.height):
+            self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
+            self.erase_mask_image.fill(Qt.transparent)
+
     def erase_segment(self, start, end):
+        """把擦除笔迹加入非破坏性遮罩（默认只作用于标注层，露出底图）。"""
+        self._ensure_mask_size()
         radius = self.settings.get("eraser_width", self.settings["pen_width"]) / 2
-        area = QRectF(start, end).normalized().adjusted(-radius, -radius, radius, radius)
-        for item in self.scene_data.items(area):
-            if item is self.base:
-                continue
-            if not isinstance(item, QGraphicsPixmapItem):
-                bounds = item.boundingRect().toAlignedRect()
-                if bounds.isEmpty():
-                    continue
-                image = QImage(bounds.size(), QImage.Format_ARGB32_Premultiplied)
-                image.fill(Qt.transparent)
-                painter = QPainter(image)
-                painter.setRenderHint(QPainter.Antialiasing)
-                painter.translate(-bounds.topLeft())
-                item.paint(painter, QStyleOptionGraphicsItem(), None)
-                painter.end()
-                replacement = editable(AnnotationPixmapItem(QPixmap.fromImage(image)))
-                replacement.setOffset(bounds.topLeft())
-                replacement.setPos(item.pos())
-                replacement.setTransform(item.transform())
-                replacement.setScale(item.scale())
-                replacement.setZValue(item.zValue())
-                self.scene_data.removeItem(item)
-                self.scene_data.addItem(replacement)
-                item = replacement
-            image = item.pixmap().toImage().convertToFormat(QImage.Format_ARGB32_Premultiplied)
-            painter = QPainter(image)
-            painter.setRenderHint(QPainter.Antialiasing)
-            painter.setCompositionMode(QPainter.CompositionMode_Clear)
-            painter.setPen(QPen(QColor("#000000"), radius * 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-            local_start = item.mapFromScene(start) - item.offset()
-            local_end = item.mapFromScene(end) - item.offset()
-            if local_start == local_end:
-                painter.setPen(Qt.NoPen)
-                painter.setBrush(QColor("#000000"))
-                painter.drawEllipse(local_start, radius, radius)
-            else:
-                painter.drawLine(local_start, local_end)
-            painter.end()
-            item.setPixmap(QPixmap.fromImage(image))
+        painter = QPainter(self.erase_mask_image)
+        painter.setRenderHint(QPainter.Antialiasing)
+        painter.setPen(QPen(QColor("white"), radius * 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawLine(start, end)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("white"))
+        painter.drawEllipse(end, radius, radius)
+        painter.end()
+        self.viewport().update()
 
     def drawForeground(self, painter, rect):
         """只在视图预览正在绘制的标注和缩放手柄，导出不包含这些辅助线。"""
@@ -607,17 +797,44 @@ class AnnotationCanvas(QGraphicsView):
                               self.settings.get("arrow_style", "filled"))
                 painter.setBrush(arrow.brush())
                 painter.drawPath(arrow.path())
+        if self.mosaic_drawing is not None:
+            painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(self.mosaic_drawing)
         if self.tool != "select":
             return
+        selected = self.scene_data.selectedItems()
         painter.setPen(QPen(QColor("#00ad91"), 1))
         painter.setBrush(Qt.NoBrush)
-        for item in self.scene_data.selectedItems():
-            bounds = item.sceneBoundingRect()
-            painter.drawRect(bounds)
-            for handle in self.resize_handles(bounds).values():
-                handle_rect = QRectF(handle.x() - 4, handle.y() - 4, 8, 8)
-                painter.fillRect(handle_rect, QColor("white"))
-                painter.drawRect(handle_rect)
+        for item in selected:
+            # 选中描边：旋转项绘制按局部包围盒变换后的实际轮廓，未旋转项等价矩形。
+            rect = item.boundingRect()
+            corners = [rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()]
+            outline = QPolygonF([item.mapToScene(corner) for corner in corners])
+            painter.drawPolygon(outline)
+            if abs(item.rotation()) < 0.01:
+                for handle in self.resize_handles(item.sceneBoundingRect()).values():
+                    handle_rect = QRectF(handle.x() - 4, handle.y() - 4, 8, 8)
+                    painter.fillRect(handle_rect, QColor("white"))
+                    painter.drawRect(handle_rect)
+        # 单选时在其上方显示旋转手柄（绕中心旋转），手柄杆自顶边中点引出。
+        if len(selected) == 1:
+            item = selected[0]
+            rect = item.sceneBoundingRect()
+            top = QPointF(rect.center().x(), rect.top())
+            handle = self.rotation_handle_position(item)
+            painter.drawLine(top, handle)
+            painter.setBrush(QColor("white"))
+            painter.drawEllipse(handle, 5, 5)
+            painter.setBrush(Qt.NoBrush)
+        # 拖动选中标注时显示对齐参考虚线（导出不含）。
+        if self.alignment_guides:
+            painter.save()
+            painter.setPen(QPen(QColor("#ff5fa2"), 1, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            for line in self.alignment_guides:
+                painter.drawLine(line)
+            painter.restore()
 
     @staticmethod
     def resize_handles(bounds):
@@ -629,9 +846,80 @@ class AnnotationCanvas(QGraphicsView):
             "sw": bounds.bottomLeft(), "w": QPointF(bounds.left(), center.y()),
         }
 
+    ROTATION_HANDLE_DISTANCE = 24
+
+    def rotation_handle_position(self, item):
+        """单选标注上方、固定在场景包围盒顶边之上的旋转手柄（不压住缩放手柄）。"""
+        rect = item.sceneBoundingRect()
+        return QPointF(rect.center().x(), rect.top() - self.ROTATION_HANDLE_DISTANCE)
+
+    def rotation_handle_at(self, item, point):
+        """指针是否落在旋转手柄 8 像素（场景单位）内。"""
+        handle = self.rotation_handle_position(item)
+        return ((handle.x() - point.x()) ** 2 + (handle.y() - point.y()) ** 2) <= 64
+
+    def _begin_rotation(self, item, point):
+        """开始旋转：以项包围盒中心为支点，记录起始角度与当前旋转值。"""
+        self.rotating = item
+        center_local = item.boundingRect().center()
+        item.setTransformOriginPoint(center_local)
+        center = item.mapToScene(center_local)
+        self.rotation_center = center
+        self.rotation_start_angle = math.atan2(point.y() - center.y(), point.x() - center.x())
+        self.rotation_start_value = item.rotation()
+        QToolTip.hideText()
+
+    def _rotate_to(self, point, snap=False):
+        """根据指针相对支点的角度增量更新旋转，snap=True 时吸附 15°。"""
+        angle = math.atan2(point.y() - self.rotation_center.y(),
+                           point.x() - self.rotation_center.x())
+        delta = math.degrees(angle - self.rotation_start_angle)
+        new_value = self.rotation_start_value + delta
+        if snap:
+            new_value = round(new_value / 15) * 15
+        self.rotating.setRotation(new_value)
+        self.viewport().update()
+
+    def _commit_mosaic_brush(self, path):
+        """沿笔迹路径生成马赛克/模糊覆盖：取底图对应区域，按效果生成后用笔迹形状裁掉外部像素。"""
+        radius = max(8, self.settings.get("mosaic_size", 10) * 2)
+        stroker = QPainterPathStroker()
+        stroker.setWidth(radius * 2)
+        stroker.setCapStyle(Qt.RoundCap)
+        stroker.setJoinStyle(Qt.RoundJoin)
+        region = stroker.createStroke(path)
+        bounds = region.boundingRect().toRect().intersected(self.sceneRect().toRect())
+        if bounds.isEmpty():
+            return
+        sample = self.image.crop((bounds.left(), bounds.top(), bounds.right() + 1, bounds.bottom() + 1))
+        mode = self.settings.get("mosaic_mode", "blocks")
+        size = self.settings.get("mosaic_size", 10)
+        result = mosaic_image(sample, mode, size).convert("RGBA")
+        # 在区域尺寸的图像上用白色绘制笔迹作为透明度遮罩。
+        mask = QImage(bounds.width(), bounds.height(), QImage.Format_ARGB32)
+        mask.fill(Qt.transparent)
+        mp = QPainter(mask)
+        mp.setRenderHint(QPainter.Antialiasing)
+        mp.setTransform(QTransform().translate(-bounds.left(), -bounds.top()))
+        mp.setPen(Qt.NoPen)
+        mp.setBrush(QColor("white"))
+        mp.drawPath(region)
+        mp.end()
+        out = QImage(bounds.width(), bounds.height(), QImage.Format_ARGB32)
+        out.fill(Qt.transparent)
+        op = QPainter(out)
+        op.setRenderHint(QPainter.Antialiasing)
+        op.drawImage(0, 0, to_qimage(result))
+        op.end()
+        out.setAlphaChannel(mask)
+        item = editable(AnnotationPixmapItem(QPixmap.fromImage(out)))
+        item.setOffset(QPointF(bounds.left(), bounds.top()))
+        self.scene_data.addItem(item)
+        self.checkpoint()
+
     def mousePressEvent(self, event):
         """根据工具决定选中图元、取色或开始新的标注。"""
-        if event.button() == Qt.RightButton and self.chain_active and self.tool == "arrow":
+        if event.button() == Qt.RightButton and self.chain_active and self._chain_tool():
             # 多段绘制进行中，右键直接结束连续绘制并保留已画图形。
             self._finish_chain()
             event.accept()
@@ -651,31 +939,40 @@ class AnnotationCanvas(QGraphicsView):
                 event.accept()
                 return
             self.selection_area = None
+            self.rotating = None
             self.viewport().update()
-            for item in self.scene_data.selectedItems():
-                bounds = item.sceneBoundingRect()
-                handle = self.resize_handle_at(bounds, point)
-                if handle is not None:
-                    handles = self.resize_handles(bounds)
-                    anchor_name = {"nw": "se", "n": "s", "ne": "sw", "e": "w",
-                                   "se": "nw", "s": "n", "sw": "ne", "w": "e"}[handle]
-                    anchor_scene = handles[anchor_name]
-                    anchor_local = item.mapFromScene(anchor_scene)
-                    original_scene_anchor = item.mapToScene(anchor_local)
-                    self.resize_transform = item.transform()
-                    self.resize_scale = item.scale()
-                    self.resize_origin = item.transformOriginPoint()
-                    self.resize_position = item.pos()
-                    item.setTransformOriginPoint(anchor_local)
-                    item.setPos(item.pos() + original_scene_anchor - item.mapToScene(anchor_local))
-                    self.resizing = item
-                    self.resize_handle = handle
-                    self.resize_anchor = anchor_scene
-                    self.resize_anchor_local = anchor_local
-                    self.resize_start = handles[handle]
-                    QToolTip.hideText()
-                    event.accept()
-                    return
+            selected = self.scene_data.selectedItems()
+            # 先判定缩放手柄（旋转项已隐藏缩放手柄），再判定旋转手柄，避免误触。
+            for item in selected:
+                if abs(item.rotation()) < 0.01:
+                    bounds = item.sceneBoundingRect()
+                    handle = self.resize_handle_at(bounds, point)
+                    if handle is not None:
+                        handles = self.resize_handles(bounds)
+                        anchor_name = {"nw": "se", "n": "s", "ne": "sw", "e": "w",
+                                       "se": "nw", "s": "n", "sw": "ne", "w": "e"}[handle]
+                        anchor_scene = handles[anchor_name]
+                        anchor_local = item.mapFromScene(anchor_scene)
+                        original_scene_anchor = item.mapToScene(anchor_local)
+                        self.resize_transform = item.transform()
+                        self.resize_scale = item.scale()
+                        self.resize_origin = item.transformOriginPoint()
+                        self.resize_position = item.pos()
+                        item.setTransformOriginPoint(anchor_local)
+                        item.setPos(item.pos() + original_scene_anchor - item.mapToScene(anchor_local))
+                        self.resizing = item
+                        self.resize_handle = handle
+                        self.resize_anchor = anchor_scene
+                        self.resize_anchor_local = anchor_local
+                        self.resize_start = handles[handle]
+                        QToolTip.hideText()
+                        event.accept()
+                        return
+            # 单选且不在缩放手柄上时，尝试命中旋转手柄。
+            if len(selected) == 1 and self.rotation_handle_at(selected[0], point):
+                self._begin_rotation(selected[0], point)
+                event.accept()
+                return
             if self.scene_data.itemAt(point, self.transform()) in (None, self.base):
                 # 从底图空白处拖动只画辅助选区，松开后保留框线并选中其中的标注。
                 self.scene_data.clearSelection()
@@ -717,13 +1014,27 @@ class AnnotationCanvas(QGraphicsView):
             self.scene_data.addItem(item)
             self.checkpoint()
             return
+        if self.tool == "mosaic" and self.settings.get("mosaic_brush", False) \
+                and event.button() == Qt.LeftButton:
+            # 自由笔刷：记录笔迹路径，松开时沿笔迹生成马赛克/模糊覆盖。
+            self.mosaic_drawing = QPainterPath(point)
+            self.preview_end = point
+            self.viewport().update()
+            event.accept()
+            return
         if self.tool not in ("select", "hand") and event.button() == Qt.LeftButton:
             # 多段绘制进行中：保留上一终点作为本段起点，不从按下点重置。
-            if not (self.chain_active and self.tool == "arrow" and self.start is not None):
+            if not (self.chain_active and self._chain_tool() and self.start is not None):
                 self.start = point
             self.preview_end = point
             if self.tool in ("pen", "marker"):
-                self.drawing = QPainterPath(self.start)
+                self.straight_drawing = self._pen_marker_straight(event)
+                if self.straight_drawing:
+                    self.drawing = QPainterPath()
+                    if not self.chain_active:
+                        self.committed_segments = []
+                else:
+                    self.drawing = QPainterPath(self.start)
             return
         super().mousePressEvent(event)
 
@@ -737,6 +1048,18 @@ class AnnotationCanvas(QGraphicsView):
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() - distance.x())
             self.verticalScrollBar().setValue(self.verticalScrollBar().value() - distance.y())
             self.right_pan_start = point
+            event.accept()
+            return
+        if self.rotating is not None:
+            point = self.mapToScene(event.position().toPoint())
+            self._rotate_to(point, snap=bool(event.modifiers() & Qt.ShiftModifier))
+            event.accept()
+            return
+        if self.mosaic_drawing is not None:
+            point = self.mapToScene(event.position().toPoint())
+            self.mosaic_drawing.lineTo(point)
+            self.preview_end = point
+            self.viewport().update()
             event.accept()
             return
         if self.selection_start is not None:
@@ -776,16 +1099,21 @@ class AnnotationCanvas(QGraphicsView):
             self.viewport().update()
             event.accept()
             return
-        if self.start is not None and self.tool in ("pen", "marker"):
-            self.drawing.lineTo(self.image_point(self.mapToScene(event.position().toPoint())))
         if self.start is not None:
-            self.preview_end = self.image_point(self.mapToScene(event.position().toPoint()))
+            end = self.image_point(self.mapToScene(event.position().toPoint()))
+            self.preview_end = end
+            if self.tool in ("pen", "marker"):
+                if self.straight_drawing:
+                    self.drawing = self._straight_preview_path(end)
+                else:
+                    self.drawing.lineTo(end)
             self.viewport().update()
         if self.start is None:
             super().mouseMoveEvent(event)
             if self.tool == "select":
                 for item in self.scene_data.selectedItems():
                     self.constrain_item(item)
+                self._update_alignment_guides()
                 self._update_resize_cursor(event.position().toPoint())
 
     def _free_distortion(self, event):
@@ -801,22 +1129,24 @@ class AnnotationCanvas(QGraphicsView):
             QToolTip.hideText()
             return
         for item in self.scene_data.selectedItems() if self.tool == "select" else ():
-            bounds = item.sceneBoundingRect()
-            handle = self.resize_handle_at(bounds, point)
-            cursors = {"nw": Qt.SizeFDiagCursor, "se": Qt.SizeFDiagCursor,
-                       "ne": Qt.SizeBDiagCursor, "sw": Qt.SizeBDiagCursor,
-                       "n": Qt.SizeVerCursor, "s": Qt.SizeVerCursor,
-                       "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor}
-            if handle:
-                self.setCursor(cursors[handle])
-                if handle in ("nw", "ne", "sw", "se"):
-                    QToolTip.showText(
-                        self.viewport().mapToGlobal(position),
-                        "拖动四角等比缩放；按住 Ctrl / Alt / Shift / Space 任意键可自由拉伸变形",
-                        self)
-                else:
-                    QToolTip.hideText()
-                return
+            # 旋转项不显示缩放手柄（避免旋转+缩放矩阵组合），仅当作可移动。
+            if abs(item.rotation()) < 0.01:
+                bounds = item.sceneBoundingRect()
+                handle = self.resize_handle_at(bounds, point)
+                cursors = {"nw": Qt.SizeFDiagCursor, "se": Qt.SizeFDiagCursor,
+                           "ne": Qt.SizeBDiagCursor, "sw": Qt.SizeBDiagCursor,
+                           "n": Qt.SizeVerCursor, "s": Qt.SizeVerCursor,
+                           "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor}
+                if handle:
+                    self.setCursor(cursors[handle])
+                    if handle in ("nw", "ne", "sw", "se"):
+                        QToolTip.showText(
+                            self.viewport().mapToGlobal(position),
+                            "拖动四角等比缩放；按住 Ctrl / Alt / Shift / Space 任意键可自由拉伸变形",
+                            self)
+                    else:
+                        QToolTip.hideText()
+                    return
             if item.contains(item.mapFromScene(point)):
                 self.setCursor(Qt.SizeAllCursor)
                 QToolTip.hideText()
@@ -863,6 +1193,10 @@ class AnnotationCanvas(QGraphicsView):
                 cursor.select(QTextCursor.Document)
                 cursor.mergeBlockFormat(original_format)
                 item.document().setTextWidth(text_width)
+                apply_text_format(item, self.settings.get("text_bold", False),
+                                 self.settings.get("text_italic", False),
+                                 self.settings.get("text_underline", False),
+                                 self.settings.get("text_strikethrough", False))
             self.checkpoint()
 
     def annotation_menu(self, item):
@@ -887,6 +1221,22 @@ class AnnotationCanvas(QGraphicsView):
 
     def mouseReleaseEvent(self, event):
         """按当前工具提交图元；裁剪时两版截图使用相同区域。"""
+        if self.rotating is not None:
+            self.rotating = None
+            self.checkpoint()
+            self.viewport().update()
+            event.accept()
+            return
+        if self.mosaic_drawing is not None:
+            self._commit_mosaic_brush(self.mosaic_drawing)
+            self.mosaic_drawing = None
+            self.preview_end = None
+            self.viewport().update()
+            event.accept()
+            return
+        if self.alignment_guides:
+            self.alignment_guides = []
+            self.viewport().update()
         if event.button() in (Qt.RightButton, Qt.MiddleButton):
             if self.right_pan_start is not None:
                 if event.button() == self.pan_button:
@@ -930,15 +1280,52 @@ class AnnotationCanvas(QGraphicsView):
             return
         if self.start is not None:
             end = self.image_point(self.mapToScene(event.position().toPoint()))
+            dragged = (end - self.start).manhattanLength() >= STRAIGHT_MIN_DISTANCE
+            if self.tool in ("pen", "marker") and self.straight_drawing:
+                # 直线/折线模式：仅当确有第二点时提交一段直线；无第二点不绘制。
+                self.preview_end = None
+                if dragged:
+                    seg = QPainterPath(self.start)
+                    seg.lineTo(end)
+                    item = AnnotationPathItem(seg)
+                    item.setPen(self.stroke_pen())
+                    editable(item)
+                    self.scene_data.addItem(item)
+                    if self._chain_tool():
+                        self.committed_segments.append((QPointF(self.start), QPointF(end)))
+                        self.start = end
+                        self.chain_active = True
+                    else:
+                        self.start = None
+                        self.chain_active = False
+                    self.checkpoint()
+                else:
+                    if self._chain_tool():
+                        # 仅确立链起点，不产生零长度段，保持连续绘制状态。
+                        self.start = end
+                        self.chain_active = True
+                    else:
+                        self.start = None
+                        self.chain_active = False
+                self.viewport().update()
+                return
             if self.tool in ("pen", "marker"):
+                # 自由手绘：无拖动的孤立点不绘制。
                 self.drawing.lineTo(end)
+                self.preview_end = None
+                if dragged:
+                    item = AnnotationPathItem(self._smooth_freehand_path(self.drawing))
+                    item.setPen(self.stroke_pen())
+                    editable(item)
+                    self.scene_data.addItem(item)
+                    self.checkpoint()
+                self.start = None
+                self.chain_active = False
+                self.viewport().update()
+                return
             self.preview_end = None
             self.viewport().update()
-            if self.tool in ("pen", "marker"):
-                item = AnnotationPathItem(self.drawing)
-                item.setPen(self.stroke_pen())
-                editable(item)
-            elif self.tool == "mosaic":
+            if self.tool == "mosaic":
                 # 将框选像素先缩小再以最近邻放大，形成方块马赛克。
                 area = QRectF(self.start, end).normalized().toRect().intersected(self.sceneRect().toRect())
                 if area.isEmpty():
@@ -989,7 +1376,7 @@ class AnnotationCanvas(QGraphicsView):
             self.checkpoint()
 
     def mouseDoubleClickEvent(self, event):
-        # 其他工具先切到选择；选择工具中双击已有标注可直接删除。
+        # 其他工具先切到选择；选择工具中双击非文字标注可直接删除，双击文字标注则就地编辑。
         if event.button() != Qt.LeftButton:
             event.accept()
             return
@@ -997,9 +1384,12 @@ class AnnotationCanvas(QGraphicsView):
         item = self.scene_data.itemAt(point, self.transform())
         if item is not None and item is not self.base:
             if self.tool == "select":
-                self.scene_data.clearSelection()
-                item.setSelected(True)
-                self.remove_selected()
+                if isinstance(item, AnnotationTextItem):
+                    self.edit_text_item(item)
+                else:
+                    self.scene_data.clearSelection()
+                    item.setSelected(True)
+                    self.remove_selected()
                 self._update_resize_cursor(event.position().toPoint())
                 return
             self.set_tool("select")
@@ -1013,9 +1403,9 @@ class AnnotationCanvas(QGraphicsView):
         self.confirmed.emit()
 
     def keyPressEvent(self, event):
-        """处理删除、临时平移和放弃编辑等画布快捷键。"""
+        """处理删除、撤销/重做、临时平移和放弃编辑等画布快捷键。"""
         if event.key() == Qt.Key_Escape:
-            if self.chain_active and self.tool == "arrow":
+            if self.chain_active and self._chain_tool():
                 self._finish_chain()
                 event.accept()
                 return
@@ -1025,6 +1415,12 @@ class AnnotationCanvas(QGraphicsView):
             self.setDragMode(QGraphicsView.ScrollHandDrag)
         elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self.remove_selected()
+        elif event.matches(QKeySequence.Undo):
+            self.undo()
+            event.accept()
+        elif event.matches(QKeySequence.Redo):
+            self.redo()
+            event.accept()
         else:
             super().keyPressEvent(event)
 

@@ -162,6 +162,10 @@ class EditorWindow(QMainWindow):
             self.canvas.set_selected_width(value)
         elif key in ("rect_style", "ellipse_style"):
             self.canvas.set_selected_line_style(value)
+        elif key == "arrow_style":
+            self.canvas.set_selected_arrow_style(value)
+        elif key in ("text_bold", "text_italic", "text_underline", "text_strikethrough"):
+            self.canvas.set_selected_text_format()
         elif key in ("rect_fill_enabled", "rect_fill_opacity"):
             self.canvas.set_selected_fill(
                 "rect", self.settings.get("rect_fill_enabled", False),

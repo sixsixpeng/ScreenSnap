@@ -399,7 +399,7 @@ class InlineEditor(QWidget):
         self.canvas.cursor_enabled = cursor_enabled if self.canvas.alternate is not None else False
         for item in list(self.canvas.annotations()):
             self.canvas.scene_data.removeItem(item)
-        self.canvas.history = [(self.canvas.image, self.canvas.alternate, self.canvas.cursor_enabled, [])]
+        self.canvas.reset_history()
         self.canvas.cursor_index = 0
         self.canvas.refresh_image()
         self.position_widgets()

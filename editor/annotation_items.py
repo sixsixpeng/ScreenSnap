@@ -4,7 +4,7 @@ import math
 
 from PySide6.QtCore import Qt, QPointF, QRectF
 from PySide6.QtGui import (QColor, QPen, QPainterPath, QFont, QTextCursor,
-                           QTextBlockFormat, QPolygonF)
+                           QTextBlockFormat, QPolygonF, QTextCharFormat)
 from PySide6.QtWidgets import (QGraphicsItem, QGraphicsRectItem, QGraphicsEllipseItem,
                                QGraphicsPathItem, QGraphicsTextItem, QGraphicsPixmapItem,
                                QStyle, QStyleOptionGraphicsItem)
@@ -87,7 +87,20 @@ class AnnotationPathItem(AnnotationPaintMixin, QGraphicsPathItem):
 
 
 class AnnotationTextItem(AnnotationPaintMixin, QGraphicsTextItem):
-    pass
+    """文字标注；可选背景色块绘制在文字之下，便于突出显示。"""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.background_color = None
+
+    def paint(self, painter, option, widget=None):
+        if self.background_color:
+            painter.save()
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(QColor(self.background_color))
+            painter.drawRect(self.boundingRect())
+            painter.restore()
+        super().paint(painter, option, widget)
 
 
 class AnnotationPixmapItem(AnnotationPaintMixin, QGraphicsPixmapItem):
@@ -152,6 +165,11 @@ def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
             if arrow_style in ("line", "dashed_line"):
                 item = AnnotationPathItem(path)
                 item.setPen(pen)
+                item.start = start
+                item.end = end
+                item.arrow_style = arrow_style
+                item.line_color = color
+                item.line_width = width
                 return editable(item)
             if arrow_style in ("rect_filled", "rect_open", "rect_dashed"):
                 # 仅箭杆矩形：实心/空心/空心+虚线的矩形，不含箭头。
@@ -164,6 +182,11 @@ def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
                 item = AnnotationPathItem(path)
                 item.setPen(pen)
                 item.setBrush(QColor(color) if arrow_style == "rect_filled" else Qt.NoBrush)
+                item.start = start
+                item.end = end
+                item.arrow_style = arrow_style
+                item.line_color = color
+                item.line_width = width
                 return editable(item)
             double_headed = arrow_style in ("double_filled", "double_open", "double_dashed")
             head_length = min(length * (0.36 if double_headed else 0.48),
@@ -204,7 +227,38 @@ def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
         item.setPen(pen)
         if tool == "arrow":
             item.setBrush(QColor(color) if arrow_style in ("filled", "double_filled", "rect_filled") else Qt.NoBrush)
+            item.start = start
+            item.end = end
+            item.arrow_style = arrow_style
+            item.line_color = color
+            item.line_width = width
     return editable(item)
+
+
+def apply_text_format(item, bold, italic, underline, strike):
+    """整篇应用文字格式（粗体/斜体/下划线/删除线），Qt5/6 通用。"""
+    cursor = item.textCursor()
+    cursor.select(QTextCursor.Document)
+    fmt = QTextCharFormat()
+    fmt.setFontWeight(QFont.Bold if bold else QFont.Normal)
+    fmt.setFontItalic(italic)
+    fmt.setFontUnderline(underline)
+    fmt.setFontStrikeOut(strike)
+    cursor.mergeCharFormat(fmt)
+    cursor.clearSelection()
+    item.setTextCursor(cursor)
+
+
+def read_text_format(item):
+    """读取整篇文字的当前格式标志（粗体/斜体/下划线/删除线）。"""
+    cursor = item.textCursor()
+    if item.document().characterCount() > 1:
+        cursor.setPosition(1)
+    else:
+        cursor.setPosition(0)
+    fmt = cursor.charFormat()
+    return (fmt.fontWeight() >= QFont.Bold, fmt.fontItalic(),
+            fmt.fontUnderline(), fmt.fontStrikeOut())
 
 
 def text_item(point, text, settings, alignment):
@@ -213,6 +267,10 @@ def text_item(point, text, settings, alignment):
     font = QFont(settings["font"] or "Microsoft YaHei", settings["font_size"])
     item.setFont(font)
     item.setDefaultTextColor(QColor(settings.get("text_color", settings["pen_color"])))
+    if settings.get("text_background_enabled"):
+        item.background_color = settings.get("text_background", "#fff3a0")
+    apply_text_format(item, settings.get("text_bold", False), settings.get("text_italic", False),
+                     settings.get("text_underline", False), settings.get("text_strikethrough", False))
     option = item.document().defaultTextOption()
     option.setAlignment(alignment)
     item.document().setDefaultTextOption(option)

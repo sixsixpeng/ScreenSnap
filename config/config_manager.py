@@ -88,9 +88,12 @@ DEFAULTS = {
     "last_capture_rect": [],
     "annotation_tool": "select", "text_alignment": "left", "arrow_style": "filled",
     "arrow_chain": False,
+    "pen_chain": False, "marker_chain": False,
     "rect_style": "solid", "ellipse_style": "solid",
     "rect_color": "#ff0000", "ellipse_color": "#ff0000",
     "arrow_color": "#ff0000", "marker_color": "#ff0000", "text_color": "#ff0000",
+    "text_background_enabled": False, "text_background": "#fff3a0",
+    "text_bold": False, "text_italic": False, "text_underline": False, "text_strikethrough": False,
     "rect_fill_enabled": False, "rect_fill_opacity": 35,
     "ellipse_fill_enabled": False, "ellipse_fill_opacity": 35,
     "pen_width": 2, "rect_width": 2, "ellipse_width": 2, "arrow_width": 2,
@@ -99,7 +102,8 @@ DEFAULTS = {
     "editor_border_color": "#000000", "editor_border_width": 1,
     "marker_opacity": 38, "font": "", "font_size": 18,
     "line_spacing": 1.2, "mosaic_size": 10,
-    "mosaic_mode": "blocks",
+    "mosaic_mode": "blocks", "mosaic_brush": False,
+    "eraser_erase_base": False,
     # 截图取色与定位辅助增强
     "capture_picker_shortcut": "C",
     "magnifier_grid": True, "magnifier_grid_color": "#cccccc",
@@ -193,7 +197,7 @@ def validate(data):
             result[key] = sequence.toString(QKeySequence.PortableText)
         elif key in ("sticker_border_color", "sticker_shadow_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("贴图颜色必须是六位十六进制颜色")
-        elif key in ("pen_color", "rect_color", "ellipse_color", "arrow_color", "marker_color", "text_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        elif key in ("pen_color", "rect_color", "ellipse_color", "arrow_color", "marker_color", "text_color", "text_background") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("标注工具颜色必须是六位十六进制颜色")
         elif key in ("rect_fill_opacity", "ellipse_fill_opacity") and not 0 <= value <= 100:
             raise ValueError("形状填充不透明度必须在 0 到 100 之间")

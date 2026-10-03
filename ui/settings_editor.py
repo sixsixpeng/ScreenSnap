@@ -34,6 +34,9 @@ class EditorPage(SettingsPage):
         self.preview("pen")
         self.add_color("pen_color", "画笔颜色")
         self.number("pen_width", "画笔线宽", 1, 50, "只影响画笔工具")
+        self.check("pen_chain", "画笔多段绘制",
+                   "开启后，画笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
+                   "按鼠标右键结束连续绘制并保留已画图形。")
         self.group("矩形")
         self.preview("rect")
         self.add_color("rect_color", "矩形颜色")
@@ -58,11 +61,16 @@ class EditorPage(SettingsPage):
         self.group("橡皮擦")
         self.preview("eraser")
         self.number("eraser_width", "橡皮擦直径", 10, 100, "只影响橡皮擦工具，范围 10–100")
+        self.check("eraser_erase_base", "同时擦除原图",
+                   "开启后橡皮擦同时擦掉截图原图；关闭则只擦标注、露出原图（非破坏性）")
         self.group("荧光笔")
         self.preview("marker")
         self.add_color("marker_color", "荧光笔颜色")
         self.number("marker_width", "荧光笔线宽", 1, 50, "只影响对应工具")
         self.number("marker_opacity", "荧光笔不透明度", 1, 100, "越低越能看清原图；荧光笔也使用标注颜色")
+        self.check("marker_chain", "荧光笔多段绘制",
+                   "开启后，荧光笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
+                   "按鼠标右键结束连续绘制并保留已画图形。")
         self.group("文字")
         self.preview("text", 120)
         self.add_color("text_color", "文字颜色")
@@ -72,6 +80,12 @@ class EditorPage(SettingsPage):
                                              ("右对齐", "right")], "新建文字标注的对齐方式")
         fonts = QFontDatabase.families()
         self.choice("font", "默认字体", [("系统默认", "")] + [(font, font) for font in fonts], "从已安装字体中选择")
+        self.check("text_bold", "粗体", "新建文字标注默认加粗")
+        self.check("text_italic", "斜体", "新建文字标注默认斜体")
+        self.check("text_underline", "下划线", "新建文字标注默认加下划线")
+        self.check("text_strikethrough", "删除线", "新建文字标注默认加删除线")
+        self.check("text_background_enabled", "文字背景", "为新建文字标注添加背景色块")
+        self.add_color("text_background", "文字背景色")
         self.group("序号标注")
         self.preview("sequence", 120)
         self.choice("sequence_shape", "序号形状",
@@ -97,6 +111,8 @@ class EditorPage(SettingsPage):
         self.choice("mosaic_mode", "马赛克类型", [("方块", "blocks"), ("毛玻璃", "blur"),
                              ("细粒", "fine")], "标注区域的像素处理方式")
         self.number("mosaic_size", "马赛克方块", 2, 100, "像素化块大小")
+        self.check("mosaic_brush", "涂抹模式（自由笔刷）",
+                   "开启后按住拖动可沿笔迹涂抹马赛克/模糊；关闭则为拖框选矩形")
         self.group("编辑区边框")
         self.number("editor_border_width", "编辑区边框粗细", 1, 12,
                     "只在编辑画布中显示，不写入图片")
@@ -133,6 +149,7 @@ class EditorPage(SettingsPage):
             "sequence_text_color": "新建序号标注中数字的文字颜色。",
             "editor_border_color": "编辑画布周围的边框颜色；只显示在编辑区，不会写入导出图片。",
             "crop_color": "编辑器裁剪框的线条颜色；只用于裁剪辅助显示。",
+            "text_background": "新建文字标注背景色块的颜色；仅当“文字背景”开启时生效。",
         }[key]
         button = ColorButton(self.config.data[key],
                              lambda color: self.update_value(key, color))
