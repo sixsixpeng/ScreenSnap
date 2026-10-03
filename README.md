@@ -633,6 +633,13 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon icon.ico --add-data "ic
 - **作用范围**：新建矩形/椭圆按填充色填充；选中已有矩形/椭圆后改填充色/开关/透明度即时生效（`set_selected_fill` 增加 color 参数）；设置页预览同步反映填充色；`shape()` 未传填充色时仍沿用线条颜色（旧行为不变）。
 - **验证**：`test_fill_color_config_default_matches_stroke_and_is_validated`（默认值与线色一致、格式校验、跟随与不跟随两种情形）、`test_shape_uses_fill_color_and_falls_back_to_stroke`（独立填充色与回退）、`test_set_selected_fill_applies_custom_color`、`test_toolbar_fill_color_controls_exist`；设置页分组与重置相关用例仍通过。
 
+### 2026-10-03 缩放「默认等比 + 按住键自由拉伸」在旋转后依然成立
+
+- **现象**：加了旋转之后，四角拖动「默认等比不变形、按住 `Ctrl`/`Alt`/`Shift`/`Space` 任一自由拉伸」的规则似乎失效（按了键仍是等比）。
+- **原因**：与画笔直线同一类问题——`_free_distortion` 只读取 `event.modifiers()`，拖动瞬间若键盘状态尚未同步（或画布未持有焦点）就读不到修饰键，被判成等比。规则本身（四角 `is_corner` 判定 + 取变化较大的轴作为统一比例）**不受旋转影响**。
+- **修正**：修饰键改为 `event.modifiers() | QApplication.keyboardModifiers()`，与 `wheelEvent`、画笔直线判定一致；`Space` 状态（`space_pressed`）沿用原逻辑。拖动过程中按下修饰键同样即时生效（该判定每次移动都会重新计算）。
+- **验证**：新增 `test_corner_resize_keeps_aspect_after_rotation_and_free_with_modifier`（0°/30°/90° 下用非等比位移拖 `se`：未按修饰键时横纵缩放比一致、按下 `Ctrl` 时不一致）；原有 `test_annotation_corner_resize_is_uniform_by_default_and_free_with_modifier`、缩放锚点、旋转项缩放等用例均通过。
+
 ### 2026-10-03 已有箭头后期改样式
 
 - **能力补齐**：此前箭头样式只能在绘制前选择，已画箭头无法改。现新增 `AnnotationCanvas.set_selected_arrow_style(style)`，对已选中的箭头（通过 `shape()` 记录的 `start/end/arrow_style/line_color/line_width` 重建路径）切换到实心/空心/双头/直线/矩形箭杆等任意样式，每切换记一次 checkpoint 可撤销。

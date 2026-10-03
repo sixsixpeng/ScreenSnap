@@ -1147,9 +1147,15 @@ class AnnotationCanvas(QGraphicsView):
                 self._update_alignment_guides()
                 self._update_resize_cursor(event.position().toPoint())
 
-    def _free_distortion(self, event):
-        """四角是否允许自由拉伸：按住 Ctrl/Alt/Shift 或 Space 任意其一。"""
-        modifiers = event.modifiers()
+    def _free_distortion(self, event=None):
+        """四角是否允许自由拉伸：按住 Ctrl/Alt/Shift 或 Space 任意其一。
+
+        与直线判定同理，修饰键同时取事件自带状态与全局键盘状态，
+        避免按下瞬间键盘状态未同步时误判成「等比」，导致按了键也不生效。
+        """
+        modifiers = QApplication.keyboardModifiers()
+        if event is not None:
+            modifiers |= event.modifiers()
         return bool(modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier)) \
             or self.space_pressed
 

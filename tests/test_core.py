@@ -5401,6 +5401,62 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(restored.toPlainText(), "第一行\n第二行")
         self.assertTrue(restored.document().firstBlock().blockFormat().alignment() & Qt.AlignRight)
 
+    def test_corner_resize_keeps_aspect_after_rotation_and_free_with_modifier(self):
+        """四角默认等比、按住修饰键自由拉伸的规则，旋转后依然成立。"""
+        import math
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+
+        canvas = AnnotationCanvas(Image.new("RGB", (400, 300), "white"), dict(DEFAULTS))
+        canvas.resize(500, 380)
+        canvas.show()
+        canvas.set_tool("select")
+        try:
+            # (旋转角, 修饰键, 是否期望等比)
+            cases = ((0, Qt.NoModifier, True), (0, Qt.ControlModifier, False),
+                     (30, Qt.NoModifier, True), (30, Qt.ControlModifier, False),
+                     (90, Qt.NoModifier, True))
+            for degrees, modifier, expect_uniform in cases:
+                canvas.restore([])
+                canvas.reset_history()
+                canvas.cursor_index = 0
+                item = shape("rect", QPointF(180, 140), QPointF(240, 180), "#ff0000", 2)
+                canvas.scene_data.addItem(item)
+                # 与真实旋转一致：绕中心旋转。
+                item.setTransformOriginPoint(item.boundingRect().center())
+                if degrees:
+                    item.setRotation(degrees)
+                item.setSelected(True)
+                canvas.checkpoint()
+                handles = canvas.item_resize_handles(item)
+                rad = math.radians(degrees)
+                cos_a, sin_a = math.cos(rad), math.sin(rad)
+                # 刻意用非等比位移（x 远大于 y），等比时应被拉回同一比例。
+                dx, dy = 40, 5
+                delta = QPointF(dx * cos_a - dy * sin_a, dx * sin_a + dy * cos_a)
+                start = canvas.mapFromScene(handles["se"])
+                finish = canvas.mapFromScene(handles["se"] + delta)
+
+                def send(kind, position, buttons=Qt.NoButton):
+                    self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                        kind, QPointF(position),
+                        QPointF(canvas.viewport().mapToGlobal(position)),
+                        Qt.LeftButton, buttons, modifier))
+
+                send(QEvent.MouseButtonPress, start, Qt.LeftButton)
+                send(QEvent.MouseMove, finish, Qt.LeftButton)
+                send(QEvent.MouseButtonRelease, finish)
+                transform = item.transform()
+                uniform = abs(transform.m11() - transform.m22()) < 1e-6
+                self.assertEqual(uniform, expect_uniform, (degrees, modifier))
+                canvas.resizing = None
+        finally:
+            canvas.close()
+
     def test_fill_color_config_default_matches_stroke_and_is_validated(self):
         from config.config_manager import DEFAULTS, validate, fill_colors_following_stroke
 
