@@ -2614,6 +2614,35 @@ class CoreTests(unittest.TestCase):
                     QPointF(20, 20), (tool, modifier))
                 canvas.close()
 
+    def test_pen_straight_line_when_modifier_pressed_after_start(self):
+        """鼠标按下之后才按住 Ctrl，拖动途中也应切换为直线（修「前几次触发不了」的时序问题）。"""
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"), dict(DEFAULTS))
+        canvas.resize(400, 300)
+        canvas.show()
+        canvas.set_tool("pen")
+        self.app.processEvents()
+
+        def send(kind, scene_point, modifiers, buttons=Qt.NoButton):
+            point = canvas.mapFromScene(QPointF(*scene_point))
+            self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                kind, QPointF(point), QPointF(canvas.viewport().mapToGlobal(point)),
+                Qt.LeftButton, buttons, modifiers))
+
+        send(QEvent.MouseButtonPress, (20, 20), Qt.NoModifier, Qt.LeftButton)
+        self.assertFalse(canvas.straight_drawing)
+        send(QEvent.MouseMove, (80, 60), Qt.ControlModifier, Qt.LeftButton)
+        self.assertTrue(canvas.straight_drawing)
+        send(QEvent.MouseButtonRelease, (80, 60), Qt.ControlModifier)
+        self.assertEqual(len(canvas.annotations()), 1)
+        self.assertEqual(canvas.annotations()[0].path().elementCount(), 2)
+        canvas.close()
+
     def test_pen_without_modifier_stays_freehand(self):
         """不按 Ctrl/Alt 且多段绘制关闭时，仍是自由手绘（节点多于直线）。"""
         from editor.annotation_canvas import AnnotationCanvas

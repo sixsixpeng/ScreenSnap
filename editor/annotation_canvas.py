@@ -168,9 +168,15 @@ class AnnotationCanvas(QGraphicsView):
             return bool(self.settings.get(f"{self.tool}_chain", False))
         return False
 
-    def _pen_marker_straight(self, event):
-        """画笔/记号笔当前笔划是否按直线模式绘制：多段开关开启，或按住 Ctrl / Alt 任意一个。"""
-        modifiers = event.modifiers()
+    def _pen_marker_straight(self, event=None):
+        """画笔/记号笔当前笔划是否按直线模式绘制：多段开关开启，或按住 Ctrl / Alt 任意一个。
+
+        修饰键同时取事件自带状态与全局键盘状态：只依赖 event.modifiers() 时，
+        若按下瞬间键盘状态尚未同步（或画布未持有焦点）会漏判成自由手绘。
+        """
+        modifiers = QApplication.keyboardModifiers()
+        if event is not None:
+            modifiers |= event.modifiers()
         ctrl_or_alt = bool(modifiers & (Qt.ControlModifier | Qt.AltModifier))
         return ctrl_or_alt or self._chain_tool() or self.chain_active
 
@@ -1121,6 +1127,10 @@ class AnnotationCanvas(QGraphicsView):
             end = self.image_point(self.mapToScene(event.position().toPoint()))
             self.preview_end = end
             if self.tool in ("pen", "marker"):
+                # 修饰键可能在鼠标按下之后才按住，拖动途中也能切换为直线模式。
+                if not self.straight_drawing and self._pen_marker_straight(event):
+                    self.straight_drawing = True
+                    self.committed_segments = []
                 if self.straight_drawing:
                     self.drawing = self._straight_preview_path(end)
                 else:
