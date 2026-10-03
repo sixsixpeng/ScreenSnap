@@ -120,9 +120,15 @@ class AnnotationPreview(QWidget):
             item = text_item(QPointF(0, 0), SAMPLE_TEXT, settings,
                              ALIGNMENTS.get(settings.get("text_alignment"), Qt.AlignLeft))
             item_rect = item.boundingRect()
-            center = scene.sceneRect().center()
-            item.setPos(center.x() - item_rect.width() / 2,
-                        center.y() - item_rect.height() / 2)
+            # 文字实际宽度常超出预览区（大字号尤甚），先等比缩小到可视区域内再居中，
+            # 避免左侧被裁掉看不到；能完整放下时不放大，保持原始字号观感。
+            scale = min(1.0, (width - 16) / max(item_rect.width(), 1),
+                        (height - 12) / max(item_rect.height(), 1))
+            item.setScale(scale)
+            scaled_width = item_rect.width() * scale
+            scaled_height = item_rect.height() * scale
+            item.setPos((width - scaled_width) / 2 - item_rect.x() * scale,
+                        (height - scaled_height) / 2 - item_rect.y() * scale)
             scene.addItem(item)
         elif self.kind == "arrow":
             scene.addItem(shape("arrow", QPointF(width * 0.12, height * 0.72),

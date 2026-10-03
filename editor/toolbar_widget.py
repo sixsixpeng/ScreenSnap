@@ -1217,6 +1217,28 @@ class ToolbarWidget(QWidget):
             with QSignalBlocker(button):
                 button.setChecked(option == value)
 
+    def sync_setting(self, key, value):
+        """外部入口（如文字输入对话框）改配置后同步工具栏控件，避免界面与配置不一致。"""
+        checkbox = {"text_bold": self.text_bold, "text_italic": self.text_italic,
+                    "text_underline": self.text_underline,
+                    "text_strikethrough": self.text_strikethrough,
+                    "text_background_enabled": self.text_background_enabled}.get(key)
+        if checkbox is not None:
+            with QSignalBlocker(checkbox):
+                checkbox.setChecked(bool(value))
+        elif key == "text_background":
+            self.text_background.set_color(value)
+        elif key == "text_color":
+            self.sync_tool_color("text_color", value)
+        elif key == "font_size":
+            with QSignalBlocker(self.font_size):
+                self.font_size.setValue(int(value))
+        elif key == "font" and value:
+            with QSignalBlocker(self.font):
+                self.font.setCurrentFont(QFont(value))
+        elif key == "text_alignment":
+            self.set_choice("text_alignment", value)
+
     def _apply_sequence_preset(self, preset_key):
         """套用序号预设组合，同步本地控件与画布设置。"""
         from editor.annotation_items import SEQUENCE_PRESETS

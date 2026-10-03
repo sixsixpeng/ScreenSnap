@@ -9,7 +9,7 @@ from PySide6.QtGui import (QBrush, QPainter, QPainterPath, QPen, QColor, QPixmap
                              QTextCursor, QTransform, QCursor, QKeySequence, QFont)
 from PySide6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
                                QGraphicsItem, QGraphicsRectItem, QGraphicsEllipseItem,
-                               QGraphicsTextItem, QInputDialog, QMenu, QToolTip,
+                               QGraphicsTextItem, QDialog, QMenu, QToolTip,
                                QStyleOptionGraphicsItem)
 
 from core.screen_capture import to_qimage
@@ -43,6 +43,8 @@ class AnnotationCanvas(QGraphicsView):
     cancelled = Signal()
     zoom_changed = Signal(int)
     selection_requested = Signal()
+    # 画布内入口（如文字输入对话框）改动配置时发出，交由编辑器同步配置与工具栏。
+    setting_changed = Signal(str, object)
 
     def __init__(self, image, settings, alternate=None):
         super().__init__()
@@ -1013,7 +1015,7 @@ class AnnotationCanvas(QGraphicsView):
             event.accept()
             return
         if self.tool == "text":
-            text, ok = QInputDialog.getMultiLineText(self, "文字标注", "内容")
+            text, ok = self.input_text("文字标注")
             if ok and text:
                 self.scene_data.addItem(text_item(point, text, self.settings, self.text_alignment))
                 self.checkpoint()
@@ -1206,8 +1208,26 @@ class AnnotationCanvas(QGraphicsView):
         # 菜单在无拖动的右键松开时显示，避免与抓手平移冲突。
         event.accept()
 
+    def input_text(self, title, initial=""):
+        """弹出文字输入对话框；上方样式默认套用当前配置，改动同步回配置。
+
+        返回 (文字内容, 是否确认)。
+        """
+        from editor.text_input_dialog import TextInputDialog
+
+        dialog = TextInputDialog(self, title, self.settings, initial)
+        if dialog.exec() != QDialog.Accepted:
+            return None, False
+        for key, value in dialog.changed_settings().items():
+            self.settings[key] = value
+            if key == "text_alignment":
+                self.text_alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
+                                       "right": Qt.AlignRight}[value]
+            self.setting_changed.emit(key, value)
+        return dialog.text(), True
+
     def edit_text_item(self, item):
-        text, ok = QInputDialog.getMultiLineText(self, "修改文字标注", "内容", item.toPlainText())
+        text, ok = self.input_text("修改文字标注", item.toPlainText())
         if ok and text != item.toPlainText():
             if not text:
                 self.scene_data.removeItem(item)

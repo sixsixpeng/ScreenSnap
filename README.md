@@ -618,6 +618,13 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon icon.ico --add-data "ic
 - **边界**：裁剪等底图尺寸变化时 `reset_history` 重建空遮罩；`reset_image`/`reset_region` 一并清空遮罩，无残留。
 - **验证**：`test_eraser_non_destructive_masks_pixmap_annotation`（标注项仍是原对象、像素未被改写、渲染擦处露白）、`test_eraser_default_only_masks_annotation_layer`（默认无标注时擦原图无变化）、`test_eraser_erase_base_option_clears_underlying_image`（开启后擦处 alpha 归零）、并保留 `test_eraser_removes_only_brushed_pixels_and_undo_restores`（掩码模型下仍通过，因底图白透出）。
 
+### 2026-10-03 文字输入对话框带样式设置 + 文字预览不再被裁切
+
+- **输入即调样式**：文字标注的输入框由 `QInputDialog.getMultiLineText` 换成自建的 `TextInputDialog`（`editor/text_input_dialog.py`）。输入框**上方**是一排文字设置：字体、字号、对齐、粗体/斜体/下划线/删除线、文字颜色、文字背景开关与背景色。
+- **默认套用 + 双向同步**：打开时各控件取当前配置；确认后**仅把改动过的项**写回 `canvas.settings`，并通过新增的 `canvas.setting_changed` 信号交由编辑器 `set_annotation_setting` 落盘，同时用 `toolbar.sync_setting` 同步工具栏控件（设置页、工具栏、输入框三处始终一致）。「新建文字」与「双击/右键编辑已有文字」两个入口共用该对话框。
+- **文字预览不再被裁切**：设置页「编辑器 ▸ 文字」的预览里，示例文字实际宽度常超出预览区（默认字号下为 450px vs 预览 260px），原居中算法忽略包围盒原点导致左边缘落到 -95 被裁掉。现改为先等比缩小到可视区域（留 16/12px 边距）再按包围盒原点居中，能放下时不放大以保留原始字号观感。
+- **验证**：`test_text_input_dialog_prefills_and_reports_changes`（默认套用、未改动不回写、改动项精确回传）、`test_canvas_input_text_syncs_changed_settings`（写回配置、对齐同步、对外发信号）、`test_toolbar_sync_setting_updates_text_controls`、`test_text_preview_fits_visible_area`（18/60/200 三种字号均完整可见）；原有文字编辑/双击/右键相关用例改为对新对话框打桩后仍通过。
+
 ### 2026-10-03 已有箭头后期改样式
 
 - **能力补齐**：此前箭头样式只能在绘制前选择，已画箭头无法改。现新增 `AnnotationCanvas.set_selected_arrow_style(style)`，对已选中的箭头（通过 `shape()` 记录的 `start/end/arrow_style/line_color/line_width` 重建路径）切换到实心/空心/双头/直线/矩形箭杆等任意样式，每切换记一次 checkpoint 可撤销。

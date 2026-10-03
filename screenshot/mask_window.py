@@ -187,6 +187,7 @@ class InlineEditor(QWidget):
                 QApplication.activePopupWidget() is None) else None)
         self.canvas.color_picked.connect(self.apply_picked_color)
         self.canvas.selection_requested.connect(self.toolbar.tool_buttons["select"].click)
+        self.canvas.setting_changed.connect(self.apply_canvas_setting)
         options_menu = self.toolbar.options_button.menu()
         options_menu.aboutToShow.connect(self.hide_magnifiers)
         options_menu.aboutToHide.connect(lambda: QTimer.singleShot(0, self.restore_magnifiers))
@@ -491,6 +492,11 @@ class InlineEditor(QWidget):
         self.toolbar.pen_color.setText("")
         self.set_pen_color(color)
         QGuiApplication.clipboard().setText(color)
+
+    def apply_canvas_setting(self, key, value):
+        """画布内入口（如文字输入对话框）改配置：写入配置并同步工具栏控件。"""
+        self.set_annotation_setting(key, value)
+        self.toolbar.sync_setting(key, value)
 
     def set_annotation_setting(self, key, value):
         from config.config_manager import TOOL_WIDTH_KEYS

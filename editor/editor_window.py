@@ -96,6 +96,7 @@ class EditorWindow(QMainWindow):
         self.canvas.zoom_changed.connect(self.zoom_slider.setValue)
         self.canvas.zoom_changed.connect(self.zoom_input.setValue)
         self.canvas.selection_requested.connect(self.toolbar.tool_buttons["select"].click)
+        self.canvas.setting_changed.connect(self.apply_canvas_setting)
         self.setCentralWidget(container)
         self.toolbar.tool_changed.connect(self.set_tool)
         self.toolbar.color_changed.connect(self.set_pen_color)
@@ -143,6 +144,11 @@ class EditorWindow(QMainWindow):
         self.toolbar.set_active_tool(self.canvas.tool, self.last_color_tool)
         self.toolbar.pen_color.set_color(color)
         QGuiApplication.clipboard().setText(color)
+
+    def apply_canvas_setting(self, key, value):
+        """画布内入口（如文字输入对话框）改配置：写入配置并同步工具栏控件。"""
+        self.set_annotation_setting(key, value)
+        self.toolbar.sync_setting(key, value)
 
     def set_annotation_setting(self, key, value):
         """保存当前工具参数，并更新适用的已选标注。"""

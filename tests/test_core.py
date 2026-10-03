@@ -5401,6 +5401,96 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(restored.toPlainText(), "第一行\n第二行")
         self.assertTrue(restored.document().firstBlock().blockFormat().alignment() & Qt.AlignRight)
 
+    def test_text_input_dialog_prefills_and_reports_changes(self):
+        from config.config_manager import DEFAULTS
+        from editor.text_input_dialog import TextInputDialog
+
+        settings = dict(DEFAULTS)
+        dialog = TextInputDialog(None, "文字标注", settings, "abc")
+        # 默认套用当前配置，未改动时不产生回写。
+        self.assertEqual(dialog.text(), "abc")
+        self.assertEqual(dialog.font_size.value(), settings["font_size"])
+        self.assertEqual(dialog.checks["text_bold"].isChecked(), settings["text_bold"])
+        self.assertEqual(dialog.changed_settings(), {})
+        dialog.checks["text_bold"].setChecked(True)
+        dialog.font_size.setValue(30)
+        dialog.alignment.setCurrentIndex(dialog.alignment.findData("center"))
+        changed = dialog.changed_settings()
+        self.assertTrue(changed["text_bold"])
+        self.assertEqual(changed["font_size"], 30)
+        self.assertEqual(changed["text_alignment"], "center")
+        dialog.accept()
+
+    def test_canvas_input_text_syncs_changed_settings(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_canvas import AnnotationCanvas
+        from editor import text_input_dialog
+        from PIL import Image
+        from PySide6.QtWidgets import QDialog
+
+        class StubDialog:
+            def __init__(self, parent, title, settings, initial=""):
+                self.title = title
+
+            def exec(self):
+                return QDialog.Accepted
+
+            def text(self):
+                return "hello"
+
+            def changed_settings(self):
+                return {"text_bold": True, "font_size": 42, "text_alignment": "center"}
+
+        original = text_input_dialog.TextInputDialog
+        text_input_dialog.TextInputDialog = StubDialog
+        try:
+            canvas = AnnotationCanvas(Image.new("RGB", (200, 160), "white"), dict(DEFAULTS))
+            emitted = []
+            canvas.setting_changed.connect(lambda key, value: emitted.append((key, value)))
+            text, ok = canvas.input_text("文字标注")
+            self.assertTrue(ok)
+            self.assertEqual(text, "hello")
+            # 改动写入画布配置并对外发出，供编辑器同步到配置与工具栏。
+            self.assertTrue(canvas.settings["text_bold"])
+            self.assertEqual(canvas.settings["font_size"], 42)
+            self.assertEqual(canvas.text_alignment, Qt.AlignHCenter)
+            self.assertIn(("text_bold", True), emitted)
+            canvas.close()
+        finally:
+            text_input_dialog.TextInputDialog = original
+
+    def test_toolbar_sync_setting_updates_text_controls(self):
+        from config.config_manager import DEFAULTS
+        from editor.toolbar_widget import ToolbarWidget
+
+        settings = dict(DEFAULTS)
+        toolbar = ToolbarWidget(settings["pen_color"], settings, settings["annotation_tool"])
+        toolbar.sync_setting("text_bold", True)
+        toolbar.sync_setting("font_size", 33)
+        self.assertTrue(toolbar.text_bold.isChecked())
+        self.assertEqual(toolbar.font_size.value(), 33)
+
+    def test_text_preview_fits_visible_area(self):
+        from config.config_manager import DEFAULTS
+        from ui.widgets.annotation_preview import AnnotationPreview
+        from PySide6.QtCore import QRectF
+        from PySide6.QtWidgets import QGraphicsPixmapItem
+
+        class Config:
+            def __init__(self, data):
+                self.data = data
+
+        for size in (18, 60, 200):
+            settings = dict(DEFAULTS)
+            settings["font_size"] = size
+            widget = AnnotationPreview(Config(settings), "text", 120)
+            widget.resize(320, 120)
+            scene = widget.build(QRectF(widget.rect()))
+            text = [item for item in scene.items()
+                    if not isinstance(item, QGraphicsPixmapItem)][0]
+            area = QRectF(widget.rect())
+            self.assertTrue(area.contains(text.sceneBoundingRect()), size)
+
     def test_text_background_applies_and_round_trips(self):
         from config.config_manager import DEFAULTS
         from editor.annotation_items import text_item
@@ -5996,7 +6086,7 @@ class CoreTests(unittest.TestCase):
         canvas.set_zoom(200)
         confirmations = []
         canvas.confirmed.connect(lambda: confirmations.append(True))
-        with patch("PySide6.QtWidgets.QInputDialog.getMultiLineText",
+        with patch("editor.text_input_dialog.TextInputDialog",
                    side_effect=AssertionError("right click must not edit text")):
             for tool in ("text", "picker", "eraser", "select"):
                 canvas.tool = tool
@@ -6530,7 +6620,7 @@ class CoreTests(unittest.TestCase):
         for tool in ("pen", "marker", "rect", "ellipse", "arrow", "mosaic", "text"):
             canvas.tool = tool
             outside = canvas.mapFromScene(QPointF(-12, -12))
-            with patch("editor.annotation_canvas.QInputDialog.getMultiLineText") as dialog:
+            with patch("editor.text_input_dialog.TextInputDialog") as dialog:
                 QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=outside)
                 QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=outside)
                 dialog.assert_not_called()
@@ -6673,7 +6763,11 @@ class CoreTests(unittest.TestCase):
         canvas.checkpoint()
         editor.show()
         self.app.processEvents()
-        with patch("editor.annotation_canvas.QInputDialog.getMultiLineText", return_value=("修改后", True)) as dialog:
+        from PySide6.QtWidgets import QDialog
+        with patch("editor.text_input_dialog.TextInputDialog") as dialog:
+            dialog.return_value.exec.return_value = QDialog.Accepted
+            dialog.return_value.text.return_value = "修改后"
+            dialog.return_value.changed_settings.return_value = {}
             canvas.annotation_menu(canvas.annotations()[0]).actions()[0].trigger()
         self.assertEqual(dialog.call_args.args[3], "原文")
         self.assertEqual(canvas.annotations()[0].toPlainText(), "修改后")
@@ -6731,8 +6825,11 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(canvas.annotations()), 2)
         # 文字标注：双击编辑而非删除（撤销后从场景取最新文字项，避免陈旧引用）
         live_text = [a for a in canvas.annotations() if hasattr(a, "toPlainText")][0]
-        with patch("editor.annotation_canvas.QInputDialog.getMultiLineText",
-                   return_value=("修改后", True)) as dialog:
+        from PySide6.QtWidgets import QDialog
+        with patch("editor.text_input_dialog.TextInputDialog") as dialog:
+            dialog.return_value.exec.return_value = QDialog.Accepted
+            dialog.return_value.text.return_value = "修改后"
+            dialog.return_value.changed_settings.return_value = {}
             canvas.mouseDoubleClickEvent(dbl(live_text))
         dialog.assert_called_once()
         self.assertEqual(len(canvas.annotations()), 2)
@@ -6754,8 +6851,11 @@ class CoreTests(unittest.TestCase):
         canvas.scene_data.addItem(text)
         canvas.set_tool("select")
         canvas.scene_data.itemAt = lambda *a, **k: text
-        with patch("editor.annotation_canvas.QInputDialog.getMultiLineText",
-                   return_value=("修改后", True)) as dialog:
+        from PySide6.QtWidgets import QDialog
+        with patch("editor.text_input_dialog.TextInputDialog") as dialog:
+            dialog.return_value.exec.return_value = QDialog.Accepted
+            dialog.return_value.text.return_value = "修改后"
+            dialog.return_value.changed_settings.return_value = {}
             canvas.mouseDoubleClickEvent(QMouseEvent(QEvent.Type.MouseButtonDblClick, QPointF(0, 0),
                                                      Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
         dialog.assert_called_once()
