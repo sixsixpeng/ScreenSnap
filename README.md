@@ -555,6 +555,80 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon icon.ico --add-data "ic
 - **交互约定**：第一段由按下左键（起点）拖到松开（终点）完成；后续每一段复用上一终点为起点，按下左键的位置不再作为起点，仅松开点决定本段终点，因此预览始终从锚点（上一终点）连到光标，方便在移动鼠标未落点前查看。右键中途结束连续绘制时保留所有已画图形。
 - **验证**：新增定向用例 `test_arrow_chain_draws_connected_segments_and_right_click_finishes`（多段相连、锚点停在上一终点、右键结束保留图形并复位链状态）与 `test_arrow_single_shot_without_chain`（关闭时每次绘制后复位起点、不产生连续链）；`python -m unittest tests.test_core` 相关用例通过。
 
+### 2026-10-03 画笔/记号笔直线与多段绘制
+
+- **Ctrl+Alt 临时直线**：画笔/记号笔在按下时按住 `Ctrl+Alt`，本次笔划改为「起点→松开点」的单段直线（不再累积自由手绘轨迹），松开即提交一条两点之间的直线；未拖出第二点（位移低于 3px）则不产生任何痕迹。
+- **「多段绘制」开关（独立）**：新增 `pen_chain` 与 `marker_chain`（默认关闭），位于编辑器工具栏「更多设置 > 画笔 / 记号笔」，沿用 `arrow_chain` 模式。开启后画笔/记号笔等价于「Ctrl+Alt 但可续接」——只绘制多段直线：每段鼠标左键落点、移动预览下一段、再次左键提交并续接，按鼠标右键或 `Esc` 结束并保留已画图形。每段直线各自独立、撤销按段逐步回退（与箭头一致）。
+- **统一行为**：自由画笔/记号笔的孤立单击（无拖动）现在也不绘制，消除误触留下的点；直线/折线模式下 `drawForeground` 预览由已提交段与当前橡皮筋段拼成。右键结束多段的逻辑从「仅箭头」扩展为「箭头或开启多段的画笔/记号笔」，切换工具同样复位链状态。
+- **配置边界**：开关仅放在工具栏「更多设置」弹窗（全局设置对话框未加，保持与 `arrow_chain` 一致）；`config/config_manager.py` 的 `DEFAULTS` 新增 `pen_chain`/`marker_chain` 默认值，颜色规范化与小写约定不受影响。
+- **验证**：新增 `test_pen_straight_line_with_ctrl_alt_is_single_segment`（Ctrl+Alt 生成单段直线、节点数为 2、不续接）、`test_pen_straight_line_without_second_point_draws_nothing`（无第二点不绘制）、`test_pen_freehand_isolated_click_draws_nothing`（自由单击不绘制）、`test_pen_chain_draws_connected_straight_segments`（多段直线相连、锚点停在上一终点、右键结束保留图形并复位）、`test_marker_chain_draws_connected_straight_segments`（记号笔多段直线）；箭头多段绘制回归用例与工具栏/设置冒烟用例均通过。
+
+### 2026-10-03 撤销/重做键盘快捷键
+
+- **画布快捷键**：编辑器（含截图内联编辑器，二者共用 `AnnotationCanvas`）新增 `Ctrl+Z` 撤销、`Ctrl+Y`（以及 `Ctrl+Shift+Z`）重做，复用既有 `undo()`/`redo()`，与工具栏撤销/重做按钮行为一致。使用 `QKeySequence.Undo`/`Redo` 适配各平台标准按键，不影响 `Delete`/`Backspace`（删除选中）、`Esc`（结束/取消）、`Space`（临时平移）等既有快捷键。
+- **边界**：快捷键在画布获得按键事件时生效；若焦点在工具栏输入框等控件上，则由控件自身处理（与全局撤销/重做按钮互补）。多段绘制进行中按 `Ctrl+Z` 走常规撤销（回退历史快照），不特判“仅撤销本段”。
+- **验证**：新增 `test_undo_redo_keyboard_shortcuts`（`Ctrl+Z` 使 `cursor_index` 减一；再经 `Ctrl+Y` 与 `Ctrl+Shift+Z` 两种重做标准后恢复），用例通过；`python -m unittest tests.test_core` 中该用例通过，其余失败均为既有的 offscreen/功能类用例，与本次改动无关。
+
+### 2026-10-03 选择工具下文字双击改为就地编辑
+
+- **行为修正**：选择工具中双击文字标注不再直接删除，而是打开「修改文字标注」弹窗就地编辑（复用 `edit_text_item`）；双击矩形/椭圆/箭头等非文字标注仍保持原删除行为。其他工具下双击文字标注依旧先切到选择工具并选中，不删除。
+- **边界**：仅影响 `AnnotationCanvas.mouseDoubleClickEvent` 的 `select` 分支；非文字项、右键菜单的「编辑文字 / 删除标注」逻辑均不受影响。
+- **验证**：新增 `test_double_click_select_tool_routes_text_to_edit_and_shape_to_delete`（文字走编辑、非文字走删除、各自可撤销还原）与 `test_double_click_text_in_select_tool_edits_not_deletes`（双击文字编辑而非删除、内容更新）；两者均直接驱动事件处理并桩掉 `itemAt`，不依赖窗口曝光，offscreen 下稳定通过。
+
+### 2026-10-03 画笔/记号笔自由手绘平滑
+
+- **提交时平滑**：自由手绘（非 `Ctrl+Alt` 直线、非多段）松开提交时，原始折线（`moveTo` + 一连串 `lineTo`）不再直接成图，而是经由 `_smooth_freehand_path` 转成经过相邻点中点的二次贝塞尔曲线，消除手绘毛刺。点数不足 3 个（或去重后不足 3 个）直接原样提交，行为与孤立点不绘制逻辑互不冲突。
+- **作用范围**：仅作用于画笔/记号笔的自由手绘提交（`AnnotationCanvas` 释放分支），直线模式、`Ctrl+Alt` 临时直线、多段（折线）直线均不受影响；导出/剪贴板/外观预览共用同一路径，因此平滑同时体现在成品中。实时预览仍为原始折线，提交瞬间转平滑，避免每帧重复平滑。
+- **验证**：新增 `test_pen_freehand_is_smoothed_on_commit`（多步弯曲笔划提交后路径含曲线元素且起止点不变）；`test_pen_freehand_isolated_click_draws_nothing`、`test_pen_straight_line_with_ctrl_alt_is_single_segment`、`test_pen_chain_draws_connected_straight_segments` 等既有用例仍通过。
+
+### 2026-10-03 文字标注背景色块
+
+- **新增「文字背景」开关与取色**：工具栏「更多设置 > 文字」新增「文字背景」勾选框与背景色选择器（默认关闭、默认色 `#fff3a0`）。开启后新建文字标注在文字之下绘制一块背景色，便于在复杂底图上突出文字。
+- **实现方式**：`AnnotationTextItem` 增加 `background_color` 属性并在 `paint` 中先于文字绘制背景矩形；`text_item` 仅在 `text_background_enabled` 为真时写入该属性。背景随标注一起被 `snapshot`/`restore` 序列化（新增 `background` 字段），导出、剪贴板与外观预览均包含在内；编辑文字（`setPlainText`）不会剥离背景。
+- **作用范围**：仅影响新建文字标注；已有文字标注不会因修改设置而自动变更（与现有 `text_color`/`font` 等设置一致）。配置键 `text_background_enabled`/`text_background` 加入 `DEFAULTS` 并通过既有十六进制颜色校验。
+- **验证**：新增 `test_text_background_applies_and_round_trips`（开关开启写入背景、关闭不写、snapshot/restore 往返保留背景）；`test_text_line_spacing_and_undo`、`test_existing_text_context_menu_edits_and_undoes` 等文字用例仍通过。
+
+### 2026-10-03 标注移动对齐参考线
+
+- **拖动吸附与参考线**：在「选择」工具下拖动选中标注时，以其整体包围盒的左/中/右、上/中/下边为候选，检测是否靠近其它标注的对应边或画布边缘；在 6px（场景/图像像素，与缩放无关）阈值内则吸附对齐，并在前景绘制粉色虚线参考（垂直/水平），松开后参考线消失。仅预览、不参与导出。
+- **实现方式**：新增 `_update_alignment_guides`，在 select 工具 `mouseMoveEvent` 委派基类移动之后调用；参考线存于 `self.alignment_guides`，在 `drawForeground` 末尾以虚线绘制；`mouseReleaseEvent` 开头清空。参考线坐标均为场景坐标，随缩放自适应。
+- **验证**：新增 `test_drag_shows_alignment_guides_when_edges_close`（边缘接近时产生对齐参考线并把选中项吸附到对方边缘）、`test_no_alignment_guides_when_far_apart`（远离时无参考线）。
+
+### 2026-10-03 单标注旋转
+
+- **旋转手柄**：「选择」工具单选某标注时，在其包围盒中心正上方出现一个圆形旋转手柄（随标注一起旋转）；从手柄拖动即以项中心为支点旋转，实时预览；松开提交历史快照，可撤销/重做。`Shift` 吸附到 15° 步进。
+- **实现方式**：新增 `rotation_handle_position`/`rotation_handle_at`/`_begin_rotation`/`_rotate_to`；按下命中旋转手柄进入旋转态（`self.rotating`），拖动时按指针相对支点的角度增量调用 `item.setRotation`；支点始终为项局部包围盒中心（`setTransformOriginPoint`），保证旋转后位置不漂移。序列化在 `snapshot`/`restore` 增加 `rotation` 字段并显式 `setRotation` 恢复（避免被 `setScale` 重建矩阵覆盖）。
+- **与缩放共存（MVP）**：旋转项在「选择」工具下隐藏 8 个缩放手柄，仅保留移动（旋转+缩放组合矩阵较复杂，留待后续）；未旋转的标注缩放/移动行为完全不变。移动光标在旋转项上仍显示 `SizeAll`。
+- **验证**：新增 `test_single_selection_rotation_handle_rotates_and_round_trips`（旋转后角度变化、撤销回到 0、重做恢复）、`test_rotated_item_hides_resize_handles`（旋转后不再绘制缩放手柄）；双击编辑/删除、撤销重做快捷键、对齐参考线等相关用例均通过。
+
+### 2026-10-03 马赛克/模糊自由笔刷
+
+- **涂抹模式**：马赛克/模糊工具新增「涂抹模式（自由笔刷）」开关（默认关闭，保留原矩形框选入口）。开启后按住拖动，沿鼠标笔迹生成任意形状的马赛克/模糊覆盖，支持「方块 / 毛玻璃 / 细粒」三种 `mosaic_mode`。
+- **实现方式**：按下时记录 `QPainterPath` 笔迹（`self.mosaic_drawing`）；移动时 `lineTo` 扩展并在前景以虚线预览；松开时由 `_commit_mosaic_brush` 用 `QPainterPathStroker` 把笔迹扩张为带圆角端点的涂抹区域，取底图对应区域按 `mosaic_image` 生成效果后，再用笔迹形状作为透明度遮罩（`setAlphaChannel`）裁掉区域外像素，得到一张带透明背景的 `AnnotationPixmapItem` 覆盖层（偏移至区域左上角）。笔刷粗细取 `max(8, mosaic_size*2)`，随颗粒度联动。
+- **非破坏性与序列化**：覆盖层是独立的 `AnnotationPixmapItem`，可整体移动/撤销/重做；因其本质是带透明像素的 PixmapItem，复用既有 `snapshot`/`restore`（pixmap+offset）即可往返。底图不被改写（与原矩形马赛克一致）。
+- **验证**：新增 `test_mosaic_brush_commits_stroked_overlay`（笔迹中心不透明、笔迹外完全透明、产物为 AnnotationPixmapItem）与 `test_mosaic_brush_toggle_default_keeps_rectangle`（默认关闭矩形框选）；矩形马赛克既有用例不受影响。
+
+### 2026-10-03 橡皮擦改为非破坏性遮罩
+
+- **问题**：原橡皮擦沿笔迹把矢量标注栅格化进位图再用 `CompositionMode_Clear` 擦像素，标注被永久破坏、不可再编辑/恢复（用户投诉）。
+- **方案**：canvas 维护一张与底图同尺寸、初始透明的 `erase_mask_image`。橡皮擦沿笔迹把白色笔迹绘制进该遮罩（不再改写任何标注项）。`render_image` 改为三阶段合成：① 先画底图；② 渲染标注层后在层内用遮罩 `DestinationOut` 清除被擦处（露出底层）；③ 仅当开启 `eraser_erase_base` 时，对合成结果（含底图）再 `DestinationOut` 一次，使原图也被擦成透明。
+- **非破坏性**：标注项本身从不改写，仍可移动/改色/改样式/撤销；遮罩纳入历史快照（tuple 末尾），撤销即移除最近一笔遮罩，重做恢复，往返正确。
+- **配置**：`eraser_erase_base`（默认 `False`，只擦标注、露出原图）；工具栏橡皮擦下新增“同时擦除原图”开关，切换即时生效。
+- **边界**：裁剪等底图尺寸变化时 `reset_history` 重建空遮罩；`reset_image`/`reset_region` 一并清空遮罩，无残留。
+- **验证**：`test_eraser_non_destructive_masks_pixmap_annotation`（标注项仍是原对象、像素未被改写、渲染擦处露白）、`test_eraser_default_only_masks_annotation_layer`（默认无标注时擦原图无变化）、`test_eraser_erase_base_option_clears_underlying_image`（开启后擦处 alpha 归零）、并保留 `test_eraser_removes_only_brushed_pixels_and_undo_restores`（掩码模型下仍通过，因底图白透出）。
+
+### 2026-10-03 已有箭头后期改样式
+
+- **能力补齐**：此前箭头样式只能在绘制前选择，已画箭头无法改。现新增 `AnnotationCanvas.set_selected_arrow_style(style)`，对已选中的箭头（通过 `shape()` 记录的 `start/end/arrow_style/line_color/line_width` 重建路径）切换到实心/空心/双头/直线/矩形箭杆等任意样式，每切换记一次 checkpoint 可撤销。
+- **使用入口**：箭头项的重建元数据随 `snapshot`/`restore` 序列化（新增 `arrow_style` 等字段），撤销/重做后仍可继续改样式。选择工具下「更多设置」现显示「箭头样式」控件，选中箭头后切换即作用于该箭头；未选中时切换仅影响后续新建箭头（与 `rect_style`/`ellipse_style` 的既有行为一致）。
+- **验证**：新增 `test_selected_arrow_style_can_be_changed_later`（选中箭头改双头实心、撤销回到实心、矩形线型切换不影响箭头）；`set_selected_line_style`（矩形/椭圆实虚线）等既有用例不受影响。
+
+### 2026-10-03 文字全套格式（粗体/斜体/下划线/删除线）
+
+- **补齐缺失格式**：此前文字仅支持字体/字号/颜色/对齐/行距，现新增「粗体 / 斜体 / 下划线 / 删除线」四个整篇格式开关，位于工具栏「更多设置 > 文字」区。样式通过 `QTextCharFormat` 作用于整篇文档（Qt5/6 通用），导出、剪贴板与预览均包含。
+- **序列化与实时生效**：四个开关加入 `DEFAULTS`；`text_item` 在创建时应用；`snapshot`/`restore` 通过 `read_text_format`/`apply_text_format` 保留格式（新增字段）；编辑文字（`setPlainText`）后自动按当前设置重新应用，避免格式被清空。选中已有文字标注时切换开关会实时套用（`set_selected_text_format`），每切换记一次 checkpoint 可撤销。
+- **验证**：新增 `test_text_format_flags_apply_and_round_trip`（新建应用、关闭后再套用到选中项、快照/还原往返保留格式）；文字编辑、背景色等既有用例不受影响。
+
 ### 2026-10-02 功能点汇总（按主题）
 
 - **截图与遮罩**
