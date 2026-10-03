@@ -6306,6 +6306,44 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(canvas.render_image().pixelColor(50, 20).name(), "#ffffff")
         canvas.close()
 
+    def test_eraser_visible_on_live_view_not_only_export(self):
+        from PySide6.QtTest import QTest
+        from PySide6.QtGui import QImage, QPainter
+        from config.config_manager import DEFAULTS
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), dict(DEFAULTS))
+        canvas.resize(200, 150)
+        canvas.show()
+        canvas.scene_data.addItem(shape("rect", QPointF(20, 20), QPointF(80, 80), "#ff0000", 4))
+        canvas.checkpoint()
+        canvas.tool = "eraser"
+        QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=canvas.mapFromScene(QPointF(50, 20)))
+        QTest.mouseMove(canvas.viewport(), pos=canvas.mapFromScene(QPointF(56, 20)))
+        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=canvas.mapFromScene(QPointF(56, 20)))
+        # 擦除标志应已置位，并驱动实时视图按遮罩合成（露出白色底图而非红色标注）。
+        self.assertTrue(canvas.erase_mask_dirty)
+        vp = canvas.viewport()
+        visible = canvas.mapToScene(vp.rect()).boundingRect()
+        img = QImage(vp.size(), QImage.Format_ARGB32)
+        img.fill(0)
+        painter = QPainter(img)
+        painter.translate(-visible.x(), -visible.y())
+        canvas._paint_erased_composite(painter)
+        painter.end()
+        px = int(round(50 - visible.x()))
+        py = int(round(20 - visible.y()))
+        self.assertEqual(img.pixelColor(px, py).name(), "#ffffff")
+        # 撤销后标志复位，合成停止，标注恢复为红色。
+        canvas.undo()
+        self.assertFalse(canvas.erase_mask_dirty)
+        img2 = QImage(vp.size(), QImage.Format_ARGB32)
+        img2.fill(0)
+        painter2 = QPainter(img2)
+        painter2.translate(-visible.x(), -visible.y())
+        canvas._paint_erased_composite(painter2)
+        painter2.end()
+        self.assertEqual(img2.pixelColor(px, py).name(), "#ff0000")
+        canvas.close()
+
     def test_marker_is_translucent_wide_and_survives_undo(self):
         from PySide6.QtTest import QTest
         from config.config_manager import DEFAULTS, validate

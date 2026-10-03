@@ -102,6 +102,8 @@ class AnnotationCanvas(QGraphicsView):
         self.mosaic_point = None
         self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
         self.erase_mask_image.fill(Qt.transparent)
+        # 记录当前遮罩是否有笔迹，供实时视图决定是否合成（避免每帧扫描遮罩）。
+        self.erase_mask_dirty = False
         self.resize_origin = None
         self.resize_position = None
         self.resize_start = None
@@ -117,7 +119,8 @@ class AnnotationCanvas(QGraphicsView):
         self.selection_start = None
         self.selection_end = None
         self.selection_area = None
-        self.history = [(self.image, self.alternate, self.cursor_enabled, [], self.erase_mask_image.copy())]
+        self.history = [(self.image, self.alternate, self.cursor_enabled, [],
+                        self.erase_mask_image.copy(), self.erase_mask_dirty)]
         self.cursor_index = 0
         self.zoom_percent = 100
 
@@ -472,27 +475,31 @@ class AnnotationCanvas(QGraphicsView):
             self.constrain_item(item)
         self.history = self.history[:self.cursor_index + 1]
         self.history.append((self.image, self.alternate, self.cursor_enabled,
-                             self.snapshot(), self.erase_mask_image.copy()))
+                             self.snapshot(), self.erase_mask_image.copy(),
+                             self.erase_mask_dirty))
         self.cursor_index += 1
         self.changed.emit()
 
     def restore_checkpoint(self):
         """从历史节点恢复底图与标注，通知工具栏同步光标开关。"""
-        image, alternate, cursor_enabled, records, erase_mask = self.history[self.cursor_index]
+        image, alternate, cursor_enabled, records, erase_mask, erase_dirty = \
+            self.history[self.cursor_index]
         if self.image is not image:
             self.image = image
             self.refresh_image()
         self.alternate = alternate
         self.cursor_enabled = cursor_enabled
         self.erase_mask_image = erase_mask.copy()
+        self.erase_mask_dirty = erase_dirty
         self.restore(records)
 
     def reset_history(self):
         """重建初始历史（含空擦除遮罩），用于选区重置或外部重置。"""
         self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
         self.erase_mask_image.fill(Qt.transparent)
+        self.erase_mask_dirty = False
         self.history = [(self.image, self.alternate, self.cursor_enabled, [],
-                        self.erase_mask_image.copy())]
+                        self.erase_mask_image.copy(), self.erase_mask_dirty)]
         self.cursor_index = 0
 
     def toggle_cursor(self, enabled):
@@ -525,6 +532,7 @@ class AnnotationCanvas(QGraphicsView):
         self.restore([])
         self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
         self.erase_mask_image.fill(Qt.transparent)
+        self.erase_mask_dirty = False
         self.checkpoint()
 
     def remove_selected(self):
@@ -734,6 +742,8 @@ class AnnotationCanvas(QGraphicsView):
                 or self.erase_mask_image.height() != self.image.height):
             self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
             self.erase_mask_image.fill(Qt.transparent)
+            # 尺寸变化后遮罩已清空，实时合成标志也随之复位。
+            self.erase_mask_dirty = False
 
     def erase_segment(self, start, end):
         """把擦除笔迹加入非破坏性遮罩（默认只作用于标注层，露出底图）。"""
@@ -747,10 +757,73 @@ class AnnotationCanvas(QGraphicsView):
         painter.setBrush(QColor("white"))
         painter.drawEllipse(end, radius, radius)
         painter.end()
+        # 标记遮罩已有笔迹，实时视图据此合成镂空效果。
+        self.erase_mask_dirty = True
         self.viewport().update()
+
+    def _erase_live_active(self):
+        """实时视图是否需要按遮罩合成（遮罩有笔迹时）。"""
+        return (self.erase_mask_dirty and self.erase_mask_image is not None
+                and not self.erase_mask_image.isNull())
+
+    def drawItems(self, painter, items, options):
+        """擦除激活时跳过默认绘制，改由 drawForeground 合成底图与镂空标注层，
+
+        使非破坏性橡皮擦在实时视图中可见；其余情况下保持原生矢量绘制。
+        """
+        if self._erase_live_active():
+            return
+        super().drawItems(painter, items, options)
+
+    def _paint_erased_composite(self, painter):
+        """仅渲染可见区域：先画底图（按开关决定是否擦底图），再画被遮罩镂空的标注层。"""
+        vp = self.viewport().rect()
+        if vp.isEmpty():
+            return
+        visible = self.mapToScene(vp).boundingRect().intersected(self.sceneRect())
+        if visible.isEmpty():
+            return
+        x0 = max(0, int(math.floor(visible.x())))
+        y0 = max(0, int(math.floor(visible.y())))
+        x1 = max(x0 + 1, int(math.ceil(visible.x() + visible.width())))
+        y1 = max(y0 + 1, int(math.ceil(visible.y() + visible.height())))
+        w = x1 - x0
+        h = y1 - y0
+        if w <= 0 or h <= 0:
+            return
+        # 底图层：取可见区域的底图像素，开启 eraser_erase_base 时一并镂空。
+        base_img = self.base.pixmap().toImage().convertToFormat(QImage.Format_ARGB32)
+        if not base_img.isNull():
+            bw = min(base_img.width() - x0, w)
+            bh = min(base_img.height() - y0, h)
+            if bw > 0 and bh > 0:
+                base_sub = base_img.copy(x0, y0, bw, bh)
+                if self.settings.get("eraser_erase_base", False):
+                    mp = QPainter(base_sub)
+                    mp.setCompositionMode(QPainter.CompositionMode_DestinationOut)
+                    mp.drawImage(-x0, -y0, self.erase_mask_image)
+                    mp.end()
+                painter.drawImage(visible.topLeft(), base_sub)
+        # 标注层：隐藏底图后渲染，再按遮罩镂空，露出底图或透明。
+        ann = QImage(w, h, QImage.Format_ARGB32)
+        ann.fill(Qt.transparent)
+        ap = QPainter(ann)
+        ap.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        self.base.hide()
+        self.scene_data.render(ap, QRectF(0, 0, w, h), QRectF(x0, y0, w, h))
+        self.base.show()
+        ap.end()
+        mp = QPainter(ann)
+        mp.setCompositionMode(QPainter.CompositionMode_DestinationOut)
+        mp.drawImage(-x0, -y0, self.erase_mask_image)
+        mp.end()
+        painter.drawImage(visible.topLeft(), ann)
 
     def drawForeground(self, painter, rect):
         """只在视图预览正在绘制的标注和缩放手柄，导出不包含这些辅助线。"""
+        # 非破坏性橡皮擦的实时镂空效果（绘制在选区框、手柄等辅助线之下）。
+        if self._erase_live_active():
+            self._paint_erased_composite(painter)
         if self.round_corner_preview and self.corner_radius > 0:
             bounds = self.sceneRect()
             radius = min(self.corner_radius, bounds.width() / 2, bounds.height() / 2)

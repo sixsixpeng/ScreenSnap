@@ -658,6 +658,13 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon icon.ico --add-data "ic
 - **序列化与实时生效**：四个开关加入 `DEFAULTS`；`text_item` 在创建时应用；`snapshot`/`restore` 通过 `read_text_format`/`apply_text_format` 保留格式（新增字段）；编辑文字（`setPlainText`）后自动按当前设置重新应用，避免格式被清空。选中已有文字标注时切换开关会实时套用（`set_selected_text_format`），每切换记一次 checkpoint 可撤销。
 - **验证**：新增 `test_text_format_flags_apply_and_round_trip`（新建应用、关闭后再套用到选中项、快照/还原往返保留格式）；文字编辑、背景色等既有用例不受影响。
 
+### 2026-10-03 橡皮擦实时可见（非破坏性遮罩在画布上合成）
+
+- **现象**：非破坏性橡皮擦只作用于**导出**（保存/复制/仅复制），在画布上擦除时屏幕"毫无反应"，表现为"擦不掉任何东西"；把新开关 `eraser_erase_base` 关掉也看不到任何改善。
+- **原因**：非破坏性改写前，擦除是**破坏性**的——把标注项栅格化为 pixmap 后用 `CompositionMode_Clear` 擦像素，所以屏幕即时可见。改成遮罩方案后，擦除只画进 `erase_mask_image`，而该遮罩**仅在 `render_image`（导出）里合成**，`QGraphicsView` 的实时场景根本没应用它，于是屏幕上永远看不到擦除。
+- **修正**：擦除激活时，`drawItems` 跳过默认绘制，改由 `drawForeground` 开头把「底图」（按 `eraser_erase_base` 决定是否也对底图镂空）与「按遮罩 `DestinationOut` 镂空的标注层」合成为离屏层并绘制；只渲染**可见区域**以控制大图开销。新增 `erase_mask_dirty` 标志避免每帧扫描遮罩，并将其并入历史元组第 6 个元素，随撤销/重做/重置/裁剪导致的尺寸变化正确复位。矢量标注项在擦除期间保持完整、可继续选中/移动/旋转，撤销即可恢复。
+- **验证**：新增 `test_eraser_visible_on_live_view_not_only_export`（实时合成后擦除处露出白色底图、撤销后标志复位且恢复红色）；原有 `test_eraser_removes_only_brushed_pixels_and_undo_restores`（导出路径）仍通过；导出/复制行为不变。
+
 ### 2026-10-02 功能点汇总（按主题）
 
 - **截图与遮罩**
