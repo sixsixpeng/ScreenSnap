@@ -94,8 +94,8 @@ DEFAULTS = {
     "arrow_color": "#ff0000", "marker_color": "#ff0000", "text_color": "#ff0000",
     "text_background_enabled": False, "text_background": "#fff3a0",
     "text_bold": False, "text_italic": False, "text_underline": False, "text_strikethrough": False,
-    "rect_fill_enabled": False, "rect_fill_opacity": 35,
-    "ellipse_fill_enabled": False, "ellipse_fill_opacity": 35,
+    "rect_fill_enabled": False, "rect_fill_opacity": 35, "rect_fill_color": "#ff0000",
+    "ellipse_fill_enabled": False, "ellipse_fill_opacity": 35, "ellipse_fill_color": "#ff0000",
     "pen_width": 2, "rect_width": 2, "ellipse_width": 2, "arrow_width": 2,
     "marker_width": 2, "eraser_width": 30, "pen_color": "#ff0000",
     "crop_color": "#00ad91", "crop_width": 2,
@@ -124,6 +124,18 @@ def _save_formats():
     from core.image_io import SAVE_FORMATS
 
     return SAVE_FORMATS
+
+
+# 形状填充色默认与对应的线条颜色一致：用户自定义过填充色后不再跟随。
+LINKED_FILL_COLORS = {"rect_color": "rect_fill_color", "ellipse_color": "ellipse_fill_color"}
+
+
+def fill_colors_following_stroke(settings, key, value):
+    """线色变化时返回需一并跟随的填充色项；未联动时返回空字典。"""
+    fill_key = LINKED_FILL_COLORS.get(key)
+    if fill_key and settings.get(fill_key) == settings.get(key):
+        return {fill_key: value}
+    return {}
 
 
 def canonical_hotkey(binding):
@@ -197,7 +209,7 @@ def validate(data):
             result[key] = sequence.toString(QKeySequence.PortableText)
         elif key in ("sticker_border_color", "sticker_shadow_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("贴图颜色必须是六位十六进制颜色")
-        elif key in ("pen_color", "rect_color", "ellipse_color", "arrow_color", "marker_color", "text_color", "text_background") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        elif key in ("pen_color", "rect_color", "ellipse_color", "arrow_color", "marker_color", "text_color", "text_background", "rect_fill_color", "ellipse_fill_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("标注工具颜色必须是六位十六进制颜色")
         elif key in ("rect_fill_opacity", "ellipse_fill_opacity") and not 0 <= value <= 100:
             raise ValueError("形状填充不透明度必须在 0 到 100 之间")

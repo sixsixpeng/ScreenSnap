@@ -625,6 +625,14 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon icon.ico --add-data "ic
 - **文字预览不再被裁切**：设置页「编辑器 ▸ 文字」的预览里，示例文字实际宽度常超出预览区（默认字号下为 450px vs 预览 260px），原居中算法忽略包围盒原点导致左边缘落到 -95 被裁掉。现改为先等比缩小到可视区域（留 16/12px 边距）再按包围盒原点居中，能放下时不放大以保留原始字号观感。
 - **验证**：`test_text_input_dialog_prefills_and_reports_changes`（默认套用、未改动不回写、改动项精确回传）、`test_canvas_input_text_syncs_changed_settings`（写回配置、对齐同步、对外发信号）、`test_toolbar_sync_setting_updates_text_controls`、`test_text_preview_fits_visible_area`（18/60/200 三种字号均完整可见）；原有文字编辑/双击/右键相关用例改为对新对话框打桩后仍通过。
 
+### 2026-10-03 矩形/椭圆：圆角设置合并一行 + 新增填充颜色
+
+- **圆角开关与半径合并一行**：设置页「编辑器 ▸ 矩形」的圆角开关与圆角半径改为同一行（新增 `SettingsPage.check_number`，开关 + 数值并列）；编辑器工具栏的「矩形圆角」行同样把开关与滑块放在一起，不再占两行。
+- **新增填充颜色**：矩形与椭圆各新增填充颜色配置，默认与对应线条颜色一致（均为 `#ff0000`）。设置页与**两个编辑器**工具栏都提供取色入口，并纳入颜色格式校验、本页重置与全局重置。
+- **填充色跟随线色**：改线条颜色时，若填充色仍等于旧线色则自动跟随（`config.fill_colors_following_stroke`）；用户自定义过填充色后不再跟随，保留自定义值。
+- **作用范围**：新建矩形/椭圆按填充色填充；选中已有矩形/椭圆后改填充色/开关/透明度即时生效（`set_selected_fill` 增加 color 参数）；设置页预览同步反映填充色；`shape()` 未传填充色时仍沿用线条颜色（旧行为不变）。
+- **验证**：`test_fill_color_config_default_matches_stroke_and_is_validated`（默认值与线色一致、格式校验、跟随与不跟随两种情形）、`test_shape_uses_fill_color_and_falls_back_to_stroke`（独立填充色与回退）、`test_set_selected_fill_applies_custom_color`、`test_toolbar_fill_color_controls_exist`；设置页分组与重置相关用例仍通过。
+
 ### 2026-10-03 已有箭头后期改样式
 
 - **能力补齐**：此前箭头样式只能在绘制前选择，已画箭头无法改。现新增 `AnnotationCanvas.set_selected_arrow_style(style)`，对已选中的箭头（通过 `shape()` 记录的 `start/end/arrow_style/line_color/line_width` 重建路径）切换到实心/空心/双头/直线/矩形箭杆等任意样式，每切换记一次 checkpoint 可撤销。

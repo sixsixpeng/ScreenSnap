@@ -43,10 +43,11 @@ class EditorPage(SettingsPage):
         self.number("rect_width", "矩形线宽", 1, 50, "只影响矩形工具")
         self.choice("rect_style", "矩形线型", [("实线", "solid"), ("虚线", "dash")],
                     "新建矩形使用的边框线型")
-        self.check("rect_corner_enabled", "矩形标注使用圆角", "新建矩形标注使用圆角；实线和虚线均适用")
-        self.number("rect_corner_radius", "矩形标注圆角半径 (px)", 0, 100,
-                "圆角半径，0 表示直角；单张图片与窗口内编辑共用此设置")
-        self.check("rect_fill_enabled", "矩形填充区域", "绘制矩形时以矩形工具颜色填充区域")
+        self.check_number("rect_corner_enabled", "rect_corner_radius", "矩形标注圆角 (px)", 0, 100,
+                          "勾选后新建矩形标注使用圆角；右侧数值为圆角半径，0 表示直角；"
+                          "实线和虚线均适用，单张图片与窗口内编辑共用此设置")
+        self.check("rect_fill_enabled", "矩形填充区域", "绘制矩形时填充区域")
+        self.add_color("rect_fill_color", "矩形填充颜色")
         self.number("rect_fill_opacity", "矩形填充不透明度 (%)", 0, 100,
                     "0 为完全透明，100 为完全不透明")
         self.group("椭圆")
@@ -55,7 +56,8 @@ class EditorPage(SettingsPage):
         self.number("ellipse_width", "椭圆线宽", 1, 50, "只影响椭圆工具")
         self.choice("ellipse_style", "椭圆线型", [("实线", "solid"), ("虚线", "dash")],
                     "新建椭圆使用的边框线型")
-        self.check("ellipse_fill_enabled", "椭圆填充区域", "绘制椭圆时以椭圆工具颜色填充区域")
+        self.check("ellipse_fill_enabled", "椭圆填充区域", "绘制椭圆时填充区域")
+        self.add_color("ellipse_fill_color", "椭圆填充颜色")
         self.number("ellipse_fill_opacity", "椭圆填充不透明度 (%)", 0, 100,
                     "0 为完全透明，100 为完全不透明")
         self.group("橡皮擦")
@@ -150,6 +152,8 @@ class EditorPage(SettingsPage):
             "editor_border_color": "编辑画布周围的边框颜色；只显示在编辑区，不会写入导出图片。",
             "crop_color": "编辑器裁剪框的线条颜色；只用于裁剪辅助显示。",
             "text_background": "新建文字标注背景色块的颜色；仅当“文字背景”开启时生效。",
+            "rect_fill_color": "矩形标注的填充颜色；默认与矩形线条颜色一致，改线色会自动跟随。",
+            "ellipse_fill_color": "椭圆标注的填充颜色；默认与椭圆线条颜色一致，改线色会自动跟随。",
         }[key]
         button = ColorButton(self.config.data[key],
                              lambda color: self.update_value(key, color))

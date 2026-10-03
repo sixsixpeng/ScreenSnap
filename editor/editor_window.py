@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
 
 from core.image_io import save_image, saved_extension
 from core.path_utils import resolved_dir
-from config.config_manager import TOOL_WIDTH_KEYS
+from config.config_manager import TOOL_WIDTH_KEYS, fill_colors_following_stroke
 from editor.annotation_canvas import AnnotationCanvas
 from editor.image_effects import apply_output_effects
 from core.screen_capture import qimage_to_pillow
@@ -152,6 +152,11 @@ class EditorWindow(QMainWindow):
 
     def set_annotation_setting(self, key, value):
         """保存当前工具参数，并更新适用的已选标注。"""
+        # 填充色默认与线色一致：仍等于旧线色时跟随变化，用户自定义过则保留。
+        for fill_key, fill_value in fill_colors_following_stroke(self.settings, key, value).items():
+            self.settings[fill_key] = fill_value
+            self.canvas.settings[fill_key] = fill_value
+            self.toolbar.sync_setting(fill_key, fill_value)
         self.settings[key] = value
         self.canvas.settings[key] = value
         if key in self.toolbar.tool_color_buttons:
@@ -172,14 +177,16 @@ class EditorWindow(QMainWindow):
             self.canvas.set_selected_arrow_style(value)
         elif key in ("text_bold", "text_italic", "text_underline", "text_strikethrough"):
             self.canvas.set_selected_text_format()
-        elif key in ("rect_fill_enabled", "rect_fill_opacity"):
+        elif key in ("rect_fill_enabled", "rect_fill_opacity", "rect_fill_color"):
             self.canvas.set_selected_fill(
                 "rect", self.settings.get("rect_fill_enabled", False),
-                self.settings.get("rect_fill_opacity", 35))
-        elif key in ("ellipse_fill_enabled", "ellipse_fill_opacity"):
+                self.settings.get("rect_fill_opacity", 35),
+                self.settings.get("rect_fill_color"))
+        elif key in ("ellipse_fill_enabled", "ellipse_fill_opacity", "ellipse_fill_color"):
             self.canvas.set_selected_fill(
                 "ellipse", self.settings.get("ellipse_fill_enabled", False),
-                self.settings.get("ellipse_fill_opacity", 35))
+                self.settings.get("ellipse_fill_opacity", 35),
+                self.settings.get("ellipse_fill_color"))
         elif key == "font":
             self.canvas.set_selected_font(value)
         elif key == "font_size":

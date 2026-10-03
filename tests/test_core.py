@@ -5401,6 +5401,69 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(restored.toPlainText(), "第一行\n第二行")
         self.assertTrue(restored.document().firstBlock().blockFormat().alignment() & Qt.AlignRight)
 
+    def test_fill_color_config_default_matches_stroke_and_is_validated(self):
+        from config.config_manager import DEFAULTS, validate, fill_colors_following_stroke
+
+        # 默认填充色与对应线色一致。
+        self.assertEqual(DEFAULTS["rect_fill_color"], DEFAULTS["rect_color"])
+        self.assertEqual(DEFAULTS["ellipse_fill_color"], DEFAULTS["ellipse_color"])
+        # 颜色格式纳入校验。
+        self.assertEqual(validate({"rect_fill_color": "#00ff00"})["rect_fill_color"], "#00ff00")
+        with self.assertRaises(ValueError):
+            validate({"rect_fill_color": "green"})
+        with self.assertRaises(ValueError):
+            validate({"ellipse_fill_color": 12})
+        # 线色变化时：未自定义则跟随，已自定义则保留。
+        settings = dict(DEFAULTS)
+        self.assertEqual(fill_colors_following_stroke(settings, "rect_color", "#168cff"),
+                         {"rect_fill_color": "#168cff"})
+        settings["rect_fill_color"] = "#00ff00"
+        self.assertEqual(fill_colors_following_stroke(settings, "rect_color", "#168cff"), {})
+        self.assertEqual(fill_colors_following_stroke(settings, "pen_color", "#123456"), {})
+
+    def test_shape_uses_fill_color_and_falls_back_to_stroke(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from PySide6.QtCore import QPointF
+
+        # 指定填充色：与线条颜色相互独立。
+        item = shape("rect", QPointF(10, 10), QPointF(60, 50), "#ff0000", 2,
+                     fill_enabled=True, fill_opacity=100, fill_color="#00ff00")
+        self.assertEqual(item.brush().color().name(), "#00ff00")
+        self.assertEqual(item.pen().color().name(), "#ff0000")
+        # 未指定时沿用线条颜色（旧行为不变）。
+        fallback = shape("ellipse", QPointF(10, 10), QPointF(60, 50), "#ff0000", 2,
+                         fill_enabled=True, fill_opacity=100)
+        self.assertEqual(fallback.brush().color().name(), "#ff0000")
+        self.assertEqual(DEFAULTS["rect_fill_color"], "#ff0000")
+
+    def test_set_selected_fill_applies_custom_color(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import QPointF
+
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 160), "white"), dict(DEFAULTS))
+        item = shape("rect", QPointF(20, 20), QPointF(80, 60), "#ff0000", 2,
+                     fill_enabled=True, fill_opacity=100)
+        canvas.scene_data.addItem(item)
+        item.setSelected(True)
+        canvas.set_selected_fill("rect", True, 100, "#00ad91")
+        self.assertEqual(item.brush().color().name(), "#00ad91")
+        canvas.close()
+
+    def test_toolbar_fill_color_controls_exist(self):
+        from config.config_manager import DEFAULTS
+        from editor.toolbar_widget import ToolbarWidget
+
+        settings = dict(DEFAULTS)
+        toolbar = ToolbarWidget(settings["pen_color"], settings, settings["annotation_tool"])
+        self.assertTrue(hasattr(toolbar, "rect_fill_color"))
+        self.assertTrue(hasattr(toolbar, "ellipse_fill_color"))
+        toolbar.sync_setting("rect_fill_color", "#123456")
+        toolbar.sync_setting("ellipse_fill_color", "#654321")
+
     def test_text_input_dialog_prefills_and_reports_changes(self):
         from config.config_manager import DEFAULTS
         from editor.text_input_dialog import TextInputDialog

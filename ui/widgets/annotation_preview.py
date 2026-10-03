@@ -141,13 +141,15 @@ class AnnotationPreview(QWidget):
                                 corner_radius=(settings.get("rect_corner_radius", 12)
                                                if settings.get("rect_corner_enabled", False) else 0),
                                 fill_enabled=settings.get("rect_fill_enabled", False),
-                                fill_opacity=settings.get("rect_fill_opacity", 35)))
+                                fill_opacity=settings.get("rect_fill_opacity", 35),
+                                fill_color=settings.get("rect_fill_color")))
         elif self.kind == "ellipse":
             scene.addItem(shape("ellipse", QPointF(width * 0.40, height * 0.16),
                                 QPointF(width * 0.62, height * 0.62),
                                 settings.get("ellipse_color", color), settings["ellipse_width"], settings["ellipse_style"],
                                 fill_enabled=settings.get("ellipse_fill_enabled", False),
-                                fill_opacity=settings.get("ellipse_fill_opacity", 35)))
+                                fill_opacity=settings.get("ellipse_fill_opacity", 35),
+                                fill_color=settings.get("ellipse_fill_color")))
         elif self.kind == "pen":
             path = QPainterPath(QPointF(width * 0.25, height * 0.60))
             path.quadTo(QPointF(width * 0.50, height * 0.20), QPointF(width * 0.75, height * 0.60))

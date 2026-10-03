@@ -600,8 +600,8 @@ class AnnotationCanvas(QGraphicsView):
         if selected:
             self.checkpoint()
 
-    def set_selected_fill(self, tool, enabled, opacity):
-        """实时更新选中矩形或椭圆的填充与透明度。"""
+    def set_selected_fill(self, tool, enabled, opacity, color=None):
+        """实时更新选中矩形或椭圆的填充、颜色与透明度。"""
         item_type = QGraphicsRectItem if tool == "rect" else QGraphicsEllipseItem
         selected = [item for item in self.scene_data.selectedItems()
                     if isinstance(item, item_type)]
@@ -609,7 +609,8 @@ class AnnotationCanvas(QGraphicsView):
             if not enabled:
                 item.setBrush(Qt.NoBrush)
                 continue
-            fill = QColor(item.pen().color())
+            # 未指定填充色时沿用线条颜色，保持与新建时一致。
+            fill = QColor(color or item.pen().color())
             fill.setAlpha(round(255 * max(0, min(100, opacity)) / 100))
             item.setBrush(fill)
         if selected:
@@ -1404,7 +1405,8 @@ class AnnotationCanvas(QGraphicsView):
                              if self.tool == "rect" and self.settings.get("rect_corner_enabled", False)
                              else 0,
                              self.settings.get(f"{self.tool}_fill_enabled", False),
-                             self.settings.get(f"{self.tool}_fill_opacity", 35))
+                             self.settings.get(f"{self.tool}_fill_opacity", 35),
+                             self.settings.get(f"{self.tool}_fill_color"))
             self.scene_data.addItem(item)
             if self.tool == "arrow" and self.settings.get("arrow_chain", False):
                 # 多段绘制：保留上一终点作为下一段起点；按右键结束连续绘制。

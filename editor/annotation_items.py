@@ -135,12 +135,15 @@ def editable(item):
 
 
 def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
-          fill_enabled=False, fill_opacity=35):
-    """按工具类型建立可选中、可移动的矢量图元。"""
+          fill_enabled=False, fill_opacity=35, fill_color=None):
+    """按工具类型建立可选中、可移动的矢量图元。
+
+    fill_color 为 None 时填充沿用线条颜色，保持旧行为。
+    """
     bounds = QRectF(start, end).normalized()
     dashed = arrow_style in ("dashed", "double_dashed", "dashed_line", "rect_dashed", "dash")
     pen = QPen(QColor(color), width, Qt.DashLine if dashed else Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
-    fill = QColor(color)
+    fill = QColor(fill_color or color)
     fill.setAlpha(round(255 * max(0, min(100, fill_opacity)) / 100))
     if tool == "rect":
         item = RoundedRectItem(bounds, corner_radius) if corner_radius > 0 else AnnotationRectItem(bounds)

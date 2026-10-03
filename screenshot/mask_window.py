@@ -499,7 +499,12 @@ class InlineEditor(QWidget):
         self.toolbar.sync_setting(key, value)
 
     def set_annotation_setting(self, key, value):
-        from config.config_manager import TOOL_WIDTH_KEYS
+        from config.config_manager import TOOL_WIDTH_KEYS, fill_colors_following_stroke
+        # 填充色默认与线色一致：仍等于旧线色时跟随变化，用户自定义过则保留。
+        for fill_key, fill_value in fill_colors_following_stroke(self.settings, key, value).items():
+            self.settings[fill_key] = fill_value
+            self.canvas.settings[fill_key] = fill_value
+            self.toolbar.sync_setting(fill_key, fill_value)
         self.settings[key] = value
         self.canvas.settings[key] = value
         if key in self.toolbar.tool_color_buttons:
@@ -516,14 +521,16 @@ class InlineEditor(QWidget):
             self.canvas.set_selected_width(value)
         elif key in ("rect_style", "ellipse_style"):
             self.canvas.set_selected_line_style(value)
-        elif key in ("rect_fill_enabled", "rect_fill_opacity"):
+        elif key in ("rect_fill_enabled", "rect_fill_opacity", "rect_fill_color"):
             self.canvas.set_selected_fill(
                 "rect", self.settings.get("rect_fill_enabled", False),
-                self.settings.get("rect_fill_opacity", 35))
-        elif key in ("ellipse_fill_enabled", "ellipse_fill_opacity"):
+                self.settings.get("rect_fill_opacity", 35),
+                self.settings.get("rect_fill_color"))
+        elif key in ("ellipse_fill_enabled", "ellipse_fill_opacity", "ellipse_fill_color"):
             self.canvas.set_selected_fill(
                 "ellipse", self.settings.get("ellipse_fill_enabled", False),
-                self.settings.get("ellipse_fill_opacity", 35))
+                self.settings.get("ellipse_fill_opacity", 35),
+                self.settings.get("ellipse_fill_color"))
         elif key == "font":
             self.canvas.set_selected_font(value)
         elif key == "font_size":

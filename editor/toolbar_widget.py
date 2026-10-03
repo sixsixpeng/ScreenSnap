@@ -396,6 +396,17 @@ class ToolbarWidget(QWidget):
         self.ellipse_fill_opacity_label = QLabel(f"{self.ellipse_fill_opacity.value()}%")
         self.ellipse_fill_opacity.valueChanged.connect(lambda value: self.ellipse_fill_opacity_label.setText(f"{value}%"))
         self.ellipse_fill_opacity.valueChanged.connect(lambda value: self.setting_changed.emit("ellipse_fill_opacity", value))
+        # 填充颜色：默认与对应线条颜色一致，可单独指定。
+        self.rect_fill_color = ColorButton(
+            settings.get("rect_fill_color", settings.get("rect_color", "#ff0000")),
+            lambda color: self.setting_changed.emit("rect_fill_color", color),
+            compact=True, purpose="矩形填充颜色")
+        self.rect_fill_color.setMinimumHeight(34)
+        self.ellipse_fill_color = ColorButton(
+            settings.get("ellipse_fill_color", settings.get("ellipse_color", "#ff0000")),
+            lambda color: self.setting_changed.emit("ellipse_fill_color", color),
+            compact=True, purpose="椭圆填充颜色")
+        self.ellipse_fill_color.setMinimumHeight(34)
         self.ellipse_style = self.radio_options(
             "ellipse_style", (("实线", "solid"), ("虚线", "dash")),
             settings.get("ellipse_style", "solid"), "设置新椭圆的边框线型")
@@ -492,11 +503,16 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(self.ellipse_style, 11, 1, 1, 2)
         panel_layout.addWidget(QLabel("预览"), 12, 0)
         panel_layout.addWidget(preview_box, 12, 1, 1, 2)
+        # 圆角开关与半径滑块合并为一行，减少纵向占用。
+        corner_row = QWidget()
+        corner_layout = QHBoxLayout(corner_row)
+        corner_layout.setContentsMargins(0, 0, 0, 0)
+        corner_layout.setSpacing(6)
+        corner_layout.addWidget(self.rect_corner_enabled)
+        corner_layout.addWidget(self.rect_corner_radius)
+        corner_layout.addWidget(self.rect_corner_radius_label)
         panel_layout.addWidget(QLabel("矩形圆角"), 13, 0)
-        panel_layout.addWidget(self.rect_corner_enabled, 13, 1, 1, 2)
-        panel_layout.addWidget(QLabel("圆角半径"), 14, 0)
-        panel_layout.addWidget(self.rect_corner_radius, 14, 1)
-        panel_layout.addWidget(self.rect_corner_radius_label, 14, 2)
+        panel_layout.addWidget(corner_row, 13, 1, 1, 2)
         panel_layout.addWidget(QLabel("矩形填充"), 15, 0)
         panel_layout.addWidget(self.rect_fill_enabled, 15, 1, 1, 2)
         panel_layout.addWidget(QLabel("填充透明度"), 16, 0)
@@ -507,6 +523,10 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(QLabel("填充透明度"), 18, 0)
         panel_layout.addWidget(self.ellipse_fill_opacity, 18, 1)
         panel_layout.addWidget(self.ellipse_fill_opacity_label, 18, 2)
+        panel_layout.addWidget(QLabel("矩形填充色"), 32, 0)
+        panel_layout.addWidget(self.rect_fill_color, 32, 1, 1, 2)
+        panel_layout.addWidget(QLabel("椭圆填充色"), 33, 0)
+        panel_layout.addWidget(self.ellipse_fill_color, 33, 1, 1, 2)
         # 文字背景：开关 + 取色，置于独立行（仅 text 工具可见）。
         panel_layout.addWidget(self.text_background_enabled, 28, 0)
         panel_layout.addWidget(self.text_background, 28, 1, 1, 2)
@@ -564,7 +584,7 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(QLabel("预设组合"), 24, 0)
         panel_layout.addWidget(self.sequence_preset, 24, 1, 1, 2)
         self.sequence_rows = (19, 20, 21, 22, 23, 24)
-        option_row_count = 32
+        option_row_count = 34
         for row in range(option_row_count):
             label_item = panel_layout.itemAtPosition(row, 0)
             label = label_item.widget() if label_item is not None else None
@@ -840,9 +860,9 @@ class ToolbarWidget(QWidget):
         elif tool == "crop":
             rows.add(9)
         elif tool == "rect":
-            rows.update((10, 13, 14, 15, 16))
+            rows.update((10, 13, 15, 16, 32))
         elif tool == "ellipse":
-            rows.update((11, 17, 18))
+            rows.update((11, 17, 18, 33))
         elif tool == "number":
             rows.update(self.sequence_rows)
         elif tool == "select":
@@ -1228,6 +1248,10 @@ class ToolbarWidget(QWidget):
                 checkbox.setChecked(bool(value))
         elif key == "text_background":
             self.text_background.set_color(value)
+        elif key == "rect_fill_color":
+            self.rect_fill_color.set_color(value)
+        elif key == "ellipse_fill_color":
+            self.ellipse_fill_color.set_color(value)
         elif key == "text_color":
             self.sync_tool_color("text_color", value)
         elif key == "font_size":

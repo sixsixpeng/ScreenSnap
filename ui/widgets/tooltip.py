@@ -5,8 +5,8 @@ import logging
 
 from PySide6.QtCore import QSignalBlocker
 from PySide6.QtWidgets import (QWidget, QFormLayout, QCheckBox, QSpinBox, QDoubleSpinBox,
-                               QLineEdit, QComboBox, QGroupBox, QScrollArea, QVBoxLayout,
-                               QPushButton, QStyle)
+                               QLineEdit, QComboBox, QGroupBox, QHBoxLayout, QScrollArea,
+                               QVBoxLayout, QPushButton, QStyle)
 
 from ui.widgets.color_button import ColorButton
 from ui.widgets.file_path_edit import FilePathEdit
@@ -128,6 +128,32 @@ class SettingsPage(QWidget):
         widget.setRange(low, high)
         widget.setValue(self.config.data[key])
         return self.bind(key, widget, widget.valueChanged, widget.value, label, help_text)
+
+    def check_number(self, check_key, number_key, label, low, high, help_text, suffix=""):
+        """开关与数值放在同一行，避免一项设置占用两行。"""
+        box = QCheckBox()
+        box.setChecked(self.config.data[check_key])
+        spin = QSpinBox()
+        spin.setRange(low, high)
+        spin.setValue(self.config.data[number_key])
+        if suffix:
+            spin.setSuffix(suffix)
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(box)
+        row.addWidget(spin)
+        row.addStretch()
+        container = QWidget()
+        container.setLayout(row)
+        box.setToolTip(help_text)
+        spin.setToolTip(help_text)
+        self.controls[check_key] = box
+        self.controls[number_key] = spin
+        self.form.addRow(label, container)
+        box.toggled.connect(lambda value: self.update_value(check_key, value))
+        spin.valueChanged.connect(lambda value: self.update_value(number_key, value))
+        return container
 
     def decimal(self, key, label, low, high, help_text):
         """创建可按 0.1 步进调整的小数设置控件。"""
