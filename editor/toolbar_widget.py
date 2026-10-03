@@ -895,9 +895,9 @@ class ToolbarWidget(QWidget):
         tool_order = [self.cursor_switch, self.options_button,
                       self.tool_buttons["select"],
                       *(self.tool_buttons[key] for key in
-                        ("pen", "marker", "rect", "ellipse", "text", "arrow",
-                                                 "mosaic", "eraser", "picker", "crop", "number")
-                                                if key != "crop" or not self.property("inline_edit"))]
+                        ("pen", "marker", "rect", "ellipse", "number", "text", "arrow",
+                                                 "mosaic", "eraser", "picker", "crop")
+                        if key != "crop" or not self.property("inline_edit"))]
         gap = self.tool_grid.horizontalSpacing()
         tool_widths = ([widget.width() for widget in tool_order] if self.property("inline_edit") else
                        [max(widget.sizeHint().width(), widget.minimumWidth())
