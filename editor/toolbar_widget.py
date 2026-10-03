@@ -300,6 +300,21 @@ class ToolbarWidget(QWidget):
         self.mosaic_brush.setChecked(settings.get("mosaic_brush", False))
         self.mosaic_brush.setToolTip("开启后按住拖动可沿笔迹涂抹马赛克/模糊；关闭则为拖框选矩形")
         self.mosaic_brush.toggled.connect(lambda value: self.setting_changed.emit("mosaic_brush", value))
+        # 切换涂抹模式会改变可用参数行（笔刷宽度只在涂抹模式下有意义），需重算可见行。
+        self.mosaic_brush.toggled.connect(lambda _value: self._refresh_option_rows())
+        self.mosaic_width = QSlider(Qt.Horizontal)
+        self.mosaic_width.setRange(4, 100)
+        self.mosaic_width.setValue(settings.get("mosaic_width", 20))
+        self.mosaic_width.setMinimumWidth(220)
+        self.mosaic_width.setMinimumHeight(36)
+        self.mosaic_width.setToolTip("涂抹模式的笔刷宽度（像素）")
+        self.mosaic_width_label = QLabel(f"{self.mosaic_width.value()} px")
+        self.mosaic_width_label.setMinimumWidth(52)
+        self.mosaic_width_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.mosaic_width.valueChanged.connect(
+            lambda value: self.mosaic_width_label.setText(f"{value} px"))
+        self.mosaic_width.valueChanged.connect(
+            lambda value: self.setting_changed.emit("mosaic_width", value))
         self.eraser_erase_base = QCheckBox("同时擦除原图")
         self.eraser_erase_base.setChecked(settings.get("eraser_erase_base", False))
         self.eraser_erase_base.setToolTip("开启后橡皮擦同时擦掉截图原图；关闭则只擦标注、露出原图")
@@ -527,6 +542,9 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(self.rect_fill_color, 32, 1, 1, 2)
         panel_layout.addWidget(QLabel("椭圆填充色"), 33, 0)
         panel_layout.addWidget(self.ellipse_fill_color, 33, 1, 1, 2)
+        panel_layout.addWidget(QLabel("笔刷宽度"), 34, 0)
+        panel_layout.addWidget(self.mosaic_width, 34, 1)
+        panel_layout.addWidget(self.mosaic_width_label, 34, 2)
         # 文字背景：开关 + 取色，置于独立行（仅 text 工具可见）。
         panel_layout.addWidget(self.text_background_enabled, 28, 0)
         panel_layout.addWidget(self.text_background, 28, 1, 1, 2)
@@ -584,7 +602,7 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(QLabel("预设组合"), 24, 0)
         panel_layout.addWidget(self.sequence_preset, 24, 1, 1, 2)
         self.sequence_rows = (19, 20, 21, 22, 23, 24)
-        option_row_count = 34
+        option_row_count = 35
         for row in range(option_row_count):
             label_item = panel_layout.itemAtPosition(row, 0)
             label = label_item.widget() if label_item is not None else None
@@ -833,6 +851,12 @@ class ToolbarWidget(QWidget):
             self.tool_widths[tool] = value
             self.setting_changed.emit(TOOL_WIDTH_KEYS[tool], value)
 
+    def _refresh_option_rows(self):
+        """按当前工具重算参数行可见性（如切换涂抹模式后）。"""
+        tool = next((key for key, button in self.tool_buttons.items() if button.isChecked()), None)
+        if tool:
+            self.set_tool_mode(tool)
+
     def set_tool_mode(self, tool):
         """只展示当前工具可用的参数；切换时不改写别的工具的线宽。"""
         self.set_active_tool(tool)
@@ -855,6 +879,9 @@ class ToolbarWidget(QWidget):
             rows.update((3, 4, 5, 28, 29))
         elif tool == "mosaic":
             rows.update((6, 7, 30))
+            # 笔刷宽度仅在涂抹模式（自由笔刷）下生效。
+            if self.mosaic_brush.isChecked():
+                rows.add(34)
         elif tool == "arrow":
             rows.update((8, 25))
         elif tool == "crop":
@@ -1248,6 +1275,9 @@ class ToolbarWidget(QWidget):
                 checkbox.setChecked(bool(value))
         elif key == "text_background":
             self.text_background.set_color(value)
+        elif key == "mosaic_width":
+            with QSignalBlocker(self.mosaic_width):
+                self.mosaic_width.setValue(int(value))
         elif key == "rect_fill_color":
             self.rect_fill_color.set_color(value)
         elif key == "ellipse_fill_color":

@@ -640,6 +640,12 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon icon.ico --add-data "ic
 - **修正**：修饰键改为 `event.modifiers() | QApplication.keyboardModifiers()`，与 `wheelEvent`、画笔直线判定一致；`Space` 状态（`space_pressed`）沿用原逻辑。拖动过程中按下修饰键同样即时生效（该判定每次移动都会重新计算）。
 - **验证**：新增 `test_corner_resize_keeps_aspect_after_rotation_and_free_with_modifier`（0°/30°/90° 下用非等比位移拖 `se`：未按修饰键时横纵缩放比一致、按下 `Ctrl` 时不一致）；原有 `test_annotation_corner_resize_is_uniform_by_default_and_free_with_modifier`、缩放锚点、旋转项缩放等用例均通过。
 
+### 2026-10-03 马赛克涂抹模式新增笔刷宽度与光标圆环
+
+- **新增笔刷宽度**：涂抹模式此前用「马赛克方块」×2 当作笔刷直径（默认约 40px，偏粗），现改为独立配置项**涂抹笔刷宽度**，默认 **20px**，可调范围 4–100，并纳入范围校验、本页/全局重置。设置页「编辑器 ▸ 马赛克」与**两个编辑器**工具栏（选中马赛克且开启涂抹模式时）都有入口。
+- **光标改为虚线圆环**：选中马赛克工具并开启涂抹模式后，指针在画布上显示一个**虚线圆环**（与橡皮擦同一套样式），圆环直径即当前笔刷宽度，移动时实时跟随，离开画布即隐藏；既能看出笔刷粗细，也便于对齐涂抹范围。涂抹关闭（矩形框选模式）时不显示该圆环，而是沿用原有的矩形虚线预览。
+- **验证**：`test_mosaic_width_config_and_validation`（默认值与 4–100 范围校验）、`test_mosaic_brush_width_drives_stroke_size`（横向笔迹的覆盖层高度即笔刷粗细：10 明显细于旧行为、60 明显更粗）、`test_mosaic_cursor_ring_follows_pointer_and_width`（光标跟随指针、半径取宽度一半）；涂抹提交与矩形模式用例仍通过。
+
 ### 2026-10-03 已有箭头后期改样式
 
 - **能力补齐**：此前箭头样式只能在绘制前选择，已画箭头无法改。现新增 `AnnotationCanvas.set_selected_arrow_style(style)`，对已选中的箭头（通过 `shape()` 记录的 `start/end/arrow_style/line_color/line_width` 重建路径）切换到实心/空心/双头/直线/矩形箭杆等任意样式，每切换记一次 checkpoint 可撤销。

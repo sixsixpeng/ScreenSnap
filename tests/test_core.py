@@ -5401,6 +5401,71 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(restored.toPlainText(), "第一行\n第二行")
         self.assertTrue(restored.document().firstBlock().blockFormat().alignment() & Qt.AlignRight)
 
+    def test_mosaic_width_config_and_validation(self):
+        from config.config_manager import DEFAULTS, validate
+
+        # 默认笔刷宽度明显小于旧的 mosaic_size*2 取法，且范围受限。
+        self.assertEqual(DEFAULTS["mosaic_width"], 20)
+        self.assertEqual(validate({"mosaic_width": 6})["mosaic_width"], 6)
+        self.assertEqual(validate({"mosaic_width": 100})["mosaic_width"], 100)
+        with self.assertRaises(ValueError):
+            validate({"mosaic_width": 3})
+        with self.assertRaises(ValueError):
+            validate({"mosaic_width": 101})
+        with self.assertRaises(ValueError):
+            validate({"mosaic_width": "wide"})
+
+    def test_mosaic_brush_width_drives_stroke_size(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_canvas import AnnotationCanvas
+        from editor.annotation_items import AnnotationPixmapItem
+        from PIL import Image
+        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtGui import QPainterPath
+
+        def stroke_width(width):
+            canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"),
+                                      dict(DEFAULTS, mosaic_brush=True, mosaic_width=width))
+            canvas.tool = "mosaic"
+            path = QPainterPath(QPointF(60, 100))
+            path.lineTo(QPointF(140, 100))
+            canvas._commit_mosaic_brush(path)
+            items = [item for item in canvas.annotations()
+                     if isinstance(item, AnnotationPixmapItem)]
+            self.assertEqual(len(items), 1)
+            # 横向笔迹：覆盖层高度即笔刷粗细（宽度还含笔迹长度）。
+            return items[0].pixmap().height()
+
+        narrow = stroke_width(10)
+        wide = stroke_width(60)
+        # 笔刷越宽，覆盖层越粗。
+        self.assertGreater(wide, narrow)
+        # 窄笔刷不应再由 mosaic_size*2 决定（旧行为约 40，明显更粗）。
+        self.assertLess(narrow, 20)
+        self.assertGreater(wide, 40)
+
+    def test_mosaic_cursor_ring_follows_pointer_and_width(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtTest import QTest
+        from PySide6.QtCore import QPointF, Qt
+
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"),
+                                  dict(DEFAULTS, mosaic_brush=True, mosaic_width=24))
+        canvas.resize(300, 260)
+        canvas.show()
+        canvas.tool = "mosaic"
+        self.assertIsNone(canvas.mosaic_point)
+        QTest.mouseMove(canvas.viewport(), pos=canvas.mapFromScene(QPointF(100, 100)))
+        self.assertIsNotNone(canvas.mosaic_point)
+        self.assertAlmostEqual(canvas.mosaic_point.x(), 100, delta=1)
+        self.assertAlmostEqual(canvas.mosaic_point.y(), 100, delta=1)
+        # 光标圆环半径取笔刷宽度的一半。
+        self.assertAlmostEqual(
+            max(2, canvas.settings.get("mosaic_width", 20) / 2), 12, delta=0.01)
+        canvas.close()
+
     def test_corner_resize_keeps_aspect_after_rotation_and_free_with_modifier(self):
         """四角默认等比、按住修饰键自由拉伸的规则，旋转后依然成立。"""
         import math

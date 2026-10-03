@@ -102,7 +102,7 @@ DEFAULTS = {
     "editor_border_color": "#000000", "editor_border_width": 1,
     "marker_opacity": 38, "font": "", "font_size": 18,
     "line_spacing": 1.2, "mosaic_size": 10,
-    "mosaic_mode": "blocks", "mosaic_brush": False,
+    "mosaic_mode": "blocks", "mosaic_brush": False, "mosaic_width": 20,
     "eraser_erase_base": False,
     # 截图取色与定位辅助增强
     "capture_picker_shortcut": "C",
@@ -299,6 +299,8 @@ def validate(data):
             raise ValueError("字号必须在 6 到 200 之间")
         elif key == "eraser_width" and not 10 <= value <= 100:
             raise ValueError("橡皮擦直径必须在 10 到 100 之间")
+        elif key == "mosaic_width" and not 4 <= value <= 100:
+            raise ValueError("马赛克涂抹笔刷宽度必须在 4 到 100 之间")
         elif key in ("pen_width", "rect_width", "ellipse_width", "arrow_width",
                      "marker_width") and not 1 <= value <= 50:
             raise ValueError("标注线宽必须在 1 到 50 之间")

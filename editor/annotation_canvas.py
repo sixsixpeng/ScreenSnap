@@ -99,6 +99,7 @@ class AnnotationCanvas(QGraphicsView):
         self.rotation_start_angle = 0.0
         self.rotation_start_value = 0.0
         self.mosaic_drawing = None
+        self.mosaic_point = None
         self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
         self.erase_mask_image.fill(Qt.transparent)
         self.resize_origin = None
@@ -784,6 +785,13 @@ class AnnotationCanvas(QGraphicsView):
             painter.setBrush(Qt.NoBrush)
             radius = self.settings.get("eraser_width", self.settings["pen_width"]) / 2
             painter.drawEllipse(self.eraser_point, radius, radius)
+        # 马赛克涂抹模式：同样用虚线圆环表示笔刷宽度，便于对齐涂抹范围。
+        if self.tool == "mosaic" and self.mosaic_point is not None \
+                and self.settings.get("mosaic_brush", False):
+            painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
+            painter.setBrush(Qt.NoBrush)
+            radius = max(2, self.settings.get("mosaic_width", 20) / 2)
+            painter.drawEllipse(self.mosaic_point, radius, radius)
         if self.start is not None and self.preview_end is not None:
             painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine) if self.tool == "mosaic"
                            else self.stroke_pen())
@@ -903,7 +911,7 @@ class AnnotationCanvas(QGraphicsView):
 
     def _commit_mosaic_brush(self, path):
         """沿笔迹路径生成马赛克/模糊覆盖：取底图对应区域，按效果生成后用笔迹形状裁掉外部像素。"""
-        radius = max(8, self.settings.get("mosaic_size", 10) * 2)
+        radius = max(2, self.settings.get("mosaic_width", 20) / 2)
         stroker = QPainterPathStroker()
         stroker.setWidth(radius * 2)
         stroker.setCapStyle(Qt.RoundCap)
@@ -1037,6 +1045,7 @@ class AnnotationCanvas(QGraphicsView):
                 and event.button() == Qt.LeftButton:
             # 自由笔刷：记录笔迹路径，松开时沿笔迹生成马赛克/模糊覆盖。
             self.mosaic_drawing = QPainterPath(point)
+            self.mosaic_point = point
             self.preview_end = point
             self.viewport().update()
             event.accept()
@@ -1074,13 +1083,6 @@ class AnnotationCanvas(QGraphicsView):
             self._rotate_to(point, snap=bool(event.modifiers() & Qt.ShiftModifier))
             event.accept()
             return
-        if self.mosaic_drawing is not None:
-            point = self.mapToScene(event.position().toPoint())
-            self.mosaic_drawing.lineTo(point)
-            self.preview_end = point
-            self.viewport().update()
-            event.accept()
-            return
         if self.selection_start is not None:
             self.selection_end = self.image_point(self.mapToScene(event.position().toPoint()))
             self.viewport().update()
@@ -1092,6 +1094,15 @@ class AnnotationCanvas(QGraphicsView):
             if self.erasing:
                 self.erase_segment(self.eraser_last, point)
                 self.eraser_last = point
+            self.viewport().update()
+            return
+        if self.tool == "mosaic" and self.settings.get("mosaic_brush", False):
+            # 未按住时也跟随指针，用虚线圆环显示笔刷宽度与位置。
+            point = self.image_point(self.mapToScene(event.position().toPoint()))
+            self.mosaic_point = point
+            if self.mosaic_drawing is not None:
+                self.mosaic_drawing.lineTo(point)
+                self.preview_end = point
             self.viewport().update()
             return
         if self.resizing is not None:
@@ -1208,6 +1219,7 @@ class AnnotationCanvas(QGraphicsView):
 
     def leaveEvent(self, event):
         self.eraser_point = None
+        self.mosaic_point = None
         self.viewport().update()
         super().leaveEvent(event)
 

@@ -115,6 +115,8 @@ class EditorPage(SettingsPage):
         self.number("mosaic_size", "马赛克方块", 2, 100, "像素化块大小")
         self.check("mosaic_brush", "涂抹模式（自由笔刷）",
                    "开启后按住拖动可沿笔迹涂抹马赛克/模糊；关闭则为拖框选矩形")
+        self.number("mosaic_width", "涂抹笔刷宽度 (px)", 4, 100,
+                    "涂抹模式下的笔刷直径，数值越大单次涂抹覆盖越宽")
         self.group("编辑区边框")
         self.number("editor_border_width", "编辑区边框粗细", 1, 12,
                     "只在编辑画布中显示，不写入图片")
