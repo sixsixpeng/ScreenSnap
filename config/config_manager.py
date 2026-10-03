@@ -87,6 +87,7 @@ DEFAULTS = {
     "cursor": False, "history_limit": 100,
     "last_capture_rect": [],
     "annotation_tool": "select", "text_alignment": "left", "arrow_style": "filled",
+    "arrow_chain": False,
     "rect_style": "solid", "ellipse_style": "solid",
     "rect_color": "#ff0000", "ellipse_color": "#ff0000",
     "arrow_color": "#ff0000", "marker_color": "#ff0000", "text_color": "#ff0000",
@@ -298,8 +299,8 @@ def validate(data):
         elif key == "capture_after_selection" and value not in ("save", "edit", "copy"):
             raise ValueError("截图选区后的行为必须是仅保存、进入编辑或仅复制")
         elif key == "arrow_style" and value not in (
-            "filled", "open", "double", "double_filled",
-            "solid_line", "open_line", "solid_dash", "open_dash",
+            "filled", "open", "dashed", "double_filled", "double_open", "double_dashed",
+            "line", "dashed_line", "rect_filled", "rect_open", "rect_dashed",
         ):
             raise ValueError("未知箭头样式")
         elif key in ("rect_style", "ellipse_style") and value not in ("solid", "dash"):
@@ -348,6 +349,19 @@ def validate(data):
     return result
 
 
+# 旧箭头样式值到新样式 key 的迁移映射；旧 key 不再保留，加载时统一迁走。
+ARROW_STYLE_LEGACY = {
+    "filled": "filled",
+    "open": "open",
+    "double_filled": "double_filled",
+    "double": "double_open",
+    "solid_line": "line",
+    "open_line": "rect_open",
+    "solid_dash": "dashed_line",
+    "open_dash": "rect_dashed",
+}
+
+
 def migrate_legacy_settings(data):
     if not isinstance(data, dict):
         return data
@@ -358,6 +372,9 @@ def migrate_legacy_settings(data):
         if old_key in migrated:
             migrated.setdefault(new_key, migrated[old_key])
             del migrated[old_key]
+    legacy = migrated.get("arrow_style")
+    if legacy in ARROW_STYLE_LEGACY:
+        migrated["arrow_style"] = ARROW_STYLE_LEGACY[legacy]
     return migrated
 
 

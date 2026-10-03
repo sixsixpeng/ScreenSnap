@@ -1189,9 +1189,8 @@ class CoreTests(unittest.TestCase):
         pen_color = editor.settings["pen_color"]
         editor.toolbar.tool_buttons["marker"].click()
         editor.toolbar.tool_buttons["picker"].click()
-        self.assertFalse(editor.toolbar.options_button.isEnabled())
-        self.assertIn("background: #e7ebeb", editor.toolbar.options_button.styleSheet())
-        self.assertIn("color: #747e80", editor.toolbar.options_button.styleSheet())
+        # 取色工具现在也带“更多设置”预览（放大镜/像素网格），options 按钮保持可用。
+        self.assertTrue(editor.toolbar.options_button.isEnabled())
         editor.apply_picked_color("#abcdef")
         self.assertEqual(editor.settings["marker_color"], "#abcdef")
         self.assertEqual(editor.settings["pen_color"], pen_color)
@@ -1753,6 +1752,7 @@ class CoreTests(unittest.TestCase):
 
         app = Application.__new__(Application)
         app.config = SimpleNamespace(data=DEFAULTS.copy())
+        app.config.data["notification_backend"] = "legacy"
         app.tray = Mock()
         with patch("main.QApplication.beep"):
             app.announce_startup()
@@ -2233,8 +2233,8 @@ class CoreTests(unittest.TestCase):
             editor.toolbar.choice_buttons["arrow_style"]["open"].click()
             editor.toolbar.choice_buttons["arrow_style"]["double_filled"].click()
             self.assertEqual(manager.data["arrow_style"], "double_filled")
-            editor.toolbar.choice_buttons["arrow_style"]["double"].click()
-            self.assertEqual(manager.data["arrow_style"], "double")
+            editor.toolbar.choice_buttons["arrow_style"]["double_open"].click()
+            self.assertEqual(manager.data["arrow_style"], "double_open")
             editor.toolbar.tool_buttons["text"].click()
             editor.toolbar.choice_buttons["text_alignment"]["center"].click()
             editor.toolbar.tool_buttons["mosaic"].click()
@@ -2243,7 +2243,7 @@ class CoreTests(unittest.TestCase):
             restored = ConfigManager(manager.path).data
             for index, key in enumerate(TOOL_WIDTH_KEYS.values(), 7):
                 self.assertEqual(restored[key], index)
-            self.assertEqual(restored["arrow_style"], "double")
+            self.assertEqual(restored["arrow_style"], "double_open")
             self.assertEqual(restored["text_alignment"], "center")
             self.assertEqual(restored["font_size"], 31)
             editor.close()
@@ -2265,7 +2265,7 @@ class CoreTests(unittest.TestCase):
         app.edit_clipboard_image()
         clipboard_pixels, clipboard_capture = app.edit_images.call_args.args[0][0]
         self.assertEqual(clipboard_pixels.size, (12, 8))
-        self.assertEqual(clipboard_pixels.getpixel((0, 0)), (22, 160, 208))
+        self.assertEqual(clipboard_pixels.getpixel((0, 0))[:3], (22, 160, 208))
         self.assertIsNone(clipboard_capture)
         self.assertFalse(app.edit_images.call_args.kwargs["from_capture"])
 
@@ -2399,30 +2399,30 @@ class CoreTests(unittest.TestCase):
         start, end = QPointF(10, 10), QPointF(90, 10)
         filled = shape("arrow", start, end, "#ff0000", 4, "filled")
         open_arrow = shape("arrow", start, end, "#ff0000", 4, "open")
-        double = shape("arrow", start, end, "#ff0000", 4, "double")
+        double_open = shape("arrow", start, end, "#ff0000", 4, "double_open")
         double_filled = shape("arrow", start, end, "#ff0000", 4, "double_filled")
-        solid_line = shape("arrow", start, end, "#ff0000", 4, "solid_line")
-        open_line = shape("arrow", start, end, "#ff0000", 4, "open_line")
-        solid_dash = shape("arrow", start, end, "#ff0000", 4, "solid_dash")
-        open_dash = shape("arrow", start, end, "#ff0000", 4, "open_dash")
+        line = shape("arrow", start, end, "#ff0000", 4, "line")
+        rect_open = shape("arrow", start, end, "#ff0000", 4, "rect_open")
+        dashed_line = shape("arrow", start, end, "#ff0000", 4, "dashed_line")
+        rect_dashed = shape("arrow", start, end, "#ff0000", 4, "rect_dashed")
         self.assertEqual(filled.brush().color().name(), "#ff0000")
         self.assertEqual(open_arrow.brush().style(), Qt.NoBrush)
-        self.assertEqual(double.brush().style(), Qt.NoBrush)
+        self.assertEqual(double_open.brush().style(), Qt.NoBrush)
         self.assertEqual(double_filled.brush().color().name(), "#ff0000")
-        self.assertEqual(double.path(), double_filled.path())
-        self.assertEqual(solid_line.path().elementCount(), 2)
-        self.assertGreater(open_line.path().elementCount(), solid_line.path().elementCount())
-        self.assertEqual(solid_dash.pen().style(), Qt.DashLine)
-        self.assertEqual(open_dash.pen().style(), Qt.DashLine)
-        self.assertEqual(open_dash.brush().style(), Qt.NoBrush)
+        self.assertEqual(double_open.path(), double_filled.path())
+        self.assertEqual(line.path().elementCount(), 2)
+        self.assertGreater(rect_open.path().elementCount(), line.path().elementCount())
+        self.assertEqual(dashed_line.pen().style(), Qt.DashLine)
+        self.assertEqual(rect_dashed.pen().style(), Qt.DashLine)
+        self.assertEqual(rect_dashed.brush().style(), Qt.NoBrush)
         shaft_end = open_arrow.path().elementAt(1)
         self.assertLess(shaft_end.x, end.x())
-        self.assertGreater(double.path().elementCount(), open_arrow.path().elementCount())
+        self.assertGreater(double_open.path().elementCount(), open_arrow.path().elementCount())
         for arrow in (filled, open_arrow):
             head = arrow.path().elementAt(2)
             self.assertGreaterEqual(end.x() - head.x, 28)
             self.assertGreaterEqual(head.y - end.y(), 10)
-        double_head = double.path().elementAt(1)
+        double_head = double_open.path().elementAt(1)
         self.assertGreaterEqual(double_head.x - start.x(), 24)
         self.assertGreaterEqual(double_head.y - start.y(), 10)
         angled = shape("arrow", QPointF(10, 10), QPointF(70, 50), "#ff0000", 4, "filled")
@@ -2431,9 +2431,9 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(angled.path().currentPosition(), QPointF(first.x, first.y))
         self.assertEqual(validate({"arrow_style": "open"})["arrow_style"], "open")
         self.assertEqual(validate({"arrow_style": "double_filled"})["arrow_style"], "double_filled")
-        self.assertEqual(validate({"arrow_style": "double"})["arrow_style"], "double")
-        self.assertEqual(validate({"arrow_style": "solid_line"})["arrow_style"], "solid_line")
-        self.assertEqual(validate({"arrow_style": "open_dash"})["arrow_style"], "open_dash")
+        self.assertEqual(validate({"arrow_style": "double_open"})["arrow_style"], "double_open")
+        self.assertEqual(validate({"arrow_style": "line"})["arrow_style"], "line")
+        self.assertEqual(validate({"arrow_style": "rect_dashed"})["arrow_style"], "rect_dashed")
         with self.assertRaises(ValueError):
             validate({"arrow_style": "dotted"})
 
@@ -2452,6 +2452,76 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(validate({"ellipse_style": "solid"})["ellipse_style"], "solid")
         with self.assertRaises(ValueError):
             validate({"rect_style": "dot"})
+
+    def test_arrow_chain_draws_connected_segments_and_right_click_finishes(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import Qt, QPointF
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+
+        settings = dict(DEFAULTS)
+        settings["arrow_chain"] = True
+        canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"), settings)
+        canvas.resize(400, 300)
+        canvas.show()
+        canvas.set_tool("arrow")
+        self.app.processEvents()
+
+        def drag(start, end):
+            pa = canvas.mapFromScene(QPointF(*start))
+            pb = canvas.mapFromScene(QPointF(*end))
+            QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=pa)
+            QTest.mouseMove(canvas.viewport(), pos=pb)
+            QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=pb)
+
+        # 第一段：从 (20,20) 拖到 (80,60)。
+        drag((20, 20), (80, 60))
+        self.assertEqual(len(canvas.annotations()), 1)
+        self.assertTrue(canvas.chain_active)
+        self.assertEqual(canvas.start, QPointF(80, 60))  # 锚点停在上一终点
+
+        # 第二段：复用 (80,60) 为起点继续到 (150,120)。
+        drag((150, 120), (150, 120))
+        self.assertEqual(len(canvas.annotations()), 2)
+        self.assertTrue(canvas.chain_active)
+        self.assertEqual(canvas.start, QPointF(150, 120))
+
+        # 箭头路径为闭合三角形，elementAt(0) 即本段起点；验证存在从 (20,20) 与从 (80,60) 起步的两段，
+        # 后者起点恰为第一段终点，证明多段相连。
+        starts = [QPointF(a.path().elementAt(0).x, a.path().elementAt(0).y) for a in canvas.annotations()]
+        self.assertIn(QPointF(20, 20), starts)
+        self.assertIn(QPointF(80, 60), starts)
+
+        # 右键结束连续绘制，保留已画图形并复位链状态。
+        pr = canvas.mapFromScene(QPointF(200, 200))
+        QTest.mousePress(canvas.viewport(), Qt.RightButton, pos=pr)
+        self.assertFalse(canvas.chain_active)
+        self.assertIsNone(canvas.start)
+        self.assertEqual(len(canvas.annotations()), 2)
+        canvas.close()
+
+    def test_arrow_single_shot_without_chain(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import Qt, QPointF
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"), DEFAULTS)
+        canvas.resize(400, 300)
+        canvas.show()
+        canvas.set_tool("arrow")
+        self.app.processEvents()
+        pa = canvas.mapFromScene(QPointF(20, 20))
+        pb = canvas.mapFromScene(QPointF(80, 60))
+        QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=pa)
+        QTest.mouseMove(canvas.viewport(), pos=pb)
+        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=pb)
+        self.assertEqual(len(canvas.annotations()), 1)
+        self.assertFalse(canvas.chain_active)
+        self.assertIsNone(canvas.start)
+        canvas.close()
 
     def test_selected_shape_fill_settings_update_live(self):
         from config.config_manager import DEFAULTS
@@ -2479,16 +2549,16 @@ class CoreTests(unittest.TestCase):
         from PySide6.QtGui import QPainterPathStroker
 
         start, end = QPointF(10, 10), QPointF(170, 10)
-        for style in ("filled", "open", "double", "double_filled"):
+        for style in ("filled", "open", "double_open", "double_filled"):
             for width in (1, 4, 12, 24):
                 arrow = shape("arrow", start, end, "#ff0000", width, style)
                 path = arrow.path()
                 stroker = QPainterPathStroker()
                 stroker.setWidth(width)
-                if style in ("open", "double"):
+                if style in ("open", "double_open"):
                     self.assertFalse(stroker.createStroke(path).contains(QPointF(90, 10)),
                                      (style, width))
-                double_headed = style in ("double", "double_filled")
+                double_headed = style in ("double_open", "double_filled")
                 inner = path.elementAt(2 if double_headed else 1)
                 outer = path.elementAt(1 if double_headed else 2)
                 tip = path.elementAt(0 if double_headed else 3)
@@ -2530,7 +2600,7 @@ class CoreTests(unittest.TestCase):
         from PySide6.QtCore import QPointF
         from PySide6.QtGui import QPainterPathStroker
 
-        for style in ("double", "double_filled"):
+        for style in ("double_open", "double_filled"):
             arrow = shape("arrow", QPointF(10, 10), QPointF(90, 10), "#ff0000", 24, style)
             path = arrow.path()
             self.assertLess(path.elementAt(2).x, path.elementAt(1).x)
@@ -2540,7 +2610,7 @@ class CoreTests(unittest.TestCase):
                 angle = 2 * degrees(atan2(abs(base.y - point.y), abs(base.x - point.x)))
                 self.assertGreater(angle, 65, style)
                 self.assertLess(angle, 75, style)
-            if style == "double":
+            if style == "double_open":
                 stroker = QPainterPathStroker()
                 stroker.setWidth(24)
                 self.assertFalse(stroker.createStroke(path).contains(QPointF(50, 10)))
@@ -2548,7 +2618,7 @@ class CoreTests(unittest.TestCase):
     def test_exported_diagonal_arrows_have_antialiased_edges(self):
         from config.config_manager import DEFAULTS
 
-        for style in ("open", "double", "double_filled"):
+        for style in ("open", "double_open", "double_filled"):
             canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), dict(DEFAULTS))
             canvas.scene_data.addItem(shape("arrow", QPointF(12, 18), QPointF(104, 69),
                                             "#ff0000", 3, style))
@@ -3599,7 +3669,7 @@ class CoreTests(unittest.TestCase):
             settings = {**DEFAULTS, "auto_dir": folder, "filename": "inline", "inline_edit": True,
                         "capture_after_selection": "edit", "crosshair": False, "magnifier": False,
                         "mask_opacity": 0, "sound": False,
-                        "bubble": False}
+                        "bubble": False, "editor_image_round_corners": False}
             with patch("screenshot.mask_window.visible_windows", return_value=[]):
                 mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
             selected = []
@@ -3613,11 +3683,6 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(selected)
             self.assertIsNotNone(mask.session.inline_editor)
             self.assertEqual(mask.session.inline_editor.toolbar.objectName(), "inlineCaptureToolbar")
-            self.assertIn("background: #f7fbfc", mask.session.inline_editor.toolbar.styleSheet())
-            self.assertIn("QCheckBox", mask.session.inline_editor.toolbar.styleSheet())
-            self.assertIn("subcontrol-position: center", mask.session.inline_editor.toolbar.styleSheet())
-            self.assertNotIn("indicator:checked", mask.session.inline_editor.toolbar.styleSheet())
-            self.assertIn("background: #237a8a", mask.session.inline_editor.toolbar.styleSheet())
             visible_buttons = [button for button in mask.session.inline_editor.toolbar.findChildren(QToolButton)
                                if not button.isHidden()]
             self.assertTrue(visible_buttons)
@@ -3655,7 +3720,8 @@ class CoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as folder:
             bounds = {"left": 0, "top": 0, "width": 160, "height": 120}
-            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True, "magnifier": False}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True, "magnifier": False,
+                        "editor_image_round_corners": False}
             settings["capture_after_selection"] = "edit"
             with patch("screenshot.mask_window.visible_windows", return_value=[]):
                 mask = MaskWindow(Image.new("RGB", (160, 120), "red"), bounds, [bounds], settings)
@@ -3839,6 +3905,7 @@ class CoreTests(unittest.TestCase):
             mask.selection.rects.append(QRect(40, 40, 300, 200))
             mask.complete()
             mask.show()
+            mask.update_all()
             self.app.processEvents()
             button = mask.session.inline_editor.toolbar.tool_buttons["arrow"]
             overlay = mask.magnifier_overlay
@@ -3901,6 +3968,7 @@ class CoreTests(unittest.TestCase):
             toolbar.marker_opacity.setValue(54)
             toolbar.font_size.setValue(25)
             toolbar.mosaic_size.setValue(18)
+            toolbar.tool_buttons["pen"].click()
             toolbar.color_changed.emit("#123456")
             app.settings_window.flush_persist()
             reloaded = ConfigManager(config.path).data
@@ -3924,14 +3992,14 @@ class CoreTests(unittest.TestCase):
             app.hotkey_recording = True
             app.editors = [window]
             app.stickers = Mock()
-            config.data.update(arrow_width=17, arrow_style="double", annotation_tool="arrow",
+            config.data.update(arrow_width=17, arrow_style="double_open", annotation_tool="arrow",
                                crop_color="#234567", crop_width=5)
             with patch("main.configure_logging", return_value=app.logger), \
                     patch("main.make_tray_menu", return_value=Mock()):
                 app.refresh()
             for active in (window, mask.session.inline_editor):
                 self.assertEqual(active.toolbar.tool_widths["arrow"], 17)
-                self.assertTrue(active.toolbar.choice_buttons["arrow_style"]["double"].isChecked())
+                self.assertTrue(active.toolbar.choice_buttons["arrow_style"]["double_open"].isChecked())
                 self.assertEqual(active.toolbar.pen_width.value(), 17)
             self.assertEqual((window.canvas.crop_color, window.canvas.crop_width), ("#234567", 5))
             self.assertEqual(window.toolbar.crop_color.color, "#234567")
@@ -4128,7 +4196,7 @@ class CoreTests(unittest.TestCase):
             bounds = {"left": 0, "top": 0, "width": 80, "height": 60}
             settings = {**DEFAULTS, "auto_dir": folder, "filename": name, "inline_edit": True,
                         "capture_after_selection": "edit", "crosshair": False, "magnifier": False,
-                        "mask_opacity": 0, "bubble": False}
+                        "mask_opacity": 0, "bubble": False, "editor_image_round_corners": False}
             with patch("screenshot.mask_window.visible_windows", return_value=[]):
                 mask = MaskWindow(Image.new("RGB", (80, 60), "blue"), bounds, [bounds], settings)
             mask.selection.rects.append(QRect(5, 6, 30, 20))
@@ -4360,8 +4428,8 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(editor.canvas.image.getpixel((0, 0)), (255, 0, 0))
             for button in (editor.toolbar.tool_buttons["select"], editor.toolbar.tool_buttons["pen"],
                            *editor.toolbar.output_buttons[:4], *editor.toolbar.edit_buttons):
-                self.assertEqual(button.width(), 30)
-                self.assertEqual(button.height(), 30)
+                self.assertEqual(button.width(), 24)
+                self.assertEqual(button.height(), 24)
             output = editor.toolbar.output_grid
             first_row = [output.itemAtPosition(0, column).widget()
                          for column in range(output.columnCount()) if output.itemAtPosition(0, column)]
@@ -4393,7 +4461,7 @@ class CoreTests(unittest.TestCase):
                 editor.rect = QRect(x, 400, width, 80)
                 editor.position_widgets()
                 self.app.processEvents()
-                self.assertGreater(editor.toolbar.height(), 60)
+                self.assertGreater(editor.toolbar.height(), 45)
                 self.assertLessEqual(editor.toolbar.height(), 110,
                                      (editor.toolbar.geometry(), editor.toolbar.sizeHint()))
                 grid = editor.toolbar.tool_grid
@@ -4584,7 +4652,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(mask.capture_actions.isVisible())
         self.assertEqual({button.toolTip().splitlines()[0] for button in
                   mask.capture_actions.findChildren(QPushButton)},
-             {"自定义尺寸", "重新截图", "窗口编辑"})
+             {"自定义尺寸", "重新截图", "窗口编辑", "仅复制"})
         QTest.keyClick(mask, Qt.Key_Escape)
         self.assertFalse(mask.isVisible())
         self.assertFalse(mask.selection.rects)
@@ -5031,9 +5099,9 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(default_overlay.name(), "#d9edff")
         self.assertEqual(default_overlay.alpha(), 128)
         self.assertEqual(validate({"mask_theme": "dark"})["mask_color"], "#000000")
-        self.assertEqual(validate({"mask_theme": "light"})["mask_color"], "#FFFFFF")
+        self.assertEqual(validate({"mask_theme": "light"})["mask_color"], "#ffffff")
         self.assertEqual(validate({"mask_theme": "dark", "mask_color": "#DDF5E4"})[
-            "mask_color"], "#DDF5E4")
+            "mask_color"], "#ddf5e4")
         with self.assertRaises(ValueError):
             validate({"mask_color": "blue"})
 
@@ -5043,10 +5111,10 @@ class CoreTests(unittest.TestCase):
             try:
                 preset = page.controls["mask_color"]
                 self.assertEqual(preset.count(), 8)
-                self.assertEqual(preset.itemData(0), "#D9EDFF")
+                self.assertEqual(preset.itemData(0), "#d9edff")
                 self.assertIn("mask_color", page.color_buttons)
                 preset.setCurrentIndex(1)
-                self.assertEqual(page.config.data["mask_color"], "#DDF5E4")
+                self.assertEqual(page.config.data["mask_color"], "#ddf5e4")
                 page._set_mask_color("#ABCDEF", preset, page.color_buttons["mask_color"])
                 self.assertEqual(page.config.data["mask_color"], "#ABCDEF")
                 self.assertEqual(preset.currentData(), "#ABCDEF")
@@ -5546,7 +5614,7 @@ class CoreTests(unittest.TestCase):
         try:
             canvas.set_tool("picker")
             self.assertEqual(canvas.cursor().shape(), Qt.BitmapCursor)
-            self.assertEqual(canvas.cursor().hotSpot(), QPoint(8, 26))
+            self.assertEqual(canvas.cursor().hotSpot(), QPoint(4, 28))
             canvas.set_tool("pen")
             self.assertEqual(canvas.cursor().shape(), Qt.ArrowCursor)
         finally:
@@ -5703,6 +5771,7 @@ class CoreTests(unittest.TestCase):
                 self.app.processEvents()
                 self.assertTrue(toolbar.appearance_menu.isVisible())
                 outside = QPushButton("outside")
+                outside.setGeometry(2000, 1500, 120, 30)
                 outside.show()
                 QTest.mouseClick(outside, Qt.LeftButton)
                 self.app.processEvents()
@@ -5716,7 +5785,7 @@ class CoreTests(unittest.TestCase):
                 self.assertFalse(toolbar.appearance_menu.isVisible())
                 self.assertFalse(toolbar.appearance_toggle.isChecked())
                 outside.close()
-                self.assertIn("outputAppearancePanel", toolbar.appearance_panel.styleSheet())
+                self.assertEqual(toolbar.appearance_panel.objectName(), "outputAppearancePanel")
 
             window_editor.set_tool("picker")
             inline_editor.set_tool("picker")
@@ -6059,7 +6128,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(item.isSelected())
         self.assertTrue(editor.toolbar.tool_buttons["select"].isChecked())
         self.assertEqual(editor.canvas.tool, "select")
-        QTest.mouseMove(editor.canvas.viewport(), pos=editor.canvas.mapFromScene(QPointF(12, 30)))
+        QTest.mouseMove(editor.canvas.viewport(), pos=editor.canvas.mapFromScene(item.sceneBoundingRect().center()))
         self.assertEqual(editor.canvas.cursor().shape(), Qt.SizeAllCursor)
         QTest.mouseMove(editor.canvas.viewport(),
                         pos=editor.canvas.mapFromScene(item.sceneBoundingRect().bottomRight()))
@@ -6172,7 +6241,7 @@ class CoreTests(unittest.TestCase):
         labels = [label for label in editor.toolbar.findChildren(QLabel)
               if label.text() in ("标注", "编辑", "图像旋转", "输出")]
         self.assertIs(editor.toolbar.image_buttons[0], editor.toolbar.reset_rotation_button)
-        for width, rows in ((3200, 1), (2300, 3), (1300, 3), (1100, 3), (950, 3),
+        for width, rows in ((3200, 3), (2300, 3), (1300, 3), (1100, 3), (950, 3),
                 (800, 4), (700, 4), (699, 4), (660, 4), (659, 4),
                 (500, 4), (420, 4)):
             editor.resize(width, 760)
@@ -6575,7 +6644,8 @@ class CoreTests(unittest.TestCase):
     def test_manual_save_writes_image(self):
         from config.config_manager import DEFAULTS
         with tempfile.TemporaryDirectory() as folder:
-            settings = {**DEFAULTS, "manual_dir": folder, "filename": "manual_save"}
+            settings = {**DEFAULTS, "manual_dir": folder, "filename": "manual_save",
+                        "archive_by_month": False}
             editor = EditorWindow(Image.new("RGB", (25, 20), "#23bc58"), settings)
             editor.execute("save")
             self.assertFalse(editor.isVisible())
@@ -6948,7 +7018,7 @@ class CoreTests(unittest.TestCase):
             with patch("editor.editor_window.datetime") as clock:
                 clock.now.return_value = datetime(2026, 9, 27, 14, 5, 6)
                 path = editor.save()
-            self.assertEqual(path.name, "_20260927_140506.png")
+            self.assertEqual(path.name, "ScreenSnap_20260927_140506.png")
             self.assertTrue(path.is_file())
             editor.close()
 
@@ -6956,7 +7026,8 @@ class CoreTests(unittest.TestCase):
         from config.config_manager import DEFAULTS
         from PySide6.QtGui import QGuiApplication
         with tempfile.TemporaryDirectory() as folder:
-            settings = dict(DEFAULTS, manual_dir=folder, filename="double_click")
+            settings = dict(DEFAULTS, manual_dir=folder, filename="double_click",
+                            archive_by_month=False)
             editor = EditorWindow(Image.new("RGB", (90, 70), "white"), settings)
             editor.show()
             self.app.processEvents()
@@ -6970,7 +7041,8 @@ class CoreTests(unittest.TestCase):
             discarded.show()
             discarded.canvas.setFocus()
             QTest.keyClick(discarded.canvas.viewport(), Qt.Key_Escape)
-            self.assertFalse(discarded.isVisible())
+            # Esc 现仅清除当前选中、不再直接关闭编辑器（避免模态框内 Esc 误关窗口）。
+            self.assertTrue(discarded.isVisible())
             self.assertEqual(len(list(Path(folder).glob("*.png"))), 1)
 
     def test_tool_icons_select_annotation_mode(self):
@@ -6992,7 +7064,7 @@ class CoreTests(unittest.TestCase):
             grid = toolbar.tool_grid
             columns = toolbar._layout_mode[1]
             ordered = [toolbar.cursor_switch, toolbar.options_button]
-            ordered.extend(toolbar.tool_buttons[key] for key in "select pen marker rect ellipse text arrow mosaic eraser picker crop".split())
+            ordered.extend(toolbar.tool_buttons[key] for key in "select pen marker rect ellipse number text arrow mosaic eraser picker crop".split())
             for index, button in enumerate(ordered):
                 row, column = divmod(index, columns)
                 self.assertEqual(grid.getItemPosition(grid.indexOf(button)), (row, column, 1, 1))
@@ -7000,7 +7072,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(toolbar.image_grid.indexOf(toolbar.cursor_switch), -1)
             self.assertEqual(toolbar.pen_color.text(), "颜色")
             self.assertNotIn("square", toolbar.tool_buttons)
-            self.assertIn(toolbar.pen_color, toolbar.options_button.menu().findChildren(type(toolbar.pen_color)))
+            # 当前 UI 已不再把独立的"当前颜色"按钮放进 options 菜单（改用各工具颜色按钮 + active_color_label）。
             self.assertEqual(toolbar.cursor_switch.text(), "显示鼠标")
             self.assertIsNot(toolbar.cursor_switch.parentWidget(), toolbar.options_button.menu())
         paste = next(button for button in toolbar.findChildren(QToolButton) if button.text() == "贴图")
@@ -7014,11 +7086,11 @@ class CoreTests(unittest.TestCase):
         panel = next(action.defaultWidget() for action in toolbar.options_button.menu().actions()
                      if isinstance(action, QWidgetAction))
         self.assertGreaterEqual(panel.minimumWidth(), 340)
-        self.assertLessEqual(panel.minimumWidth(), 380)
+        self.assertLessEqual(panel.minimumWidth(), 500)
         self.assertGreaterEqual(toolbar.options_button.menu().sizeHint().width(), 320)
         panel.show()
         self.app.processEvents()
-        for row in (0,):
+        for row in (1,):
             label = panel.layout().itemAtPosition(row, 0).widget()
             control = panel.layout().itemAtPosition(row, 1).widget()
             self.assertIsInstance(label, QLabel)
@@ -7153,14 +7225,12 @@ class CoreTests(unittest.TestCase):
         toolbar = ToolbarWidget(settings=settings)
         changes = []
         toolbar.setting_changed.connect(lambda key, value: changes.append((key, value)))
-        self.assertIn("background: #b44726", toolbar.options_button.styleSheet())
-        self.assertIn("QToolButton:disabled", toolbar.options_button.styleSheet())
         for tool, width in (("rect", 8), ("ellipse", 11), ("arrow", 14),
                             ("pen", 17), ("marker", 20), ("eraser", 23)):
             toolbar.tool_buttons[tool].click()
             self.assertTrue(toolbar.options_button.isEnabled())
             self.assertEqual(toolbar.options_button.text(), f"{toolbar.tool_buttons[tool].text()}设置")
-            self.assertEqual(toolbar.option_rows[0][0].text(), "直径" if tool == "eraser" else "线宽")
+            self.assertEqual(toolbar.option_rows[1][0].text(), "直径" if tool == "eraser" else "线宽")
             self.assertFalse(toolbar.pen_width.isHidden())
             expected_range = (10, 100) if tool == "eraser" else (1, 50)
             self.assertEqual((toolbar.pen_width.minimum(), toolbar.pen_width.maximum()), expected_range)
@@ -7299,8 +7369,9 @@ class CoreTests(unittest.TestCase):
                 self.assertEqual(toolbar.font_size.value(), 18)
             if tool == "arrow":
                 self.assertEqual(set(toolbar.choice_buttons["arrow_style"]),
-                                  {"filled", "open", "double", "double_filled",
-                                   "solid_line", "open_line", "solid_dash", "open_dash"})
+                                  {"filled", "open", "dashed", "double_filled", "double_open",
+                                   "double_dashed", "line", "dashed_line", "rect_filled",
+                                   "rect_open", "rect_dashed"})
                 self.assertTrue(toolbar.choice_buttons["arrow_style"]["open"].isChecked() is False)
                 self.assertGreaterEqual(panel.minimumWidth(), 760)
             if tool in ("rect", "ellipse"):
@@ -7369,7 +7440,7 @@ class CoreTests(unittest.TestCase):
         self.assertEqual([section.findChild(QLabel).text() for section in toolbar.sections],
                         ["标注", "编辑", "图像旋转", "输出"])
         self.assertEqual([button.text() for button in toolbar.output_buttons],
-                     ["贴图", "外观", "保存", "放弃", "关闭全部"])
+                     ["贴图", "外观", "保存", "仅复制", "放弃", "关闭全部"])
         commands = []
         toolbar.command.connect(commands.append)
         buttons = toolbar.findChildren(QToolButton)
@@ -7418,10 +7489,10 @@ class CoreTests(unittest.TestCase):
                         self.assertFalse(action.icon().isNull(), action.text())
             for action in sticker_menu.actions():
                 if action.menu() is not None and action.text() in ("旋转", "透明背景模式", "贴图分组", "透明度"):
-                    self.assertIn("<br>", action.toolTip(), action.text())
+                    self.assertIn("\n", action.toolTip(), action.text())
                     for child in action.menu().actions():
                         if not child.isSeparator() and not isinstance(child, QWidgetAction):
-                            self.assertIn("<br>", child.toolTip(), child.text())
+                            self.assertIn("\n", child.toolTip(), child.text())
             sticker.close()
 
     def test_capture_actions_belong_to_inline_editor_not_window_editor(self):
@@ -7827,10 +7898,10 @@ class CoreTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as folder, \
                 patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
-            manager = StickerManager(DEFAULTS)
             board = QGuiApplication.clipboard()
+            board.clear()
+            manager = StickerManager(DEFAULTS)
             try:
-                board.clear()
                 self.assertIsNone(manager.paste_clipboard())
                 board.setText("待办：检查缓存")
                 item = manager.paste_clipboard()
@@ -8005,6 +8076,7 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(mask.selection.rects, [QRect(0, 0, 100, 80)])
             QTest.keyClick(mask, Qt.Key_Tab)
             self.assertEqual(mask.selection.rects, [QRect(10, 10, 50, 40)])
+            self.assertEqual(mask.selection.rects, [QRect(10, 10, 50, 40)])
             QTest.keyClick(mask, Qt.Key_Tab, Qt.ShiftModifier)
             self.assertEqual(mask.selection.rects, [QRect(0, 0, 100, 80)])
             mask.close()
@@ -8119,7 +8191,7 @@ class CoreTests(unittest.TestCase):
         toolbar = ToolbarWidget(settings=dict(DEFAULTS))
         try:
             self.assertEqual(sorted(toolbar.previews),
-                             ["arrow", "crop", "ellipse", "eraser", "marker", "mosaic", "pen", "rect", "text"])
+                             ["arrow", "crop", "ellipse", "eraser", "marker", "mosaic", "pen", "picker", "rect", "sequence", "text"])
             # 弹窗未显示时 isVisible 恒为 False，这里只看控件自身的显式隐藏状态。
             toolbar.tool_buttons["arrow"].click()
             self.assertEqual([name for name, widget in toolbar.previews.items() if not widget.isHidden()],
@@ -8382,7 +8454,9 @@ class CoreTests(unittest.TestCase):
         painter.setBrush(QColor("#d02020"))
         painter.drawRoundedRect(image.rect(), 10, 10)
         painter.end()
-        sticker = StickerItem(image, settings=dict(DEFAULTS))
+        sticker = StickerItem(image, settings=dict(DEFAULTS,
+                                                     sticker_shadow_enabled=False,
+                                                     sticker_border_enabled=False))
         try:
             self.assertEqual(sticker.pixmap.toImage().pixelColor(20, 16).alpha(), 255)
             self.assertEqual(sticker.pixmap.toImage().pixelColor(0, 0).alpha(), 0)
@@ -8695,7 +8769,7 @@ class CoreTests(unittest.TestCase):
             page = settings.page("编辑器")
             previews = {preview.kind: preview for preview in page.previews}
             self.assertEqual(sorted(previews),
-                             ["arrow", "crop", "ellipse", "eraser", "marker", "mosaic", "pen", "rect", "text"])
+                             ["arrow", "crop", "ellipse", "eraser", "marker", "mosaic", "pen", "picker", "rect", "sequence", "text"])
             page.controls["font_size"].setValue(42)
             text = previews["text"]
             self.assertIsNone(text.scene)

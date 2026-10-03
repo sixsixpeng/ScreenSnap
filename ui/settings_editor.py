@@ -20,11 +20,15 @@ class EditorPage(SettingsPage):
         self.group("箭头")
         self.preview("arrow")
         self.add_color("arrow_color", "箭头颜色")
-        self.choice("arrow_style", "箭头样式", [("实心", "filled"), ("空心", "open"),
-                                ("实心双向", "double_filled"), ("空心双向", "double"),
-                               ("实心线段", "solid_line"), ("空心线段", "open_line"),
-                               ("实心虚线", "solid_dash"), ("空心虚线", "open_dash")],
-                    "新建箭头的箭头头部样式")
+        self.choice("arrow_style", "箭头样式", [
+                                ("箭头", "filled"), ("空心箭头", "open"), ("虚线箭头", "dashed"),
+                                ("双向箭头", "double_filled"), ("双向空心箭头", "double_open"), ("双向虚线箭头", "double_dashed"),
+                                ("线段", "line"), ("虚线", "dashed_line"),
+                                ("箭杆矩形", "rect_filled"), ("空心箭杆", "rect_open"), ("虚线箭杆", "rect_dashed")],
+                    "新建箭头的样式")
+        self.check("arrow_chain", "箭头多段绘制",
+                   "开启后，绘制一个箭头后可继续在上一个终点与下一个点之间连续绘制相连的多段箭头；"
+                   "按鼠标右键结束连续绘制并保留已画图形。")
         self.number("arrow_width", "箭头线宽", 1, 50, "只影响对应工具")
         self.group("画笔")
         self.preview("pen")
@@ -64,6 +68,10 @@ class EditorPage(SettingsPage):
         self.add_color("text_color", "文字颜色")
         self.number("font_size", "文字大小", 6, 200, "默认文字字号")
         self.decimal("line_spacing", "文字行距", 0.5, 4, "多行文字的行间距倍率")
+        self.choice("text_alignment", "文字对齐", [("左对齐", "left"), ("居中", "center"),
+                                             ("右对齐", "right")], "新建文字标注的对齐方式")
+        fonts = QFontDatabase.families()
+        self.choice("font", "默认字体", [("系统默认", "")] + [(font, font) for font in fonts], "从已安装字体中选择")
         self.group("序号标注")
         self.preview("sequence", 120)
         self.choice("sequence_shape", "序号形状",
@@ -84,10 +92,6 @@ class EditorPage(SettingsPage):
                      ("紫五边形", "purple_pentagon"), ("青六边形", "teal_hexagon"),
                      ("红心", "red_heart"), ("蓝箭头", "blue_arrow")],
                     "一键套用形状与配色组合；选自定义后可逐项自由调整")
-        self.choice("text_alignment", "文字对齐", [("左对齐", "left"), ("居中", "center"),
-                                              ("右对齐", "right")], "新建文字标注的对齐方式")
-        fonts = QFontDatabase.families()
-        self.choice("font", "默认字体", [("系统默认", "")] + [(font, font) for font in fonts], "从已安装字体中选择")
         self.group("马赛克")
         self.preview("mosaic")
         self.choice("mosaic_mode", "马赛克类型", [("方块", "blocks"), ("毛玻璃", "blur"),

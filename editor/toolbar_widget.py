@@ -301,12 +301,19 @@ class ToolbarWidget(QWidget):
             settings.get("text_alignment", "left"), "新建文字标注的对齐方式")
         self.alignment.setToolTip("新建文字标注的对齐方式")
         self.arrow_style = self.radio_options(
-            "arrow_style", (("实心", "filled"), ("空心", "open"),
-                            ("实心双向", "double_filled"), ("空心双向", "double"),
-                            ("实心线段", "solid_line"), ("空心线段", "open_line"),
-                            ("实心虚线", "solid_dash"), ("空心虚线", "open_dash")),
-            settings.get("arrow_style", "filled"), "设置新箭头的箭头头部样式")
+            "arrow_style", (
+                ("箭头", "filled"), ("空心箭头", "open"), ("虚线箭头", "dashed"),
+                ("双向箭头", "double_filled"), ("双向空心箭头", "double_open"), ("双向虚线箭头", "double_dashed"),
+                ("线段", "line"), ("虚线", "dashed_line"),
+                ("箭杆矩形", "rect_filled"), ("空心箭杆", "rect_open"), ("虚线箭杆", "rect_dashed"),
+            ),
+            settings.get("arrow_style", "filled"), "设置新箭头的样式", columns=3)
         self.arrow_style.setToolTip("设置新箭头的箭头头部样式")
+        self.arrow_chain = QCheckBox("多段绘制")
+        self.arrow_chain.setChecked(settings.get("arrow_chain", False))
+        self.arrow_chain.setToolTip("开启后，绘制一个箭头后可继续在上一个终点与下一个点之间连续绘制相连的多段箭头；"
+                                    "按鼠标右键结束连续绘制并保留已画图形。")
+        self.arrow_chain.toggled.connect(lambda value: self.setting_changed.emit("arrow_chain", value))
         self.rect_style = self.radio_options(
             "rect_style", (("实线", "solid"), ("虚线", "dash")),
             settings.get("rect_style", "solid"), "设置新矩形的边框线型")
@@ -426,6 +433,7 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(self.mosaic_size_label, 7, 2)
         panel_layout.addWidget(QLabel("样式"), 8, 0)
         panel_layout.addWidget(self.arrow_style, 8, 1, 1, 2)
+        panel_layout.addWidget(self.arrow_chain, 25, 0, 1, 3)
         panel_layout.addWidget(QLabel("裁剪线宽"), 9, 0)
         panel_layout.addWidget(self.crop_width, 9, 1)
         panel_layout.addWidget(self.crop_width_label, 9, 2)
@@ -501,12 +509,13 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(QLabel("预设组合"), 24, 0)
         panel_layout.addWidget(self.sequence_preset, 24, 1, 1, 2)
         self.sequence_rows = (19, 20, 21, 22, 23, 24)
-        option_row_count = 25
+        option_row_count = 26
         for row in range(option_row_count):
             label_item = panel_layout.itemAtPosition(row, 0)
             label = label_item.widget() if label_item is not None else None
             if label is not None:
-                label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+                if isinstance(label, QLabel):
+                    label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
                 label.setMinimumHeight(28)
         for index in range(panel_layout.count()):
             widget = panel_layout.itemAt(index).widget()
@@ -769,7 +778,7 @@ class ToolbarWidget(QWidget):
         elif tool == "mosaic":
             rows.update((6, 7))
         elif tool == "arrow":
-            rows.add(8)
+            rows.update((8, 25))
         elif tool == "crop":
             rows.add(9)
         elif tool == "rect":

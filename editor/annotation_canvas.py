@@ -76,6 +76,7 @@ class AnnotationCanvas(QGraphicsView):
         self.start = None
         self.drawing = None
         self.preview_end = None
+        self.chain_active = False
         self.resizing = None
         self.resize_handle = None
         self.resize_anchor = None
@@ -130,12 +131,25 @@ class AnnotationCanvas(QGraphicsView):
 
     def set_tool(self, tool):
         """切换标注工具并同步其专属光标。"""
+        if tool != self.tool:
+            self.chain_active = False
+            self.start = None
+            self.preview_end = None
         previous = self.tool
         self.tool = tool
         if tool == "picker":
             self.setCursor(self._picker_cursor)
         elif previous == "picker" or tool != "select":
             self.unsetCursor()
+
+    def _finish_chain(self):
+        """结束多段绘制：保留已画图形，复位连续绘制状态。"""
+        if not self.chain_active:
+            return
+        self.chain_active = False
+        self.start = None
+        self.preview_end = None
+        self.viewport().update()
 
     def set_zoom(self, percent):
         percent = min(800, max(1, int(percent)))
@@ -617,6 +631,11 @@ class AnnotationCanvas(QGraphicsView):
 
     def mousePressEvent(self, event):
         """根据工具决定选中图元、取色或开始新的标注。"""
+        if event.button() == Qt.RightButton and self.chain_active and self.tool == "arrow":
+            # 多段绘制进行中，右键直接结束连续绘制并保留已画图形。
+            self._finish_chain()
+            event.accept()
+            return
         if event.button() in (Qt.RightButton, Qt.MiddleButton):
             # 右键和中键使用自定义抓手平移，不改变当前标注工具。
             self.right_pan_start = event.position().toPoint()
@@ -699,10 +718,12 @@ class AnnotationCanvas(QGraphicsView):
             self.checkpoint()
             return
         if self.tool not in ("select", "hand") and event.button() == Qt.LeftButton:
-            self.start = point
+            # 多段绘制进行中：保留上一终点作为本段起点，不从按下点重置。
+            if not (self.chain_active and self.tool == "arrow" and self.start is not None):
+                self.start = point
             self.preview_end = point
             if self.tool in ("pen", "marker"):
-                self.drawing = QPainterPath(point)
+                self.drawing = QPainterPath(self.start)
             return
         super().mousePressEvent(event)
 
@@ -952,8 +973,16 @@ class AnnotationCanvas(QGraphicsView):
                              self.settings.get(f"{self.tool}_fill_enabled", False),
                              self.settings.get(f"{self.tool}_fill_opacity", 35))
             self.scene_data.addItem(item)
-            self.start = None
+            if self.tool == "arrow" and self.settings.get("arrow_chain", False):
+                # 多段绘制：保留上一终点作为下一段起点；按右键结束连续绘制。
+                self.start = end
+                self.chain_active = True
+                self.preview_end = None
+            else:
+                self.start = None
+                self.chain_active = False
             self.checkpoint()
+            self.viewport().update()
             return
         super().mouseReleaseEvent(event)
         if self.tool == "select":
@@ -986,6 +1015,10 @@ class AnnotationCanvas(QGraphicsView):
     def keyPressEvent(self, event):
         """处理删除、临时平移和放弃编辑等画布快捷键。"""
         if event.key() == Qt.Key_Escape:
+            if self.chain_active and self.tool == "arrow":
+                self._finish_chain()
+                event.accept()
+                return
             self.cancelled.emit()
         elif event.key() == Qt.Key_Space:
             self.space_pressed = True

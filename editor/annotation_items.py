@@ -125,7 +125,7 @@ def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
           fill_enabled=False, fill_opacity=35):
     """按工具类型建立可选中、可移动的矢量图元。"""
     bounds = QRectF(start, end).normalized()
-    dashed = arrow_style in ("dash", "solid_dash", "open_dash")
+    dashed = arrow_style in ("dashed", "double_dashed", "dashed_line", "rect_dashed", "dash")
     pen = QPen(QColor(color), width, Qt.DashLine if dashed else Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
     fill = QColor(color)
     fill.setAlpha(round(255 * max(0, min(100, fill_opacity)) / 100))
@@ -149,12 +149,13 @@ def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
                 return editable(item)
             axis = QPointF(direction.x() / length, direction.y() / length)
             side = QPointF(-axis.y(), axis.x())
-            if arrow_style in ("solid_line", "solid_dash"):
+            if arrow_style in ("line", "dashed_line"):
                 item = AnnotationPathItem(path)
                 item.setPen(pen)
                 return editable(item)
-            if arrow_style in ("open_line", "open_dash"):
-                shaft_half = max(3, width * 1.6)
+            if arrow_style in ("rect_filled", "rect_open", "rect_dashed"):
+                # 仅箭杆矩形：实心/空心/空心+虚线的矩形，不含箭头。
+                shaft_half = max(3.5, width * 1.15)
                 path = QPainterPath(start + side * shaft_half)
                 path.lineTo(end + side * shaft_half)
                 path.lineTo(end - side * shaft_half)
@@ -162,17 +163,17 @@ def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
                 path.closeSubpath()
                 item = AnnotationPathItem(path)
                 item.setPen(pen)
-                item.setBrush(Qt.NoBrush)
+                item.setBrush(QColor(color) if arrow_style == "rect_filled" else Qt.NoBrush)
                 return editable(item)
-            double_headed = arrow_style in ("double", "double_filled")
+            double_headed = arrow_style in ("double_filled", "double_open", "double_dashed")
             head_length = min(length * (0.36 if double_headed else 0.48),
                               max(24, width * 8))
             shaft_half = min(max(3.5, width * 1.15), head_length * (0.55 if double_headed else 0.8))
             head_half = max(shaft_half * 1.2, head_length * 0.7)
             shoulder = (head_length * 0.25 if double_headed else
                         min(head_length * 0.22, (head_half - shaft_half) * 0.6))
-
             if double_headed:
+                # 双向箭头沿用旧的矩形箭杆外观。
                 front = start + axis * head_length
                 back = end - axis * head_length
                 points = (start,
@@ -186,14 +187,15 @@ def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
                           front - axis * shoulder - side * shaft_half,
                           front - side * head_half)
             else:
+                # 单箭头：三角形箭杆，尾部收为尖点，靠箭头一侧为三角形底边。
                 back = end - axis * head_length
-                points = (start + side * shaft_half,
-                          back + axis * shoulder + side * shaft_half,
+                base = back + axis * shoulder
+                points = (start,
+                          base + side * shaft_half,
                           back + side * head_half,
                           end,
                           back - side * head_half,
-                          back + axis * shoulder - side * shaft_half,
-                          start - side * shaft_half)
+                          base - side * shaft_half)
             path = QPainterPath(points[0])
             for point in points[1:]:
                 path.lineTo(point)
@@ -201,7 +203,7 @@ def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
         item = AnnotationPathItem(path)
         item.setPen(pen)
         if tool == "arrow":
-            item.setBrush(QColor(color) if arrow_style in ("filled", "double_filled") else Qt.NoBrush)
+            item.setBrush(QColor(color) if arrow_style in ("filled", "double_filled", "rect_filled") else Qt.NoBrush)
     return editable(item)
 
 

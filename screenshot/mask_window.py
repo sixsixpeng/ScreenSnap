@@ -48,7 +48,7 @@ def _hover_fill_color(settings):
 
 
 def _mask_overlay_color(settings):
-    color = QColor(settings.get("mask_color", "#D9EDFF"))
+    color = QColor(settings.get("mask_color", "#000000"))
     opacity = settings.get("mask_opacity", 50)
     color.setAlpha(round(opacity * 255 / 100))
     return color
@@ -718,6 +718,8 @@ class MaskWindow(QWidget):
         # 窗口未显示时先识别一次，此时命中测试不会被本进程遮罩挡住。
         self.element_chain = []
         self.element_index = -1
+        self.capture_actions = self.create_capture_actions()
+        self.update_capture_actions()
         if primary and settings.get("window_detection", True):
             point = self.mapper.logical_global_to_physical_global(QCursor.pos())
             self.element_chain = element_chain((point.x(), point.y()),
@@ -732,8 +734,7 @@ class MaskWindow(QWidget):
                 auto_select, len(self.element_chain), self.element_chain)
             if self.element_chain and auto_select:
                 self.apply_element(0)
-        self.capture_actions = self.create_capture_actions()
-        self.update_capture_actions()
+
 
     def create_capture_actions(self):
         actions = QWidget(self)
@@ -761,6 +762,9 @@ class MaskWindow(QWidget):
         for button in (custom_size, recapture, window_edit, copy_only):
             button.setFixedHeight(32)
             button.setIconSize(QSize(14, 14))
+            # 截图遮罩是键盘驱动的取景层，操作按钮只用鼠标点击，不应抢占 Tab 焦点，
+            # 否则 Tab 会被焦点遍历抢走，无法在窗口元素层级间循环。
+            button.setFocusPolicy(Qt.NoFocus)
         custom_size.setToolTip(rich_tooltip(
             "自定义尺寸",
             "按指定宽高创建选区：宽高默认填整屏像素，可改成任意尺寸（如 1920 × 1080），"
@@ -906,6 +910,10 @@ class MaskWindow(QWidget):
         super().closeEvent(event)
 
     def update_all(self):
+        # 选区微调（键位包含 S）与快捷保存快捷键 S 冲突：选区处于可微调状态时不响应保存，
+        # 交由 keyPressEvent 处理方向微调；无活动选区时才允许 S 直接保存。
+        if self.capture_save_shortcut is not None:
+            self.capture_save_shortcut.setEnabled(self.selection.nudge_index is None)
         self.session.position = QPoint(self.position)
         for view in self.session.views:
             view.update_capture_actions()
@@ -1467,6 +1475,7 @@ class MaskWindow(QWidget):
             return
         if key == Qt.Key_Tab:
             self.cycle_element(-1 if event.modifiers() & Qt.ShiftModifier else 1)
+            event.accept()
             return
         if key == Qt.Key_Escape:
             self.close()

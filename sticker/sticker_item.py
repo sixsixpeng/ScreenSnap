@@ -278,7 +278,7 @@ class StickerItem(QWidget):
             return
         rect = self.image_rect()
         mask = QImage(self.size(), QImage.Format_Mono)
-        mask.fill(1)
+        mask.fill(0)
         source = self.pixmap.toImage()
         if source.isNull() or not source.hasAlphaChannel():
             self.clearMask()
