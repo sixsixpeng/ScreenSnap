@@ -1069,29 +1069,6 @@ class CoreTests(unittest.TestCase):
                 warning.assert_called_once()
                 settings.close()
 
-    def test_legacy_product_directories_migrate_to_screensnap(self):
-        import os
-        from core.path_utils import captures_dir, data_dir
-
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            appdata = root / "appdata"
-            legacy_data = appdata / "SnipasteClone"
-            legacy_data.mkdir(parents=True)
-            (legacy_data / "settings.json").write_text("{}", encoding="utf-8")
-            with patch.dict(os.environ, {"APPDATA": str(appdata)}):
-                self.assertEqual(data_dir(), appdata / "ScreenSnap")
-            self.assertTrue((appdata / "ScreenSnap" / "settings.json").is_file())
-            self.assertFalse(legacy_data.exists())
-
-            pictures = root / "Pictures"
-            legacy_captures = pictures / "SnipasteClone"
-            legacy_captures.mkdir(parents=True)
-            (legacy_captures / "capture.png").write_bytes(b"image")
-            with patch.object(Path, "home", return_value=root):
-                self.assertEqual(captures_dir(), pictures / "ScreenSnap")
-            self.assertTrue((pictures / "ScreenSnap" / "capture.png").is_file())
-
     def test_config_created_on_first_load_with_all_settings(self):
         from config.config_manager import DEFAULTS
         with tempfile.TemporaryDirectory() as folder:

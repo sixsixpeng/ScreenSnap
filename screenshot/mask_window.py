@@ -30,8 +30,6 @@ from screenshot.selection_rect import SelectionRects
 from screenshot.overlay_info import paint_info
 from screenshot.magnifier_widget import magnifier_rect, paint_magnifier
 
-# 长截图期间遮罩为鼠标穿透，真实滚轮/点击由系统直接投递给下方页面，不再自行转发。
-
 # 鼠标移动时悬停识别的刷新间隔由设置“window_hover_interval”控制（毫秒），避免每个移动事件都调用系统 API。
 
 # 没抢到焦点时的全局 Esc 兜底需要系统键盘钩子；自动化测试会置为 False，避免吃掉真实按键。
