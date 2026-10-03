@@ -172,8 +172,11 @@ class ToolbarWidget(QWidget):
         self.section_layout.setHorizontalSpacing(2)
         self.section_layout.setVerticalSpacing(3)
         self._layout_mode = None
+        # 选择工具下选中的标注类型，用于「更多设置」展示对应参数（None 表示无/未识别）。
+        self.selected_tool = None
 
         self._apply_hover_style()
+        QApplication.instance().paletteChanged.connect(self._apply_hover_style)
 
         drawing = self.group("标注")
         tool_grid = QGridLayout()
@@ -189,6 +192,7 @@ class ToolbarWidget(QWidget):
                            ("椭圆", "ellipse"), ("序号", "number"), ("文字", "text"),
                            ("橡皮擦", "eraser"), ("马赛克", "mosaic"), ("取色", "picker"), ("裁剪", "crop")]:
             button = QToolButton()
+            button.setProperty("annotationTool", True)
             icon = action_icon("eraser") if key == "eraser" else annotation_icon(key)
             button.setIcon(icon)
             button.setIconSize(QSize(20, 20))
@@ -211,6 +215,9 @@ class ToolbarWidget(QWidget):
             button.setToolTip(rich_tooltip(label, tool_tips[key]))
             button.setAccessibleName(label)
             button.setCheckable(True)
+            button.toggled.connect(
+                lambda checked, selected=key: logging.getLogger("screensnap").debug(
+                    "标注工具选中状态切换: %s", selected) if checked else None)
             button.setMinimumHeight(40)
             button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
             button.clicked.connect(lambda checked=False, selected=key: self.tool_changed.emit(selected))
@@ -317,7 +324,9 @@ class ToolbarWidget(QWidget):
             lambda value: self.setting_changed.emit("mosaic_width", value))
         self.eraser_erase_base = QCheckBox("同时擦除原图")
         self.eraser_erase_base.setChecked(settings.get("eraser_erase_base", False))
-        self.eraser_erase_base.setToolTip("开启后橡皮擦同时擦掉截图原图；关闭则只擦标注、露出原图")
+        self.eraser_erase_base.setToolTip(
+            "开启后新擦除会同时擦掉截图原图（只影响之后的擦除，已有擦除可在该处右键单独设置）；"
+            "关闭则只擦标注、露出原图")
         self.eraser_erase_base.toggled.connect(lambda value: self.setting_changed.emit("eraser_erase_base", value))
         self.alignment = self.radio_options(
             "text_alignment", (("左对齐", "left"), ("居中", "center"), ("右对齐", "right")),
@@ -333,6 +342,24 @@ class ToolbarWidget(QWidget):
             lambda color: self.setting_changed.emit("text_background", color),
             compact=True, purpose="文字背景颜色")
         self.text_background.setMinimumHeight(34)
+        self.text_width = QSpinBox()
+        self.text_width.setRange(0, 2000)
+        self.text_width.setValue(int(settings.get("text_width", 0)))
+        self.text_width.setSuffix(" px")
+        self.text_width.setSpecialValueText("自动")
+        self.text_width.setMinimumHeight(34)
+        self.text_width.setToolTip("新建文字的文本框宽度；0 表示按内容自动换行")
+        self.text_width.valueChanged.connect(
+            lambda value: self.setting_changed.emit("text_width", value))
+        self.text_height = QSpinBox()
+        self.text_height.setRange(0, 2000)
+        self.text_height.setValue(int(settings.get("text_height", 0)))
+        self.text_height.setSuffix(" px")
+        self.text_height.setSpecialValueText("自动")
+        self.text_height.setMinimumHeight(34)
+        self.text_height.setToolTip("新建文字的文本框高度；0 表示按内容自动增长，超出部分裁剪")
+        self.text_height.valueChanged.connect(
+            lambda value: self.setting_changed.emit("text_height", value))
         self.text_bold = QCheckBox("粗体")
         self.text_bold.setChecked(settings.get("text_bold", False))
         self.text_bold.toggled.connect(lambda v: self.setting_changed.emit("text_bold", v))
@@ -549,6 +576,10 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(self.text_background_enabled, 28, 0)
         panel_layout.addWidget(self.text_background, 28, 1, 1, 2)
         panel_layout.addWidget(text_format, 29, 0, 1, 3)
+        panel_layout.addWidget(QLabel("文字宽度"), 35, 0)
+        panel_layout.addWidget(self.text_width, 35, 1, 1, 2)
+        panel_layout.addWidget(QLabel("文字高度"), 36, 0)
+        panel_layout.addWidget(self.text_height, 36, 1, 1, 2)
         panel_layout.addWidget(self.mosaic_brush, 30, 0, 1, 3)
         panel_layout.addWidget(self.eraser_erase_base, 31, 0, 1, 3)
         # 序号标注专属参数：形状、填充色、文字色、字号、起始值与预设组合。
@@ -602,7 +633,7 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(QLabel("预设组合"), 24, 0)
         panel_layout.addWidget(self.sequence_preset, 24, 1, 1, 2)
         self.sequence_rows = (19, 20, 21, 22, 23, 24)
-        option_row_count = 35
+        option_row_count = 37
         for row in range(option_row_count):
             label_item = panel_layout.itemAtPosition(row, 0)
             label = label_item.widget() if label_item is not None else None
@@ -723,7 +754,8 @@ class ToolbarWidget(QWidget):
                      ("删除", "delete", QStyle.SP_TrashIcon)]:
             self.edit_buttons.append(self.button(self.edit_grid, label, key, icon))
         self.edit_buttons.append(self.menu_button(self.edit_grid, "层级", [("置顶", "top"), ("置底", "bottom"),
-                                          ("上移一层", "up"), ("下移一层", "down")]))
+                                          ("上移一层", "up"), ("下移一层", "down"),
+                                          ("删除最近一次擦除", "erase_one"), ("清除全部擦除", "erase_clear")]))
         self.edit_buttons.append(self.button(self.edit_grid, "重置", "reset", QStyle.SP_DialogResetButton))
         self.capture_action_buttons = []
         if show_capture_actions:
@@ -803,41 +835,55 @@ class ToolbarWidget(QWidget):
         self.edit_image_layout.addStretch()
         self.reflow(1100)
 
-    def _apply_hover_style(self):
-        """给工具按钮加一层非常轻微的悬停/按下反馈，保持系统原生外观。
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() in (QEvent.PaletteChange, QEvent.ApplicationPaletteChange):
+            self._apply_hover_style()
 
-        只作用于 QToolButton（不含颜色按钮等 QPushButton），浅/深色主题各自取
-        近乎透明的叠加色，避免明显色块变化；边框平时透明，悬停时浅描边以防布局跳动。
-        """
-        from PySide6.QtCore import Qt
-        app = QApplication.instance()
-        dark = False
-        if app is not None:
-            try:
-                dark = app.styleHints().colorScheme() == Qt.ColorScheme.Dark
-            except Exception:
-                dark = False
+    def _apply_hover_style(self):
+        """统一灰黑选中反馈，并按应用实际主题保证前景与背景对比。"""
+        from PySide6.QtGui import QPalette
+        dark = QApplication.palette().color(QPalette.Window).lightness() < 128
         if dark:
-            hover_bg = "rgba(255, 255, 255, 0.10)"
-            hover_border = "rgba(255, 255, 255, 0.22)"
-            pressed_bg = "rgba(255, 255, 255, 0.16)"
+            selected, hovered, pressed = "#484848", "#535353", "#606060"
+            border, foreground = "#aaaaaa", "#f5f5f5"
         else:
-            hover_bg = "rgba(0, 0, 0, 0.06)"
-            hover_border = "rgba(0, 0, 0, 0.14)"
-            pressed_bg = "rgba(0, 0, 0, 0.10)"
-        self.setStyleSheet(f"""
-            QToolButton {{
+            selected, hovered, pressed = "#dedede", "#d3d3d3", "#c4c4c4"
+            border, foreground = "#666666", "#202020"
+        stylesheet = """
+            QToolButton {
                 border: 1px solid transparent;
                 border-radius: 4px;
-            }}
-            QToolButton:hover {{
-                background: {hover_bg};
-                border: 1px solid {hover_border};
-            }}
-            QToolButton:pressed {{
-                background: {pressed_bg};
-            }}
-        """)
+                color: palette(button-text);
+            }
+            QToolButton:hover {
+                background: palette(midlight);
+                border: 1px solid palette(mid);
+            }
+            QToolButton:pressed {
+                background: palette(mid);
+            }
+            QToolButton[annotationTool="true"]:checked {
+                background: %s;
+                border: 1px solid %s;
+                color: %s;
+            }
+            QToolButton[annotationTool="true"]:checked:hover {
+                background: %s;
+                border: 1px solid %s;
+                color: %s;
+            }
+            QToolButton[annotationTool="true"]:checked:pressed {
+                background: %s;
+                border: 1px solid %s;
+                color: %s;
+            }
+        """ % (selected, border, foreground, hovered, border, foreground,
+               pressed, border, foreground)
+        if self.styleSheet() != stylesheet:
+            self.setStyleSheet(stylesheet)
+            logging.getLogger("screensnap").debug(
+                "标注工具选中样式刷新: %s", "深色" if dark else "浅色")
 
     def refresh_previews(self):
         """参数变化后重绘“更多设置”里的实时预览。"""
@@ -846,7 +892,7 @@ class ToolbarWidget(QWidget):
         self.output_preview.refresh()
 
     def change_tool_width(self, value):
-        tool = next((key for key, button in self.tool_buttons.items() if button.isChecked()), None)
+        tool = self.selected_tool if self.current_tool == "select" else self.current_tool
         if tool in TOOL_WIDTH_KEYS:
             self.tool_widths[tool] = value
             self.setting_changed.emit(TOOL_WIDTH_KEYS[tool], value)
@@ -860,6 +906,9 @@ class ToolbarWidget(QWidget):
     def set_tool_mode(self, tool):
         """只展示当前工具可用的参数；切换时不改写别的工具的线宽。"""
         self.set_active_tool(tool)
+        selection_mode = tool == "select"
+        if selection_mode:
+            tool = self.selected_tool
         rows = ({1} if tool in TOOL_WIDTH_KEYS else set())
         if tool == "eraser":
             rows.add(31)
@@ -876,7 +925,7 @@ class ToolbarWidget(QWidget):
         elif tool == "pen":
             rows.add(26)
         elif tool == "text":
-            rows.update((3, 4, 5, 28, 29))
+            rows.update((3, 4, 5, 28, 29, 35, 36))
         elif tool == "mosaic":
             rows.update((6, 7, 30))
             # 笔刷宽度仅在涂抹模式（自由笔刷）下生效。
@@ -892,9 +941,6 @@ class ToolbarWidget(QWidget):
             rows.update((11, 17, 18, 33))
         elif tool == "number":
             rows.update(self.sequence_rows)
-        elif tool == "select":
-            # 选择工具下展示「箭头样式」，便于对已有箭头后期改样式。
-            rows.update((8,))
         if tool in ("pen", "rect", "ellipse", "arrow", "marker", "text"):
             rows.add(0)
         elif tool == "crop":
@@ -908,6 +954,7 @@ class ToolbarWidget(QWidget):
         if kind:
             self.previews[kind].refresh()
         # 同一个弹出面板只展示当前工具的参数，切换时保留各自的线宽。
+        self._last_option_rows = set(rows)
         for index, widgets in enumerate(self.option_rows):
             for widget in widgets:
                 widget.setVisible(index in rows)
@@ -926,7 +973,9 @@ class ToolbarWidget(QWidget):
         }
         self.active_color_label.setText(color_labels.get(tool, "当前工具颜色"))
         self.options_button.setEnabled(bool(rows))
-        name = self.tool_buttons[tool].text()
+        if not rows:
+            self.options_button.menu().hide()
+        name = self.tool_buttons[tool].text() if tool in self.tool_buttons else "选择"
         self.options_button.setText(f"{name}设置" if rows else "更多设置")
         descriptions = {
             "crop": "设置裁剪框的颜色和线宽，并保存为下次编辑的默认值",
@@ -941,9 +990,12 @@ class ToolbarWidget(QWidget):
             "number": "设置序号标记的形状、填充色、文字色与字号",
             "picker": "预览取色放大镜与像素网格；取到的色值会设为当前标注颜色",
         }
+        detail = (f"调整选中的{name}标注参数" if selection_mode and rows
+                  else descriptions.get(tool, f"设置{name}参数"))
+        if not rows:
+            detail = "单选一个标注后调整其参数" if selection_mode else "当前工具没有可调整的专属参数"
         self.options_button.setToolTip(rich_tooltip(
-            f"{name}设置" if rows else "更多设置",
-            descriptions.get(tool, f"设置{name}参数") if rows else "当前工具没有可调整的专属参数",
+            f"{name}设置" if rows else "更多设置", detail,
         ))
         self.option_rows[1][0].setText("直径" if tool == "eraser" else "线宽")
         self.pen_width.setToolTip("橡皮擦直径：10–100 px" if tool == "eraser"
@@ -969,6 +1021,44 @@ class ToolbarWidget(QWidget):
         menu.setMinimumHeight(0)
         menu.setMinimumHeight(panel.sizeHint().height() + 4)
         menu.adjustSize()
+
+    def set_selected_tool(self, tool):
+        """记录选择工具下当前选中的标注类型，并刷新「更多设置」参数行。"""
+        selected_tool = tool if tool in self.tool_buttons and tool != "select" else None
+        if selected_tool == self.selected_tool:
+            return
+        self.selected_tool = selected_tool
+        logging.getLogger("screensnap").debug(
+            "标注设置上下文切换: %s", selected_tool or "无单选标注")
+        if self.tool_buttons["select"].isChecked():
+            self.set_tool_mode("select")
+
+    def _rows_for_tool(self, tool):
+        """返回某工具在「更多设置」中展示的参数行集合（不含宽度范围等副作用）。"""
+        rows = {1} if tool in TOOL_WIDTH_KEYS else set()
+        if tool == "eraser":
+            rows.add(31)
+        elif tool == "marker":
+            rows.update((2, 27))
+        elif tool == "pen":
+            rows.add(26)
+        elif tool == "text":
+            rows.update((3, 4, 5, 28, 29, 35, 36))
+        elif tool == "mosaic":
+            rows.update((6, 7, 30))
+            if self.mosaic_brush.isChecked():
+                rows.add(34)
+        elif tool == "arrow":
+            rows.update((8, 25))
+        elif tool == "crop":
+            rows.add(9)
+        elif tool == "rect":
+            rows.update((10, 13, 15, 16, 32))
+        elif tool == "ellipse":
+            rows.update((11, 17, 18, 33))
+        elif tool == "number":
+            rows.update(self.sequence_rows)
+        return rows
 
     @staticmethod
     def option_panel_width(tool):
@@ -1186,7 +1276,7 @@ class ToolbarWidget(QWidget):
         elif label == "旋转 / 翻转":
             button.setIcon(action_icon("rotate"))
         button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
-        button.setToolTip({"层级": "调整选中标注的前后层级"}.get(label, label))
+        button.setToolTip({"层级": "调整选中标注的前后层级；也可删除擦除层（无需回退后续标注）"}.get(label, label))
         button.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(button)
         action_icons = {"top": QStyle.SP_ArrowUp, "bottom": QStyle.SP_ArrowDown,
@@ -1194,7 +1284,8 @@ class ToolbarWidget(QWidget):
                         "left": QStyle.SP_ArrowBack, "right": QStyle.SP_ArrowForward,
                         "half": QStyle.SP_BrowserReload, "angle": QStyle.SP_BrowserReload,
                         "horizontal": QStyle.SP_ArrowLeft, "vertical": QStyle.SP_ArrowDown,
-                        "copy": QStyle.SP_FileDialogContentsView, "path": QStyle.SP_FileLinkIcon}
+                        "copy": QStyle.SP_FileDialogContentsView, "path": QStyle.SP_FileLinkIcon,
+                        "erase_one": QStyle.SP_TrashIcon, "erase_clear": QStyle.SP_TrashIcon}
         for title, action in actions:
             icon = action_icons[action]
             if action in ("top", "bottom", "left", "right", "half", "angle", "horizontal", "vertical"):
@@ -1287,6 +1378,12 @@ class ToolbarWidget(QWidget):
         elif key == "font_size":
             with QSignalBlocker(self.font_size):
                 self.font_size.setValue(int(value))
+        elif key == "text_width":
+            with QSignalBlocker(self.text_width):
+                self.text_width.setValue(int(value))
+        elif key == "text_height":
+            with QSignalBlocker(self.text_height):
+                self.text_height.setValue(int(value))
         elif key == "font" and value:
             with QSignalBlocker(self.font):
                 self.font.setCurrentFont(QFont(value))

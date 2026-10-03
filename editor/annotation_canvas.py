@@ -1,11 +1,12 @@
 """图片画布、标注事件和可撤销操作。"""
 
+import logging
 import math
 
 from PIL import Image, ImageFilter
 from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, Signal
 from PySide6.QtGui import (QBrush, QPainter, QPainterPath, QPen, QColor, QPixmap, QImage,
-                             QPolygonF, QPainterPathStroker,
+                             QPolygonF, QPainterPathStroker, QTextBlockFormat,
                              QTextCursor, QTransform, QCursor, QKeySequence, QFont)
 from PySide6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
                                QGraphicsItem, QGraphicsRectItem, QGraphicsEllipseItem,
@@ -18,10 +19,15 @@ from editor.annotation_items import (shape, text_item, editable, RoundedRectItem
                                      AnnotationRectItem, AnnotationEllipseItem,
                                      AnnotationPathItem, AnnotationTextItem,
                                      AnnotationPixmapItem, AnnotationSequenceItem,
+                                     EraseMaskItem, auto_text_width,
                                      apply_text_format, read_text_format)
 
 # 直线/折线模式下单段最短位移（像素），低于此值视为“未确定第二点”，不绘制。
 STRAIGHT_MIN_DISTANCE = 3
+
+# 文字标注用边中点拖动调整文本框时的最小宽/高（像素），避免拖成不可见。
+MIN_TEXT_WIDTH = 40.0
+MIN_TEXT_HEIGHT = 24.0
 
 
 def mosaic_image(sample, mode, size):
@@ -43,6 +49,9 @@ class AnnotationCanvas(QGraphicsView):
     cancelled = Signal()
     zoom_changed = Signal(int)
     selection_requested = Signal()
+    # 选中标注类型变化时发出（"rect"/"ellipse"/"arrow"/"text"/"pen"/"number"/""），
+    # 供工具栏按选中项类型展示对应的「更多设置」参数。
+    selected_annotation_changed = Signal(str)
     # 画布内入口（如文字输入对话框）改动配置时发出，交由编辑器同步配置与工具栏。
     setting_changed = Signal(str, object)
 
@@ -58,6 +67,7 @@ class AnnotationCanvas(QGraphicsView):
         self.cursor_enabled = settings["cursor"]
         self.scene_data = QGraphicsScene(self)
         self.setScene(self.scene_data)
+        self.scene_data.selectionChanged.connect(self._on_selection_changed)
         self.base = QGraphicsPixmapItem()
         # 底图固定在所有标注之下，且不会进入标注快照。
         self.base.setZValue(-10000)
@@ -93,6 +103,8 @@ class AnnotationCanvas(QGraphicsView):
         self.resize_anchor_local = None
         self.resize_scale = 1
         self.resize_transform = None
+        # 文字标注边中点调整宽度时的按下基准（宽度, 位置），避免逐帧叠加导致跳跃。
+        self.text_resize_origin = None
         self.alignment_guides = []
         self.rotating = None
         self.rotation_center = None
@@ -100,9 +112,8 @@ class AnnotationCanvas(QGraphicsView):
         self.rotation_start_value = 0.0
         self.mosaic_drawing = None
         self.mosaic_point = None
-        self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
-        self.erase_mask_image.fill(Qt.transparent)
-        # 记录当前遮罩是否有笔迹，供实时视图决定是否合成（避免每帧扫描遮罩）。
+        # 擦除以带 z 序的 EraseMaskItem 存在于场景中；该标志表示当前是否有擦除层，
+        # 供实时视图决定是否走合成路径。
         self.erase_mask_dirty = False
         self.resize_origin = None
         self.resize_position = None
@@ -111,6 +122,8 @@ class AnnotationCanvas(QGraphicsView):
         self.space_pressed = False
         self.eraser_last = None
         self.eraser_point = None
+        # 擦除笔迹分组编号：每次按下（或直接调用 erase_segment）递增，用于按笔迹删除擦除。
+        self.eraser_group = 0
         self.erasing = False
         self.right_pan_start = None
         self.right_pan_cursor = None
@@ -119,8 +132,7 @@ class AnnotationCanvas(QGraphicsView):
         self.selection_start = None
         self.selection_end = None
         self.selection_area = None
-        self.history = [(self.image, self.alternate, self.cursor_enabled, [],
-                        self.erase_mask_image.copy(), self.erase_mask_dirty)]
+        self.history = [(self.image, self.alternate, self.cursor_enabled, [])]
         self.cursor_index = 0
         self.zoom_percent = 100
 
@@ -324,14 +336,145 @@ class AnnotationCanvas(QGraphicsView):
         item.setPos(item.pos() + offset)
 
     def annotations(self):
-        """返回不包含底图的图元，用于层级管理和历史记录。"""
-        return [item for item in self.scene_data.items() if item is not self.base]
+        """返回标注图元（不含底图与擦除层），用于层级管理、选中与历史记录。"""
+        return [item for item in self.scene_data.items()
+                if item is not self.base and not isinstance(item, EraseMaskItem)]
+
+    def annotation_at(self, point):
+        """返回场景点处最上层的标注图元，没有则返回 None。
+
+        命中测试跳过底图与擦除层：擦除层（`EraseMaskItem`）z 更高且覆盖在标注之上，
+        直接用它会导致被擦过的标注命中到擦除层，从而无法选中、编辑或删除。
+        """
+        layer = self.annotations()
+        for item in self.scene_data.items(point, Qt.IntersectsItemShape,
+                                          Qt.DescendingOrder, self.transform()):
+            if item in layer:
+                return item
+        return None
+
+    def erase_items(self):
+        """按 z 顺序返回擦除层图元。"""
+        return sorted((item for item in self.scene_data.items()
+                       if isinstance(item, EraseMaskItem)), key=lambda item: item.zValue())
+
+    def _erase_item_covers(self, item, point):
+        """擦除层是否在该场景点留下过笔迹（遮罩像素 alpha>0 即为已擦除）。"""
+        local = item.mapFromScene(point)
+        x, y = int(local.x()), int(local.y())
+        return (0 <= x < item.mask.width() and 0 <= y < item.mask.height()
+                and QColor.fromRgba(item.mask.pixel(x, y)).alpha() > 0)
+
+    def erased_at(self, point):
+        """该场景点是否被擦除过（用于在被擦区域提供删除擦除层的入口）。"""
+        return any(self._erase_item_covers(item, point) for item in self.erase_items())
+
+    def erase_layer(self, action, point=None):
+        """删除擦除内容：其下方标注恢复显示，不影响其后画的标注。
+
+        `erase_one` 删除最近一次擦除（最后一次拖动形成的笔迹，而不是整层）；
+        `erase_at` 删除经过指定点的那几次擦除；`erase_clear` 删除全部擦除层。
+        同一次拖动写入同一组笔迹，因此「最近一次/此处」只删对应笔迹，不会清空全部擦除。
+        删除会记入历史，可随时撤销恢复。返回受影响（删除）的擦除组数与层数。
+        """
+        items = self.erase_items()
+        if not items:
+            return 0
+        if action == "erase_clear":
+            for item in items:
+                self.scene_data.removeItem(item)
+            removed = len(items)
+        else:
+            if action == "erase_at":
+                groups = self._groups_at(point)
+            elif action == "erase_one":
+                latest = max((group for item in items for group in item.group_ids()),
+                             default=None)
+                groups = {latest} if latest is not None else set()
+            else:
+                raise ValueError(f"未知擦除层操作: {action}")
+            results = [item.drop_groups(groups) for item in items]
+            if not any(results):
+                return 0
+            # 不再包含任何笔迹的擦除层已无意义，直接移除。
+            for item in list(self.erase_items()):
+                if not item.strokes:
+                    self.scene_data.removeItem(item)
+            removed = len(groups)
+        self.erase_mask_dirty = bool(self.erase_items())
+        self.viewport().update()
+        self.checkpoint()
+        return removed
+
+    def _groups_at(self, point):
+        """返回“笔迹经过该场景点”的擦除分组编号集合。
+
+        点先换算到各擦除层自身坐标，图片旋转/翻转后判定同样准确。
+        """
+        groups = set()
+        for item in self.erase_items():
+            groups |= item.groups_near(item.mapFromScene(point))
+        return groups
+
+    def erase_base_at(self, point):
+        """该点处的擦除是否已标记「同时擦除原图」（相关分组全为真才算）。"""
+        groups = self._groups_at(point)
+        if not groups:
+            return False
+        flags = set()
+        for item in self.erase_items():
+            flags |= item.base_flags(groups)
+        return flags == {True}
+
+    def set_erase_base(self, point, erase_base):
+        """把该点处的擦除改为（不）同时擦除原图，逐笔生效，不影响其它擦除。
+
+        返回被改动的擦除分组数；改动记入历史，可撤销。
+        """
+        groups = self._groups_at(point)
+        if not groups:
+            return 0
+        results = [item.set_groups_erase_base(groups, erase_base)
+                   for item in self.erase_items()]
+        if not any(results):
+            return 0
+        self.erase_mask_dirty = bool(self.erase_items())
+        self.viewport().update()
+        self.checkpoint()
+        return len(groups)
+
+    def _layer_items(self):
+        """标注层全部图元：普通标注 + 擦除层（不含底图）。"""
+        return self.annotations() + self.erase_items()
+
+    def _next_annotation_z(self):
+        """新标注的 z：始终高于当前标注层所有图元，使其位于既有擦除之上。"""
+        levels = [item.zValue() for item in self._layer_items()]
+        return (max(levels) + 1.0) if levels else 1.0
+
+    def _add_annotation(self, item):
+        """把新标注加入场景并赋予递增 z（保证后画的位于既有擦除之上）。"""
+        item.setZValue(self._next_annotation_z())
+        self.scene_data.addItem(item)
+        return item
 
     def snapshot(self):
         """以可重建的属性记录图元，供撤销历史使用。"""
         # 使用图元的深拷贝代价较高；记录图元类型与属性以支持撤销/重做。
         records = []
-        for item in reversed(self.annotations()):
+        for item in sorted(self._layer_items(), key=lambda entry: entry.zValue()):
+            if isinstance(item, EraseMaskItem):
+                rect = item.boundingRect()
+                records.append({"type": "EraseMask",
+                                "pos": (item.pos().x(), item.pos().y()),
+                                "z": item.zValue(),
+                                "transform": QTransform(item.transform()),
+                                "origin": (item.transformOriginPoint().x(),
+                                           item.transformOriginPoint().y()),
+                                "mask": QImage(item.mask),
+                                "strokes": [tuple(stroke) for stroke in item.strokes],
+                                "size": (rect.width(), rect.height())})
+                continue
             kind = ("RoundedRectItem" if isinstance(item, RoundedRectItem) else
                     "QGraphicsRectItem" if isinstance(item, AnnotationRectItem) else
                     "QGraphicsEllipseItem" if isinstance(item, AnnotationEllipseItem) else
@@ -366,6 +509,7 @@ class AnnotationCanvas(QGraphicsView):
             elif data["type"] == "QGraphicsTextItem":
                 data.update(text=item.toHtml(), font=item.font(),
                             text_width=item.document().textWidth(),
+                            text_height=getattr(item, "fixed_height", 0.0),
                             color=item.defaultTextColor().name(),
                             background=item.background_color)
                 bold, italic, underline, strike = read_text_format(item)
@@ -417,10 +561,20 @@ class AnnotationCanvas(QGraphicsView):
 
     def restore(self, records):
         """清除现有标注，再按快照重建类型、样式和图层。"""
-        for item in self.annotations():
+        for item in self._layer_items():
             self.scene_data.removeItem(item)
         for data in records:
             kind = data["type"]
+            if kind == "EraseMask":
+                width, height = data["size"]
+                mask_item = EraseMaskItem(QImage(data["mask"]), width, height,
+                                          data.get("strokes", []))
+                mask_item.setPos(QPointF(*data["pos"]))
+                mask_item.setTransformOriginPoint(QPointF(*data.get("origin", (0, 0))))
+                mask_item.setTransform(data.get("transform", QTransform()))
+                mask_item.setZValue(data["z"])
+                self.scene_data.addItem(mask_item)
+                continue
             if kind == "RoundedRectItem":
                 item = RoundedRectItem(QRectF(*data["rect"]), data.get("corner_radius", 0))
             elif kind == "QGraphicsRectItem":
@@ -440,6 +594,8 @@ class AnnotationCanvas(QGraphicsView):
                 item.setHtml(data["text"])
                 item.setFont(data["font"])
                 item.document().setTextWidth(data["text_width"])
+                if data.get("text_height"):
+                    item.set_text_height(data["text_height"])
                 item.setDefaultTextColor(QColor(data["color"]))
                 item.background_color = data.get("background")
                 apply_text_format(item, data.get("bold", False), data.get("italic", False),
@@ -475,31 +631,27 @@ class AnnotationCanvas(QGraphicsView):
             self.constrain_item(item)
         self.history = self.history[:self.cursor_index + 1]
         self.history.append((self.image, self.alternate, self.cursor_enabled,
-                             self.snapshot(), self.erase_mask_image.copy(),
-                             self.erase_mask_dirty))
+                             self.snapshot()))
         self.cursor_index += 1
+        self.erase_mask_dirty = bool(self.erase_items())
         self.changed.emit()
 
     def restore_checkpoint(self):
         """从历史节点恢复底图与标注，通知工具栏同步光标开关。"""
-        image, alternate, cursor_enabled, records, erase_mask, erase_dirty = \
-            self.history[self.cursor_index]
+        image, alternate, cursor_enabled, records = self.history[self.cursor_index]
         if self.image is not image:
             self.image = image
             self.refresh_image()
         self.alternate = alternate
         self.cursor_enabled = cursor_enabled
-        self.erase_mask_image = erase_mask.copy()
-        self.erase_mask_dirty = erase_dirty
         self.restore(records)
+        # 撤销/重做后擦除层随快照一并重建，这里据实际存在的擦除层刷新标志。
+        self.erase_mask_dirty = bool(self.erase_items())
 
     def reset_history(self):
-        """重建初始历史（含空擦除遮罩），用于选区重置或外部重置。"""
-        self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
-        self.erase_mask_image.fill(Qt.transparent)
+        """重建初始历史（清空擦除层），用于选区重置或外部重置。"""
         self.erase_mask_dirty = False
-        self.history = [(self.image, self.alternate, self.cursor_enabled, [],
-                        self.erase_mask_image.copy(), self.erase_mask_dirty)]
+        self.history = [(self.image, self.alternate, self.cursor_enabled, [])]
         self.cursor_index = 0
 
     def toggle_cursor(self, enabled):
@@ -530,17 +682,22 @@ class AnnotationCanvas(QGraphicsView):
         self.cursor_enabled = self.settings["cursor"]
         self.refresh_image()
         self.restore([])
-        self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
-        self.erase_mask_image.fill(Qt.transparent)
         self.erase_mask_dirty = False
         self.checkpoint()
 
     def remove_selected(self):
         """删除选中的标注并记录撤销历史。"""
-        for item in self.scene_data.selectedItems():
+        selected = self.scene_data.selectedItems()
+        if not selected:
+            return
+        for item in selected:
             self.scene_data.removeItem(item)
         self.renumber_sequence_items()
+        self._on_selection_changed()
         self.checkpoint()
+        logging.getLogger("screensnap").debug(
+            "标注删除完成: 删除=%d, 剩余=%d, 选中类型=%s",
+            len(selected), len(self.annotations()), self.selected_annotation_tool() or "无")
 
     def set_selected_width(self, width):
         """对所选矢量标注重新描边，保持历史记录可撤销。"""
@@ -645,6 +802,53 @@ class AnnotationCanvas(QGraphicsView):
         if selected:
             self.checkpoint()
 
+    def _text_box_width(self, item, text, width=None):
+        """按配置计算文本框宽度：正数为固定宽度，0 表示按内容自动（按字体实测，与 text_item 一致）。"""
+        value = int(self.settings.get("text_width", 0) if width is None else width)
+        return float(value) if value > 0 else auto_text_width(text, item.font())
+
+    def set_selected_text_width(self, width):
+        """把文本框宽度应用到选中的文字标注（0 表示按内容自动换行）。"""
+        selected = [item for item in self.scene_data.selectedItems()
+                    if isinstance(item, QGraphicsTextItem)]
+        for item in selected:
+            item.document().setTextWidth(
+                self._text_box_width(item, item.toPlainText(), width))
+        if selected:
+            self.checkpoint()
+
+    def set_selected_text_height(self, height):
+        """把文本框高度应用到选中的文字标注（0 表示按内容自动）。"""
+        selected = [item for item in self.scene_data.selectedItems()
+                    if isinstance(item, QGraphicsTextItem)]
+        for item in selected:
+            if hasattr(item, "set_text_height"):
+                item.set_text_height(int(height) if int(height) > 0 else 0)
+        if selected:
+            self.checkpoint()
+
+    def selected_annotation_tool(self):
+        """返回当前选中的单个标注对应的工具类型，多选/未选/不可识别时返回空串。"""
+        selected = self.scene_data.selectedItems()
+        if len(selected) != 1:
+            return ""
+        item = selected[0]
+        if isinstance(item, (AnnotationRectItem, RoundedRectItem)):
+            return "rect"
+        if isinstance(item, AnnotationEllipseItem):
+            return "ellipse"
+        if isinstance(item, (AnnotationTextItem, QGraphicsTextItem)):
+            return "text"
+        if isinstance(item, AnnotationSequenceItem):
+            return "number"
+        if isinstance(item, AnnotationPathItem):
+            return "arrow" if getattr(item, "arrow_style", None) is not None else "pen"
+        return ""
+
+    def _on_selection_changed(self):
+        """选中项变化后通知工具栏，使其「更多设置」展示对应类型参数。"""
+        self.selected_annotation_changed.emit(self.selected_annotation_tool())
+
     def transform_annotations(self, records, operation, degrees, old_size):
         """从原始快照重建图元，再按底图变换同步移动和旋转标注。"""
         self.restore(records)
@@ -663,7 +867,8 @@ class AnnotationCanvas(QGraphicsView):
             linear = QTransform(cosine, sine, -sine, cosine, 0, 0)
             old_center = QPointF(old_width / 2, old_height / 2)
             offset = QPointF(new_width / 2, new_height / 2) - linear.map(old_center)
-        for item in self.annotations():
+        # 擦除层与标注一起变换，旋转/翻转后擦除位置仍与画面一致。
+        for item in self._layer_items():
             item.setPos(linear.map(item.pos()) + offset)
             item.setTransform(linear * item.transform())
 
@@ -676,11 +881,34 @@ class AnnotationCanvas(QGraphicsView):
                             "up": item.zValue() + 1, "down": item.zValue() - 1}[action])
         self.checkpoint()
 
+    def _base_erase_mask(self):
+        """按「逐笔是否擦原图」的标记合并出需要镂空底图的遮罩。
+
+        底图位于全部标注层之下，不受擦除层级影响；只绘制带“同时擦除原图”标记的笔迹，
+        因此之后切换该开关不会改变已有擦除的效果，逐层按其场景变换绘制也保证对齐。
+        """
+        items = [(item, item.base_strokes()) for item in self.erase_items()]
+        items = [(item, strokes) for item, strokes in items if strokes]
+        if not items:
+            return None
+        union = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
+        union.fill(Qt.transparent)
+        painter = QPainter(union)
+        painter.setRenderHint(QPainter.Antialiasing)
+        for item, strokes in items:
+            painter.save()
+            painter.setTransform(item.sceneTransform(), True)
+            for stroke in strokes:
+                item.paint_stroke(painter, stroke)
+            painter.restore()
+        painter.end()
+        return union
+
     def render_image(self):
         """仅渲染场景中的底图和标注；视图前景的缩放手柄不会导出。
 
-        非破坏性橡皮擦：标注层先在独立透明图层渲染，再按擦除遮罩镂空（露出底图），
-        最后合成到底图之上；遮罩可作用于底图本身（由 eraser_erase_base 控制）。
+        非破坏性橡皮擦：擦除以带 z 序的 EraseMaskItem 存在于标注层内，渲染时按 z
+        镂空其下方（更早绘制）的标注并露出底图；由 eraser_erase_base 决定是否也擦底图。
         """
         width, height = self.image.width, self.image.height
         output = QImage(width, height, QImage.Format_ARGB32)
@@ -689,7 +917,7 @@ class AnnotationCanvas(QGraphicsView):
         painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
         painter.drawImage(0, 0, to_qimage(self.image))
         painter.end()
-        # 单独渲染标注层，便于按遮罩镂空而不破坏底图与矢量标注。
+        # 单独渲染标注层（含擦除层按 z 镂空），不破坏底图与矢量标注。
         layer = QImage(width, height, QImage.Format_ARGB32)
         layer.fill(Qt.transparent)
         layer_painter = QPainter(layer)
@@ -698,16 +926,12 @@ class AnnotationCanvas(QGraphicsView):
         self.scene_data.render(layer_painter, QRectF(layer.rect()), self.scene_data.sceneRect())
         self.base.show()
         layer_painter.end()
-        if self.erase_mask_image is not None and not self.erase_mask_image.isNull():
-            mask_painter = QPainter(layer)
-            mask_painter.setCompositionMode(QPainter.CompositionMode_DestinationOut)
-            mask_painter.drawImage(0, 0, self.erase_mask_image)
-            mask_painter.end()
-            if self.settings.get("eraser_erase_base", False):
-                base_painter = QPainter(output)
-                base_painter.setCompositionMode(QPainter.CompositionMode_DestinationOut)
-                base_painter.drawImage(0, 0, self.erase_mask_image)
-                base_painter.end()
+        base_mask = self._base_erase_mask()
+        if base_mask is not None:
+            base_painter = QPainter(output)
+            base_painter.setCompositionMode(QPainter.CompositionMode_DestinationOut)
+            base_painter.drawImage(0, 0, base_mask)
+            base_painter.end()
         compositor = QPainter(output)
         compositor.drawImage(0, 0, layer)
         compositor.end()
@@ -735,36 +959,46 @@ class AnnotationCanvas(QGraphicsView):
         return self.settings.get(TOOL_WIDTH_KEYS.get(self.tool, "pen_width"),
                                  self.settings["pen_width"])
 
-    def _ensure_mask_size(self):
-        """底图尺寸变化（如裁剪）后重建擦除遮罩，避免坐标错位。"""
-        if (self.erase_mask_image is None or self.erase_mask_image.isNull()
-                or self.erase_mask_image.width() != self.image.width
-                or self.erase_mask_image.height() != self.image.height):
-            self.erase_mask_image = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
-            self.erase_mask_image.fill(Qt.transparent)
-            # 尺寸变化后遮罩已清空，实时合成标志也随之复位。
-            self.erase_mask_dirty = False
+    def _erase_stroke_item(self):
+        """返回本次擦除笔迹应写入的擦除层。
+
+        擦除层带 z 序：若已有擦除层仍位于全部标注之上（其后没再画新标注），
+        则把笔迹并入该层；否则新开一层，使“擦除之后新画的标注”位于擦除之上。
+        """
+        existing = self.erase_items()
+        if existing:
+            annotation_levels = [item.zValue() for item in self.annotations()]
+            top_erase = existing[-1]
+            if not annotation_levels or top_erase.zValue() > max(annotation_levels):
+                return top_erase
+        levels = [item.zValue() for item in self._layer_items()]
+        mask = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
+        mask.fill(Qt.transparent)
+        item = EraseMaskItem(mask, self.image.width, self.image.height)
+        item.setZValue((max(levels) + 0.5) if levels else 0.5)
+        self.scene_data.addItem(item)
+        return item
 
     def erase_segment(self, start, end):
-        """把擦除笔迹加入非破坏性遮罩（默认只作用于标注层，露出底图）。"""
-        self._ensure_mask_size()
-        radius = self.settings.get("eraser_width", self.settings["pen_width"]) / 2
-        painter = QPainter(self.erase_mask_image)
-        painter.setRenderHint(QPainter.Antialiasing)
-        painter.setPen(QPen(QColor("white"), radius * 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.drawLine(start, end)
-        painter.setPen(Qt.NoPen)
-        painter.setBrush(QColor("white"))
-        painter.drawEllipse(end, radius, radius)
-        painter.end()
-        # 标记遮罩已有笔迹，实时视图据此合成镂空效果。
+        """把擦除笔迹绘制进当前擦除层（默认只作用于其下方标注，露出底图）。
+
+        笔迹按“第几次擦除”分组记录，便于之后按「最近一次 / 经过某点」精确删除。
+        """
+        item = self._erase_stroke_item()
+        if not self.erasing:
+            # 非拖动路径（直接调用）每次自成一次擦除。
+            self.eraser_group += 1
+        # 笔迹按擦除层自身坐标记录：遮罩、底图镂空与按点删除用的都是同一套几何，
+        # 图片旋转/翻转（擦除层随之变换）后也保持一致。
+        item.add_stroke(self.eraser_group, item.mapFromScene(start), item.mapFromScene(end),
+                        self.settings.get("eraser_width", self.settings["pen_width"]),
+                        self.settings.get("eraser_erase_base", False))
         self.erase_mask_dirty = True
         self.viewport().update()
 
     def _erase_live_active(self):
-        """实时视图是否需要按遮罩合成（遮罩有笔迹时）。"""
-        return (self.erase_mask_dirty and self.erase_mask_image is not None
-                and not self.erase_mask_image.isNull())
+        """实时视图是否需要按擦除层合成（存在擦除层时）。"""
+        return bool(self.erase_items())
 
     def drawItems(self, painter, items, options):
         """擦除激活时跳过默认绘制，改由 drawForeground 合成底图与镂空标注层，
@@ -776,7 +1010,7 @@ class AnnotationCanvas(QGraphicsView):
         super().drawItems(painter, items, options)
 
     def _paint_erased_composite(self, painter):
-        """仅渲染可见区域：先画底图（按开关决定是否擦底图），再画被遮罩镂空的标注层。"""
+        """仅渲染可见区域：先铺背景，再画底图（按开关决定是否擦底图），最后画被遮罩镂空的标注层。"""
         vp = self.viewport().rect()
         if vp.isEmpty():
             return
@@ -791,6 +1025,12 @@ class AnnotationCanvas(QGraphicsView):
         h = y1 - y0
         if w <= 0 or h <= 0:
             return
+        # Qt6 的 QGraphicsView 不再调用 drawItems，场景仍会在底层绘制底图与标注；
+        # 先铺一层视图背景覆盖，擦除底图留下的透明洞才不会透出底部旧图元。
+        background = self.backgroundBrush()
+        if background.style() == Qt.NoBrush:
+            background = self.palette().base()
+        painter.fillRect(QRectF(visible), background)
         # 底图层：取可见区域的底图像素，开启 eraser_erase_base 时一并镂空。
         base_img = self.base.pixmap().toImage().convertToFormat(QImage.Format_ARGB32)
         if not base_img.isNull():
@@ -798,13 +1038,14 @@ class AnnotationCanvas(QGraphicsView):
             bh = min(base_img.height() - y0, h)
             if bw > 0 and bh > 0:
                 base_sub = base_img.copy(x0, y0, bw, bh)
-                if self.settings.get("eraser_erase_base", False):
+                base_mask = self._base_erase_mask()
+                if base_mask is not None:
                     mp = QPainter(base_sub)
                     mp.setCompositionMode(QPainter.CompositionMode_DestinationOut)
-                    mp.drawImage(-x0, -y0, self.erase_mask_image)
+                    mp.drawImage(-x0, -y0, base_mask)
                     mp.end()
                 painter.drawImage(visible.topLeft(), base_sub)
-        # 标注层：隐藏底图后渲染，再按遮罩镂空，露出底图或透明。
+        # 标注层：擦除层已按 z 序镂空其下方内容。
         ann = QImage(w, h, QImage.Format_ARGB32)
         ann.fill(Qt.transparent)
         ap = QPainter(ann)
@@ -813,10 +1054,6 @@ class AnnotationCanvas(QGraphicsView):
         self.scene_data.render(ap, QRectF(0, 0, w, h), QRectF(x0, y0, w, h))
         self.base.show()
         ap.end()
-        mp = QPainter(ann)
-        mp.setCompositionMode(QPainter.CompositionMode_DestinationOut)
-        mp.drawImage(-x0, -y0, self.erase_mask_image)
-        mp.end()
         painter.drawImage(visible.topLeft(), ann)
 
     def drawForeground(self, painter, rect):
@@ -1016,7 +1253,7 @@ class AnnotationCanvas(QGraphicsView):
         out.setAlphaChannel(mask)
         item = editable(AnnotationPixmapItem(QPixmap.fromImage(out)))
         item.setOffset(QPointF(bounds.left(), bounds.top()))
-        self.scene_data.addItem(item)
+        self._add_annotation(item)
         self.checkpoint()
 
     def mousePressEvent(self, event):
@@ -1065,6 +1302,8 @@ class AnnotationCanvas(QGraphicsView):
                     self.resize_anchor = anchor_scene
                     self.resize_anchor_local = anchor_local
                     self.resize_start = handles[handle]
+                    # 文字宽度以按下时的实际宽度与位置为基准，首帧再捕获。
+                    self.text_resize_origin = None
                     QToolTip.hideText()
                     event.accept()
                     return
@@ -1073,8 +1312,8 @@ class AnnotationCanvas(QGraphicsView):
                 self._begin_rotation(selected[0], point)
                 event.accept()
                 return
-            if self.scene_data.itemAt(point, self.transform()) in (None, self.base):
-                # 从底图空白处拖动只画辅助选区，松开后保留框线并选中其中的标注。
+            if self.annotation_at(point) is None:
+                # 从底图空白处（含已被擦除的区域）拖动只画辅助选区，松开后保留框线并选中其中的标注。
                 self.scene_data.clearSelection()
                 self.selection_start = point
                 self.selection_end = point
@@ -1085,6 +1324,7 @@ class AnnotationCanvas(QGraphicsView):
                 self.erasing = True
                 self.eraser_last = point
                 self.eraser_point = point
+                self.eraser_group += 1          # 本次拖动自成一组擦除笔迹
                 self.erase_segment(point, point)
                 self.viewport().update()
             return
@@ -1097,9 +1337,10 @@ class AnnotationCanvas(QGraphicsView):
             event.accept()
             return
         if self.tool == "text":
-            text, ok = self.input_text("文字标注")
+            text, _changed, ok = self.input_text("文字标注")
             if ok and text:
-                self.scene_data.addItem(text_item(point, text, self.settings, self.text_alignment))
+                self._add_annotation(
+                    text_item(point, text, self.settings, self.text_alignment))
                 self.checkpoint()
             return
         if self.tool == "number":
@@ -1111,7 +1352,7 @@ class AnnotationCanvas(QGraphicsView):
                 self.settings.get("sequence_font_size", 14),
                 self.settings.get("sequence_shape", "circle"),
                 self.settings.get("font", ""), point)
-            self.scene_data.addItem(item)
+            self._add_annotation(item)
             self.checkpoint()
             return
         if self.tool == "mosaic" and self.settings.get("mosaic_brush", False) \
@@ -1181,7 +1422,6 @@ class AnnotationCanvas(QGraphicsView):
         if self.resizing is not None:
             point = self.image_point(self.mapToScene(event.position().toPoint()))
             handle = self.resize_handle
-            scale_x, scale_y = 1.0, 1.0
             # 旋转项：把场景位移换算到项自身未旋转的坐标轴上，拖动手感才与视觉一致。
             angle = math.radians(-self.resizing.rotation())
             cos_a, sin_a = math.cos(angle), math.sin(angle)
@@ -1192,13 +1432,21 @@ class AnnotationCanvas(QGraphicsView):
 
             start_local = to_local(self.resize_start - self.resize_anchor)
             now_local = to_local(point - self.resize_anchor)
+            # 文字标注：边中点（n/s/e/w）拖动改为直接调整文本框宽度、文字随之重排；
+            # 四角仍是等比/自由缩放。仅文字走此分支，其它标注类型行为不变。
+            if len(handle) == 1 and isinstance(self.resizing, QGraphicsTextItem):
+                self._resize_text_box(self.resizing, handle, point)
+                self.constrain_item(self.resizing)
+                self.viewport().update()
+                event.accept()
+                return
+            scale_x, scale_y = 1.0, 1.0
             if ("w" in handle or "e" in handle) and abs(start_local.x()) > 1e-6:
                 scale_x = self.clamp_resize_ratio(now_local.x() / start_local.x())
             if ("n" in handle or "s" in handle) and abs(start_local.y()) > 1e-6:
                 scale_y = self.clamp_resize_ratio(now_local.y() / start_local.y())
-            # 四角默认等比缩放（保持宽高比）；按住 Ctrl/Alt/Shift/Space 任意其一则自由拉伸变形。
-            is_corner = ("w" in handle or "e" in handle) and ("n" in handle or "s" in handle)
-            if is_corner and not self._free_distortion(event):
+            # 所有把手默认等比缩放（保持宽高比）；按住 Ctrl/Alt/Shift/Space 任意其一则自由拉伸变形。
+            if not self._free_distortion(event):
                 driver = scale_x if abs(scale_x - 1) >= abs(scale_y - 1) else scale_y
                 scale_x = scale_y = driver
             self.resizing.setTransform(self.resize_transform)
@@ -1243,6 +1491,60 @@ class AnnotationCanvas(QGraphicsView):
         return bool(modifiers & (Qt.ControlModifier | Qt.AltModifier | Qt.ShiftModifier)) \
             or self.space_pressed
 
+    def _resize_text_box(self, item, handle, point):
+        """文字标注的边中点拖动：横向（e/w）调整文本框宽度、纵向（n/s）调整高度。
+
+        尺寸以「按下时的尺寸」为基准加上累计本地位移，避免逐帧叠加导致的跳跃；
+        本地位移按标注自身的旋转/缩放换算，因此缩放或旋转后手感仍然一致。
+        拖左边（w）/上边（n）时同步平移标注，使对侧边保持不动。
+        尺寸上限取画布尺寸，避免无限放大后被整体缩回；四角仍是整体缩放。
+        """
+        if self.text_resize_origin is None:
+            # 首帧捕获：按下后（锚点已就位）的文本框尺寸与实际位置。
+            self.text_resize_origin = (
+                float(item.document().textWidth()),
+                float(item.boundingRect().height()),
+                float(getattr(item, "fixed_height", 0.0)),
+                QPointF(item.pos()))
+        origin_width, origin_height, origin_fixed, origin_pos = self.text_resize_origin
+        inverse, invertible = item.sceneTransform().inverted()
+        if not invertible:
+            inverse = QTransform()
+        scene_dx = point.x() - self.resize_start.x()
+        scene_dy = point.y() - self.resize_start.y()
+        # 只取线性部分把场景位移换算到标注自身坐标（忽略平移），避免位置变化影响位移。
+        local_dx = inverse.m11() * scene_dx + inverse.m21() * scene_dy
+        local_dy = inverse.m12() * scene_dx + inverse.m22() * scene_dy
+        image = self.sceneRect()
+        if handle in ("e", "w"):
+            limit = max(MIN_TEXT_WIDTH, math.hypot(inverse.m11(), inverse.m12()) * image.width())
+            width = origin_width + (local_dx if handle == "e" else -local_dx)
+            width = max(MIN_TEXT_WIDTH, min(width, limit))
+            item.document().setTextWidth(width)
+            if handle == "w":
+                # 保持右边缘不动：从按下位置按本地 x 方向平移 (origin_width - width)。
+                item.setPos(origin_pos + self._local_vector(item, origin_width - width, 0))
+            else:
+                item.setPos(origin_pos)
+            return
+        # n / s：调整文本框高度（固定高度，超出内容被裁剪）；拖上边时下边缘保持不动。
+        limit = max(MIN_TEXT_HEIGHT, math.hypot(inverse.m21(), inverse.m22()) * image.height())
+        base_height = origin_fixed if origin_fixed > 0 else origin_height
+        height = base_height + (local_dy if handle == "s" else -local_dy)
+        height = max(MIN_TEXT_HEIGHT, min(height, limit))
+        if hasattr(item, "set_text_height"):
+            item.set_text_height(height)
+        if handle == "n":
+            item.setPos(origin_pos + self._local_vector(item, 0, base_height - height))
+        else:
+            item.setPos(origin_pos)
+
+    def _local_vector(self, item, dx, dy):
+        """把标注自身坐标的位移换算为场景位移（含旋转/缩放，忽略平移）。"""
+        transform = item.sceneTransform()
+        base = transform.map(QPointF(0, 0))
+        return transform.map(QPointF(dx, dy)) - base
+
     def _update_resize_cursor(self, position):
         point = self.mapToScene(position)
         if not self.sceneRect().contains(point):
@@ -1256,14 +1558,26 @@ class AnnotationCanvas(QGraphicsView):
                        "n": Qt.SizeVerCursor, "s": Qt.SizeVerCursor,
                        "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor}
             if handle:
-                self.setCursor(cursors[handle])
-                if handle in ("nw", "ne", "sw", "se"):
+                if len(handle) == 1 and isinstance(item, QGraphicsTextItem):
+                    # 文字标注：左右边中点调整文本框宽度、上下边中点调整高度。
+                    if handle in ("e", "w"):
+                        self.setCursor(Qt.SizeHorCursor)
+                        QToolTip.showText(
+                            self.viewport().mapToGlobal(position),
+                            "拖动左右边中点调整文本框宽度（文字自动换行）；四角仍是缩放",
+                            self)
+                    else:
+                        self.setCursor(Qt.SizeVerCursor)
+                        QToolTip.showText(
+                            self.viewport().mapToGlobal(position),
+                            "拖动上下边中点调整文本框高度（超出部分裁剪）；四角仍是缩放",
+                            self)
+                else:
+                    self.setCursor(cursors[handle])
                     QToolTip.showText(
                         self.viewport().mapToGlobal(position),
-                        "拖动四角等比缩放；按住 Ctrl / Alt / Shift / Space 任意键可自由拉伸变形",
+                        "拖动控制点等比缩放；按住 Ctrl / Alt / Shift / Space 任意键可自由拉伸变形",
                         self)
-                else:
-                    QToolTip.hideText()
                 return
             if item.contains(item.mapFromScene(point)):
                 self.setCursor(Qt.SizeAllCursor)
@@ -1300,41 +1614,104 @@ class AnnotationCanvas(QGraphicsView):
         # 菜单在无拖动的右键松开时显示，避免与抓手平移冲突。
         event.accept()
 
-    def input_text(self, title, initial=""):
-        """弹出文字输入对话框；上方样式默认套用当前配置，改动同步回配置。
+    def input_text(self, title, initial="", values=None, persist=True):
+        """弹出文字输入对话框。
 
-        返回 (文字内容, 是否确认)。
+        `values` 非空表示编辑某个已有标注：以该标注当前样式为初值，改动只作用于它；
+        `persist=False` 时不回写公共配置。返回 (文字, 改动项, 是否确认)。
         """
         from editor.text_input_dialog import TextInputDialog
 
-        dialog = TextInputDialog(self, title, self.settings, initial)
+        dialog = TextInputDialog(self, title, self.settings, initial, values=values)
         if dialog.exec() != QDialog.Accepted:
-            return None, False
-        for key, value in dialog.changed_settings().items():
-            self.settings[key] = value
-            if key == "text_alignment":
-                self.text_alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
-                                       "right": Qt.AlignRight}[value]
-            self.setting_changed.emit(key, value)
-        return dialog.text(), True
+            return None, {}, False
+        changed = dialog.changed_settings()
+        if persist:
+            for key, value in changed.items():
+                self.settings[key] = value
+                if key == "text_alignment":
+                    self.text_alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
+                                           "right": Qt.AlignRight}[value]
+                self.setting_changed.emit(key, value)
+        return dialog.text(), changed, True
+
+    def _text_values_from_item(self, item):
+        """读取某个文字标注当前的样式，作为「编辑该标注」对话框的初值。"""
+        font = item.font()
+        bold, italic, underline, strike = read_text_format(item)
+        alignment = item.document().defaultTextOption().alignment()
+        if alignment & Qt.AlignHCenter:
+            alignment_key = "center"
+        elif alignment & Qt.AlignRight:
+            alignment_key = "right"
+        else:
+            alignment_key = "left"
+        return {
+            "font": font.family(),
+            "font_size": (font.pointSize() if font.pointSize() > 0
+                          else self.settings.get("font_size", 18)),
+            "text_alignment": alignment_key,
+            "text_color": item.defaultTextColor().name(),
+            "text_bold": bold, "text_italic": italic,
+            "text_underline": underline, "text_strikethrough": strike,
+            "text_background_enabled": bool(item.background_color),
+            "text_background": item.background_color or self.settings.get("text_background", "#fff3a0"),
+            "text_width": int(round(item.document().textWidth())),
+            "text_height": int(round(getattr(item, "fixed_height", 0.0))),
+        }
+
+    def _apply_text_values(self, item, values, text):
+        """把一组文字样式完整应用到某个标注（编辑对话框的改动只落在这一个标注上）。"""
+        item.document().setTextWidth(
+            self._text_box_width(item, text, values.get("text_width", 0)))
+        if hasattr(item, "set_text_height"):
+            height = int(values.get("text_height", 0) or 0)
+            item.set_text_height(height if height > 0 else 0)
+        font = item.font()
+        font.setFamily(values.get("font") or "Microsoft YaHei")
+        font.setPointSize(int(values.get("font_size", 18)))
+        item.setFont(font)
+        item.setDefaultTextColor(QColor(values.get("text_color")
+                                        or self.settings.get("text_color", "#ff0000")))
+        item.background_color = (values.get("text_background")
+                                 if values.get("text_background_enabled") else None)
+        apply_text_format(item, bool(values.get("text_bold")), bool(values.get("text_italic")),
+                          bool(values.get("text_underline")), bool(values.get("text_strikethrough")))
+        alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
+                     "right": Qt.AlignRight}.get(values.get("text_alignment"), Qt.AlignLeft)
+        option = item.document().defaultTextOption()
+        option.setAlignment(alignment)
+        item.document().setDefaultTextOption(option)
+        cursor = QTextCursor(item.document())
+        cursor.select(QTextCursor.Document)
+        block = QTextBlockFormat()
+        block.setAlignment(alignment)
+        cursor.mergeBlockFormat(block)
 
     def edit_text_item(self, item):
-        text, ok = self.input_text("修改文字标注", item.toPlainText())
-        if ok and text != item.toPlainText():
-            if not text:
-                self.scene_data.removeItem(item)
-            else:
-                original_format = item.document().firstBlock().blockFormat()
-                text_width = item.document().textWidth()
-                item.setPlainText(text)
-                cursor = QTextCursor(item.document())
-                cursor.select(QTextCursor.Document)
-                cursor.mergeBlockFormat(original_format)
-                item.document().setTextWidth(text_width)
-                apply_text_format(item, self.settings.get("text_bold", False),
-                                 self.settings.get("text_italic", False),
-                                 self.settings.get("text_underline", False),
-                                 self.settings.get("text_strikethrough", False))
+        """编辑已有文字标注：对话框各项只作用于该标注，不回写公共配置。"""
+        values = self._text_values_from_item(item)
+        original_text = item.toPlainText()
+        text, changed, ok = self.input_text("修改文字标注", original_text,
+                                            values=values, persist=False)
+        if not ok:
+            return
+        if not text:
+            self.scene_data.removeItem(item)
+            self.checkpoint()
+            return
+        text_changed = text != original_text
+        if text_changed:
+            original_format = item.document().firstBlock().blockFormat()
+            item.setPlainText(text)
+            cursor = QTextCursor(item.document())
+            cursor.select(QTextCursor.Document)
+            cursor.mergeBlockFormat(original_format)
+        # 「该标注原值 + 本次改动」整体应用，确保各项只影响这一个标注。
+        merged = dict(values)
+        merged.update(changed)
+        self._apply_text_values(item, merged, text)
+        if text_changed or changed:
             self.checkpoint()
 
     def annotation_menu(self, item):
@@ -1356,6 +1733,32 @@ class AnnotationCanvas(QGraphicsView):
         item.setSelected(True)
         self.viewport().update()
         self.annotation_menu(item).popup(position)
+
+    def erase_menu(self, point):
+        """被擦除区域（该点没有标注）的右键菜单：删除擦除，或单独设置是否擦掉原图。"""
+        menu = QMenu(self)
+        menu.addAction("删除此处擦除").triggered.connect(
+            lambda: self.erase_layer("erase_at", point))
+        menu.addAction("删除最近一次擦除").triggered.connect(
+            lambda: self.erase_layer("erase_one"))
+        menu.addAction("清除全部擦除").triggered.connect(
+            lambda: self.erase_layer("erase_clear"))
+        # 逐笔设置：只改这一处擦除；工具栏/设置里的开关只决定之后新擦除的默认值。
+        base_action = menu.addAction("此处同时擦除原图")
+        base_action.setCheckable(True)
+        base_action.setChecked(self.erase_base_at(point))
+        base_action.setToolTip("只改这一处擦除是否擦掉原图，不影响其它已有擦除")
+        base_action.toggled.connect(lambda flag: self.set_erase_base(point, flag))
+        menu.aboutToHide.connect(menu.deleteLater)
+        return menu
+
+    def show_erase_menu(self, point, position):
+        """在画布上直接删除某处擦除，无需回退其后的标注。"""
+        if self.tool != "select":
+            self.set_tool("select")
+            self.setDragMode(QGraphicsView.RubberBandDrag)
+            self.selection_requested.emit()
+        self.erase_menu(point).popup(position)
 
     def mouseReleaseEvent(self, event):
         """按当前工具提交图元；裁剪时两版截图使用相同区域。"""
@@ -1386,10 +1789,14 @@ class AnnotationCanvas(QGraphicsView):
                     self.pan_button = None
                     self._update_resize_cursor(event.position().toPoint())
                     if show_menu:
-                        item = self.scene_data.itemAt(self.mapToScene(event.position().toPoint()),
-                                                      self.transform())
-                        if item is not None and item is not self.base:
+                        # 命中标注而非擦除层，保证被擦过的标注右键仍可编辑/删除。
+                        point = self.mapToScene(event.position().toPoint())
+                        item = self.annotation_at(point)
+                        if item is not None:
                             self.show_annotation_menu(item, event.globalPosition().toPoint())
+                        elif self.erased_at(point):
+                            # 擦除区域：直接提供删除擦除层的入口，不必为撤回一次擦除回退后续编辑。
+                            self.show_erase_menu(point, event.globalPosition().toPoint())
             event.accept()
             return
         if self.selection_start is not None and event.button() == Qt.LeftButton:
@@ -1428,7 +1835,7 @@ class AnnotationCanvas(QGraphicsView):
                     item = AnnotationPathItem(seg)
                     item.setPen(self.stroke_pen())
                     editable(item)
-                    self.scene_data.addItem(item)
+                    self._add_annotation(item)
                     if self._chain_tool():
                         self.committed_segments.append((QPointF(self.start), QPointF(end)))
                         self.start = end
@@ -1455,7 +1862,7 @@ class AnnotationCanvas(QGraphicsView):
                     item = AnnotationPathItem(self._smooth_freehand_path(self.drawing))
                     item.setPen(self.stroke_pen())
                     editable(item)
-                    self.scene_data.addItem(item)
+                    self._add_annotation(item)
                     self.checkpoint()
                 self.start = None
                 self.chain_active = False
@@ -1498,7 +1905,7 @@ class AnnotationCanvas(QGraphicsView):
                              self.settings.get(f"{self.tool}_fill_enabled", False),
                              self.settings.get(f"{self.tool}_fill_opacity", 35),
                              self.settings.get(f"{self.tool}_fill_color"))
-            self.scene_data.addItem(item)
+            self._add_annotation(item)
             if self.tool == "arrow" and self.settings.get("arrow_chain", False):
                 # 多段绘制：保留上一终点作为下一段起点；按右键结束连续绘制。
                 self.start = end
@@ -1520,8 +1927,9 @@ class AnnotationCanvas(QGraphicsView):
             event.accept()
             return
         point = self.mapToScene(event.position().toPoint())
-        item = self.scene_data.itemAt(point, self.transform())
-        if item is not None and item is not self.base:
+        # 命中标注而非擦除层：被擦过的文字/标注仍可双击编辑或删除。
+        item = self.annotation_at(point)
+        if item is not None:
             if self.tool == "select":
                 if isinstance(item, AnnotationTextItem):
                     self.edit_text_item(item)

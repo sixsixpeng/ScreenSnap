@@ -93,6 +93,7 @@ DEFAULTS = {
     "rect_color": "#ff0000", "ellipse_color": "#ff0000",
     "arrow_color": "#ff0000", "marker_color": "#ff0000", "text_color": "#ff0000",
     "text_background_enabled": False, "text_background": "#fff3a0",
+    "text_width": 0, "text_height": 0,
     "text_bold": False, "text_italic": False, "text_underline": False, "text_strikethrough": False,
     "rect_fill_enabled": False, "rect_fill_opacity": 35, "rect_fill_color": "#ff0000",
     "ellipse_fill_enabled": False, "ellipse_fill_opacity": 35, "ellipse_fill_color": "#ff0000",
@@ -297,6 +298,10 @@ def validate(data):
             raise ValueError("荧光笔不透明度必须在 1 到 100 之间")
         elif key == "font_size" and not 6 <= value <= 200:
             raise ValueError("字号必须在 6 到 200 之间")
+        elif key == "text_width" and not 0 <= value <= 2000:
+            raise ValueError("文字宽度必须在 0 到 2000 像素之间")
+        elif key == "text_height" and not 0 <= value <= 2000:
+            raise ValueError("文字高度必须在 0 到 2000 像素之间")
         elif key == "eraser_width" and not 10 <= value <= 100:
             raise ValueError("橡皮擦直径必须在 10 到 100 之间")
         elif key == "mosaic_width" and not 4 <= value <= 100:

@@ -96,6 +96,9 @@ class EditorWindow(QMainWindow):
         self.canvas.zoom_changed.connect(self.zoom_slider.setValue)
         self.canvas.zoom_changed.connect(self.zoom_input.setValue)
         self.canvas.selection_requested.connect(self.toolbar.tool_buttons["select"].click)
+        self.canvas.selected_annotation_changed.connect(self._on_selected_annotation_changed)
+        self.toolbar.options_button.menu().aboutToShow.connect(
+            lambda: self.toolbar.set_selected_tool(self.canvas.selected_annotation_tool()))
         self.canvas.setting_changed.connect(self.apply_canvas_setting)
         self.setCentralWidget(container)
         self.toolbar.tool_changed.connect(self.set_tool)
@@ -161,7 +164,9 @@ class EditorWindow(QMainWindow):
         self.canvas.settings[key] = value
         if key in self.toolbar.tool_color_buttons:
             self.toolbar.sync_tool_color(key, value)
-            if key == f"{self.canvas.tool}_color":
+            tool = (self.canvas.selected_annotation_tool() if self.canvas.tool == "select"
+                    else self.canvas.tool)
+            if key == f"{tool}_color":
                 self.canvas.set_selected_color(value)
                 self.canvas.update()
         if key == "editor_image_round_corners":
@@ -191,11 +196,19 @@ class EditorWindow(QMainWindow):
             self.canvas.set_selected_font(value)
         elif key == "font_size":
             self.canvas.set_selected_font_size(value)
+        elif key == "text_width":
+            self.canvas.set_selected_text_width(value)
+        elif key == "text_height":
+            self.canvas.set_selected_text_height(value)
         elif key == "text_alignment":
             self.canvas.text_alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
                                           "right": Qt.AlignRight}[value]
         self.canvas.update()
         self.setting_changed.emit(key, value)
+
+    def _on_selected_annotation_changed(self, tool):
+        """选中标注类型变化时，让工具栏「更多设置」展示该类型专属参数。"""
+        self.toolbar.set_selected_tool(tool or None)
 
     def set_crop_style(self, key, value):
         if key == "crop_color":
@@ -355,6 +368,9 @@ class EditorWindow(QMainWindow):
             self.canvas.remove_selected()
         elif action in ("top", "bottom", "up", "down"):
             self.canvas.layer(action)
+        elif action in ("erase_one", "erase_clear"):
+            # 擦除层可像普通图层一样删除，避免为撤回一次擦除而回退其后的所有编辑。
+            self.canvas.erase_layer(action)
         elif action == "angle":
             self.rotate_angle()
         elif action in ("left", "right", "half", "horizontal", "vertical"):

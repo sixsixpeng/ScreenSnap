@@ -64,7 +64,7 @@ class EditorPage(SettingsPage):
         self.preview("eraser")
         self.number("eraser_width", "橡皮擦直径", 10, 100, "只影响橡皮擦工具，范围 10–100")
         self.check("eraser_erase_base", "同时擦除原图",
-                   "开启后橡皮擦同时擦掉截图原图；关闭则只擦标注、露出原图（非破坏性）")
+                   "开启后新擦除会同时擦掉截图原图（只影响之后的擦除）；关闭则只擦标注、露出原图（非破坏性）。已有擦除可在该处右键单独设置")
         self.group("荧光笔")
         self.preview("marker")
         self.add_color("marker_color", "荧光笔颜色")
@@ -77,6 +77,8 @@ class EditorPage(SettingsPage):
         self.preview("text", 120)
         self.add_color("text_color", "文字颜色")
         self.number("font_size", "文字大小", 6, 200, "默认文字字号")
+        self.number("text_width", "文字宽度", 0, 2000, "新建文字标注的文本框宽度（像素）；超出后自动换行，0 表示按内容自动")
+        self.number("text_height", "文字高度", 0, 2000, "新建文字标注的文本框高度（像素）；超出部分裁剪，0 表示按内容自动")
         self.decimal("line_spacing", "文字行距", 0.5, 4, "多行文字的行间距倍率")
         self.choice("text_alignment", "文字对齐", [("左对齐", "left"), ("居中", "center"),
                                              ("右对齐", "right")], "新建文字标注的对齐方式")

@@ -3,8 +3,8 @@
 import math
 
 from PySide6.QtCore import Qt, QPointF, QRectF
-from PySide6.QtGui import (QColor, QPen, QPainterPath, QFont, QTextCursor,
-                           QTextBlockFormat, QPolygonF, QTextCharFormat)
+from PySide6.QtGui import (QColor, QPen, QPainter, QPainterPath, QFont, QFontMetricsF,
+                           QTextCursor, QTextBlockFormat, QPolygonF, QTextCharFormat)
 from PySide6.QtWidgets import (QGraphicsItem, QGraphicsRectItem, QGraphicsEllipseItem,
                                QGraphicsPathItem, QGraphicsTextItem, QGraphicsPixmapItem,
                                QStyle, QStyleOptionGraphicsItem)
@@ -87,24 +87,182 @@ class AnnotationPathItem(AnnotationPaintMixin, QGraphicsPathItem):
 
 
 class AnnotationTextItem(AnnotationPaintMixin, QGraphicsTextItem):
-    """文字标注；可选背景色块绘制在文字之下，便于突出显示。"""
+    """文字标注；可选背景色块绘制在文字之下，便于突出显示。
+
+    支持固定高度（`set_text_height`，0 表示按内容自动）：固定高度后高度不再随
+    内容增长、超出部分被裁剪，便于用上下手柄精确控制文本框的纵向大小。
+    """
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.background_color = None
+        self.fixed_height = 0.0
+
+    def set_text_height(self, height):
+        """设置固定高度；0 表示按内容自动（恢复自然高度）。"""
+        height = max(0.0, float(height or 0))
+        if abs(height - self.fixed_height) < 1e-6:
+            return
+        self.prepareGeometryChange()
+        self.fixed_height = height
+        self.update()
+
+    def auto_height(self):
+        """按内容自动排版后的自然高度（忽略固定高度裁剪）。"""
+        return float(super().boundingRect().height())
+
+    def boundingRect(self):
+        rect = super().boundingRect()
+        if self.fixed_height > 0:
+            rect.setHeight(self.fixed_height)
+        return rect
 
     def paint(self, painter, option, widget=None):
+        rect = self.boundingRect()
         if self.background_color:
             painter.save()
             painter.setPen(Qt.NoPen)
             painter.setBrush(QColor(self.background_color))
-            painter.drawRect(self.boundingRect())
+            painter.drawRect(rect)
             painter.restore()
+        if self.fixed_height > 0:
+            # 固定高度时裁剪超出区域，使显示范围与手柄位置一致。
+            painter.save()
+            painter.setClipRect(rect)
+            super().paint(painter, option, widget)
+            painter.restore()
+            return
         super().paint(painter, option, widget)
 
 
 class AnnotationPixmapItem(AnnotationPaintMixin, QGraphicsPixmapItem):
     pass
+
+
+class EraseMaskItem(QGraphicsItem):
+    """非破坏性擦除层：在标注层内按 z 顺序镂空其下方内容。
+
+    以遮罩（白色=擦除）用 DestinationOut 清除同一图层中 z 更低（更早绘制）的像素，
+    因此“先擦除再新画”的标注位于擦除之上、不会被擦到，也支持多次擦除与多层覆盖。
+    擦除层不参与选中/移动，只作为渲染层存在于场景中。
+
+    同时记录每段笔迹（`strokes`，按第几次拖动分组）：遮罩始终等于这些笔迹的渲染结果，
+    因此可以按笔迹精确删除（最近一次 / 经过某点），不必整层丢弃导致所有擦除一起消失。
+    """
+
+    def __init__(self, mask, width, height, strokes=None):
+        super().__init__()
+        self.mask = mask
+        self._rect = QRectF(0, 0, width, height)
+        self.strokes = [tuple(stroke) for stroke in (strokes or [])]
+        self.setFlag(QGraphicsItem.ItemIsSelectable, False)
+        self.setFlag(QGraphicsItem.ItemIsMovable, False)
+        self.setAcceptedMouseButtons(Qt.NoButton)
+
+    def boundingRect(self):
+        return self._rect
+
+    def paint(self, painter, option, widget=None):
+        painter.save()
+        painter.setCompositionMode(QPainter.CompositionMode_DestinationOut)
+        painter.drawImage(0, 0, self.mask)
+        painter.restore()
+
+    def add_stroke(self, group, start, end, width, erase_base=False):
+        """记录并绘制一段擦除笔迹。
+
+        `group` 表示同一次拖动（同一次擦除）；`erase_base` 记录这段笔迹是否同时擦掉
+        截图原图——按笔迹保存，因此之后切换「同时擦除原图」不会改变已有擦除。
+        """
+        stroke = (group, start.x(), start.y(), end.x(), end.y(), float(width), bool(erase_base))
+        self.strokes.append(stroke)
+        self._paint_stroke(stroke)
+
+    def render(self):
+        """按记录的笔迹重绘遮罩，使遮罩与笔迹记录随时保持一致。"""
+        self.mask.fill(Qt.transparent)
+        for stroke in self.strokes:
+            self._paint_stroke(stroke)
+
+    def drop_groups(self, groups):
+        """丢弃指定分组的笔迹并重绘遮罩；返回是否发生了变化。"""
+        groups = set(groups)
+        if not groups:
+            return False
+        kept = [stroke for stroke in self.strokes if stroke[0] not in groups]
+        if len(kept) == len(self.strokes):
+            return False
+        self.strokes = kept
+        self.render()
+        return True
+
+    def group_ids(self):
+        """本层包含的擦除分组编号集合。"""
+        return {stroke[0] for stroke in self.strokes}
+
+    def groups_near(self, point, slack=3.0):
+        """返回笔迹经过该点（距离 ≤ 笔画半径 + slack）的分组编号集合。"""
+        hit = set()
+        for stroke in self.strokes:
+            if self._stroke_distance(stroke, point) <= stroke[5] / 2 + slack:
+                hit.add(stroke[0])
+        return hit
+
+    def base_strokes(self):
+        """需要同时擦掉截图原图的那部分笔迹。"""
+        return [stroke for stroke in self.strokes if stroke[6]]
+
+    def base_flags(self, groups=None):
+        """返回指定分组（默认全部）的“是否擦除原图”标记集合。"""
+        return {stroke[6] for stroke in self.strokes
+                if groups is None or stroke[0] in groups}
+
+    def set_groups_erase_base(self, groups, erase_base):
+        """修改指定分组笔迹的“是否擦除原图”标记；遮罩本身不受影响，返回是否有改动。"""
+        groups = set(groups)
+        changed = False
+        updated = []
+        for stroke in self.strokes:
+            if stroke[0] in groups and bool(stroke[6]) != bool(erase_base):
+                stroke = stroke[:6] + (bool(erase_base),)
+                changed = True
+            updated.append(stroke)
+        if changed:
+            self.strokes = updated
+        return changed
+
+    @staticmethod
+    def _stroke_distance(stroke, point):
+        return _point_to_segment(point, QPointF(stroke[1], stroke[2]),
+                                 QPointF(stroke[3], stroke[4]))
+
+    def _paint_stroke(self, stroke):
+        painter = QPainter(self.mask)
+        painter.setRenderHint(QPainter.Antialiasing)
+        self.paint_stroke(painter, stroke)
+        painter.end()
+
+    def paint_stroke(self, painter, stroke):
+        """把一段笔迹画到给定画笔上（擦除遮罩与底图镂空共用同一套几何）。"""
+        width = stroke[5]
+        start = QPointF(stroke[1], stroke[2])
+        end = QPointF(stroke[3], stroke[4])
+        painter.setPen(QPen(QColor("white"), width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawLine(start, end)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("white"))
+        painter.drawEllipse(end, width / 2, width / 2)
+
+
+def _point_to_segment(point, start, end):
+    """点到线段的距离（像素），用于判断擦除笔迹是否经过某点。"""
+    dx, dy = end.x() - start.x(), end.y() - start.y()
+    if not dx and not dy:
+        return math.hypot(point.x() - start.x(), point.y() - start.y())
+    ratio = ((point.x() - start.x()) * dx + (point.y() - start.y()) * dy) / (dx * dx + dy * dy)
+    ratio = max(0.0, min(1.0, ratio))
+    return math.hypot(point.x() - (start.x() + ratio * dx),
+                      point.y() - (start.y() + ratio * dy))
 
 
 class RoundedRectItem(AnnotationPaintMixin, QGraphicsRectItem):
@@ -264,12 +422,23 @@ def read_text_format(item):
             fmt.fontUnderline(), fmt.fontStrikeOut())
 
 
+def auto_text_width(text, font):
+    """自动模式下的文本框宽度：按字体实测内容宽度给紧凑值（含少量留白），避免默认过宽。"""
+    metrics = QFontMetricsF(font)
+    lines = text.split("\n") or [""]
+    natural = max(metrics.horizontalAdvance(line) for line in lines)
+    return max(60.0, float(math.ceil(natural) + 12))
+
+
 def text_item(point, text, settings, alignment):
     """为文字图元设置默认字体、对齐和按百分比计算的段落行距。"""
     item = AnnotationTextItem(text)
     font = QFont(settings["font"] or "Microsoft YaHei", settings["font_size"])
     item.setFont(font)
-    item.setDefaultTextColor(QColor(settings.get("text_color", settings["pen_color"])))
+    # 注意：不能用 settings.get("text_color", settings["pen_color"])——默认值会被预先求值，
+    # 编辑对话框传入的样式快照可能不含 pen_color 而抛 KeyError。
+    item.setDefaultTextColor(QColor(settings.get("text_color") or settings.get("pen_color")
+                                    or "#ff0000"))
     if settings.get("text_background_enabled"):
         item.background_color = settings.get("text_background", "#fff3a0")
     apply_text_format(item, settings.get("text_bold", False), settings.get("text_italic", False),
@@ -277,15 +446,34 @@ def text_item(point, text, settings, alignment):
     option = item.document().defaultTextOption()
     option.setAlignment(alignment)
     item.document().setDefaultTextOption(option)
-    item.document().setTextWidth(max(180, len(text) * settings["font_size"]))
+    # 文本框宽度：配置为正数时用固定宽度（超出自动换行），0 表示按内容自动。
+    text_width = int(settings.get("text_width", 0) or 0)
+    item.document().setTextWidth(float(text_width) if text_width > 0
+                                 else auto_text_width(text, font))
     cursor = QTextCursor(item.document())
     cursor.select(QTextCursor.Document)
     block = QTextBlockFormat()
     block.setAlignment(alignment)
     block.setLineHeight(round(settings["line_spacing"] * 100), QTextBlockFormat.ProportionalHeight.value)
     cursor.mergeBlockFormat(block)
+    # 文本框高度：配置为正数时固定高度（超出裁剪），0 表示按内容自动增长。
+    text_height = int(settings.get("text_height", 0) or 0)
+    if text_height > 0:
+        item.set_text_height(text_height)
     item.setPos(point)
     return editable(item)
+
+
+def auto_text_height(text, settings, alignment):
+    """按内容自动排版后的文本框高度（忽略固定高度，与实际建立的高度一致）。
+
+    用于对话框「高度＝自动」时提示实际生效的高度：按当前文字、字体、宽度与
+    行距真实排版一次后取值，避免另写一套估算公式与实际渲染不一致。
+    """
+    probe = text_item(QPointF(0, 0), text, {**settings, "text_height": 0,
+                                            "line_spacing": settings.get("line_spacing") or 1.2},
+                      alignment)
+    return float(probe.auto_height())
 
 
 class AnnotationSequenceItem(QGraphicsItem):

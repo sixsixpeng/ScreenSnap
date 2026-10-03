@@ -53,11 +53,13 @@ def sample_image():
 class AnnotationPreview(QWidget):
     """按当前配置即时绘制标注效果，避免只能反复截图试参数。"""
 
-    def __init__(self, config, kind, height=96):
+    def __init__(self, config, kind, height=96, sample_text=None):
         super().__init__()
         self.config = config
         self.kind = kind
         self.scene = None
+        # 文字预览可改用调用方提供的示例文字（如对话框里正在输入的内容）。
+        self.sample_text = sample_text
         self.setFixedHeight(height)
         self.setMinimumWidth(260)
         self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
@@ -117,7 +119,8 @@ class AnnotationPreview(QWidget):
             checker.end()
             scene.addItem(QGraphicsPixmapItem(QPixmap.fromImage(preview)))
         elif self.kind == "text":
-            item = text_item(QPointF(0, 0), SAMPLE_TEXT, settings,
+            sample = self.sample_text if self.sample_text else SAMPLE_TEXT
+            item = text_item(QPointF(0, 0), sample, settings,
                              ALIGNMENTS.get(settings.get("text_alignment"), Qt.AlignLeft))
             item_rect = item.boundingRect()
             # 文字实际宽度常超出预览区（大字号尤甚），先等比缩小到可视区域内再居中，

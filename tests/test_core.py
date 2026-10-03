@@ -827,6 +827,433 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(reloaded["sequence_shape"], DEFAULTS["sequence_shape"])
             settings.close()
 
+    def test_text_width_default_validated_and_controls_box_width(self):
+        from config.config_manager import DEFAULTS, validate
+        from editor.annotation_items import text_item
+        from editor.annotation_canvas import AnnotationCanvas
+        from editor.toolbar_widget import ToolbarWidget
+        from PySide6.QtWidgets import QSpinBox
+
+        # 默认 0 = 自动；合法范围 0–2000，非法值被拒绝。
+        self.assertEqual(DEFAULTS["text_width"], 0)
+        self.assertEqual(validate({"text_width": 0})["text_width"], 0)
+        self.assertEqual(validate({"text_width": 320})["text_width"], 320)
+        for bad in (2001, -1, "auto", True):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                validate({"text_width": bad})
+        self.assertEqual(DEFAULTS["text_height"], 0)
+        self.assertEqual(validate({"text_height": 0})["text_height"], 0)
+        self.assertEqual(validate({"text_height": 240})["text_height"], 240)
+        for bad in (2001, -1, "auto", True):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                validate({"text_height": bad})
+
+        long_text = "这是一段很长的文字用于测试文本框宽度自动换行效果"
+        # 自动：宽度随内容增长，短文本至少 180。
+        auto = text_item(QPointF(0, 0), long_text, dict(DEFAULTS), Qt.AlignLeft)
+        self.assertGreater(auto.document().textWidth(), 180)
+        # 固定宽度：文本框宽度等于配置值，超出后自动换行（高度增加）。
+        narrow_settings = dict(DEFAULTS, text_width=200)
+        narrow = text_item(QPointF(0, 0), long_text, narrow_settings, Qt.AlignLeft)
+        self.assertEqual(narrow.document().textWidth(), 200)
+        self.assertGreater(narrow.boundingRect().height(),
+                           text_item(QPointF(0, 0), "短", narrow_settings,
+                                     Qt.AlignLeft).boundingRect().height())
+        # 固定高度：显示高度等于配置值；内容更高时被裁剪，auto_height 仍是自然高度。
+        natural = text_item(QPointF(0, 0), long_text, dict(DEFAULTS), Qt.AlignLeft)
+        tall = text_item(QPointF(0, 0), long_text, dict(DEFAULTS, text_height=24), Qt.AlignLeft)
+        self.assertEqual(tall.boundingRect().height(), 24.0)
+        self.assertEqual(tall.fixed_height, 24.0)
+        self.assertGreater(tall.auto_height(), 24.0)
+        self.assertEqual(natural.boundingRect().height(), tall.auto_height())
+
+        # 工具栏：文字工具展示文字宽度行，且外部同步生效。
+        settings = dict(DEFAULTS)
+        toolbar = ToolbarWidget(settings["pen_color"], settings, "text")
+        toolbar.tool_buttons["text"].click()
+        self.assertIn(35, toolbar._last_option_rows)
+        self.assertIn(36, toolbar._last_option_rows)
+        self.assertIsInstance(toolbar.text_width, QSpinBox)
+        self.assertIsInstance(toolbar.text_height, QSpinBox)
+        toolbar.sync_setting("text_width", 260)
+        toolbar.sync_setting("text_height", 120)
+        self.assertEqual(toolbar.text_width.value(), 260)
+        self.assertEqual(toolbar.text_height.value(), 120)
+
+        # 选中文字后改宽度：应用到该标注。
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 160), "white"),
+                                  dict(DEFAULTS, text_width=0))
+        item = text_item(QPointF(10, 10), long_text, canvas.settings, Qt.AlignLeft)
+        canvas.scene_data.addItem(item)
+        item.setSelected(True)
+        canvas.set_selected_text_width(300)
+        self.assertEqual(item.document().textWidth(), 300)
+        canvas.set_selected_text_width(0)
+        self.assertGreater(item.document().textWidth(), 180)
+        # 选中文字后改高度：固定高度生效，设回 0 恢复按内容自动。
+        canvas.set_selected_text_height(140)
+        self.assertEqual(item.boundingRect().height(), 140.0)
+        canvas.set_selected_text_height(0)
+        self.assertEqual(item.boundingRect().height(), item.auto_height())
+        canvas.close()
+        toolbar.close()
+
+    def test_editing_text_only_affects_that_annotation(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import text_item, read_text_format
+        from editor import text_input_dialog
+        from PySide6.QtWidgets import QDialog
+
+        settings = dict(DEFAULTS, text_bold=False, font_size=18,
+                        text_color="#ff0000", text_width=0)
+        canvas = AnnotationCanvas(Image.new("RGB", (320, 200), "white"), settings)
+        first = text_item(QPointF(10, 10), "第一", canvas.settings, Qt.AlignLeft)
+        second = text_item(QPointF(10, 60), "第二", canvas.settings, Qt.AlignLeft)
+        canvas._add_annotation(first)
+        canvas._add_annotation(second)
+
+        class StubDialog:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def exec(self):
+                return QDialog.Accepted
+
+            def text(self):
+                return "第二"          # 文字不变，只改样式
+
+            def changed_settings(self):
+                return {"font_size": 40, "text_bold": True, "text_color": "#00ff00"}
+
+        original = text_input_dialog.TextInputDialog
+        text_input_dialog.TextInputDialog = StubDialog
+        try:
+            canvas.edit_text_item(second)
+        finally:
+            text_input_dialog.TextInputDialog = original
+
+        # 编辑对话框的各项只作用于被编辑的标注。
+        self.assertEqual(second.font().pointSize(), 40)
+        self.assertTrue(read_text_format(second)[0])
+        self.assertEqual(second.defaultTextColor().name(), "#00ff00")
+        self.assertEqual(first.font().pointSize(), settings["font_size"])
+        self.assertFalse(read_text_format(first)[0])
+        # 不回写公共配置（新建才用公共配置作默认）。
+        self.assertEqual(canvas.settings["font_size"], 18)
+        self.assertFalse(canvas.settings["text_bold"])
+        self.assertEqual(canvas.settings["text_color"], "#ff0000")
+        canvas.close()
+
+    def test_text_settings_available_in_all_four_places(self):
+        """今天新增的文字设置（含 text_width）在四处都应就位并带预览：
+        ① 设置页「编辑器>文字」；② 工具栏「更多设置>文字」（两个编辑器共用）；
+        ③ 新建文字对话框；④ 编辑文字对话框。"""
+        from config.config_manager import DEFAULTS
+        from editor.toolbar_widget import ToolbarWidget
+        from editor.text_input_dialog import TextInputDialog
+        from ui.settings_window import SettingsWindow
+
+        text_keys = {"font", "font_size", "text_alignment", "text_color",
+                     "text_bold", "text_italic", "text_underline", "text_strikethrough",
+                     "text_background_enabled", "text_background", "text_width",
+                     "text_height"}
+
+        # ① 设置页：控件齐全且有文字预览。
+        with tempfile.TemporaryDirectory() as folder:
+            window = SettingsWindow(ConfigManager(Path(folder) / "settings.json"))
+            page = window.page("编辑器")
+            controls = set(page.controls) | set(page.color_buttons)
+            self.assertLessEqual(text_keys, controls)
+            self.assertTrue(any(preview.kind == "text" for preview in page.previews))
+            window.close()
+
+        # ② 工具栏「更多设置>文字」：参数行齐全且有文字预览。
+        settings = dict(DEFAULTS)
+        toolbar = ToolbarWidget(settings["pen_color"], settings, "text")
+        toolbar.tool_buttons["text"].click()
+        # 未显示工具栏时用 isHidden 判断（其未被显式隐藏即为可见）。
+        self.assertFalse(toolbar.previews["text"].isHidden())
+        self.assertLessEqual({0, 3, 4, 5, 28, 29, 35, 36},
+                             set(toolbar._last_option_rows))
+        toolbar.close()
+
+        # ③④ 新建 / 编辑对话框：控件齐全且带（实时文字）预览。
+        item_values = {"font": "", "font_size": 20, "text_alignment": "center",
+                       "text_color": "#ff0000", "text_bold": False, "text_italic": False,
+                       "text_underline": False, "text_strikethrough": False,
+                       "text_background_enabled": False, "text_background": "#fff3a0",
+                       "text_width": 120, "text_height": 0}
+        for values in (None, item_values):
+            dialog = TextInputDialog(None, "文字", settings, "abc", values=values)
+            for attr in ("font", "font_size", "alignment", "text_color",
+                         "background_enabled", "background", "text_width", "width_hint",
+                         "text_height", "height_hint"):
+                self.assertIsNotNone(getattr(dialog, attr, None), attr)
+            self.assertEqual(dialog.per_annotation, values is not None)
+            self.assertEqual(dialog.preview.kind, "text")
+            self.assertEqual(dialog.preview.sample_text, "abc")
+            dialog.accept()
+
+    def test_text_input_dialog_shows_live_preview(self):
+        from unittest.mock import patch as _patch
+        from config.config_manager import DEFAULTS
+        from editor.text_input_dialog import TextInputDialog
+
+        settings = dict(DEFAULTS)
+        dialog = TextInputDialog(None, "文字标注", settings, "abc")
+        self.assertIsNotNone(getattr(dialog, "preview", None))
+        self.assertEqual(dialog.preview.kind, "text")
+        # 预览使用编辑框里正在输入的文字，而不是固定示例文案。
+        self.assertEqual(dialog.preview.sample_text, "abc")
+        dialog.editor.setPlainText("实时输入的文字")
+        self.assertEqual(dialog.preview.sample_text, "实时输入的文字")
+        # 自动模式显示按内容实测的宽度；改为固定值后显示该值。
+        self.assertIn("自动", dialog.width_hint.text())
+        dialog.text_width.setValue(200)
+        self.assertIn("200", dialog.width_hint.text())
+        # 高度同样显示实测/固定值，避免「自动高度看不到实际值」。
+        self.assertIn("自动", dialog.height_hint.text())
+        self.assertIn("px", dialog.height_hint.text())
+        dialog.text_height.setValue(120)
+        self.assertIn("120", dialog.height_hint.text())
+        dialog.text_height.setValue(0)
+        self.assertIn("自动", dialog.height_hint.text())
+        # 固定宽度下输入换行会让自动高度变大，提示随之刷新。
+        dialog.text_width.setValue(120)
+        dialog.editor.setPlainText("短")
+        narrow_hint = dialog.height_hint.text()
+        dialog.editor.setPlainText("这是一段较长的文字，在窄框里会折成很多行，从而明显变高")
+        self.assertNotEqual(dialog.height_hint.text(), narrow_hint)
+        with _patch.object(dialog.preview, "refresh", wraps=dialog.preview.refresh) as refresh:
+            dialog.font_size.setValue(30)
+            dialog.text_width.setValue(240)
+            dialog.checks["text_bold"].setChecked(True)
+        # 每次参数改动都刷新预览，保证插入前能看到实际效果。
+        self.assertEqual(refresh.call_count, 3)
+        dialog.accept()
+
+    def test_editing_text_applies_width_only_change(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import text_item
+        from editor import text_input_dialog
+        from PySide6.QtWidgets import QDialog
+
+        canvas = AnnotationCanvas(Image.new("RGB", (320, 200), "white"),
+                                  dict(DEFAULTS, text_width=0))
+        item = text_item(QPointF(10, 10), "原文", canvas.settings, Qt.AlignLeft)
+        canvas._add_annotation(item)
+        before = item.document().textWidth()
+        self.assertNotEqual(before, 260)
+
+        class StubDialog:
+            def __init__(self, *args, **kwargs):
+                pass
+
+            def exec(self):
+                return QDialog.Accepted
+
+            def text(self):
+                return "原文"          # 文字未变，只调了宽度
+
+            def changed_settings(self):
+                return {"text_width": 260}
+
+        original = text_input_dialog.TextInputDialog
+        text_input_dialog.TextInputDialog = StubDialog
+        try:
+            canvas.edit_text_item(item)
+        finally:
+            text_input_dialog.TextInputDialog = original
+        # 只改宽度的编辑也要作用到该标注上，且不回写公共配置（编辑只针对该标注）。
+        self.assertEqual(item.document().textWidth(), 260)
+        self.assertEqual(canvas.settings["text_width"], 0)
+        canvas.close()
+
+    def test_editing_text_applies_height_only_change_without_touching_config(self):
+        """二次编辑只改高度：作用于该标注，且不回写公共配置；初值取自该标注自身。"""
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import text_item
+        from editor import text_input_dialog
+        from PySide6.QtWidgets import QDialog
+
+        settings = dict(DEFAULTS, text_width=0, text_height=0)
+        canvas = AnnotationCanvas(Image.new("RGB", (320, 200), "white"), settings)
+        item = text_item(QPointF(10, 10), "多行文字", canvas.settings, Qt.AlignLeft)
+        canvas._add_annotation(item)
+        item.setSelected(True)
+        auto_height = item.boundingRect().height()
+        self.assertEqual(item.fixed_height, 0.0)
+
+        captured = {}
+
+        class StubDialog:
+            def __init__(self, *args, **kwargs):
+                # 二次编辑的初值来自该标注自身（自动高度即 0），而不是公共配置。
+                captured.update(kwargs.get("values") or {})
+
+            def exec(self):
+                return QDialog.Accepted
+
+            def text(self):
+                return "多行文字"
+
+            def changed_settings(self):
+                return {"text_height": 96}
+
+        original = text_input_dialog.TextInputDialog
+        text_input_dialog.TextInputDialog = StubDialog
+        try:
+            canvas.edit_text_item(item)
+        finally:
+            text_input_dialog.TextInputDialog = original
+
+        self.assertEqual(captured.get("text_height"), 0)
+        self.assertEqual(item.fixed_height, 96.0)
+        self.assertEqual(item.boundingRect().height(), 96.0)
+        # 只改这一个标注：公共配置与其它标注不受影响。
+        self.assertEqual(canvas.settings["text_height"], 0)
+        other = text_item(QPointF(10, 120), "另一", canvas.settings, Qt.AlignLeft)
+        self.assertEqual(other.fixed_height, 0.0)
+        self.assertNotEqual(auto_height, 96.0)
+        canvas.close()
+
+    def test_text_edge_handle_resizes_box_width_and_corner_still_scales(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import text_item
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+
+        canvas = AnnotationCanvas(Image.new("RGB", (400, 300), "white"),
+                                  dict(DEFAULTS, text_width=0))
+        canvas.resize(520, 400)
+        canvas.show()
+        canvas.set_tool("select")
+        item = text_item(QPointF(20, 20), "较长文字内容示例", canvas.settings, Qt.AlignLeft)
+        canvas._add_annotation(item)
+        item.setSelected(True)
+        canvas.checkpoint()
+
+        def drag(handle_point, offset):
+            start = canvas.mapFromScene(handle_point)
+            finish = start + offset
+
+            def send(kind, pos, buttons):
+                self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                    kind, QPointF(pos), QPointF(canvas.viewport().mapToGlobal(pos)),
+                    Qt.LeftButton, buttons, Qt.NoModifier))
+
+            send(QEvent.MouseButtonPress, start, Qt.LeftButton)
+            send(QEvent.MouseMove, finish, Qt.LeftButton)
+            send(QEvent.MouseButtonRelease, finish, Qt.NoButton)
+
+        # 边中点（右边）→ 直接调整文本框宽度，不缩放整个标注。
+        rect = item.sceneBoundingRect()
+        before_width = item.document().textWidth()
+        before_scale = item.scale()
+        drag(QPointF(rect.right(), rect.center().y()), QPoint(40, 0))
+        self.assertGreater(item.document().textWidth(), before_width + 20)
+        self.assertAlmostEqual(item.scale(), before_scale, places=5)
+
+        # 四角（右下）→ 仍是缩放整个标注，文本框宽度不变。
+        canvas.undo()
+        live = canvas.annotations()[0]
+        live.setSelected(True)
+        width_after = live.document().textWidth()
+        corner = live.sceneBoundingRect()
+        drag(QPointF(corner.right(), corner.bottom()), QPoint(24, 24))
+        self.assertAlmostEqual(live.document().textWidth(), width_after, delta=2)
+        # 缩放写进 transform（而非 setScale），故用矩阵判断四角仍是缩放。
+        self.assertGreater(live.transform().m11(), 1.0)
+
+        # 上下边中点 → 调整文本框高度（宽度、缩放都不变），同类型标注才走此路径。
+        canvas.undo()
+        live = canvas.annotations()[0]
+        live.setSelected(True)
+        scale = live.transform().m11()
+        height_before = live.boundingRect().height()
+        width_before = live.document().textWidth()
+        box = live.sceneBoundingRect()
+        drag(QPointF(box.center().x(), box.bottom()), QPoint(0, 30))
+        self.assertAlmostEqual(live.boundingRect().height(),
+                               height_before + 30 / scale, delta=2)
+        self.assertEqual(live.fixed_height, live.boundingRect().height())
+        self.assertAlmostEqual(live.document().textWidth(), width_before, delta=0.5)
+        # 拖上边（n）时下边缘保持不动。
+        bottom_before = live.sceneBoundingRect().bottom()
+        height_after_s = live.boundingRect().height()
+        top = live.sceneBoundingRect()
+        drag(QPointF(top.center().x(), top.top()), QPoint(0, -20))
+        self.assertAlmostEqual(live.boundingRect().height(),
+                               height_after_s + 20 / scale, delta=2)
+        self.assertAlmostEqual(live.sceneBoundingRect().bottom(), bottom_before, delta=2)
+        canvas.close()
+
+    def test_text_box_drag_resizes_smoothly_without_jumping(self):
+        """文字框边中点拖动：宽度 = 按下宽度 + 累计位移，逐帧稳定，不出现跳跃放大。"""
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import text_item
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+
+        canvas = AnnotationCanvas(Image.new("RGB", (400, 300), "white"),
+                                  dict(DEFAULTS, text_width=200))
+        canvas.resize(520, 400)
+        canvas.show()
+        canvas.set_tool("select")
+        # 放在画布中部，避免拖拽越界被边界钳制（那属于预期行为，不是跳跃）。
+        item = text_item(QPointF(150, 20), "多行文字示例内容", canvas.settings, Qt.AlignLeft)
+        canvas._add_annotation(item)
+        item.setSelected(True)
+        canvas.checkpoint()
+        origin_width = item.document().textWidth()
+        self.assertEqual(origin_width, 200)
+
+        rect = item.sceneBoundingRect()
+        start = canvas.mapFromScene(QPointF(rect.right(), rect.center().y()))
+
+        def send(kind, pos, buttons):
+            self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                kind, QPointF(pos), QPointF(canvas.viewport().mapToGlobal(pos)),
+                Qt.LeftButton, buttons, Qt.NoModifier))
+
+        send(QEvent.MouseButtonPress, start, Qt.LeftButton)
+        widths = []
+        for offset in (10, 20, 30):
+            send(QEvent.MouseMove, start + QPoint(offset, 0), Qt.LeftButton)
+            widths.append(item.document().textWidth())
+        # 每步都等于「按下宽度 + 累计位移」，不再叠加放大。
+        for offset, width in zip((10, 20, 30), widths):
+            self.assertAlmostEqual(width, origin_width + offset, delta=2.0)
+        # 拖回起点即恢复原宽度，无累积漂移。
+        send(QEvent.MouseMove, start, Qt.LeftButton)
+        self.assertAlmostEqual(item.document().textWidth(), origin_width, delta=1.0)
+        send(QEvent.MouseButtonRelease, start, Qt.NoButton)
+
+        # 拖左边（w）时宽度增加且右边缘保持不动。
+        left = canvas.mapFromScene(QPointF(item.sceneBoundingRect().left(),
+                                           item.sceneBoundingRect().center().y()))
+        right_before = item.sceneBoundingRect().right()
+        send(QEvent.MouseButtonPress, left, Qt.LeftButton)
+        send(QEvent.MouseMove, left - QPoint(40, 0), Qt.LeftButton)
+        send(QEvent.MouseButtonRelease, left - QPoint(40, 0), Qt.NoButton)
+        self.assertAlmostEqual(item.document().textWidth(), origin_width + 40, delta=2.0)
+        self.assertAlmostEqual(item.sceneBoundingRect().right(), right_before, delta=2.0)
+
+        # 已缩放的标注：场景位移按自身缩放换算，避免与光标脱节而跳跃。
+        canvas.undo()
+        live = canvas.annotations()[0]
+        live.document().setTextWidth(60)
+        live.setScale(2.0)
+        live.setSelected(True)
+        rect = live.sceneBoundingRect()
+        start = canvas.mapFromScene(QPointF(rect.right(), rect.center().y()))
+        send(QEvent.MouseButtonPress, start, Qt.LeftButton)
+        send(QEvent.MouseMove, start + QPoint(40, 0), Qt.LeftButton)
+        send(QEvent.MouseButtonRelease, start + QPoint(40, 0), Qt.NoButton)
+        # 2 倍缩放下，40 px 场景位移对应 20 px 文本框宽度。
+        self.assertAlmostEqual(live.document().textWidth(), 80, delta=2.0)
+        canvas.close()
+
     def test_text_item_uses_shared_annotation_color(self):
         from config.config_manager import DEFAULTS
         from editor.annotation_items import text_item
@@ -982,24 +1409,41 @@ class CoreTests(unittest.TestCase):
                 "pen_chain": True, "marker_chain": True,
                 "text_bold": True, "text_italic": True, "text_underline": True,
                 "text_strikethrough": True, "text_background_enabled": True,
-                "text_background": "#123456", "mosaic_brush": True,
-                "eraser_erase_base": True,
+                "text_background": "#123456", "text_width": 320, "text_height": 180,
+                "mosaic_brush": True,
+                "eraser_erase_base": True, "arrow_chain": True, "mosaic_width": 66,
+                "rect_corner_enabled": True, "rect_corner_radius": 40,
+                "rect_fill_enabled": True, "rect_fill_opacity": 80, "rect_fill_color": "#112233",
+                "ellipse_fill_enabled": True, "ellipse_fill_opacity": 70, "ellipse_fill_color": "#445566",
             }), encoding="utf-8")
             manager = ConfigManager(path)
             settings = SettingsWindow(manager)
             editor = settings.page("编辑器")
             new_keys = ("pen_chain", "marker_chain", "text_bold", "text_italic",
                         "text_underline", "text_strikethrough", "text_background_enabled",
-                        "text_background", "mosaic_brush", "eraser_erase_base")
+                        "text_background", "text_width", "text_height", "mosaic_brush",
+                        "eraser_erase_base",
+                        "arrow_chain", "mosaic_width", "rect_corner_enabled", "rect_corner_radius",
+                        "rect_fill_enabled", "rect_fill_opacity", "rect_fill_color",
+                        "ellipse_fill_enabled", "ellipse_fill_opacity", "ellipse_fill_color")
             for key in new_keys:
                 control = editor.controls.get(key) or editor.color_buttons.get(key)
                 self.assertIsNotNone(control, key)
+                self.assertIn(key, DEFAULTS, key)
             # 改动若干开关后，重置本页应恢复默认并被持久化。
             editor.controls["pen_chain"].setChecked(False)
             editor.controls["marker_chain"].setChecked(False)
             editor.controls["text_bold"].setChecked(False)
+            editor.controls["text_width"].setValue(400)
+            editor.controls["text_height"].setValue(500)
             editor.controls["mosaic_brush"].setChecked(False)
             editor.controls["eraser_erase_base"].setChecked(False)
+            editor.controls["arrow_chain"].setChecked(False)
+            editor.controls["mosaic_width"].setValue(10)
+            editor.controls["rect_fill_enabled"].setChecked(False)
+            editor.controls["rect_fill_opacity"].setValue(20)
+            editor.controls["rect_corner_enabled"].setChecked(False)
+            editor.controls["ellipse_fill_opacity"].setValue(5)
             editor.reset_page()
             for key in new_keys:
                 self.assertEqual(manager.data[key], DEFAULTS[key], key)
@@ -5522,6 +5966,61 @@ class CoreTests(unittest.TestCase):
         finally:
             canvas.close()
 
+    def test_edge_resize_keeps_aspect_by_default_and_free_with_modifier(self):
+        """边把手（n/s/e/w）与角把手一致：默认等比，按住修饰键则自由拉伸。"""
+        import math
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+
+        canvas = AnnotationCanvas(Image.new("RGB", (400, 300), "white"), dict(DEFAULTS))
+        canvas.resize(500, 380)
+        canvas.show()
+        canvas.set_tool("select")
+        try:
+            # (把手, 旋转角, 修饰键, 是否期望等比)
+            cases = (("e", 0, Qt.NoModifier, True), ("e", 0, Qt.ControlModifier, False),
+                     ("n", 0, Qt.NoModifier, True), ("n", 30, Qt.NoModifier, True),
+                     ("e", 90, Qt.ControlModifier, False))
+            for handle_name, degrees, modifier, expect_uniform in cases:
+                canvas.restore([])
+                canvas.reset_history()
+                canvas.cursor_index = 0
+                item = shape("rect", QPointF(180, 140), QPointF(240, 180), "#ff0000", 2)
+                canvas.scene_data.addItem(item)
+                item.setTransformOriginPoint(item.boundingRect().center())
+                if degrees:
+                    item.setRotation(degrees)
+                item.setSelected(True)
+                canvas.checkpoint()
+                handles = canvas.item_resize_handles(item)
+                rad = math.radians(degrees)
+                cos_a, sin_a = math.cos(rad), math.sin(rad)
+                # 刻意用非等比位移（x 远大于 y），等比时应被拉回同一比例。
+                dx, dy = 40, 5
+                delta = QPointF(dx * cos_a - dy * sin_a, dx * sin_a + dy * cos_a)
+                start = canvas.mapFromScene(handles[handle_name])
+                finish = canvas.mapFromScene(handles[handle_name] + delta)
+
+                def send(kind, position, buttons=Qt.NoButton):
+                    self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                        kind, QPointF(position),
+                        QPointF(canvas.viewport().mapToGlobal(position)),
+                        Qt.LeftButton, buttons, modifier))
+
+                send(QEvent.MouseButtonPress, start, Qt.LeftButton)
+                send(QEvent.MouseMove, finish, Qt.LeftButton)
+                send(QEvent.MouseButtonRelease, finish)
+                transform = item.transform()
+                uniform = abs(transform.m11() - transform.m22()) < 1e-6
+                self.assertEqual(uniform, expect_uniform, (handle_name, degrees, modifier))
+                canvas.resizing = None
+        finally:
+            canvas.close()
+
     def test_fill_color_config_default_matches_stroke_and_is_validated(self):
         from config.config_manager import DEFAULTS, validate, fill_colors_following_stroke
 
@@ -5585,6 +6084,139 @@ class CoreTests(unittest.TestCase):
         toolbar.sync_setting("rect_fill_color", "#123456")
         toolbar.sync_setting("ellipse_fill_color", "#654321")
 
+    def test_select_mode_more_settings_follows_selected_annotation(self):
+        from config.config_manager import DEFAULTS
+        from editor.toolbar_widget import ToolbarWidget
+
+        settings = dict(DEFAULTS)
+        toolbar = ToolbarWidget(settings["pen_color"], settings, "select")
+        toolbar.set_tool_mode("select")
+        self.assertEqual(toolbar._last_option_rows, set())
+        self.assertFalse(toolbar.options_button.isEnabled())
+        # 选中矩形后，更多设置应展示矩形专属参数（矩形线型 行10、圆角 行13、填充 行15/16/32），
+        # 而不再只显示箭头样式。
+        toolbar.set_selected_tool("rect")
+        toolbar.set_tool_mode("select")
+        self.assertIn(10, toolbar._last_option_rows)
+        self.assertIn(13, toolbar._last_option_rows)
+        self.assertIn(32, toolbar._last_option_rows)
+        self.assertNotIn(8, toolbar._last_option_rows)
+        # 选中椭圆展示椭圆专属参数。
+        toolbar.set_selected_tool("ellipse")
+        toolbar.set_tool_mode("select")
+        self.assertIn(11, toolbar._last_option_rows)
+        self.assertNotIn(10, toolbar._last_option_rows)
+        toolbar.set_selected_tool(None)
+        toolbar.set_tool_mode("select")
+        self.assertEqual(toolbar._last_option_rows, set())
+        self.assertFalse(toolbar.options_button.isEnabled())
+        toolbar.close()
+
+    def _check_options_after_double_click_delete(self, editor):
+        from PySide6.QtCore import QTimer
+        from config.config_manager import TOOL_WIDTH_KEYS
+
+        canvas, toolbar = editor.canvas, editor.toolbar
+        toolbar.tool_buttons["select"].click()
+        rect = shape("rect", QPointF(40, 40), QPointF(120, 100), "#ff0000", 3,
+                     corner_radius=12, fill_enabled=True, fill_opacity=100)
+        ellipse = shape("ellipse", QPointF(170, 40), QPointF(250, 100), "#00ff00", 3,
+                        fill_enabled=True, fill_opacity=100)
+        canvas.scene_data.addItem(rect)
+        canvas.scene_data.addItem(ellipse)
+        canvas.checkpoint()
+        rect.setSelected(True)
+        ellipse.setSelected(True)
+        QTest.mouseDClick(canvas.viewport(), Qt.LeftButton,
+                         pos=canvas.mapFromScene(QPointF(210, 70)))
+        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton,
+                           pos=canvas.mapFromScene(QPointF(210, 70)))
+        self.app.processEvents()
+        self.assertEqual(canvas.annotations(), [rect])
+        self.assertEqual(canvas.selected_annotation_tool(), "")
+        self.assertIsNone(toolbar.selected_tool)
+        self.assertEqual(toolbar._last_option_rows, set())
+        self.assertFalse(toolbar.options_button.isEnabled())
+        QTest.mouseClick(toolbar.options_button, Qt.LeftButton)
+        self.assertFalse(toolbar.options_button.menu().isVisible())
+
+        QTest.mouseClick(canvas.viewport(), Qt.LeftButton,
+                         pos=canvas.mapFromScene(QPointF(80, 70)))
+        self.app.processEvents()
+        self.assertEqual(canvas.selected_annotation_tool(), "rect")
+        self.assertEqual(toolbar.selected_tool, "rect")
+        self.assertEqual(toolbar._last_option_rows, {0, 1, 10, 12, 13, 15, 16, 32})
+        self.assertEqual(toolbar.options_button.text(), "矩形设置")
+        button, menu = toolbar.options_button, toolbar.options_button.menu()
+        toolbar.set_selected_tool("ellipse")
+        opened = []
+
+        def inspect_menu():
+            try:
+                opened.append((menu.isVisible(), toolbar.tool_color_buttons["rect_color"].isVisible(),
+                               toolbar.previews["rect"].isVisible(),
+                               toolbar.option_rows[8][0].isVisible(), menu.width()))
+                toolbar.pen_width.setValue(7)
+            finally:
+                menu.hide()
+
+        QTimer.singleShot(0, inspect_menu)
+        QTest.mouseClick(button, Qt.LeftButton)
+        self.app.processEvents()
+        self.assertEqual(opened[0][:4], (True, True, True, False))
+        self.assertGreaterEqual(opened[0][4], toolbar.option_panel_width("rect"))
+        self.assertEqual(rect.pen().width(), 7)
+        self.assertEqual(editor.settings[TOOL_WIDTH_KEYS["rect"]], 7)
+        self.assertEqual(toolbar.pen_width_label.text(), "7 px")
+        toolbar.setting_changed.emit("rect_color", "#123456")
+        self.assertEqual(rect.pen().color().name(), "#123456")
+
+        canvas.scene_data.clearSelection()
+        self.assertFalse(button.isEnabled())
+        canvas.undo()
+        self.assertFalse(button.isEnabled())
+        canvas.redo()
+        self.assertFalse(button.isEnabled())
+        restored = canvas.annotations()[0]
+        restored.setSelected(True)
+        self.assertEqual(toolbar.selected_tool, "rect")
+        self.assertTrue(button.isEnabled())
+        QTest.mouseDClick(canvas.viewport(), Qt.LeftButton,
+                         pos=canvas.mapFromScene(QPointF(80, 70)))
+        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton,
+                           pos=canvas.mapFromScene(QPointF(80, 70)))
+        self.assertEqual(canvas.annotations(), [])
+        self.assertFalse(button.isEnabled())
+        self.assertEqual(toolbar._last_option_rows, set())
+
+    def test_window_options_refresh_after_double_click_delete(self):
+        from config.config_manager import DEFAULTS
+        editor = EditorWindow(Image.new("RGB", (320, 200), "white"), dict(DEFAULTS))
+        editor.show()
+        self.app.processEvents()
+        try:
+            self._check_options_after_double_click_delete(editor)
+        finally:
+            editor.close()
+
+    def test_inline_options_refresh_after_double_click_delete(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 1200, "height": 900}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True,
+                        "magnifier": False, "capture_after_selection": "edit"}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (1200, 900), "white"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(50, 50, 320, 200))
+            mask.complete()
+            mask.show()
+            self.app.processEvents()
+            try:
+                self._check_options_after_double_click_delete(mask.session.inline_editor)
+            finally:
+                mask.close()
+
     def test_text_input_dialog_prefills_and_reports_changes(self):
         from config.config_manager import DEFAULTS
         from editor.text_input_dialog import TextInputDialog
@@ -5595,13 +6227,16 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(dialog.text(), "abc")
         self.assertEqual(dialog.font_size.value(), settings["font_size"])
         self.assertEqual(dialog.checks["text_bold"].isChecked(), settings["text_bold"])
+        self.assertEqual(dialog.text_width.value(), settings["text_width"])
         self.assertEqual(dialog.changed_settings(), {})
         dialog.checks["text_bold"].setChecked(True)
         dialog.font_size.setValue(30)
+        dialog.text_width.setValue(280)
         dialog.alignment.setCurrentIndex(dialog.alignment.findData("center"))
         changed = dialog.changed_settings()
         self.assertTrue(changed["text_bold"])
         self.assertEqual(changed["font_size"], 30)
+        self.assertEqual(changed["text_width"], 280)
         self.assertEqual(changed["text_alignment"], "center")
         dialog.accept()
 
@@ -5613,7 +6248,7 @@ class CoreTests(unittest.TestCase):
         from PySide6.QtWidgets import QDialog
 
         class StubDialog:
-            def __init__(self, parent, title, settings, initial=""):
+            def __init__(self, parent, title, settings, initial="", values=None):
                 self.title = title
 
             def exec(self):
@@ -5631,9 +6266,10 @@ class CoreTests(unittest.TestCase):
             canvas = AnnotationCanvas(Image.new("RGB", (200, 160), "white"), dict(DEFAULTS))
             emitted = []
             canvas.setting_changed.connect(lambda key, value: emitted.append((key, value)))
-            text, ok = canvas.input_text("文字标注")
+            text, changed, ok = canvas.input_text("文字标注")
             self.assertTrue(ok)
             self.assertEqual(text, "hello")
+            self.assertEqual(changed["font_size"], 42)
             # 改动写入画布配置并对外发出，供编辑器同步到配置与工具栏。
             self.assertTrue(canvas.settings["text_bold"])
             self.assertEqual(canvas.settings["font_size"], 42)
@@ -6344,6 +6980,223 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(img2.pixelColor(px, py).name(), "#ff0000")
         canvas.close()
 
+    def test_eraser_works_when_stroke_starts_on_annotation_and_on_empty_space(self):
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from PIL import Image
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), dict(DEFAULTS))
+        canvas.resize(200, 150)
+        canvas.show()
+        canvas.scene_data.addItem(shape("rect", QPointF(20, 20), QPointF(80, 80), "#ff0000", 4))
+        canvas.checkpoint()
+
+        def stroke(start, end):
+            QTest.mousePress(canvas.viewport(), Qt.LeftButton,
+                             pos=canvas.mapFromScene(QPointF(*start)))
+            QTest.mouseMove(canvas.viewport(), pos=canvas.mapFromScene(QPointF(*end)))
+            QTest.mouseRelease(canvas.viewport(), Qt.LeftButton,
+                               pos=canvas.mapFromScene(QPointF(*end)))
+
+        for zoom in (100, 200, 50):
+            canvas.set_zoom(zoom)
+            canvas.set_tool("eraser")
+            canvas.settings["eraser_width"] = 16
+            with self.subTest(f"缩放{zoom}% 起笔在标注上"):
+                stroke((50, 20), (56, 20))
+                self.assertEqual(canvas.render_image().pixelColor(50, 20).name(), "#ffffff")
+                canvas.undo()
+            with self.subTest(f"缩放{zoom}% 起笔在空白处划过标注"):
+                stroke((5, 5), (56, 20))
+                # 非破坏式擦除：无论起笔在标注上还是空白处，划过处都应被擦除为白色。
+                self.assertEqual(canvas.render_image().pixelColor(50, 20).name(), "#ffffff")
+                canvas.undo()
+        canvas.close()
+
+    def test_eraser_live_viewport_updates_during_drag_and_erase_base(self):
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        # A：擦除标注时，拖动途中真实视口就应显示擦除（不能只在松开时才生效）。
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), dict(DEFAULTS))
+        canvas.resize(240, 200)
+        canvas.show()
+        canvas.scene_data.addItem(shape("rect", QPointF(20, 20), QPointF(80, 80), "#ff0000", 4))
+        canvas.checkpoint()
+        canvas.set_tool("eraser")
+        canvas.settings["eraser_width"] = 16
+        press = canvas.mapFromScene(QPointF(50, 20))
+        QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=press)
+        QTest.mouseMove(canvas.viewport(), pos=canvas.mapFromScene(QPointF(58, 20)))
+        self.app.processEvents()
+        during = canvas.viewport().grab().toImage()
+        self.assertEqual(during.pixelColor(press).name(), "#ffffff", "拖动途中未实时擦除")
+        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton,
+                           pos=canvas.mapFromScene(QPointF(58, 20)))
+        canvas.close()
+
+    def test_eraser_erase_base_live_viewport_clears_background(self):
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        settings = dict(DEFAULTS, eraser_width=16)
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), (10, 20, 30)), settings)
+        canvas.resize(240, 200)
+        canvas.show()
+        canvas.set_tool("eraser")
+        canvas.settings["eraser_erase_base"] = True
+        press = canvas.mapFromScene(QPointF(50, 50))
+        QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=press)
+        QTest.mouseMove(canvas.viewport(), pos=canvas.mapFromScene(QPointF(56, 50)))
+        self.app.processEvents()
+        live = canvas.viewport().grab().toImage()
+        erased = live.pixelColor(press)
+        self.assertNotEqual(erased.name(), "#0a141e", "开启擦除原图后实时视图未擦除底图")
+        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton,
+                           pos=canvas.mapFromScene(QPointF(56, 50)))
+        self.assertEqual(canvas.render_image().pixelColor(50, 50).alpha(), 0)
+        canvas.close()
+
+    def test_editor_eraser_shows_live_erasure_during_drag(self):
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        for context in ("window", "inline"):
+            with self.subTest(context=context):
+                if context == "window":
+                    editor = EditorWindow(Image.new("RGB", (200, 160), "white"), dict(DEFAULTS))
+                    editor.show()
+                    self.app.processEvents()
+                    canvas = editor.canvas
+                    cleanup = editor.close
+                else:
+                    from screenshot.mask_window import MaskWindow
+                    folder = tempfile.mkdtemp()
+                    bounds = {"left": 0, "top": 0, "width": 1200, "height": 900}
+                    settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True,
+                                "magnifier": False, "capture_after_selection": "edit"}
+                    with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                        mask = MaskWindow(Image.new("RGB", (1200, 900), "white"),
+                                          bounds, [bounds], settings)
+                    mask.selection.rects.append(QRect(30, 30, 300, 220))
+                    mask.complete()
+                    mask.show()
+                    self.app.processEvents()
+                    canvas = mask.session.inline_editor.canvas
+                    cleanup = mask.close
+                try:
+                    canvas.scene_data.addItem(
+                        shape("rect", QPointF(20, 20), QPointF(120, 100), "#ff0000", 4))
+                    canvas.checkpoint()
+                    canvas.set_tool("eraser")
+                    canvas.settings["eraser_width"] = 18
+                    press = canvas.mapFromScene(QPointF(60, 20))
+                    QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=press)
+                    # 光标移到远处再采样，避免落在橡皮擦虚线圆环（预览）上。
+                    QTest.mouseMove(canvas.viewport(), pos=canvas.mapFromScene(QPointF(170, 90)))
+                    self.app.processEvents()
+                    during = canvas.viewport().grab().toImage()
+                    self.assertEqual(during.pixelColor(press).name(), "#ffffff",
+                                     f"{context} 拖动途中未实时擦除")
+                    QTest.mouseRelease(canvas.viewport(), Qt.LeftButton,
+                                       pos=canvas.mapFromScene(QPointF(170, 90)))
+                finally:
+                    cleanup()
+
+    def test_inline_editor_eraser_removes_annotation_via_mouse(self):
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from PySide6.QtCore import QRect
+        from PIL import Image
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import patch
+        import tempfile
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 120, "height": 100}
+            settings = dict(DEFAULTS, auto_dir=folder, inline_edit=True,
+                            magnifier=False, crosshair=False, mask_opacity=0)
+            settings["capture_after_selection"] = "edit"
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (120, 100), "white"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(0, 0, 120, 100))
+            mask.complete()
+            mask.show()
+            self.app.processEvents()
+            editor = mask.session.inline_editor
+            editor.initial_save_timer.stop()
+            editor.canvas.scene_data.addItem(
+                shape("rect", QPointF(20, 20), QPointF(80, 80), "#ff0000", 4))
+            editor.canvas.checkpoint()
+            # 通过工具栏切到橡皮擦，再在矩形上拖动。
+            editor.toolbar.tool_changed.emit("eraser")
+            self.assertEqual(editor.canvas.tool, "eraser")
+            QTest.mousePress(editor.canvas.viewport(), Qt.LeftButton,
+                             pos=editor.canvas.mapFromScene(QPointF(50, 20)))
+            QTest.mouseMove(editor.canvas.viewport(), pos=editor.canvas.mapFromScene(QPointF(56, 20)))
+            QTest.mouseRelease(editor.canvas.viewport(), Qt.LeftButton,
+                               pos=editor.canvas.mapFromScene(QPointF(56, 20)))
+            self.assertEqual(editor.canvas.render_image().pixelColor(50, 20).name(), "#ffffff")
+            # 实时画布视图也应显示擦除后的镂空（不再是红色标注）。
+            editor.canvas.viewport().update()
+            self.app.processEvents()
+            vp_img = editor.canvas.viewport().grab().toImage()
+            vp_pos = editor.canvas.mapFromScene(QPointF(50, 20))
+            self.assertEqual(vp_img.pixelColor(vp_pos.x(), vp_pos.y()).name(), "#ffffff")
+            mask.close()
+
+    def test_window_editor_eraser_removes_annotation_via_toolbar_button(self):
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from PIL import Image
+
+        editor = EditorWindow(Image.new("RGB", (120, 100), "white"), dict(DEFAULTS))
+        editor.show()
+        self.app.processEvents()
+        editor.canvas.scene_data.addItem(
+            shape("rect", QPointF(20, 20), QPointF(80, 80), "#ff0000", 4))
+        editor.canvas.checkpoint()
+        # 通过真实工具栏按钮点击切换到橡皮擦。
+        QTest.mouseClick(editor.toolbar.tool_buttons["eraser"], Qt.LeftButton)
+        self.assertEqual(editor.canvas.tool, "eraser")
+        QTest.mousePress(editor.canvas.viewport(), Qt.LeftButton,
+                         pos=editor.canvas.mapFromScene(QPointF(50, 20)))
+        QTest.mouseMove(editor.canvas.viewport(), pos=editor.canvas.mapFromScene(QPointF(56, 20)))
+        QTest.mouseRelease(editor.canvas.viewport(), Qt.LeftButton,
+                           pos=editor.canvas.mapFromScene(QPointF(56, 20)))
+        self.assertEqual(editor.canvas.render_image().pixelColor(50, 20).name(), "#ffffff")
+        editor.close()
+
+    def test_selected_annotation_tool_reports_type_and_clears_on_multi(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape, text_item
+        from PySide6.QtCore import QPointF, Qt
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), dict(DEFAULTS))
+        rect = shape("rect", QPointF(10, 10), QPointF(60, 60), "#ff0000", 4)
+        ellipse = shape("ellipse", QPointF(10, 10), QPointF(60, 60), "#00ff00", 4)
+        text = text_item(QPointF(10, 10), "字", canvas.settings, Qt.AlignLeft)
+        canvas.scene_data.addItem(rect)
+        canvas.scene_data.addItem(ellipse)
+        canvas.scene_data.addItem(text)
+        # 单个选中时返回对应工具类型。
+        canvas.scene_data.clearSelection()
+        rect.setSelected(True)
+        self.assertEqual(canvas.selected_annotation_tool(), "rect")
+        canvas.scene_data.clearSelection()
+        ellipse.setSelected(True)
+        self.assertEqual(canvas.selected_annotation_tool(), "ellipse")
+        canvas.scene_data.clearSelection()
+        text.setSelected(True)
+        self.assertEqual(canvas.selected_annotation_tool(), "text")
+        # 多选或空选时返回空串，不展示单选标注的专属参数。
+        rect.setSelected(True)
+        ellipse.setSelected(True)
+        text.setSelected(True)
+        self.assertEqual(canvas.selected_annotation_tool(), "")
+        canvas.scene_data.clearSelection()
+        self.assertEqual(canvas.selected_annotation_tool(), "")
+        canvas.close()
+
     def test_marker_is_translucent_wide_and_survives_undo(self):
         from PySide6.QtTest import QTest
         from config.config_manager import DEFAULTS, validate
@@ -6419,9 +7272,8 @@ class CoreTests(unittest.TestCase):
         canvas.tool = "eraser"
         self.assertEqual(canvas.render_image().pixelColor(40, 40).name(), "#ff0000")
         self.assertIs(canvas.annotations()[0], item)
-        QTest.mouseMove(canvas.viewport(), pos=canvas.mapFromScene(QPointF(40, 40)))
-        self.assertIsNotNone(canvas.eraser_point)
         QTest.mouseClick(canvas.viewport(), Qt.LeftButton, pos=canvas.mapFromScene(QPointF(40, 40)))
+        self.assertIsNotNone(canvas.eraser_point)
         # 非破坏：标注项仍是原对象，像素未被改写。
         self.assertIs(canvas.annotations()[0], item)
         self.assertEqual(canvas.annotations()[0].pixmap().toImage().pixelColor(20, 20).alpha(), 255)
@@ -6430,6 +7282,60 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(canvas.render_image().pixelColor(60, 60).name(), "#ff0000")
         canvas.undo()
         self.assertEqual(canvas.render_image().pixelColor(40, 40).name(), "#ff0000")
+        canvas.close()
+
+    def test_eraser_keeps_later_annotations_above_earlier_strokes(self):
+        """擦除只影响其下方（更早绘制）的标注；擦除后新画的标注在擦除之上，
+        二次擦除又能作用于其间新增的标注——覆盖多层叠加场景。"""
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        from PIL import Image
+
+        canvas = AnnotationCanvas(Image.new("RGB", (160, 120), "white"),
+                                  dict(DEFAULTS, eraser_width=24))
+        canvas.resize(320, 240)
+        canvas.show()
+
+        def erase(point):
+            pos = canvas.mapFromScene(QPointF(*point))
+            QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=pos)
+            QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=pos)
+            self.app.processEvents()
+
+        def filled(start, end, color):
+            return shape("rect", QPointF(*start), QPointF(*end), color, 2,
+                         fill_enabled=True, fill_opacity=100)
+
+        # 红色实心块，先擦掉左侧一小块。
+        canvas._add_annotation(filled((20, 20), (140, 100), "#ff0000"))
+        canvas.checkpoint()
+        canvas.set_tool("eraser")
+        erase((40, 60))
+        self.assertEqual(canvas.render_image().pixelColor(40, 60).name(), "#ffffff")
+        self.assertEqual(canvas.render_image().pixelColor(100, 60).name(), "#ff0000")
+
+        # 擦除之后新画的蓝色块位于擦除之上：不被旧擦除挖空，并覆盖下方红色。
+        canvas._add_annotation(filled((70, 40), (130, 80), "#0000ff"))
+        canvas.checkpoint()
+        self.assertEqual(canvas.render_image().pixelColor(100, 60).name(), "#0000ff")
+        self.assertEqual(canvas.render_image().pixelColor(40, 60).name(), "#ffffff")
+        # 实时画布同样成立：新蓝色块不被旧擦除挖空（此时光标仍在 (40,60)，不干扰采样）。
+        live = canvas.viewport().grab().toImage()
+        self.assertEqual(live.pixelColor(canvas.mapFromScene(QPointF(100, 60))).name(), "#0000ff")
+
+        # 二次擦除作用于其之前的全部内容（含新画的蓝色块），旧擦除区域不受影响。
+        erase((100, 60))
+        self.assertEqual(canvas.render_image().pixelColor(100, 60).name(), "#ffffff")
+        self.assertEqual(canvas.render_image().pixelColor(40, 60).name(), "#ffffff")
+        # 擦除层按 z 分层存在且有序。
+        zs = [item.zValue() for item in canvas.erase_items()]
+        self.assertGreaterEqual(len(zs), 2)
+        self.assertEqual(zs, sorted(zs))
+
+        # 撤销二次擦除后蓝色块恢复（擦除层随历史往返）。
+        canvas.undo()
+        self.assertEqual(canvas.render_image().pixelColor(100, 60).name(), "#0000ff")
+        self.assertEqual(len(canvas.erase_items()), 1)
         canvas.close()
 
     def test_eraser_default_only_masks_annotation_layer(self):
@@ -6546,45 +7452,73 @@ class CoreTests(unittest.TestCase):
         canvas = AnnotationCanvas(Image.new("RGB", (240, 180), "white"), DEFAULTS)
         canvas.resize(400, 300)
         canvas.show()
-        items = [
-            shape("rect", QPointF(20, 20), QPointF(60, 60), "#ff0000", 2),
-            shape("ellipse", QPointF(80, 20), QPointF(120, 60), "#00aa00", 2),
-            shape("arrow", QPointF(140, 20), QPointF(180, 60), "#0000ff", 2),
-            text_item(QPointF(20, 100), "Resize me", DEFAULTS, Qt.AlignLeft),
-        ]
+
+        def build(kind):
+            return {
+                "rect": lambda: shape("rect", QPointF(20, 20), QPointF(60, 60), "#ff0000", 2),
+                "ellipse": lambda: shape("ellipse", QPointF(80, 20), QPointF(120, 60), "#00aa00", 2),
+                "arrow": lambda: shape("arrow", QPointF(140, 20), QPointF(180, 60), "#0000ff", 2),
+                "text": lambda: text_item(QPointF(20, 100), "Resize me", DEFAULTS, Qt.AlignLeft),
+            }[kind]
+
+        def drag(start, finish, modifier):
+            self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                QEvent.MouseButtonPress, QPointF(start),
+                QPointF(canvas.viewport().mapToGlobal(start)),
+                Qt.LeftButton, Qt.LeftButton, modifier))
+            self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                QEvent.MouseMove, QPointF(finish),
+                QPointF(canvas.viewport().mapToGlobal(finish)),
+                Qt.NoButton, Qt.LeftButton, modifier))
+            self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                QEvent.MouseButtonRelease, QPointF(finish),
+                QPointF(canvas.viewport().mapToGlobal(finish)),
+                Qt.LeftButton, Qt.NoButton, modifier))
+
         try:
-            for item in items:
-                canvas.restore([])
-                canvas.reset_history()
-                canvas.cursor_index = 0
-                canvas.scene_data.addItem(item)
-                item.setSelected(True)
-                canvas.checkpoint()
-                original = item.sceneBoundingRect()
-                handle = QPointF(original.right(), original.center().y())
-                start = canvas.mapFromScene(handle)
-                finish = start + QPoint(22, 0)
-                self.app.sendEvent(canvas.viewport(), QMouseEvent(
-                    QEvent.MouseButtonPress, QPointF(start),
-                    QPointF(canvas.viewport().mapToGlobal(start)),
-                    Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
-                self.app.sendEvent(canvas.viewport(), QMouseEvent(
-                    QEvent.MouseMove, QPointF(finish),
-                    QPointF(canvas.viewport().mapToGlobal(finish)),
-                    Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
-                self.app.sendEvent(canvas.viewport(), QMouseEvent(
-                    QEvent.MouseButtonRelease, QPointF(finish),
-                    QPointF(canvas.viewport().mapToGlobal(finish)),
-                    Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
-                resized = item.sceneBoundingRect()
-                self.assertGreater(resized.width(), original.width())
-                self.assertAlmostEqual(resized.height(), original.height(), delta=2)
-                canvas.undo()
-                restored = canvas.annotations()[0].sceneBoundingRect()
-                self.assertAlmostEqual(restored.width(), original.width(), delta=1)
-                self.assertAlmostEqual(restored.height(), original.height(), delta=1)
-                canvas.redo()
-                item.setSelected(False)
+            # 四种图元 × 两种修饰键：默认所有把手等比，按住 Ctrl 单轴自由拉伸。
+            for kind in ("rect", "ellipse", "arrow", "text"):
+                for modifier, uniform in ((Qt.NoModifier, True), (Qt.ControlModifier, False)):
+                    canvas.restore([])
+                    canvas.reset_history()
+                    canvas.cursor_index = 0
+                    item = build(kind)()
+                    canvas._add_annotation(item)
+                    item.setSelected(True)
+                    canvas.checkpoint()
+                    original = item.sceneBoundingRect()
+                    original_text_width = (item.document().textWidth()
+                                           if kind == "text" else None)
+                    handle = QPointF(original.right(), original.center().y())
+                    start = canvas.mapFromScene(handle)
+                    finish = start + QPoint(22, 0)
+                    drag(start, finish, modifier)
+                    # 撤销/重做会按快照重建图元，需从画布重新取当前图元。
+                    current = canvas.annotations()[0]
+                    resized = current.sceneBoundingRect()
+                    if kind == "text":
+                        # 文字标注的边中点直接调整文本框宽度，不做整体缩放。
+                        self.assertGreater(current.document().textWidth(),
+                                           original_text_width, modifier)
+                        self.assertAlmostEqual(current.transform().m11(), 1.0, places=5)
+                    else:
+                        self.assertGreater(resized.width(), original.width(), (kind, modifier))
+                        if uniform:
+                            self.assertAlmostEqual(resized.width() / original.width(),
+                                                   resized.height() / original.height(),
+                                                   delta=0.05, msg=f"{kind} 默认应等比")
+                        else:
+                            self.assertAlmostEqual(resized.height(), original.height(), delta=2,
+                                                   msg=f"{kind} 按住 Ctrl 应单轴")
+                    canvas.undo()
+                    restored_item = canvas.annotations()[0]
+                    restored = restored_item.sceneBoundingRect()
+                    self.assertAlmostEqual(restored.width(), original.width(), delta=1)
+                    self.assertAlmostEqual(restored.height(), original.height(), delta=1)
+                    if kind == "text":
+                        self.assertAlmostEqual(restored_item.document().textWidth(),
+                                               original_text_width, delta=1)
+                    canvas.redo()
             handles = canvas.resize_handles(QRectF(10, 10, 100, 80))
             self.assertEqual(set(handles), {"nw", "n", "ne", "e", "se", "s", "sw", "w"})
         finally:
@@ -7035,7 +7969,7 @@ class CoreTests(unittest.TestCase):
         canvas.set_tool("select")
 
         def dbl(target):
-            canvas.scene_data.itemAt = lambda *a, **k: target
+            canvas.annotation_at = lambda *a, **k: target
             return QMouseEvent(QEvent.Type.MouseButtonDblClick, QPointF(0, 0),
                                Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
 
@@ -7072,7 +8006,7 @@ class CoreTests(unittest.TestCase):
         text = text_item(QPointF(10, 10), "原文", DEFAULTS, Qt.AlignLeft)
         canvas.scene_data.addItem(text)
         canvas.set_tool("select")
-        canvas.scene_data.itemAt = lambda *a, **k: text
+        canvas.annotation_at = lambda *a, **k: text
         from PySide6.QtWidgets import QDialog
         with patch("editor.text_input_dialog.TextInputDialog") as dialog:
             dialog.return_value.exec.return_value = QDialog.Accepted
@@ -7104,6 +8038,321 @@ class CoreTests(unittest.TestCase):
         canvas.undo()
         self.assertEqual(len(canvas.annotations()), 1)
         canvas.close()
+
+    def test_erased_annotation_still_editable_and_deletable(self):
+        """被橡皮擦覆盖过的标注：命中测试跳过擦除层，右键与双击仍作用于标注本身。"""
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import EraseMaskItem, text_item
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtWidgets import QDialog
+
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 140), "white"),
+                                  dict(DEFAULTS, eraser_width=24))
+        canvas.resize(300, 220)
+        canvas.show()
+        text = text_item(QPointF(20, 20), "被擦过的文字", canvas.settings, Qt.AlignLeft)
+        rect = shape("rect", QPointF(20, 70), QPointF(120, 120), "#ff0000", 3)
+        canvas._add_annotation(text)
+        canvas._add_annotation(rect)
+        canvas.checkpoint()
+        # 在文字与矩形上各擦一段，生成 z 高于标注、覆盖其上的擦除层。
+        canvas.erase_segment(QPointF(20, 36), QPointF(120, 36))
+        canvas.erase_segment(QPointF(20, 96), QPointF(120, 96))
+        canvas.checkpoint()
+        masks = [item for item in canvas.scene_data.items() if isinstance(item, EraseMaskItem)]
+        self.assertTrue(masks)
+        self.assertGreater(max(item.zValue() for item in masks),
+                           max(text.zValue(), rect.zValue()))
+
+        # 关键：命中测试跳过擦除层，返回被擦的标注本身（旧实现返回擦除层，下面两步全部失效）。
+        self.assertIs(canvas.annotation_at(QPointF(40, 36)), text)
+        self.assertIs(canvas.annotation_at(QPointF(40, 96)), rect)
+
+        def send(kind, scene_point, button, buttons):
+            viewport = canvas.viewport()
+            pos = canvas.mapFromScene(scene_point)
+            self.app.sendEvent(viewport, QMouseEvent(
+                kind, QPointF(pos), QPointF(viewport.mapToGlobal(pos)),
+                button, buttons, Qt.NoModifier))
+            self.app.processEvents()
+
+        def double_click(scene_point):
+            send(QEvent.Type.MouseButtonDblClick, scene_point, Qt.LeftButton, Qt.LeftButton)
+
+        # 普通单击也应选中被擦过的标注（选中后才能用 Delete 键删除）。
+        canvas.set_tool("select")
+        send(QEvent.Type.MouseButtonPress, QPointF(60, 36), Qt.LeftButton, Qt.LeftButton)
+        send(QEvent.Type.MouseButtonRelease, QPointF(60, 36), Qt.LeftButton, Qt.NoButton)
+        selected = canvas.scene_data.selectedItems()
+        self.assertEqual(len(selected), 1)
+        self.assertTrue(hasattr(selected[0], "toPlainText"))
+        canvas.remove_selected()
+        self.assertEqual(len(canvas.annotations()), 1)
+        canvas.undo()
+        self.assertEqual(len(canvas.annotations()), 2)
+
+        # 双击被擦过的矩形 → 删除（旧实现命中擦除层，删不掉）。
+        canvas.set_tool("select")
+        double_click(QPointF(40, 96))
+        self.assertEqual(len(canvas.annotations()), 1)
+        self.assertTrue(hasattr(canvas.annotations()[0], "toPlainText"))
+        canvas.undo()
+        self.assertEqual(len(canvas.annotations()), 2)
+
+        # 双击被擦过的文字 → 打开编辑对话框而不是删除。
+        canvas.set_tool("select")
+        with patch("editor.text_input_dialog.TextInputDialog") as dialog:
+            dialog.return_value.exec.return_value = QDialog.Rejected
+            double_click(QPointF(40, 36))
+        dialog.assert_called_once()
+        self.assertEqual(len(canvas.annotations()), 2)
+
+        # 右键被擦过的文字 → 菜单作用于该标注本身，删除后可撤销还原。
+        with patch.object(canvas, "show_annotation_menu") as show_menu:
+            send(QEvent.Type.MouseButtonPress, QPointF(40, 36), Qt.RightButton, Qt.RightButton)
+            send(QEvent.Type.MouseButtonRelease, QPointF(40, 36), Qt.RightButton, Qt.NoButton)
+        show_menu.assert_called_once()
+        target = show_menu.call_args.args[0]
+        self.assertIs(target, canvas.annotation_at(QPointF(40, 36)))
+        self.assertTrue(hasattr(target, "toPlainText"))
+        canvas.annotation_menu(target).actions()[-1].trigger()
+        self.assertEqual(len(canvas.annotations()), 1)
+        canvas.undo()
+        self.assertEqual(len(canvas.annotations()), 2)
+        canvas.close()
+
+    def test_erase_layer_can_be_deleted_like_a_layer(self):
+        """擦除层可作为图层删除：不影响其后画的标注，且可撤销/重做。"""
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 90), "white"),
+                                  dict(DEFAULTS, eraser_width=14))
+        canvas.resize(240, 200)
+        canvas.show()
+        canvas._add_annotation(shape("rect", QPointF(10, 10), QPointF(60, 60), "#ff0000", 3,
+                                     fill_enabled=True, fill_opacity=100, fill_color="#ff0000"))
+        canvas.checkpoint()
+        canvas.erase_segment(QPointF(20, 35), QPointF(50, 35))
+        canvas.checkpoint()
+        # 第一次擦除之后又画了新标注，需要新开一层，故两次擦除是两个独立图层。
+        canvas._add_annotation(shape("rect", QPointF(70, 10), QPointF(110, 60), "#00ff00", 3,
+                                     fill_enabled=True, fill_opacity=100, fill_color="#00ff00"))
+        canvas.checkpoint()
+        canvas.erase_segment(QPointF(80, 35), QPointF(100, 35))
+        canvas.checkpoint()
+        self.assertEqual(len(canvas.erase_items()), 2)
+        self.assertEqual(canvas.render_image().pixelColor(20, 35).name(), "#ffffff")
+        self.assertEqual(canvas.render_image().pixelColor(80, 35).name(), "#ffffff")
+
+        # 删除最近一层：只恢复第二个矩形，第一个矩形仍保持擦除，标注一条没少。
+        self.assertEqual(canvas.erase_layer("erase_one"), 1)
+        self.assertEqual(len(canvas.erase_items()), 1)
+        self.assertEqual(len(canvas.annotations()), 2)
+        image = canvas.render_image()
+        self.assertEqual(image.pixelColor(80, 35).name(), "#00ff00")
+        self.assertEqual(image.pixelColor(20, 35).name(), "#ffffff")
+
+        # 按点删除：只删掉在这一带留下笔迹的层。
+        self.assertTrue(canvas.erased_at(QPointF(20, 35)))
+        self.assertEqual(canvas.erase_layer("erase_at", QPointF(20, 35)), 1)
+        self.assertEqual(canvas.erase_items(), [])
+        self.assertFalse(canvas.erased_at(QPointF(20, 35)))
+        self.assertEqual(canvas.render_image().pixelColor(20, 35).name(), "#ff0000")
+        self.assertEqual(len(canvas.annotations()), 2)
+
+        # 删除擦除层同样进入历史：撤销恢复、重做再删除。
+        canvas.undo()
+        self.assertEqual(len(canvas.erase_items()), 1)
+        self.assertEqual(canvas.render_image().pixelColor(20, 35).name(), "#ffffff")
+        canvas.redo()
+        self.assertEqual(canvas.erase_items(), [])
+
+        # 清除全部擦除：把所有擦除层一并删除，标注不受影响。
+        canvas.undo()
+        self.assertEqual(canvas.erase_layer("erase_clear"), 1)
+        self.assertEqual(canvas.erase_items(), [])
+        self.assertEqual(len(canvas.annotations()), 2)
+        canvas.close()
+
+    def test_right_click_erased_area_shows_erase_layer_menu(self):
+        """右键被擦除区域（该处没有标注）→ 提供删除擦除层入口，无需回退后续编辑。"""
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 90), "white"),
+                                  dict(DEFAULTS, eraser_width=14))
+        canvas.resize(240, 200)
+        canvas.show()
+        canvas.set_tool("select")
+        canvas._add_annotation(shape("rect", QPointF(10, 10), QPointF(60, 60), "#ff0000", 3))
+        canvas.checkpoint()
+        canvas.erase_segment(QPointF(80, 70), QPointF(110, 70))   # 只擦空白区域
+        canvas.checkpoint()
+        outside = QPointF(95, 70)
+        self.assertIsNone(canvas.annotation_at(outside))
+        self.assertTrue(canvas.erased_at(outside))
+
+        def send(kind, button, buttons):
+            viewport = canvas.viewport()
+            pos = canvas.mapFromScene(outside)
+            self.app.sendEvent(viewport, QMouseEvent(
+                kind, QPointF(pos), QPointF(viewport.mapToGlobal(pos)),
+                button, buttons, Qt.NoModifier))
+            self.app.processEvents()
+
+        with patch.object(canvas, "show_erase_menu") as show_menu:
+            send(QEvent.Type.MouseButtonPress, Qt.RightButton, Qt.RightButton)
+            send(QEvent.Type.MouseButtonRelease, Qt.RightButton, Qt.NoButton)
+        show_menu.assert_called_once()
+        called = show_menu.call_args.args[0]
+        self.assertAlmostEqual(called.x(), outside.x(), delta=1)
+        self.assertAlmostEqual(called.y(), outside.y(), delta=1)
+
+        menu = canvas.erase_menu(outside)
+        self.assertEqual([action.text() for action in menu.actions()],
+                         ["删除此处擦除", "删除最近一次擦除", "清除全部擦除", "此处同时擦除原图"])
+        self.assertFalse(menu.actions()[3].isChecked())
+        self.assertTrue(menu.actions()[3].isCheckable())
+        menu.actions()[0].trigger()
+        self.assertEqual(canvas.erase_items(), [])
+        self.assertEqual(len(canvas.annotations()), 1)
+        canvas.undo()
+        self.assertEqual(len(canvas.erase_items()), 1)
+        canvas.close()
+
+    def test_erase_at_and_last_remove_only_their_own_stroke(self):
+        """同一擦除层内的多笔擦除：「删除此处擦除 / 删除最近一次擦除」只删对应笔迹。"""
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 90), "white"),
+                                  dict(DEFAULTS, eraser_width=14))
+        canvas.resize(240, 200)
+        canvas.show()
+        canvas._add_annotation(shape("rect", QPointF(10, 10), QPointF(110, 80), "#ff0000", 3,
+                                     fill_enabled=True, fill_opacity=100, fill_color="#ff0000"))
+        canvas.checkpoint()
+        # 两次独立的擦除，且两次之间没有新标注 → 合并写入同一个擦除层。
+        canvas.erase_segment(QPointF(25, 30), QPointF(90, 30))
+        canvas.erase_segment(QPointF(25, 60), QPointF(90, 60))
+        canvas.checkpoint()
+        self.assertEqual(len(canvas.erase_items()), 1)
+        image = canvas.render_image()
+        self.assertEqual(image.pixelColor(50, 30).name(), "#ffffff")
+        self.assertEqual(image.pixelColor(50, 60).name(), "#ffffff")
+
+        # 「删除此处擦除」只清掉经过该点的那一次擦除，另一笔保持。
+        self.assertEqual(canvas.erase_layer("erase_at", QPointF(50, 30)), 1)
+        self.assertEqual(len(canvas.erase_items()), 1)
+        image = canvas.render_image()
+        self.assertEqual(image.pixelColor(50, 30).name(), "#ff0000")
+        self.assertEqual(image.pixelColor(50, 60).name(), "#ffffff")
+        self.assertFalse(canvas.erased_at(QPointF(50, 30)))
+        self.assertTrue(canvas.erased_at(QPointF(50, 60)))
+
+        # 「删除最近一次擦除」删掉剩下的那一笔，此时擦除内容才清空。
+        self.assertEqual(canvas.erase_layer("erase_one"), 1)
+        self.assertEqual(canvas.erase_items(), [])
+        self.assertEqual(canvas.render_image().pixelColor(50, 60).name(), "#ff0000")
+
+        # 撤销逐次恢复：先恢复最后一笔，再恢复两笔。
+        canvas.undo()
+        self.assertEqual(len(canvas.erase_items()), 1)
+        self.assertTrue(canvas.erased_at(QPointF(50, 60)))
+        canvas.undo()
+        self.assertTrue(canvas.erased_at(QPointF(50, 30)))
+        self.assertTrue(canvas.erased_at(QPointF(50, 60)))
+        self.assertEqual(len(canvas.annotations()), 1)
+        canvas.close()
+
+    def test_erase_base_is_recorded_per_stroke(self):
+        """「同时擦除原图」按每一次擦除记录：之后切换开关不会改动已有擦除。"""
+        from config.config_manager import DEFAULTS
+
+        settings = dict(DEFAULTS, eraser_width=16, eraser_erase_base=False)
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), (10, 20, 30)), settings)
+        canvas.resize(240, 200)
+        canvas.show()
+        # 第一笔在开关关闭时擦（只擦标注、露出原图），第二笔在开启后擦（连原图一起擦）。
+        canvas.erase_segment(QPointF(30, 30), QPointF(40, 30))
+        canvas.settings["eraser_erase_base"] = True
+        canvas.erase_segment(QPointF(30, 70), QPointF(40, 70))
+        canvas.checkpoint()
+        image = canvas.render_image()
+        self.assertEqual(image.pixelColor(35, 30).name(), "#0a141e")
+        self.assertEqual(image.pixelColor(35, 70).alpha(), 0)
+
+        # 再把开关关掉：已有两笔的各自效果都保持不变（不会被统一成“不擦原图”）。
+        canvas.settings["eraser_erase_base"] = False
+        image = canvas.render_image()
+        self.assertEqual(image.pixelColor(35, 30).name(), "#0a141e")
+        self.assertEqual(image.pixelColor(35, 70).alpha(), 0)
+
+        # 逐笔查询与改写：只改被点中的那一笔。
+        self.assertFalse(canvas.erase_base_at(QPointF(35, 30)))
+        self.assertTrue(canvas.erase_base_at(QPointF(35, 70)))
+        self.assertEqual(canvas.set_erase_base(QPointF(35, 30), True), 1)
+        self.assertTrue(canvas.erase_base_at(QPointF(35, 30)))
+        image = canvas.render_image()
+        self.assertEqual(image.pixelColor(35, 30).alpha(), 0)
+        self.assertEqual(image.pixelColor(35, 70).alpha(), 0)
+
+        # 撤销恢复该笔的标记与原图。
+        canvas.undo()
+        self.assertFalse(canvas.erase_base_at(QPointF(35, 30)))
+        self.assertEqual(canvas.render_image().pixelColor(35, 30).name(), "#0a141e")
+        canvas.close()
+
+    def test_layer_menu_deletes_erase_layer_in_both_editors(self):
+        """「层级」菜单的删除擦除命令在独立编辑器与原地编辑器都应生效。"""
+        from PySide6.QtWidgets import QToolButton
+        from config.config_manager import DEFAULTS
+
+        for context in ("window", "inline"):
+            with self.subTest(context=context):
+                if context == "window":
+                    editor = EditorWindow(Image.new("RGB", (140, 100), "white"),
+                                          dict(DEFAULTS, eraser_width=14))
+                    editor.show()
+                    self.app.processEvents()
+                    cleanup = editor.close
+                else:
+                    from screenshot.mask_window import MaskWindow
+                    folder = tempfile.mkdtemp()
+                    bounds = {"left": 0, "top": 0, "width": 1200, "height": 900}
+                    settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True,
+                                "magnifier": False, "capture_after_selection": "edit",
+                                "eraser_width": 14}
+                    with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                        mask = MaskWindow(Image.new("RGB", (1200, 900), "white"),
+                                          bounds, [bounds], settings)
+                    mask.selection.rects.append(QRect(30, 30, 300, 220))
+                    mask.complete()
+                    mask.show()
+                    self.app.processEvents()
+                    editor = mask.session.inline_editor
+                    cleanup = mask.close
+                try:
+                    canvas = editor.canvas
+                    canvas._add_annotation(shape("rect", QPointF(10, 10), QPointF(60, 60),
+                                                 "#ff0000", 3))
+                    canvas.erase_segment(QPointF(20, 35), QPointF(50, 35))
+                    canvas.checkpoint()
+                    self.assertEqual(len(canvas.erase_items()), 1)
+                    menu = next(button.menu() for button in editor.toolbar.findChildren(QToolButton)
+                                if button.text() == "层级" and button.menu() is not None)
+                    texts = [action.text() for action in menu.actions()]
+                    self.assertIn("删除最近一次擦除", texts)
+                    self.assertIn("清除全部擦除", texts)
+                    next(action for action in menu.actions()
+                         if action.data() == "erase_one").trigger()
+                    self.assertEqual(canvas.erase_items(), [])
+                    self.assertEqual(len(canvas.annotations()), 1)
+                    canvas.undo()
+                    self.assertEqual(len(canvas.erase_items()), 1)
+                finally:
+                    cleanup()
 
     def test_editor_zoom_controls_and_wheel_keep_annotations_aligned(self):
         from PySide6.QtCore import QPointF
@@ -10628,6 +11877,98 @@ class CoreTests(unittest.TestCase):
         self.assertIn("Ctrl+Alt+R", recycle.toolTip())
         recycle.trigger()
         self.assertIn("recycle", calls)
+
+    def _assert_annotation_tool_selection_style(self, toolbar, dark):
+        from PySide6.QtGui import QColor, QImage, QPainter, QPalette
+        from PySide6.QtWidgets import QStyle, QStyleOptionToolButton
+
+        backgrounds = ("#484848", "#535353", "#606060") if dark else (
+            "#dedede", "#d3d3d3", "#c4c4c4")
+        border = QColor("#aaaaaa" if dark else "#666666")
+        foreground = QColor("#f5f5f5" if dark else "#202020")
+        toolbar.tool_buttons["rect"].click()
+        button = toolbar.tool_buttons["rect"]
+        self.assertEqual(sum(item.isChecked() for item in toolbar.tool_buttons.values()), 1)
+        self.assertTrue(button.property("annotationTool"))
+        self.assertFalse(toolbar.options_button.property("annotationTool"))
+        button.ensurePolished()
+        size = button.size()
+        for extra, background in zip((QStyle.State_None, QStyle.State_MouseOver,
+                                      QStyle.State_Sunken), backgrounds):
+            with self.subTest(dark=dark, state=extra):
+                option = QStyleOptionToolButton()
+                option.initFrom(button)
+                option.rect = button.rect()
+                option.state = QStyle.State_Enabled | QStyle.State_On | extra
+                option.text = "Tool"
+                option.toolButtonStyle = Qt.ToolButtonTextOnly
+                image = QImage(size, QImage.Format_ARGB32)
+                image.fill(Qt.transparent)
+                painter = QPainter(image)
+                button.style().drawComplexControl(QStyle.CC_ToolButton, option, painter, button)
+                painter.end()
+                self.assertEqual(image.pixelColor(size.width() // 2, 3), QColor(background))
+                self.assertEqual(image.pixelColor(size.width() // 2, 0), border)
+                self.assertTrue(any(
+                    image.pixelColor(x, y) == foreground
+                    for x in range(2, size.width() - 2)
+                    for y in range(5, size.height() - 5)))
+        toolbar.tool_buttons["ellipse"].click()
+        self.assertFalse(button.isChecked())
+        self.assertTrue(toolbar.tool_buttons["ellipse"].isChecked())
+        self.assertEqual(button.size(), size)
+        self.assertEqual(sum(item.isChecked() for item in toolbar.tool_buttons.values()), 1)
+
+    def test_window_annotation_tool_selection_style_in_light_and_dark_theme(self):
+        from PySide6.QtGui import QPalette
+        from config.config_manager import DEFAULTS
+        from ui.theme import apply_theme
+
+        original_palette = QPalette(self.app.palette())
+        original_mode = self.app.property("screensnap_theme_mode")
+        editor = EditorWindow(Image.new("RGB", (120, 80), "white"), dict(DEFAULTS))
+        try:
+            for theme in ("light", "dark", "light"):
+                apply_theme(self.app, theme)
+                self.app.processEvents()
+                self._assert_annotation_tool_selection_style(editor.toolbar, theme == "dark")
+        finally:
+            editor.close()
+            self.app.setProperty("screensnap_theme_mode", original_mode)
+            self.app.setPalette(original_palette)
+            self.app.processEvents()
+
+    def test_inline_annotation_tool_selection_style_in_light_and_dark_theme(self):
+        from PySide6.QtGui import QPalette
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from ui.theme import apply_theme
+
+        original_palette = QPalette(self.app.palette())
+        original_mode = self.app.property("screensnap_theme_mode")
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 600, "height": 400}
+            settings = {**DEFAULTS, "auto_dir": folder, "inline_edit": True,
+                        "capture_after_selection": "edit", "crosshair": False,
+                        "magnifier": False, "bubble": False, "sound": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (600, 400), "white"), bounds, [bounds], settings)
+            try:
+                mask.selection.rects.append(QRect(50, 50, 300, 150))
+                mask.complete()
+                editor = mask.session.inline_editor
+                editor.initial_save_timer.stop()
+                self.assertEqual(editor.toolbar.tool_buttons["rect"].toolButtonStyle(),
+                                 Qt.ToolButtonIconOnly)
+                for theme in ("light", "dark", "light"):
+                    apply_theme(self.app, theme)
+                    self.app.processEvents()
+                    self._assert_annotation_tool_selection_style(editor.toolbar, theme == "dark")
+            finally:
+                mask.close()
+                self.app.setProperty("screensnap_theme_mode", original_mode)
+                self.app.setPalette(original_palette)
+                self.app.processEvents()
 
     def test_theme_setting_and_native_unchecked_checkbox(self):
         from PySide6.QtGui import QImage, QPainter, QPalette

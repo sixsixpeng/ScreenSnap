@@ -187,8 +187,11 @@ class InlineEditor(QWidget):
                 QApplication.activePopupWidget() is None) else None)
         self.canvas.color_picked.connect(self.apply_picked_color)
         self.canvas.selection_requested.connect(self.toolbar.tool_buttons["select"].click)
+        self.canvas.selected_annotation_changed.connect(self._on_selected_annotation_changed)
         self.canvas.setting_changed.connect(self.apply_canvas_setting)
         options_menu = self.toolbar.options_button.menu()
+        options_menu.aboutToShow.connect(
+            lambda: self.toolbar.set_selected_tool(self.canvas.selected_annotation_tool()))
         options_menu.aboutToShow.connect(self.hide_magnifiers)
         options_menu.aboutToHide.connect(lambda: QTimer.singleShot(0, self.restore_magnifiers))
         self.position_widgets()
@@ -498,6 +501,10 @@ class InlineEditor(QWidget):
         self.set_annotation_setting(key, value)
         self.toolbar.sync_setting(key, value)
 
+    def _on_selected_annotation_changed(self, tool):
+        """选中标注类型变化时，让工具栏「更多设置」展示该类型专属参数。"""
+        self.toolbar.set_selected_tool(tool or None)
+
     def set_annotation_setting(self, key, value):
         from config.config_manager import TOOL_WIDTH_KEYS, fill_colors_following_stroke
         # 填充色默认与线色一致：仍等于旧线色时跟随变化，用户自定义过则保留。
@@ -509,7 +516,9 @@ class InlineEditor(QWidget):
         self.canvas.settings[key] = value
         if key in self.toolbar.tool_color_buttons:
             self.toolbar.sync_tool_color(key, value)
-            if key == f"{self.canvas.tool}_color":
+            tool = (self.canvas.selected_annotation_tool() if self.canvas.tool == "select"
+                    else self.canvas.tool)
+            if key == f"{tool}_color":
                 self.canvas.set_selected_color(value)
         if key == "editor_image_round_corners":
             self.round_corners = value
@@ -535,6 +544,10 @@ class InlineEditor(QWidget):
             self.canvas.set_selected_font(value)
         elif key == "font_size":
             self.canvas.set_selected_font_size(value)
+        elif key == "text_width":
+            self.canvas.set_selected_text_width(value)
+        elif key == "text_height":
+            self.canvas.set_selected_text_height(value)
         elif key == "text_alignment":
             self.canvas.text_alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
                                           "right": Qt.AlignRight}[value]
@@ -555,6 +568,9 @@ class InlineEditor(QWidget):
             self.canvas.remove_selected()
         elif action in ("top", "bottom", "up", "down"):
             self.canvas.layer(action)
+        elif action in ("erase_one", "erase_clear"):
+            # 擦除层可像普通图层一样删除，避免为撤回一次擦除而回退其后的所有编辑。
+            self.canvas.erase_layer(action)
         elif action in ("left", "right", "half", "horizontal", "vertical", "angle", "reset_rotation"):
             # 第一版原地编辑禁用会改变图片尺寸/几何的图像变换，避免 DPI 和选区映射风险。
             return
