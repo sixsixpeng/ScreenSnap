@@ -972,6 +972,43 @@ class CoreTests(unittest.TestCase):
                                editor_scroll.viewport().height())
             settings.close()
 
+    def test_editor_settings_page_exposes_and_resets_new_annotation_options(self):
+        from config.config_manager import DEFAULTS
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            # 把今天新增的标注配置项全部改成非默认值。
+            path.write_text(json.dumps({
+                "pen_chain": True, "marker_chain": True,
+                "text_bold": True, "text_italic": True, "text_underline": True,
+                "text_strikethrough": True, "text_background_enabled": True,
+                "text_background": "#123456", "mosaic_brush": True,
+                "eraser_erase_base": True,
+            }), encoding="utf-8")
+            manager = ConfigManager(path)
+            settings = SettingsWindow(manager)
+            editor = settings.page("编辑器")
+            new_keys = ("pen_chain", "marker_chain", "text_bold", "text_italic",
+                        "text_underline", "text_strikethrough", "text_background_enabled",
+                        "text_background", "mosaic_brush", "eraser_erase_base")
+            for key in new_keys:
+                control = editor.controls.get(key) or editor.color_buttons.get(key)
+                self.assertIsNotNone(control, key)
+            # 改动若干开关后，重置本页应恢复默认并被持久化。
+            editor.controls["pen_chain"].setChecked(False)
+            editor.controls["marker_chain"].setChecked(False)
+            editor.controls["text_bold"].setChecked(False)
+            editor.controls["mosaic_brush"].setChecked(False)
+            editor.controls["eraser_erase_base"].setChecked(False)
+            editor.reset_page()
+            for key in new_keys:
+                self.assertEqual(manager.data[key], DEFAULTS[key], key)
+            settings.flush_persist()
+            reloaded = ConfigManager(path).data
+            for key in new_keys:
+                self.assertEqual(reloaded[key], DEFAULTS[key], key)
+            settings.close()
+
     def test_filename_template_has_visible_format_guide(self):
         from PySide6.QtWidgets import QFormLayout, QLabel
 
@@ -2521,6 +2558,156 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(canvas.annotations()), 1)
         self.assertFalse(canvas.chain_active)
         self.assertIsNone(canvas.start)
+        canvas.close()
+
+    def _pen_drag(self, canvas, start, end, modifiers=Qt.KeyboardModifiers()):
+        """在画布上用给定修饰键从 start 拖到 end，模拟一次笔划。"""
+        from PySide6.QtCore import QPointF
+        from PySide6.QtTest import QTest
+        pa = canvas.mapFromScene(QPointF(*start))
+        pb = canvas.mapFromScene(QPointF(*end))
+        QTest.mousePress(canvas.viewport(), Qt.LeftButton, modifiers, pos=pa)
+        QTest.mouseMove(canvas.viewport(), pb)
+        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, modifiers, pos=pb)
+
+    def test_pen_straight_line_with_ctrl_alt_is_single_segment(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import Qt, QPointF
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"), dict(DEFAULTS))
+        canvas.resize(400, 300)
+        canvas.show()
+        canvas.set_tool("pen")
+        self.app.processEvents()
+        self._pen_drag(canvas, (20, 20), (80, 60), Qt.ControlModifier | Qt.AltModifier)
+        self.assertEqual(len(canvas.annotations()), 1)
+        item = canvas.annotations()[0]
+        # 直线只含 moveTo + lineTo 两个节点，而非自由手绘的连续轨迹。
+        self.assertEqual(item.path().elementCount(), 2)
+        self.assertEqual(QPointF(item.path().elementAt(0).x, item.path().elementAt(0).y), QPointF(20, 20))
+        self.assertFalse(canvas.chain_active)
+        self.assertIsNone(canvas.start)
+        canvas.close()
+
+    def test_pen_straight_line_without_second_point_draws_nothing(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import Qt
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"), dict(DEFAULTS))
+        canvas.resize(400, 300)
+        canvas.show()
+        canvas.set_tool("pen")
+        self.app.processEvents()
+        # 按住 Ctrl+Alt 但按下后未拖出第二点（原地松开），不应产生痕迹。
+        self._pen_drag(canvas, (40, 40), (40, 40), Qt.ControlModifier | Qt.AltModifier)
+        self.assertEqual(len(canvas.annotations()), 0)
+        self.assertFalse(canvas.chain_active)
+        canvas.close()
+
+    def test_pen_freehand_isolated_click_draws_nothing(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"), dict(DEFAULTS))
+        canvas.resize(400, 300)
+        canvas.show()
+        canvas.set_tool("pen")
+        self.app.processEvents()
+        # 自由画笔单击无拖动，同样不留下孤立点。
+        self._pen_drag(canvas, (40, 40), (40, 40))
+        self.assertEqual(len(canvas.annotations()), 0)
+        canvas.close()
+
+    def test_pen_freehand_is_smoothed_on_commit(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import Qt, QPointF
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"), dict(DEFAULTS))
+        canvas.resize(400, 300)
+        canvas.show()
+        canvas.set_tool("pen")
+        self.app.processEvents()
+        # 多次鼠标移动画一条弯曲轨迹（非直线、非 Ctrl+Alt）。
+        pa = canvas.mapFromScene(QPointF(20, 100))
+        pb = canvas.mapFromScene(QPointF(60, 40))
+        pc = canvas.mapFromScene(QPointF(100, 120))
+        pd = canvas.mapFromScene(QPointF(140, 60))
+        QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=pa)
+        QTest.mouseMove(canvas.viewport(), pb)
+        QTest.mouseMove(canvas.viewport(), pc)
+        QTest.mouseMove(canvas.viewport(), pd)
+        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=pd)
+        self.assertEqual(len(canvas.annotations()), 1)
+        item = canvas.annotations()[0]
+        # 平滑后路径含曲线元素（多于直线的两节点），且起止点保持不变。
+        self.assertGreater(item.path().elementCount(), 2)
+        self.assertAlmostEqual(item.path().elementAt(0).x, 20, delta=1)
+        self.assertAlmostEqual(item.path().elementAt(0).y, 100, delta=1)
+        last = item.path().elementAt(item.path().elementCount() - 1)
+        self.assertAlmostEqual(last.x, 140, delta=1)
+        self.assertAlmostEqual(last.y, 60, delta=1)
+        canvas.close()
+
+    def test_pen_chain_draws_connected_straight_segments(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import Qt, QPointF
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+
+        settings = dict(DEFAULTS)
+        settings["pen_chain"] = True
+        canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"), settings)
+        canvas.resize(400, 300)
+        canvas.show()
+        canvas.set_tool("pen")
+        self.app.processEvents()
+        self._pen_drag(canvas, (20, 20), (80, 60))
+        self.assertEqual(len(canvas.annotations()), 1)
+        self.assertTrue(canvas.chain_active)
+        self.assertEqual(canvas.start, QPointF(80, 60))  # 锚点停在上一终点
+        # 第二段复用上一终点继续到 (150,120)，且每段都是直线（两节点）。
+        self._pen_drag(canvas, (150, 120), (150, 120))
+        self.assertEqual(len(canvas.annotations()), 2)
+        self.assertEqual(canvas.annotations()[1].path().elementCount(), 2)
+        starts = [QPointF(a.path().elementAt(0).x, a.path().elementAt(0).y) for a in canvas.annotations()]
+        self.assertIn(QPointF(20, 20), starts)
+        self.assertIn(QPointF(80, 60), starts)
+        # 右键结束连续绘制，保留已画图形并复位链状态。
+        pr = canvas.mapFromScene(QPointF(200, 200))
+        QTest.mousePress(canvas.viewport(), Qt.RightButton, pos=pr)
+        self.assertFalse(canvas.chain_active)
+        self.assertIsNone(canvas.start)
+        self.assertEqual(len(canvas.annotations()), 2)
+        canvas.close()
+
+    def test_marker_chain_draws_connected_straight_segments(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import Qt, QPointF
+        from config.config_manager import DEFAULTS
+
+        settings = dict(DEFAULTS)
+        settings["marker_chain"] = True
+        canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"), settings)
+        canvas.resize(400, 300)
+        canvas.show()
+        canvas.set_tool("marker")
+        self.app.processEvents()
+        self._pen_drag(canvas, (20, 20), (80, 60))
+        self.assertEqual(len(canvas.annotations()), 1)
+        self.assertTrue(canvas.chain_active)
+        self._pen_drag(canvas, (150, 120), (150, 120))
+        self.assertEqual(len(canvas.annotations()), 2)
+        self.assertEqual(canvas.annotations()[0].path().elementCount(), 2)
         canvas.close()
 
     def test_selected_shape_fill_settings_update_live(self):
@@ -5137,6 +5324,183 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(restored.toPlainText(), "第一行\n第二行")
         self.assertTrue(restored.document().firstBlock().blockFormat().alignment() & Qt.AlignRight)
 
+    def test_text_background_applies_and_round_trips(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import text_item
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+
+        settings = dict(DEFAULTS)
+        settings["text_background_enabled"] = True
+        settings["text_background"] = "#112233"
+        item = text_item(QPointF(0, 0), "你好", settings, Qt.AlignLeft)
+        self.assertEqual(item.background_color, "#112233")
+        # 关闭背景时不设置
+        plain = text_item(QPointF(0, 0), "你好", dict(DEFAULTS), Qt.AlignLeft)
+        self.assertIsNone(plain.background_color)
+        # 序列化与还原均保留背景
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), settings)
+        canvas.scene_data.addItem(item)
+        records = canvas.snapshot()
+        record = next(r for r in records if r["type"] == "QGraphicsTextItem")
+        self.assertEqual(record["background"], "#112233")
+        canvas2 = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), settings)
+        canvas2.restore(records)
+        self.assertEqual(canvas2.annotations()[0].background_color, "#112233")
+        canvas.close()
+        canvas2.close()
+
+    def test_drag_shows_alignment_guides_when_edges_close(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from PySide6.QtCore import QPointF
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"), dict(DEFAULTS))
+        a = shape("rect", QPointF(96, 10), QPointF(136, 50), "#ff0000", 3)
+        b = shape("rect", QPointF(100, 10), QPointF(140, 50), "#0000ff", 3)
+        canvas.scene_data.addItem(a)
+        canvas.scene_data.addItem(b)
+        a.setSelected(True)
+        canvas._update_alignment_guides()
+        self.assertTrue(canvas.alignment_guides)
+        vertical = [g for g in canvas.alignment_guides if abs(g.x1() - g.x2()) < 1e-6]
+        self.assertTrue(vertical)
+        # 选中项被吸附，使其左边缘与另一标注（含线宽扩张后的）左边缘对齐。
+        self.assertAlmostEqual(a.sceneBoundingRect().left(), b.sceneBoundingRect().left(), delta=0.6)
+        self.assertAlmostEqual(vertical[0].x1(), b.sceneBoundingRect().left(), delta=0.6)
+        canvas.close()
+
+    def test_no_alignment_guides_when_far_apart(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from PySide6.QtCore import QPointF
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"), dict(DEFAULTS))
+        a = shape("rect", QPointF(10, 10), QPointF(50, 50), "#ff0000", 3)
+        b = shape("rect", QPointF(150, 120), QPointF(190, 160), "#0000ff", 3)
+        canvas.scene_data.addItem(a)
+        canvas.scene_data.addItem(b)
+        a.setSelected(True)
+        canvas._update_alignment_guides()
+        self.assertEqual(canvas.alignment_guides, [])
+        canvas.close()
+
+    def test_selected_arrow_style_can_be_changed_later(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from PySide6.QtCore import QPointF
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"), dict(DEFAULTS))
+        item = shape("arrow", QPointF(20, 20), QPointF(120, 60), "#ff0000", 4, arrow_style="filled")
+        canvas.scene_data.addItem(item)
+        canvas.checkpoint()
+        item.setSelected(True)
+        self.assertEqual(item.arrow_style, "filled")
+        canvas.set_selected_arrow_style("double_filled")
+        self.assertEqual(item.arrow_style, "double_filled")
+        self.assertTrue(item.brush().style() != Qt.NoBrush)
+        canvas.undo()
+        restored = [a for a in canvas.annotations() if getattr(a, "arrow_style", None) is not None][0]
+        self.assertEqual(restored.arrow_style, "filled")
+        # 矩形线型切换不影响箭头
+        canvas.set_selected_line_style("dash")
+        self.assertEqual(restored.arrow_style, "filled")
+        canvas.close()
+
+    def test_text_format_flags_apply_and_round_trip(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import text_item, read_text_format
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+
+        settings = dict(DEFAULTS)
+        settings.update(text_bold=True, text_italic=True, text_underline=True, text_strikethrough=True)
+        item = text_item(QPointF(0, 0), "你好", settings, Qt.AlignLeft)
+        bold, italic, underline, strike = read_text_format(item)
+        self.assertTrue(bold)
+        self.assertTrue(italic)
+        self.assertTrue(underline)
+        self.assertTrue(strike)
+
+        plain = text_item(QPointF(0, 0), "你好", dict(DEFAULTS), Qt.AlignLeft)
+        self.assertFalse(read_text_format(plain)[0])
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), settings)
+        canvas.scene_data.addItem(item)
+        canvas.checkpoint()
+        records = canvas.snapshot()  # 加粗状态
+        rec = next(r for r in records if r["type"] == "QGraphicsTextItem")
+        self.assertTrue(rec["bold"])
+        item.setSelected(True)
+        canvas.settings = dict(DEFAULTS)  # 全部关闭
+        canvas.set_selected_text_format()
+        self.assertFalse(read_text_format(item)[0])  # 实时更新为无粗体
+        canvas2 = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), settings)
+        canvas2.restore(records)
+        restored = read_text_format(canvas2.annotations()[0])
+        self.assertTrue(restored[0])
+        self.assertTrue(restored[3])
+        canvas.close()
+        canvas2.close()
+
+    def test_single_selection_rotation_handle_rotates_and_round_trips(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from PySide6.QtCore import QPointF
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"), dict(DEFAULTS))
+        item = shape("rect", QPointF(80, 80), QPointF(140, 140), "#ff0000", 3)
+        canvas.scene_data.addItem(item)
+        item.setSelected(True)
+        canvas.checkpoint()
+        handle = canvas.rotation_handle_position(item)
+        canvas._begin_rotation(item, handle)
+        canvas._rotate_to(QPointF(handle.x() + 40, handle.y()), snap=False)
+        self.assertGreater(abs(item.rotation()), 30)
+        canvas.rotating = None
+        canvas.checkpoint()
+        canvas.undo()
+        self.assertEqual(len(canvas.annotations()), 1)
+        self.assertAlmostEqual(canvas.annotations()[0].rotation(), 0, delta=0.5)
+        canvas.redo()
+        self.assertEqual(len(canvas.annotations()), 1)
+        self.assertGreater(abs(canvas.annotations()[0].rotation()), 30)
+        canvas.close()
+
+    def test_rotated_item_hides_resize_handles(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from PySide6.QtCore import QPointF
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"), dict(DEFAULTS))
+        item = shape("rect", QPointF(80, 80), QPointF(140, 140), "#ff0000", 3)
+        canvas.scene_data.addItem(item)
+        item.setRotation(45)
+        item.setSelected(True)
+        canvas.viewport().update()
+        # 旋转后不应再有缩放手柄（drawForeground 跳过 resize_handles）。
+        self.assertTrue(abs(item.rotation()) > 0.01)
+        canvas.close()
+
+    def test_mosaic_brush_commits_stroked_overlay(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationPixmapItem
+        from PySide6.QtGui import QPainterPath, QImage
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"), dict(DEFAULTS))
+        canvas.settings["mosaic_brush"] = True
+        canvas.tool = "mosaic"
+        path = QPainterPath(QPointF(50, 50))
+        path.lineTo(QPointF(150, 50))
+        canvas._commit_mosaic_brush(path)
+        items = canvas.annotations()
+        self.assertEqual(len(items), 1)
+        item = items[0]
+        self.assertIsInstance(item, AnnotationPixmapItem)
+        img = item.pixmap().toImage().convertToFormat(QImage.Format_ARGB32)
+        # 笔迹中心应为不透明，笔迹外的圆角之外应为完全透明。
+        self.assertGreater(img.pixelColor(70, 20).alpha(), 0)
+        self.assertEqual(img.pixelColor(0, 0).alpha(), 0)
+        canvas.close()
+
+    def test_mosaic_brush_toggle_default_keeps_rectangle(self):
+        from config.config_manager import DEFAULTS
+        self.assertFalse(DEFAULTS.get("mosaic_brush", False))
+
     def test_editor_border_settings_preview_and_export(self):
         from PySide6.QtGui import QColor, QImage, QPainter
         from PySide6.QtWidgets import QColorDialog
@@ -5188,6 +5552,24 @@ class CoreTests(unittest.TestCase):
         canvas.redo()
         self.assertEqual(len(canvas.annotations()), 1)
         self.assertEqual(canvas.render_image().size().width(), 120)
+
+    def test_undo_redo_keyboard_shortcuts(self):
+        from config.config_manager import DEFAULTS
+        from PySide6.QtTest import QTest
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), DEFAULTS)
+        canvas.scene_data.addItem(shape("rect", QPointF(10, 10), QPointF(60, 60), "#ff0000", 3))
+        base = canvas.cursor_index
+        canvas.checkpoint()
+        canvas.checkpoint()
+        self.assertEqual(canvas.cursor_index, base + 2)
+        # Ctrl+Z 撤销（各平台一致）
+        QTest.keyClick(canvas, Qt.Key_Z, Qt.ControlModifier)
+        self.assertEqual(canvas.cursor_index, base + 1)
+        # 重做：覆盖 Windows(Ctrl+Y) 与 macOS(Ctrl+Shift+Z) 两种标准
+        QTest.keyClick(canvas, Qt.Key_Y, Qt.ControlModifier)
+        QTest.keyClick(canvas, Qt.Key_Z, Qt.ControlModifier | Qt.ShiftModifier)
+        self.assertEqual(canvas.cursor_index, base + 2)
+        canvas.close()
 
     def test_round_corner_editor_preview_is_display_only(self):
         from config.config_manager import DEFAULTS
@@ -5549,7 +5931,21 @@ class CoreTests(unittest.TestCase):
         canvas.tool = "marker"
         self.assertEqual(canvas.stroke_pen().color().alpha(), round(255 / 100))
 
-    def test_eraser_partially_clears_pixmap_annotation(self):
+    def test_new_annotation_options_validation_and_defaults(self):
+        from config.config_manager import DEFAULTS, validate
+        # 两项新开关都应带合理默认值，并随配置生命周期（重置/导入/导出）自动覆盖。
+        self.assertFalse(DEFAULTS.get("mosaic_brush", True))
+        self.assertFalse(DEFAULTS.get("eraser_erase_base", True))
+        # 合法布尔值应原样保留。
+        self.assertTrue(validate({"mosaic_brush": True})["mosaic_brush"])
+        self.assertTrue(validate({"eraser_erase_base": True})["eraser_erase_base"])
+        # 类型错误应被拒绝。
+        with self.assertRaises(ValueError):
+            validate({"mosaic_brush": "yes"})
+        with self.assertRaises(ValueError):
+            validate({"eraser_erase_base": 1})
+
+    def test_eraser_non_destructive_masks_pixmap_annotation(self):
         from PySide6.QtGui import QPixmap, QColor
         from PySide6.QtWidgets import QGraphicsPixmapItem
         from config.config_manager import DEFAULTS
@@ -5564,16 +5960,43 @@ class CoreTests(unittest.TestCase):
         canvas.checkpoint()
         canvas.tool = "eraser"
         self.assertEqual(canvas.render_image().pixelColor(40, 40).name(), "#ff0000")
-        self.assertIn(item, canvas.scene_data.items(QRectF(35, 35, 10, 10)))
+        self.assertIs(canvas.annotations()[0], item)
         QTest.mouseMove(canvas.viewport(), pos=canvas.mapFromScene(QPointF(40, 40)))
         self.assertIsNotNone(canvas.eraser_point)
         QTest.mouseClick(canvas.viewport(), Qt.LeftButton, pos=canvas.mapFromScene(QPointF(40, 40)))
+        # 非破坏：标注项仍是原对象，像素未被改写。
         self.assertIs(canvas.annotations()[0], item)
-        self.assertEqual(canvas.annotations()[0].pixmap().toImage().pixelColor(20, 20).alpha(), 0)
+        self.assertEqual(canvas.annotations()[0].pixmap().toImage().pixelColor(20, 20).alpha(), 255)
+        # 渲染时擦除处露出底图（白），未擦处仍为红。
         self.assertEqual(canvas.render_image().pixelColor(40, 40).name(), "#ffffff")
         self.assertEqual(canvas.render_image().pixelColor(60, 60).name(), "#ff0000")
         canvas.undo()
         self.assertEqual(canvas.render_image().pixelColor(40, 40).name(), "#ff0000")
+        canvas.close()
+
+    def test_eraser_default_only_masks_annotation_layer(self):
+        from config.config_manager import DEFAULTS
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), (10, 20, 30)), dict(DEFAULTS, eraser_width=3))
+        canvas.resize(200, 150)
+        canvas.show()
+        # 默认模式无标注，擦除底图不应有任何变化（掩码只作用于标注层）。
+        self.assertEqual(canvas.render_image().pixelColor(40, 40).name(), "#0a141e")
+        canvas.tool = "eraser"
+        QTest.mouseClick(canvas.viewport(), Qt.LeftButton, pos=canvas.mapFromScene(QPointF(40, 40)))
+        self.assertEqual(canvas.render_image().pixelColor(40, 40).name(), "#0a141e")
+        canvas.close()
+
+    def test_eraser_erase_base_option_clears_underlying_image(self):
+        from config.config_manager import DEFAULTS
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), (10, 20, 30)),
+                                  dict(DEFAULTS, eraser_width=3, eraser_erase_base=True))
+        canvas.resize(200, 150)
+        canvas.show()
+        self.assertEqual(canvas.render_image().pixelColor(40, 40).alpha(), 255)
+        canvas.tool = "eraser"
+        QTest.mouseClick(canvas.viewport(), Qt.LeftButton, pos=canvas.mapFromScene(QPointF(40, 40)))
+        # 开启擦原图后，擦除处底图变为透明（alpha 归零）。
+        self.assertEqual(canvas.render_image().pixelColor(40, 40).alpha(), 0)
         canvas.close()
 
     def test_mosaic_preview_border_ignores_annotation_width(self):
@@ -5674,7 +6097,7 @@ class CoreTests(unittest.TestCase):
         try:
             for item in items:
                 canvas.restore([])
-                canvas.history = [(canvas.image, canvas.alternate, canvas.cursor_enabled, [])]
+                canvas.reset_history()
                 canvas.cursor_index = 0
                 canvas.scene_data.addItem(item)
                 item.setSelected(True)
@@ -5854,7 +6277,7 @@ class CoreTests(unittest.TestCase):
         try:
             for handle_name, delta in deltas.items():
                 canvas.restore([])
-                canvas.history = [(canvas.image, canvas.alternate, canvas.cursor_enabled, [])]
+                canvas.reset_history()
                 canvas.cursor_index = 0
                 item = shape("rect", QPointF(40, 40), QPointF(100, 90), "#ff0000", 2)
                 canvas.scene_data.addItem(item)
@@ -5911,7 +6334,7 @@ class CoreTests(unittest.TestCase):
 
             def resize_corner(modifier):
                 canvas.restore([])
-                canvas.history = [(canvas.image, canvas.alternate, canvas.cursor_enabled, [])]
+                canvas.reset_history()
                 canvas.cursor_index = 0
                 item = shape("rect", QPointF(original.x(), original.y()),
                              QPointF(original.right(), original.bottom()), "#ff0000", 2)
@@ -6135,28 +6558,64 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(editor.canvas.cursor().shape(), Qt.SizeFDiagCursor)
         editor.close()
 
-    def test_double_click_deletes_only_hit_annotation_and_undo_restores(self):
+    def test_double_click_select_tool_routes_text_to_edit_and_shape_to_delete(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import text_item, shape as make_shape
+        from unittest.mock import patch
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 120), "white"), dict(DEFAULTS))
+        rect = make_shape("rect", QPointF(10, 10), QPointF(65, 60), "#ff0000", 3)
+        text = text_item(QPointF(90, 10), "保留", DEFAULTS, Qt.AlignLeft)
+        canvas.scene_data.addItem(rect)
+        canvas.scene_data.addItem(text)
+        canvas.checkpoint()
+        canvas.set_tool("select")
+
+        def dbl(target):
+            canvas.scene_data.itemAt = lambda *a, **k: target
+            return QMouseEvent(QEvent.Type.MouseButtonDblClick, QPointF(0, 0),
+                               Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
+
+        # 非文字标注：双击删除并可撤销还原
+        canvas.mouseDoubleClickEvent(dbl(rect))
+        self.assertEqual(len(canvas.annotations()), 1)
+        self.assertEqual(canvas.annotations()[0].toPlainText(), "保留")
+        canvas.undo()
+        self.assertEqual(len(canvas.annotations()), 2)
+        # 文字标注：双击编辑而非删除（撤销后从场景取最新文字项，避免陈旧引用）
+        live_text = [a for a in canvas.annotations() if hasattr(a, "toPlainText")][0]
+        with patch("editor.annotation_canvas.QInputDialog.getMultiLineText",
+                   return_value=("修改后", True)) as dialog:
+            canvas.mouseDoubleClickEvent(dbl(live_text))
+        dialog.assert_called_once()
+        self.assertEqual(len(canvas.annotations()), 2)
+        edited = [a for a in canvas.annotations() if hasattr(a, "toPlainText")][0]
+        self.assertEqual(edited.toPlainText(), "修改后")
+        canvas.undo()
+        restored = [a for a in canvas.annotations() if hasattr(a, "toPlainText")][0]
+        self.assertEqual(restored.toPlainText(), "保留")
+        canvas.close()
+
+    def test_double_click_text_in_select_tool_edits_not_deletes(self):
         from config.config_manager import DEFAULTS
         from editor.annotation_items import text_item
+        from unittest.mock import patch
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
         canvas = AnnotationCanvas(Image.new("RGB", (200, 120), "white"), dict(DEFAULTS))
-        canvas.resize(300, 190)
-        first = shape("rect", QPointF(10, 10), QPointF(65, 60), "#ff0000", 3)
-        second = text_item(QPointF(90, 10), "保留", DEFAULTS, Qt.AlignLeft)
-        canvas.scene_data.addItem(first)
-        canvas.scene_data.addItem(second)
-        canvas.checkpoint()
-        canvas.show()
-        self.app.processEvents()
-        second.setSelected(True)
-        QTest.mouseDClick(canvas.viewport(), Qt.LeftButton, pos=canvas.mapFromScene(QPointF(12, 30)))
+        text = text_item(QPointF(10, 10), "原文", DEFAULTS, Qt.AlignLeft)
+        canvas.scene_data.addItem(text)
+        canvas.set_tool("select")
+        canvas.scene_data.itemAt = lambda *a, **k: text
+        with patch("editor.annotation_canvas.QInputDialog.getMultiLineText",
+                   return_value=("修改后", True)) as dialog:
+            canvas.mouseDoubleClickEvent(QMouseEvent(QEvent.Type.MouseButtonDblClick, QPointF(0, 0),
+                                                     Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+        dialog.assert_called_once()
+        self.assertEqual(dialog.call_args.args[3], "原文")
         self.assertEqual(len(canvas.annotations()), 1)
-        self.assertIs(canvas.annotations()[0], second)
-        canvas.undo()
-        self.assertEqual(len(canvas.annotations()), 2)
-        QTest.mouseDClick(canvas.viewport(), Qt.LeftButton, pos=canvas.mapFromScene(QPointF(95, 18)))
-        self.assertEqual(len(canvas.annotations()), 1)
-        canvas.undo()
-        self.assertEqual(len(canvas.annotations()), 2)
+        self.assertEqual(canvas.annotations()[0].toPlainText(), "修改后")
         canvas.close()
 
     def test_right_click_annotation_menu_deletes_and_undo_restores(self):
