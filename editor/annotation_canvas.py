@@ -812,11 +812,11 @@ class AnnotationCanvas(QGraphicsView):
             corners = [rect.topLeft(), rect.topRight(), rect.bottomRight(), rect.bottomLeft()]
             outline = QPolygonF([item.mapToScene(corner) for corner in corners])
             painter.drawPolygon(outline)
-            if abs(item.rotation()) < 0.01:
-                for handle in self.resize_handles(item.sceneBoundingRect()).values():
-                    handle_rect = QRectF(handle.x() - 4, handle.y() - 4, 8, 8)
-                    painter.fillRect(handle_rect, QColor("white"))
-                    painter.drawRect(handle_rect)
+            # 缩放手柄随项旋转，旋转后依然可用（与旋转手柄共存）。
+            for handle in self.item_resize_handles(item).values():
+                handle_rect = QRectF(handle.x() - 4, handle.y() - 4, 8, 8)
+                painter.fillRect(handle_rect, QColor("white"))
+                painter.drawRect(handle_rect)
         # 单选时在其上方显示旋转手柄（绕中心旋转），手柄杆自顶边中点引出。
         if len(selected) == 1:
             item = selected[0]
@@ -845,6 +845,18 @@ class AnnotationCanvas(QGraphicsView):
             "se": bounds.bottomRight(), "s": QPointF(center.x(), bounds.bottom()),
             "sw": bounds.bottomLeft(), "w": QPointF(bounds.left(), center.y()),
         }
+
+    def item_resize_handles(self, item):
+        """按项局部包围盒取 8 个控制点的场景坐标；旋转时随项一起转，手柄始终贴在标注上。"""
+        rect = item.boundingRect()
+        center = rect.center()
+        local = {
+            "nw": rect.topLeft(), "n": QPointF(center.x(), rect.top()),
+            "ne": rect.topRight(), "e": QPointF(rect.right(), center.y()),
+            "se": rect.bottomRight(), "s": QPointF(center.x(), rect.bottom()),
+            "sw": rect.bottomLeft(), "w": QPointF(rect.left(), center.y()),
+        }
+        return {name: item.mapToScene(point) for name, point in local.items()}
 
     ROTATION_HANDLE_DISTANCE = 24
 
@@ -942,32 +954,30 @@ class AnnotationCanvas(QGraphicsView):
             self.rotating = None
             self.viewport().update()
             selected = self.scene_data.selectedItems()
-            # 先判定缩放手柄（旋转项已隐藏缩放手柄），再判定旋转手柄，避免误触。
+            # 先判定缩放手柄（旋转项的手柄随项转动），再判定旋转手柄，避免误触。
             for item in selected:
-                if abs(item.rotation()) < 0.01:
-                    bounds = item.sceneBoundingRect()
-                    handle = self.resize_handle_at(bounds, point)
-                    if handle is not None:
-                        handles = self.resize_handles(bounds)
-                        anchor_name = {"nw": "se", "n": "s", "ne": "sw", "e": "w",
-                                       "se": "nw", "s": "n", "sw": "ne", "w": "e"}[handle]
-                        anchor_scene = handles[anchor_name]
-                        anchor_local = item.mapFromScene(anchor_scene)
-                        original_scene_anchor = item.mapToScene(anchor_local)
-                        self.resize_transform = item.transform()
-                        self.resize_scale = item.scale()
-                        self.resize_origin = item.transformOriginPoint()
-                        self.resize_position = item.pos()
-                        item.setTransformOriginPoint(anchor_local)
-                        item.setPos(item.pos() + original_scene_anchor - item.mapToScene(anchor_local))
-                        self.resizing = item
-                        self.resize_handle = handle
-                        self.resize_anchor = anchor_scene
-                        self.resize_anchor_local = anchor_local
-                        self.resize_start = handles[handle]
-                        QToolTip.hideText()
-                        event.accept()
-                        return
+                handles = self.item_resize_handles(item)
+                handle = self.resize_handle_at(handles, point)
+                if handle is not None:
+                    anchor_name = {"nw": "se", "n": "s", "ne": "sw", "e": "w",
+                                   "se": "nw", "s": "n", "sw": "ne", "w": "e"}[handle]
+                    anchor_scene = handles[anchor_name]
+                    anchor_local = item.mapFromScene(anchor_scene)
+                    original_scene_anchor = item.mapToScene(anchor_local)
+                    self.resize_transform = item.transform()
+                    self.resize_scale = item.scale()
+                    self.resize_origin = item.transformOriginPoint()
+                    self.resize_position = item.pos()
+                    item.setTransformOriginPoint(anchor_local)
+                    item.setPos(item.pos() + original_scene_anchor - item.mapToScene(anchor_local))
+                    self.resizing = item
+                    self.resize_handle = handle
+                    self.resize_anchor = anchor_scene
+                    self.resize_anchor_local = anchor_local
+                    self.resize_start = handles[handle]
+                    QToolTip.hideText()
+                    event.accept()
+                    return
             # 单选且不在缩放手柄上时，尝试命中旋转手柄。
             if len(selected) == 1 and self.rotation_handle_at(selected[0], point):
                 self._begin_rotation(selected[0], point)
@@ -1079,12 +1089,20 @@ class AnnotationCanvas(QGraphicsView):
             point = self.image_point(self.mapToScene(event.position().toPoint()))
             handle = self.resize_handle
             scale_x, scale_y = 1.0, 1.0
-            if "w" in handle or "e" in handle:
-                start_width = self.resize_start.x() - self.resize_anchor.x()
-                scale_x = self.clamp_resize_ratio((point.x() - self.resize_anchor.x()) / start_width)
-            if "n" in handle or "s" in handle:
-                start_height = self.resize_start.y() - self.resize_anchor.y()
-                scale_y = self.clamp_resize_ratio((point.y() - self.resize_anchor.y()) / start_height)
+            # 旋转项：把场景位移换算到项自身未旋转的坐标轴上，拖动手感才与视觉一致。
+            angle = math.radians(-self.resizing.rotation())
+            cos_a, sin_a = math.cos(angle), math.sin(angle)
+
+            def to_local(vector):
+                return QPointF(vector.x() * cos_a - vector.y() * sin_a,
+                               vector.x() * sin_a + vector.y() * cos_a)
+
+            start_local = to_local(self.resize_start - self.resize_anchor)
+            now_local = to_local(point - self.resize_anchor)
+            if ("w" in handle or "e" in handle) and abs(start_local.x()) > 1e-6:
+                scale_x = self.clamp_resize_ratio(now_local.x() / start_local.x())
+            if ("n" in handle or "s" in handle) and abs(start_local.y()) > 1e-6:
+                scale_y = self.clamp_resize_ratio(now_local.y() / start_local.y())
             # 四角默认等比缩放（保持宽高比）；按住 Ctrl/Alt/Shift/Space 任意其一则自由拉伸变形。
             is_corner = ("w" in handle or "e" in handle) and ("n" in handle or "s" in handle)
             if is_corner and not self._free_distortion(event):
@@ -1129,24 +1147,21 @@ class AnnotationCanvas(QGraphicsView):
             QToolTip.hideText()
             return
         for item in self.scene_data.selectedItems() if self.tool == "select" else ():
-            # 旋转项不显示缩放手柄（避免旋转+缩放矩阵组合），仅当作可移动。
-            if abs(item.rotation()) < 0.01:
-                bounds = item.sceneBoundingRect()
-                handle = self.resize_handle_at(bounds, point)
-                cursors = {"nw": Qt.SizeFDiagCursor, "se": Qt.SizeFDiagCursor,
-                           "ne": Qt.SizeBDiagCursor, "sw": Qt.SizeBDiagCursor,
-                           "n": Qt.SizeVerCursor, "s": Qt.SizeVerCursor,
-                           "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor}
-                if handle:
-                    self.setCursor(cursors[handle])
-                    if handle in ("nw", "ne", "sw", "se"):
-                        QToolTip.showText(
-                            self.viewport().mapToGlobal(position),
-                            "拖动四角等比缩放；按住 Ctrl / Alt / Shift / Space 任意键可自由拉伸变形",
-                            self)
-                    else:
-                        QToolTip.hideText()
-                    return
+            handle = self.resize_handle_at(self.item_resize_handles(item), point)
+            cursors = {"nw": Qt.SizeFDiagCursor, "se": Qt.SizeFDiagCursor,
+                       "ne": Qt.SizeBDiagCursor, "sw": Qt.SizeBDiagCursor,
+                       "n": Qt.SizeVerCursor, "s": Qt.SizeVerCursor,
+                       "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor}
+            if handle:
+                self.setCursor(cursors[handle])
+                if handle in ("nw", "ne", "sw", "se"):
+                    QToolTip.showText(
+                        self.viewport().mapToGlobal(position),
+                        "拖动四角等比缩放；按住 Ctrl / Alt / Shift / Space 任意键可自由拉伸变形",
+                        self)
+                else:
+                    QToolTip.hideText()
+                return
             if item.contains(item.mapFromScene(point)):
                 self.setCursor(Qt.SizeAllCursor)
                 QToolTip.hideText()
@@ -1156,8 +1171,9 @@ class AnnotationCanvas(QGraphicsView):
 
     @staticmethod
     def resize_handle_at(bounds, point):
-        """返回距指针 8 像素内最近的边角控制点。"""
-        candidates = AnnotationCanvas.resize_handles(bounds)
+        """返回距指针 8 像素内最近的边角控制点；bounds 可为 QRectF 或已算好的手柄字典。"""
+        candidates = (AnnotationCanvas.resize_handles(bounds)
+                      if isinstance(bounds, QRectF) else bounds)
         nearest = min(candidates, key=lambda name:
                       (candidates[name].x() - point.x()) ** 2 +
                       (candidates[name].y() - point.y()) ** 2)

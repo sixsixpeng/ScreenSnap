@@ -598,8 +598,9 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon icon.ico --add-data "ic
 
 - **旋转手柄**：「选择」工具单选某标注时，在其包围盒中心正上方出现一个圆形旋转手柄（随标注一起旋转）；从手柄拖动即以项中心为支点旋转，实时预览；松开提交历史快照，可撤销/重做。`Shift` 吸附到 15° 步进。
 - **实现方式**：新增 `rotation_handle_position`/`rotation_handle_at`/`_begin_rotation`/`_rotate_to`；按下命中旋转手柄进入旋转态（`self.rotating`），拖动时按指针相对支点的角度增量调用 `item.setRotation`；支点始终为项局部包围盒中心（`setTransformOriginPoint`），保证旋转后位置不漂移。序列化在 `snapshot`/`restore` 增加 `rotation` 字段并显式 `setRotation` 恢复（避免被 `setScale` 重建矩阵覆盖）。
-- **与缩放共存（MVP）**：旋转项在「选择」工具下隐藏 8 个缩放手柄，仅保留移动（旋转+缩放组合矩阵较复杂，留待后续）；未旋转的标注缩放/移动行为完全不变。移动光标在旋转项上仍显示 `SizeAll`。
-- **验证**：新增 `test_single_selection_rotation_handle_rotates_and_round_trips`（旋转后角度变化、撤销回到 0、重做恢复）、`test_rotated_item_hides_resize_handles`（旋转后不再绘制缩放手柄）；双击编辑/删除、撤销重做快捷键、对齐参考线等相关用例均通过。
+- **旋转与缩放共存**：旋转后的标注**仍保留全部 8 个缩放手柄**，与旋转手柄同时可用（初版曾做成「旋转即隐藏缩放手柄」，已按反馈纠正）。缩放手柄改为由项局部包围盒映射而来（`item_resize_handles`），会随标注一起转动，始终贴在标注边角而不是轴对齐包围盒上。
+- **旋转下的缩放算法**：拖动位移先按 `-rotation` 旋回项自身未旋转的坐标轴，再算横纵缩放比（`mouseMoveEvent` 内 `to_local`），保证拖动手感与视觉方向一致；对角手柄默认等比、按住修饰键自由拉伸的行为不变。旋转手柄固定在包围盒顶边之上 24px，不与任何缩放手柄重叠（命中半径 8px）。
+- **验证**：`test_single_selection_rotation_handle_rotates_and_round_trips`（旋转后角度变化、撤销回 0、重做恢复）、`test_rotated_item_keeps_resize_handles`（旋转后 8 个手柄仍存在且命中正确、贴合旋转后角点）、`test_resize_rotated_item_keeps_anchor_and_rotation`（30/45/90° 下拖 `se/nw/e/s`：对侧锚点不动、尺寸变大、旋转角保持）；并保留 `test_annotation_resize_all_handles_keeps_opposite_anchor` 覆盖未旋转场景。
 
 ### 2026-10-03 马赛克/模糊自由笔刷
 

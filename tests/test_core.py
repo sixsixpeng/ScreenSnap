@@ -5463,7 +5463,7 @@ class CoreTests(unittest.TestCase):
         self.assertGreater(abs(canvas.annotations()[0].rotation()), 30)
         canvas.close()
 
-    def test_rotated_item_hides_resize_handles(self):
+    def test_rotated_item_keeps_resize_handles(self):
         from config.config_manager import DEFAULTS
         from editor.annotation_items import shape
         from PySide6.QtCore import QPointF
@@ -5473,9 +5473,78 @@ class CoreTests(unittest.TestCase):
         item.setRotation(45)
         item.setSelected(True)
         canvas.viewport().update()
-        # 旋转后不应再有缩放手柄（drawForeground 跳过 resize_handles）。
-        self.assertTrue(abs(item.rotation()) > 0.01)
+        # 旋转与缩放共存：旋转后 8 个缩放手柄依然命中（且随项一起转）。
+        handles = canvas.item_resize_handles(item)
+        self.assertEqual(len(handles), 8)
+        for name, position in handles.items():
+            self.assertEqual(canvas.resize_handle_at(handles, position), name)
+        # 手柄确实贴在旋转后的标注上（不再是轴对齐包围盒的角）。
+        rect = item.boundingRect()
+        self.assertAlmostEqual(handles["nw"].x(),
+                               item.mapToScene(rect.topLeft()).x(), delta=0.01)
+        self.assertAlmostEqual(handles["nw"].y(),
+                               item.mapToScene(rect.topLeft()).y(), delta=0.01)
         canvas.close()
+
+    def test_resize_rotated_item_keeps_anchor_and_rotation(self):
+        import math
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from PySide6.QtCore import QEvent, QPointF
+        from PySide6.QtGui import QMouseEvent
+
+        # 画布留足边距，避免缩放后触发 constrain_item 的边界夹取干扰锚点校验。
+        canvas = AnnotationCanvas(Image.new("RGB", (400, 300), "white"), dict(DEFAULTS))
+        canvas.resize(500, 380)
+        canvas.show()
+        opposite = {"nw": "se", "n": "s", "ne": "sw", "e": "w",
+                    "se": "nw", "s": "n", "sw": "ne", "w": "e"}
+        # 局部坐标下向外拖动的位移（角落手柄会等比缩放，故只校验“变大”与锚点不动）。
+        drags = {"se": (24, 18), "nw": (-24, -18), "e": (24, 0), "s": (0, 18)}
+        try:
+            for degrees in (30, 45, 90):
+                for handle_name, (dx, dy) in drags.items():
+                    canvas.restore([])
+                    canvas.reset_history()
+                    canvas.cursor_index = 0
+                    item = shape("rect", QPointF(180, 140), QPointF(240, 180), "#ff0000", 2)
+                    canvas.scene_data.addItem(item)
+                    # 与真实旋转一致：绕标注中心旋转（_begin_rotation 也会先设原点），
+                    # 否则会绕局部原点把标注甩出画布并触发边界夹取。
+                    item.setTransformOriginPoint(item.boundingRect().center())
+                    item.setRotation(degrees)
+                    item.setSelected(True)
+                    canvas.checkpoint()
+                    handles = canvas.item_resize_handles(item)
+                    anchor = handles[opposite[handle_name]]
+                    area_before = (item.sceneBoundingRect().width()
+                                   * item.sceneBoundingRect().height())
+                    rad = math.radians(degrees)
+                    cos_a, sin_a = math.cos(rad), math.sin(rad)
+                    # 把局部位移旋回场景，模拟沿标注自身方向拖动。
+                    delta = QPointF(dx * cos_a - dy * sin_a, dx * sin_a + dy * cos_a)
+                    start = canvas.mapFromScene(handles[handle_name])
+                    finish = canvas.mapFromScene(handles[handle_name] + delta)
+                    for event_type, position, button, buttons in (
+                            (QEvent.MouseButtonPress, start, Qt.LeftButton, Qt.LeftButton),
+                            (QEvent.MouseMove, finish, Qt.NoButton, Qt.LeftButton),
+                            (QEvent.MouseButtonRelease, finish, Qt.LeftButton, Qt.NoButton)):
+                        self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                            event_type, QPointF(position),
+                            QPointF(canvas.viewport().mapToGlobal(position)),
+                            button, buttons, Qt.NoModifier))
+                    area_after = (item.sceneBoundingRect().width()
+                                  * item.sceneBoundingRect().height())
+                    self.assertGreater(area_after, area_before, (degrees, handle_name))
+                    self.assertAlmostEqual(item.rotation(), degrees, delta=0.01,
+                                           msg=(degrees, handle_name))
+                    anchor_now = canvas.item_resize_handles(item)[opposite[handle_name]]
+                    self.assertAlmostEqual(anchor_now.x(), anchor.x(), delta=2,
+                                           msg=(degrees, handle_name))
+                    self.assertAlmostEqual(anchor_now.y(), anchor.y(), delta=2,
+                                           msg=(degrees, handle_name))
+        finally:
+            canvas.close()
 
     def test_mosaic_brush_commits_stroked_overlay(self):
         from config.config_manager import DEFAULTS
