@@ -2591,6 +2591,54 @@ class CoreTests(unittest.TestCase):
         self.assertIsNone(canvas.start)
         canvas.close()
 
+    def test_pen_and_marker_straight_line_with_ctrl_or_alt_alone(self):
+        """按住 Ctrl 或 Alt 任意一个就应画直线（需求是「或」，不是「同时」）。"""
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import Qt, QPointF
+        from config.config_manager import DEFAULTS
+
+        for tool in ("pen", "marker"):
+            for modifier in (Qt.ControlModifier, Qt.AltModifier):
+                canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"), dict(DEFAULTS))
+                canvas.resize(400, 300)
+                canvas.show()
+                canvas.set_tool(tool)
+                self.app.processEvents()
+                self._pen_drag(canvas, (20, 20), (80, 60), modifier)
+                self.assertEqual(len(canvas.annotations()), 1, (tool, modifier))
+                item = canvas.annotations()[0]
+                self.assertEqual(item.path().elementCount(), 2, (tool, modifier))
+                self.assertEqual(
+                    QPointF(item.path().elementAt(0).x, item.path().elementAt(0).y),
+                    QPointF(20, 20), (tool, modifier))
+                canvas.close()
+
+    def test_pen_without_modifier_stays_freehand(self):
+        """不按 Ctrl/Alt 且多段绘制关闭时，仍是自由手绘（节点多于直线）。"""
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import QPointF
+        from PySide6.QtTest import QTest
+        from PySide6.QtCore import Qt
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"), dict(DEFAULTS))
+        canvas.resize(400, 300)
+        canvas.show()
+        canvas.set_tool("pen")
+        self.app.processEvents()
+        QTest.mousePress(canvas.viewport(), Qt.LeftButton,
+                         pos=canvas.mapFromScene(QPointF(20, 20)))
+        QTest.mouseMove(canvas.viewport(), canvas.mapFromScene(QPointF(40, 30)))
+        QTest.mouseMove(canvas.viewport(), canvas.mapFromScene(QPointF(60, 45)))
+        QTest.mouseMove(canvas.viewport(), canvas.mapFromScene(QPointF(80, 60)))
+        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton,
+                           pos=canvas.mapFromScene(QPointF(80, 60)))
+        self.assertEqual(len(canvas.annotations()), 1)
+        self.assertGreater(canvas.annotations()[0].path().elementCount(), 2)
+        canvas.close()
+
     def test_pen_straight_line_without_second_point_draws_nothing(self):
         from editor.annotation_canvas import AnnotationCanvas
         from PIL import Image

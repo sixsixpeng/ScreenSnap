@@ -169,10 +169,10 @@ class AnnotationCanvas(QGraphicsView):
         return False
 
     def _pen_marker_straight(self, event):
-        """画笔/记号笔当前笔划是否按直线模式绘制：多段开关开启或按住 Ctrl+Alt。"""
+        """画笔/记号笔当前笔划是否按直线模式绘制：多段开关开启，或按住 Ctrl / Alt 任意一个。"""
         modifiers = event.modifiers()
-        ctrl_alt = bool(modifiers & Qt.ControlModifier and modifiers & Qt.AltModifier)
-        return ctrl_alt or self._chain_tool() or self.chain_active
+        ctrl_or_alt = bool(modifiers & (Qt.ControlModifier | Qt.AltModifier))
+        return ctrl_or_alt or self._chain_tool() or self.chain_active
 
     def _straight_preview_path(self, end):
         """由已提交段与当前橡皮筋段拼出直线折线的预览路径。"""
