@@ -3,8 +3,8 @@
 import math
 
 from PySide6.QtCore import Qt, QPointF, QRectF
-from PySide6.QtGui import (QColor, QPen, QPainter, QPainterPath, QFont, QFontMetricsF,
-                           QTextCursor, QTextBlockFormat, QPolygonF, QTextCharFormat)
+from PySide6.QtGui import (QColor, QPen, QPainter, QPainterPath, QPainterPathStroker, QFont,
+                           QFontMetricsF, QTextCursor, QTextBlockFormat, QTextCharFormat)
 from PySide6.QtWidgets import (QGraphicsItem, QGraphicsRectItem, QGraphicsEllipseItem,
                                QGraphicsPathItem, QGraphicsTextItem, QGraphicsPixmapItem,
                                QStyle, QStyleOptionGraphicsItem)
@@ -161,6 +161,24 @@ class EraseMaskItem(QGraphicsItem):
 
     def boundingRect(self):
         return self._rect
+
+    def shape(self):
+        """命中范围＝擦除笔迹本身，而不是整幅底图。
+
+        默认实现返回 `boundingRect()`（整幅图），任何走场景命中测试的代码都会被擦除层
+        整屏挡住——历史上正是它让被擦过的标注无法选中/编辑/删除。这里按笔迹生成描边
+        路径：即便将来有代码回退到场景命中，也只会命中真正擦过的位置。
+        """
+        path = QPainterPath()
+        for stroke in self.strokes:
+            segment = QPainterPath(QPointF(stroke[1], stroke[2]))
+            segment.lineTo(QPointF(stroke[3], stroke[4]))
+            stroker = QPainterPathStroker()
+            stroker.setWidth(max(1.0, float(stroke[5])))
+            stroker.setCapStyle(Qt.RoundCap)
+            stroker.setJoinStyle(Qt.RoundJoin)
+            path.addPath(stroker.createStroke(segment))
+        return path
 
     def paint(self, painter, option, widget=None):
         painter.save()

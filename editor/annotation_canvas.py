@@ -7,11 +7,10 @@ from PIL import Image, ImageFilter
 from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, Signal
 from PySide6.QtGui import (QBrush, QPainter, QPainterPath, QPen, QColor, QPixmap, QImage,
                              QPolygonF, QPainterPathStroker, QTextBlockFormat,
-                             QTextCursor, QTransform, QCursor, QKeySequence, QFont)
+                             QTextCursor, QTransform, QCursor, QKeySequence)
 from PySide6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
-                               QGraphicsItem, QGraphicsRectItem, QGraphicsEllipseItem,
-                               QGraphicsTextItem, QDialog, QMenu, QToolTip,
-                               QStyleOptionGraphicsItem)
+                               QGraphicsRectItem, QGraphicsEllipseItem,
+                               QGraphicsTextItem, QDialog, QMenu, QToolTip)
 
 from core.screen_capture import to_qimage
 from config.config_manager import TOOL_WIDTH_KEYS

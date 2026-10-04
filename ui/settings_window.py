@@ -3,7 +3,7 @@
 import copy
 import logging
 
-from PySide6.QtCore import Qt, Signal, QSignalBlocker, QTimer
+from PySide6.QtCore import Signal, QSignalBlocker, QTimer
 from PySide6.QtWidgets import (QApplication, QWidget, QHBoxLayout, QVBoxLayout, QListWidget, QStackedWidget,
                                QPushButton, QFileDialog, QMessageBox, QStyle, QListWidgetItem)
 

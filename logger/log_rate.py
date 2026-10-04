@@ -1,6 +1,5 @@
 """高频日志的节流：同一状态在指定时间内只记录一次。"""
 
-import logging
 import time
 
 _stamps = {}

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, Q
                                QSlider, QFontComboBox, QWidgetAction, QSizePolicy,
                                QRadioButton, QSpinBox, QScrollArea, QFrame,
                                QApplication, QComboBox)
-from editor.annotation_items import SEQUENCE_SHAPES, SEQUENCE_PRESETS
+from editor.annotation_items import SEQUENCE_PRESETS
 from ui.widgets.color_button import ColorButton
 from ui.action_icons import action_icon
 from config.config_manager import DEFAULTS, TOOL_WIDTH_KEYS
@@ -172,6 +172,8 @@ class ToolbarWidget(QWidget):
         self.section_layout.setHorizontalSpacing(2)
         self.section_layout.setVerticalSpacing(3)
         self._layout_mode = None
+        # 延迟校正高度的定时器（随工具栏销毁，见 reflow）。
+        self.height_timer = None
         # 选择工具下选中的标注类型，用于「更多设置」展示对应参数（None 表示无/未识别）。
         self.selected_tool = None
 
@@ -813,6 +815,9 @@ class ToolbarWidget(QWidget):
         self.appearance_menu = QFrame(
             self, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowDoesNotAcceptFocus)
         self.appearance_menu.setObjectName("outputAppearancePopup")
+        # 采集自检：这是 Qt.Tool 浮层，类名是 QFrame，既不在遮罩的自身窗口登记表里，
+        # 也不是 QMenu/QDialog，过去会被采进画面却连警示都没有；自报标签后遮罩才能点名。
+        self.appearance_menu.setProperty("screensnap_self_window", "外观弹层")
         self.appearance_menu.setFixedWidth(960)
         self.appearance_panel.setMinimumWidth(944)
         self.appearance_panel.setObjectName("outputAppearancePanel")
@@ -1189,7 +1194,13 @@ class ToolbarWidget(QWidget):
         self.section_layout.invalidate()
         self.section_layout.activate()
         self.updateGeometry()
-        QTimer.singleShot(0, self.sync_height)
+        # 排版后再校正一次高度；定时器挂在工具栏自己身上，工具栏销毁时随之中止——
+        # 用 QTimer.singleShot 的裸回调会在控件已析构后触发，访问已释放内存直接崩进程。
+        if self.height_timer is None:
+            self.height_timer = QTimer(self)
+            self.height_timer.setSingleShot(True)
+            self.height_timer.timeout.connect(self.sync_height)
+        self.height_timer.start(0)
 
     def set_active_tool(self, tool, color_tool=None):
         self.current_tool = tool

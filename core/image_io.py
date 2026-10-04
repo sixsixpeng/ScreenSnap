@@ -1,6 +1,5 @@
 """截图保存格式与质量的统一处理。"""
 
-from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QImage, QPainter
 
 # 保存格式 -> (Qt 保存器名称, 文件扩展名)。键同时用于配置值与设置页选项。
