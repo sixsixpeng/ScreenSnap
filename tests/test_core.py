@@ -13162,6 +13162,43 @@ class CoreTests(unittest.TestCase):
                   if image.pixelColor(x, y).alpha()}
         self.assertGreater(len(colors), 1)
 
+    def test_dark_theme_menu_text_follows_palette(self):
+        from PySide6.QtGui import QPalette
+        from PySide6.QtWidgets import QMenu
+        from ui.theme import apply_theme
+
+        original_palette = QPalette(self.app.palette())
+        original_mode = self.app.property("screensnap_theme_mode")
+        original_sheet = self.app.styleSheet()
+        try:
+            apply_theme(self.app, "dark")
+            self.app.processEvents()
+            # 深色下注入仅作用于 QMenu 的样式，文字用调色板前景色，避免原生黑底黑字。
+            self.assertIn("QMenu", self.app.styleSheet())
+            text = self.app.palette().color(QPalette.WindowText).name()
+            self.assertIn(text, self.app.styleSheet())
+            menu = QMenu()
+            menu.addAction("删除标注")
+            menu.show()
+            self.app.processEvents()
+            try:
+                image = menu.grab().toImage()
+                colors = {image.pixelColor(x, y).name()
+                          for y in range(image.height())
+                          for x in range(image.width())}
+                self.assertIn(text, colors)
+            finally:
+                menu.close()
+            # 浅色主题保持原生菜单外观，不注入应用级样式表。
+            apply_theme(self.app, "light")
+            self.app.processEvents()
+            self.assertEqual(self.app.styleSheet(), "")
+        finally:
+            self.app.setProperty("screensnap_theme_mode", original_mode)
+            self.app.setPalette(original_palette)
+            self.app.setStyleSheet(original_sheet)
+            self.app.processEvents()
+
     def test_capture_mask_requests_activation_after_show(self):
         from main import Application
 
