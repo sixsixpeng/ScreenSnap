@@ -55,6 +55,7 @@ from editor import EditorWindow
 from hotkey import HotkeyManager
 from logger import configure_logging
 from screenshot import MaskWindow
+from screenshot.mask_window import window_label
 from sticker import StickerManager
 from ui import SettingsWindow, make_tray_menu, CaptureNotification, StickerPanel
 from ui.recycle_window import RecycleWindow
@@ -280,6 +281,7 @@ class Application:
             for view in self.mask.session.views:
                 view.sync_quick_sticker_shortcut(self.config.data)
                 view.sync_capture_save_shortcut(self.config.data)
+                view.sync_capture_action_shortcuts(self.config.data)
                 view.update()
         for editor in [*self.editors, *([inline_editor] if inline_editor is not None else [])]:
             for key in editor.toolbar.tool_color_buttons:
@@ -448,12 +450,34 @@ class Application:
             self.logger.info("截图延迟 %d 毫秒后显示遮罩: %s", delay, mode)
         QTimer.singleShot(waiting, lambda: self.show_mask(mode, initial_rect, preferred_monitor))
 
+    def popup_intruders(self):
+        """抓屏瞬间仍在屏幕上的本程序弹出菜单，返回 [(中文名, 屏幕矩形)]。
+
+        这类菜单抓屏之后才关闭（避免它悬浮在遮罩之上），因此像素已经进了冻结帧，
+        而那时它已不在窗口列表里、枚举不到；只有抓屏前记下的矩形能让遮罩在选区覆盖
+        它时给出警示。托盘菜单自身有 150 毫秒等待，抓屏时通常已关闭，故不重复报告。
+        """
+        popup = QApplication.activePopupWidget()
+        if popup is None or popup is getattr(self, "menu", None):
+            return []
+        rect = popup.frameGeometry()
+        if rect.width() <= 0 or rect.height() <= 0:
+            return []
+        return [(window_label(popup), rect)]
+
     def show_mask(self, mode, initial_rect=None, preferred_monitor=None):
-        """保存两版画面并显示覆盖虚拟桌面的选区遮罩。"""
+        """保存两版画面并显示覆盖虚拟桌面的选区遮罩。
+
+        抓屏前**不动**本程序的任何窗口：用户常拿程序自身的贴图/设置/编辑器当内容来
+        测截图，抓屏就是抓屏；哪些自身窗口进了画面只通过遮罩的提示条告知
+        （`MaskWindow.self_check_warning`），不替用户关窗口。
+        """
         # 同一时刻保留带光标和不带光标的画面，供编辑器临时切换。
         image, bounds, monitors, alternate = capture(self.config.data["cursor"], alternatives=True)
         # 抓取完成后再关闭本程序残留的活动弹出菜单（如贴图右键菜单），
-        # 让它留在冻结画面里，又不会继续悬浮在遮罩之上。
+        # 让它留在冻结画面里，又不会继续悬浮在遮罩之上；关闭前先记下它的位置，
+        # 好在选区覆盖它时补一句"已进入画面"的警示。
+        popup_intruders = self.popup_intruders()
         popup = QApplication.activePopupWidget()
         if popup is not None and popup is not getattr(self, "menu", None):
             popup.close()
@@ -470,7 +494,8 @@ class Application:
             self.edit_images([(image.crop(crop), alternate.crop(crop) if alternate else None)])
             return
         self.mask = MaskWindow(image, bounds, monitors, self.config.data, mode, alternate,
-                       initial_rect=initial_rect, preferred_monitor=preferred_monitor)
+                       initial_rect=initial_rect, preferred_monitor=preferred_monitor,
+                       extra_intruders=popup_intruders)
         self.mask.setAttribute(Qt.WA_DeleteOnClose)
         self.mask.last_region.connect(self.remember_region)
         if hasattr(self, "settings_window"):
