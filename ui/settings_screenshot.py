@@ -2,11 +2,12 @@
 
 import logging
 
-from PySide6.QtCore import QSignalBlocker, QRectF, Qt
+from PySide6.QtCore import QSignalBlocker, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen
-from PySide6.QtWidgets import QKeySequenceEdit, QComboBox, QSizePolicy, QWidget, QLabel
+from PySide6.QtWidgets import (QKeySequenceEdit, QCheckBox, QComboBox,
+                               QSizePolicy, QVBoxLayout, QWidget, QLabel)
 
-from config.config_manager import HINT_ITEM_IDS, HINT_LABELS
+from config.config_manager import HINT_ITEM_IDS, HINT_LABELS, INTRUDER_WARNING_ITEMS
 from ui.widgets.color_button import ColorButton
 from ui.widgets.hint_order_list import HintOrderList
 from ui.widgets.hint_preview import HintBarPreview
@@ -141,6 +142,50 @@ class ScreenshotEffectPreview(QWidget):
         painter.drawRect(area)
 
 
+class _IntruderWarningList(QWidget):
+    """采集自检警示的子项开关：一个复选框对应一类本程序窗口。
+
+    值就是 `{分类 id: 是否参与警示}`，与配置里的 `intruder_warning_items` 一致，
+    因此能被 `SettingsPage.sync_controls` 当作复合控件统一回填。
+    """
+
+    value_changed = Signal(dict)
+
+    def __init__(self, items, values, parent=None):
+        super().__init__(parent)
+        self.setToolTip("选择哪些本程序窗口进入截图选区时给出采集自检警示；\n"
+                        "取消勾选的类别即使被采进画面也不再提示。需先打开上方总开关。")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        self.boxes = {}
+        for item_id, label in items:
+            box = QCheckBox(label, self)
+            box.setChecked(bool((values or {}).get(item_id, True)))
+            box.setToolTip(f"选区包含「{label}」时是否在提示条里给出采集自检警示")
+            box.toggled.connect(self._emit)
+            self.boxes[item_id] = box
+            layout.addWidget(box)
+
+    def _emit(self, *_args):
+        self.value_changed.emit(self.value())
+
+    def value(self):
+        return {item_id: box.isChecked() for item_id, box in self.boxes.items()}
+
+    def set_value(self, values):
+        values = values or {}
+        for item_id, box in self.boxes.items():
+            blocked = box.blockSignals(True)
+            box.setChecked(bool(values.get(item_id, True)))
+            box.blockSignals(blocked)
+
+    def set_enabled(self, enabled):
+        """总开关联动：关闭时子项整体置灰，但保留勾选状态。"""
+        for box in self.boxes.values():
+            box.setEnabled(enabled)
+
+
 HOVER_STYLE_PRESETS = (
     ("海湾青", "lagoon", {
         "window_hover_color": "#0c887b",
@@ -240,6 +285,23 @@ class ScreenshotPage(SettingsPage):
         self._hint_preview = HintBarPreview(self.config)
         self.previews.append(self._hint_preview)
         self.form.addRow(self._hint_preview)
+        self._section("采集自检警示")
+        # 总开关默认关闭：打开后选区包含本程序自身窗口时才在提示条里附加暖色警示。
+        master = self.check(
+            "intruder_warning_enabled", "选区内含本程序窗口时提示",
+            "打开后，截图选区包含本程序自身的窗口（设置窗口、编辑器、通知缩略图、贴图等）时，\n"
+            "在放大镜旁的提示条里附加一句暖色警示，提醒这些窗口会被一起采进画面；默认关闭。\n"
+            "用下面的子项选择哪些窗口参与提示。")
+        intruder_list = _IntruderWarningList(
+            INTRUDER_WARNING_ITEMS, self.config.data.get("intruder_warning_items"))
+        self.controls["intruder_warning_items"] = intruder_list
+        self.form.addRow("警示窗口类型", intruder_list)
+        intruder_list.value_changed.connect(
+            lambda value: self.update_value("intruder_warning_items", value))
+        intruder_list.set_enabled(master.isChecked())
+        master.toggled.connect(intruder_list.set_enabled)
+        self._intruder_master = master
+        self._intruder_list = intruder_list
         self.group("定位辅助")
         # 整体效果预览放到分组最前，避免被挤到末尾；下面用小节标题替代嵌套子框。
         self._effect_preview("assist")
@@ -387,6 +449,9 @@ class ScreenshotPage(SettingsPage):
 
     def sync_controls(self):
         super().sync_controls()
+        if hasattr(self, "_intruder_list"):
+            # 恢复默认/导入后，子项开关的可用状态跟随总开关一起刷新。
+            self._intruder_list.set_enabled(self._intruder_master.isChecked())
         if not hasattr(self, "hover_style_combo"):
             return
         preset_keys = tuple(HOVER_STYLE_PRESETS[0][2])

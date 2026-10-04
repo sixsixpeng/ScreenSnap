@@ -39,6 +39,23 @@ HINT_ITEMS = (
 HINT_ITEM_IDS = tuple(item_id for item_id, _label in HINT_ITEMS)
 HINT_LABELS = dict(HINT_ITEMS)
 
+# 采集自检警示：截图选区包含本程序自身窗口时，在提示条里附加的暖色警示。
+# 分类 id → 设置页显示名，也是"哪些自身窗口参与警示"的子开关清单。
+# 放在配置层与提示项同理（避免设置页导入时触发 screenshot 包初始化）。
+INTRUDER_WARNING_ITEMS = (
+    ("settings", "设置窗口"),
+    ("editor", "编辑器"),
+    ("notification", "通知缩略图"),
+    ("sticker", "贴图"),
+    ("sticker_panel", "贴图管理"),
+    ("recycle", "贴图回收站"),
+    ("appearance", "外观弹层"),
+    ("popup", "弹出菜单"),
+    ("other", "本程序窗口"),
+)
+INTRUDER_WARNING_IDS = tuple(item_id for item_id, _label in INTRUDER_WARNING_ITEMS)
+INTRUDER_WARNING_LABELS = dict(INTRUDER_WARNING_ITEMS)
+
 
 DEFAULTS = {
     "hotkeys_enabled": True,
@@ -149,6 +166,10 @@ DEFAULTS = {
     "capture_hints_enabled": True,
     # 每行提示数：默认每行 2 个；0 表示不限制，只按宽度自动换行。
     "capture_hint_per_line": 2,
+    # 采集自检警示：总开关默认关闭；打开后，选区包含本程序自身窗口时在提示条里附加暖色警示。
+    # 子项决定哪些自身窗口参与警示（分类见 INTRUDER_WARNING_ITEMS）。
+    "intruder_warning_enabled": False,
+    "intruder_warning_items": {item_id: True for item_id in INTRUDER_WARNING_IDS},
     "ruler_enabled": True, "ruler_color": "#00ad91",
     # 标注：序号
     "sequence_font_size": 14, "sequence_start": 1,
@@ -339,6 +360,13 @@ def validate(data):
                 if item in HINT_ITEM_IDS and item not in seen:
                     seen.append(item)
             result[key] = seen
+            continue
+        elif key == "intruder_warning_items":
+            # 子开关：只认已知分类 id，其余忽略；缺失的分类回退为开启。
+            if not isinstance(value, dict):
+                raise ValueError("采集自检警示子项必须是字典")
+            result[key] = {item_id: bool(value.get(item_id, True))
+                           for item_id in INTRUDER_WARNING_IDS}
             continue
         elif key == "element_depth" and not 1 <= value <= 32:
             raise ValueError("窗口元素识别层级必须在 1 到 32 之间")

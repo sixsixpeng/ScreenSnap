@@ -785,6 +785,7 @@ class CoreTests(unittest.TestCase):
             "capture_picker_shortcut": str, "magnifier_grid": bool,
             "magnifier_size": int, "capture_hint_order": list,
             "capture_hint_per_line": int, "capture_hints_enabled": bool,
+            "intruder_warning_enabled": bool, "intruder_warning_items": dict,
             "magnifier_grid_color": str, "ruler_enabled": bool, "ruler_color": str,
             "sequence_font_size": int, "sequence_start": int, "sequence_shape": str,
             "sequence_text_color": str, "sequence_fill_color": str,
@@ -824,6 +825,17 @@ class CoreTests(unittest.TestCase):
             "capture_hint_order"], ["copy", "coords"])
         with self.assertRaises(ValueError):
             validate({"magnifier_size": 400})
+        # 采集自检警示：默认关闭；子项只认已知分类、缺失分类回退为开启，非法类型被拒绝。
+        from config.config_manager import INTRUDER_WARNING_IDS
+        self.assertFalse(result["intruder_warning_enabled"])
+        self.assertEqual(set(result["intruder_warning_items"]), set(INTRUDER_WARNING_IDS))
+        self.assertTrue(all(result["intruder_warning_items"].values()))
+        self.assertFalse(validate({"intruder_warning_items": {"sticker": False, "unknown": True}})[
+            "intruder_warning_items"]["sticker"])
+        self.assertNotIn("unknown", validate({"intruder_warning_items": {"unknown": True}})[
+            "intruder_warning_items"])
+        with self.assertRaises(ValueError):
+            validate({"intruder_warning_items": ["sticker"]})
 
         from ui.settings_window import SettingsWindow
         with tempfile.TemporaryDirectory() as folder:
@@ -839,8 +851,12 @@ class CoreTests(unittest.TestCase):
                 "capture_hint_order": ["coords"],
                 "capture_hint_per_line": 5,
                 "magnifier_size": 300,
+                "intruder_warning_enabled": True,
+                "intruder_warning_items": {"sticker": False},
             }), encoding="utf-8")
             manager = ConfigManager(path)
+            self.assertTrue(manager.data["intruder_warning_enabled"])
+            self.assertFalse(manager.data["intruder_warning_items"]["sticker"])
             self.assertFalse(manager.data["ruler_enabled"])
             self.assertEqual(manager.data["capture_recapture_shortcut"], "Alt+R")
             settings = SettingsWindow(manager)
@@ -867,6 +883,13 @@ class CoreTests(unittest.TestCase):
                              DEFAULTS["capture_hint_per_line"])
             self.assertEqual(screenshot.controls["capture_hint_per_line"].value(),
                              DEFAULTS["capture_hint_per_line"])
+            # 采集自检警示的总开关与子项同样在本页重置范围内，控件同步回默认。
+            self.assertFalse(manager.data["intruder_warning_enabled"])
+            self.assertEqual(manager.data["intruder_warning_items"],
+                             DEFAULTS["intruder_warning_items"])
+            self.assertFalse(screenshot.controls["intruder_warning_enabled"].isChecked())
+            self.assertEqual(screenshot.controls["intruder_warning_items"].value(),
+                             DEFAULTS["intruder_warning_items"])
 
             # 编辑器页重置：序号形状回到默认。
             editor.reset_page()
@@ -1368,7 +1391,9 @@ class CoreTests(unittest.TestCase):
                                      "capture_recapture_shortcut", "capture_window_edit_shortcut",
                                      "capture_copy_shortcut", "capture_toolbar_hide_shortcut")),
                 ("截图", "操作提示", ("capture_hints_enabled", "capture_hint_order",
-                                  "capture_hint_per_line")),
+                                  "capture_hint_per_line",
+                                  "intruder_warning_enabled",
+                                  "intruder_warning_items")),
                 ("截图", "窗口与控件识别", ("window_detection", "window_auto_select", "window_hover_detect",
                                       "window_hover_color", "window_hover_opacity", "window_uia_detect",
                                       "window_hover_interval", "element_depth")),
@@ -9195,7 +9220,8 @@ class CoreTests(unittest.TestCase):
         bounds = {"left": 0, "top": 0, "width": 200, "height": 150}
         with patch("screenshot.mask_window.visible_windows", return_value=[]):
             mask = MaskWindow(Image.new("RGB", (200, 150), "white"), bounds, [bounds],
-                              dict(DEFAULTS, inline_edit=False, magnifier=False))
+                              dict(DEFAULTS, inline_edit=False, magnifier=False,
+                                   intruder_warning_enabled=True))
         mask.show()
         self.app.processEvents()
         mask.selection.rects.append(QRect(40, 30, 100, 80))
@@ -9245,7 +9271,8 @@ class CoreTests(unittest.TestCase):
         bounds = {"left": 0, "top": 0, "width": 200, "height": 150}
         with patch("screenshot.mask_window.visible_windows", return_value=[]):
             mask = MaskWindow(Image.new("RGB", (200, 150), "white"), bounds, [bounds],
-                              dict(DEFAULTS, inline_edit=False, magnifier=False),
+                              dict(DEFAULTS, inline_edit=False, magnifier=False,
+                                   intruder_warning_enabled=True),
                               extra_intruders=[("弹出菜单", QRect(50, 40, 60, 40))])
         mask.selection.rects.append(QRect(40, 30, 100, 80))
         # 菜单此刻已关闭、枚举不到，仅凭抓屏前记录的矩形也能警示。
@@ -9267,6 +9294,39 @@ class CoreTests(unittest.TestCase):
             self.assertNotIn(plain, mask.intruding_windows())
             self.assertIn("外观弹层", mask.self_check_warning())
         self.assertEqual(window_label(overlay), "外观弹层")
+        mask.close()
+
+    def test_intruder_warning_master_and_per_item_switches(self):
+        """采集自检警示默认关闭；开启后按子项过滤参与警示的窗口分类。"""
+        from PySide6.QtWidgets import QDialog
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow, window_category
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 150}
+        # 默认关闭：即使选区内有本程序窗口也不在提示条里附加警示。
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (200, 150), "white"), bounds, [bounds],
+                              dict(DEFAULTS, inline_edit=False, magnifier=False))
+        mask.show()
+        self.app.processEvents()
+        mask.selection.rects.append(QRect(40, 30, 100, 80))
+        dialog = QDialog()
+        dialog.setGeometry(QRect(60, 50, 60, 40))
+        dialog.show()
+        self.app.processEvents()
+        self.assertIn(dialog, mask.intruding_windows())
+        self.assertEqual(window_category(dialog), "other")
+        self.assertIsNone(mask.self_check_warning())
+
+        # 打开总开关但关掉「本程序窗口」子项：该分类的窗口不再提示。
+        mask.settings["intruder_warning_enabled"] = True
+        mask.settings["intruder_warning_items"] = dict(
+            DEFAULTS["intruder_warning_items"], other=False)
+        self.assertIsNone(mask.self_check_warning())
+        # 重新勾选该子项后恢复提示。
+        mask.settings["intruder_warning_items"]["other"] = True
+        self.assertIn("本程序窗口", mask.self_check_warning())
+        dialog.close()
         mask.close()
 
     def test_show_mask_passes_self_check_hints(self):

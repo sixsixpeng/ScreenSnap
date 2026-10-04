@@ -19,6 +19,7 @@ from core.screen_capture import to_qimage
 from core.window_boundaries import visible_windows
 from core.window_elements import element_chain
 from core.window_focus import activate_window
+from config.config_manager import INTRUDER_WARNING_LABELS
 from logger.log_rate import log_every
 from editor.annotation_canvas import AnnotationCanvas
 from editor.image_effects import apply_output_effects
@@ -44,26 +45,45 @@ TOOLBAR_SNAP_DISTANCE = 24
 # 工具栏左端抓取提示的宽度（像素）：拖动整条工具栏的入口，兼作视觉提示。
 TOOLBAR_HANDLE_WIDTH = 10
 
-# 采集自检：会在屏幕上长期存在、可能被一起采进画面的自身窗口（类名 → 提示用中文名）。
+# 采集自检：会在屏幕上长期存在、可能被一起采进画面的自身窗口。
+# 类名 → 警示分类 id；分类的显示名与子开关在配置层 INTRUDER_WARNING_ITEMS 定义。
 # 新增这类常驻窗口时请一并登记；遮罩自身、放大镜 HUD 与内部控件不在其中（只画在遮罩表面）。
-INTRUDING_WINDOW_LABELS = {
-    "CaptureNotification": "通知缩略图",
-    "EditorWindow": "编辑器",
-    "SettingsWindow": "设置窗口",
-    "StickerItem": "贴图",
-    "StickerPanel": "贴图管理",
-    "RecycleWindow": "贴图回收站",
+INTRUDING_WINDOW_CATEGORIES = {
+    "CaptureNotification": "notification",
+    "EditorWindow": "editor",
+    "SettingsWindow": "settings",
+    "StickerItem": "sticker",
+    "StickerPanel": "sticker_panel",
+    "RecycleWindow": "recycle",
 }
+# 自报标签 `screensnap_self_window` → 警示分类 id；未登记的自报标签归入 other。
+INTRUDING_SELF_LABEL_CATEGORIES = {"外观弹层": "appearance"}
+
+
+def window_category(widget):
+    """干扰窗口的警示分类 id（配置层据此决定显示名与子开关）。
+
+    优先级：登记类名 → 自报标签映射 → 弹出菜单 → 其它本程序窗口。
+    """
+    category = INTRUDING_WINDOW_CATEGORIES.get(type(widget).__name__)
+    if category is not None:
+        return category
+    reported = widget.property("screensnap_self_window")
+    if reported:
+        return INTRUDING_SELF_LABEL_CATEGORIES.get(reported, "other")
+    if isinstance(widget, QMenu):
+        return "popup"
+    return "other"
 
 
 def window_label(widget):
-    """干扰窗口在提示条里的中文名：窗口可自报（`screensnap_self_window`），否则查登记表。
+    """干扰窗口在提示条里的中文名：窗口可自报（`screensnap_self_window`），否则按分类取名。
 
     自报用于类名不在登记表里的本程序浮层（例如工具栏的「外观」弹层是 `QFrame`），
-    否则这类窗口会被采进画面却连一句警示都没有。
+    否则这类窗口会被采进画面却连一句警示都没有；`QMenu` 归入「弹出菜单」分类。
     """
     return (widget.property("screensnap_self_window")
-            or INTRUDING_WINDOW_LABELS.get(type(widget).__name__, "本程序窗口"))
+            or INTRUDER_WARNING_LABELS.get(window_category(widget), "本程序窗口"))
 
 
 try:
@@ -1363,7 +1383,7 @@ class MaskWindow(QWidget):
                 continue
             own = widget.property("screensnap_self_window") or \
                 widget.property("screensnap_overlay") or \
-                type(widget).__name__ in INTRUDING_WINDOW_LABELS
+                type(widget).__name__ in INTRUDING_WINDOW_CATEGORIES
             if not own and not isinstance(widget, (QMenu, QDialog)):
                 continue
             rect = widget.frameGeometry()
@@ -1372,12 +1392,18 @@ class MaskWindow(QWidget):
         return hits
 
     def self_check_warning(self, selection=None):
-        """采集自检：选区含本程序内容时返回提示文案，否则返回 None。
+        """采集自检：开启且选区含本程序内容时返回提示文案，否则返回 None。
 
-        两类来源合并成一句：选区内的常驻自身窗口，以及抓屏瞬间记录下的弹出菜单
-        （它已被烤进冻结帧，此刻枚举不到）。系统通知不作提示（对用户是噪音）。
+        总开关 `intruder_warning_enabled` 默认关闭；开启后按子项 `intruder_warning_items`
+        过滤参与警示的窗口分类。两类来源合并成一句：选区内的常驻自身窗口，以及抓屏
+        瞬间记录下的弹出菜单（它已被烤进冻结帧，此刻枚举不到）。系统通知不作提示（对用户是噪音）。
         """
-        hits = self.intruding_windows(selection)
+        settings = self.settings or {}
+        if not settings.get("intruder_warning_enabled", False):
+            return None
+        enabled = settings.get("intruder_warning_items") or {}
+        hits = [widget for widget in self.intruding_windows(selection)
+                if enabled.get(window_category(widget), True)]
         kinds = tuple(sorted(type(widget).__name__ for widget in hits))
         logger = logging.getLogger("screensnap")
         if kinds != self.intruding_window_kinds:
@@ -1388,7 +1414,7 @@ class MaskWindow(QWidget):
                 logger.debug("选区已不含本程序窗口")
         labels = {self.window_label(widget) for widget in hits}
         area = self._selection_area(selection)
-        if area is not None:
+        if area is not None and enabled.get("popup", True):
             for label, rect in self.extra_intruders:
                 if rect.width() > 0 and rect.height() > 0 and area.intersects(rect):
                     labels.add(label)
