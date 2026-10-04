@@ -32,16 +32,23 @@ def _magnifier_rect(point, bounds, size):
     return magnifier_rect(point, bounds, size)
 
 
-def _bar_layout(metrics, area, anchor, items, per_line=0, cursor=None):
+def _bar_layout(metrics, area, anchor, items, per_line=0, cursor=None, gap=0):
     from screenshot.overlay_info import info_bar_layout
 
-    return info_bar_layout(metrics, area, anchor, items, per_line=per_line, cursor=cursor)
+    return info_bar_layout(metrics, area, anchor, items, per_line=per_line, cursor=cursor, gap=gap)
 
 
-def _draw_bar(painter, bar, rows, warning, metrics, align_right=False):
+def _draw_bar(painter, bar, rows, style, metrics, align_right=False):
     from screenshot.overlay_info import paint_info_bar
 
-    paint_info_bar(painter, bar, rows, warning, metrics, align_right=align_right)
+    paint_info_bar(painter, bar, rows, style, metrics, align_right=align_right)
+
+
+def _resolve_style(config, warning):
+    """按是否警示取出配置里的提示条外观；缺省回退内置默认样式。"""
+    from config.config_manager import hint_bar_style
+
+    return hint_bar_style(config.data, warning)
 
 # 预览用的“假截图”：一块浅色画布 + 两个色块，用来体现放大镜的取样内容。
 _PREVIEW_SAMPLE = QRect(0, 0, 64, 48)
@@ -111,10 +118,12 @@ class HintBarPreview(QWidget):
             per_line = 0
         bar, rows, align_right = _bar_layout(self.fontMetrics(), inner, anchor, items,
                                              per_line=max(0, min(per_line, 8)),
-                                             cursor=(cursor.x(), cursor.y()))
+                                             cursor=(cursor.x(), cursor.y()),
+                                             gap=int(data.get("capture_hint_gap", 0) or 0))
         painter.save()
         painter.translate(inner.topLeft())
-        _draw_bar(painter, bar, rows, None, self.fontMetrics(), align_right)
+        _draw_bar(painter, bar, rows, _resolve_style(self.config, None),
+                  self.fontMetrics(), align_right)
         painter.restore()
         painter.setPen(QPen(QColor("#8d9aa1"), 1, Qt.DashLine))
         painter.setBrush(Qt.NoBrush)
@@ -128,3 +137,43 @@ def _point_offset(rect, fx, fy):
     from PySide6.QtCore import QPoint
 
     return QPoint(int(rect.width() * fx), int(rect.height() * fy))
+
+
+class HintBarStylePreview(QWidget):
+    """单条提示条外观预览：只画一条样例提示条，所见即设置页当前配置的样式。
+
+    与遮罩共用 `paint_info_bar`，因此改预设/颜色/圆角后立刻看到实际效果；
+    `warning` 为真时预览的是「采集自检警示」样式（带 ⚠ 前缀的样例文案）。
+    """
+
+    def __init__(self, config, key, warning):
+        super().__init__()
+        self.config = config
+        self.key = key
+        self.warning = warning
+        self.kind = "hint_warning_style" if warning else "hint_style"
+        self.setMinimumWidth(260)
+        self.setFixedHeight(74)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def refresh(self):
+        self.update()
+
+    def paintEvent(self, event):
+        from screenshot.overlay_info import INFO_PADDING_X, INFO_PADDING_Y, paint_info_bar
+
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        area = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        painter.fillRect(area, QColor("#e8edf0"))
+        # 假截图底色：提示条半透明，能看出被其遮住的画面。
+        painter.fillRect(area.adjusted(10, 10, -10, -10), QColor("#4b91a5"))
+        rows = ["20, 20  200 x 100", "拖动移动 | Esc 取消"]
+        if self.warning:
+            rows.insert(0, "⚠ 选区内有贴图，移开后重截")
+        metrics = self.fontMetrics()
+        width = min(int(area.width()) - 24,
+                    max(metrics.horizontalAdvance(row) for row in rows) + INFO_PADDING_X * 2)
+        height = metrics.height() * len(rows) + INFO_PADDING_Y * 2
+        bar = QRect(int(area.left()) + 12, int(area.top()) + 12, width, height)
+        paint_info_bar(painter, bar, rows, _resolve_style(self.config, self.warning), metrics)

@@ -4,13 +4,15 @@ import logging
 
 from PySide6.QtCore import QSignalBlocker, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen
-from PySide6.QtWidgets import (QKeySequenceEdit, QCheckBox, QComboBox,
-                               QSizePolicy, QVBoxLayout, QWidget, QLabel)
+from PySide6.QtWidgets import (QKeySequenceEdit, QCheckBox, QComboBox, QHBoxLayout,
+                               QSizePolicy, QSlider, QVBoxLayout, QWidget, QLabel)
 
-from config.config_manager import HINT_ITEM_IDS, HINT_LABELS, INTRUDER_WARNING_ITEMS
+from config.config_manager import (HINT_BAR_PRESETS, HINT_BAR_STYLE_FIELDS,
+                                   HINT_BAR_WARNING_PRESETS, HINT_ITEM_IDS, HINT_LABELS,
+                                   INTRUDER_WARNING_ITEMS)
 from ui.widgets.color_button import ColorButton
 from ui.widgets.hint_order_list import HintOrderList
-from ui.widgets.hint_preview import HintBarPreview
+from ui.widgets.hint_preview import HintBarPreview, HintBarStylePreview
 from ui.widgets.tooltip import SettingsPage
 
 
@@ -186,6 +188,144 @@ class _IntruderWarningList(QWidget):
             box.setEnabled(enabled)
 
 
+class HintBarStyleEditor(QWidget):
+    """提示条外观编辑器：预设一键套用整组颜色与圆角，也可逐项自定义。
+
+    值就是配置里的样式字典（`preset` + 文字/填充/描边色 + 圆角开关与半径），与
+    `hint_bar_style` / `hint_bar_warning_style` 一致，可被设置页统一回填与重置。
+    """
+
+    value_changed = Signal(dict)
+
+    def __init__(self, presets, values, purpose, parent=None):
+        super().__init__(parent)
+        self._presets = {preset_id: dict(fields) for preset_id, _label, fields in presets}
+        values = dict(values or {})
+        self.setToolTip("提示条的文字颜色、填充颜色、描边颜色与圆角；\n"
+                        "选预设可一键套用整组外观，手动改动任一项后自动记为「自定义」。")
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        self.preset = QComboBox(self)
+        for preset_id, label, _fields in presets:
+            self.preset.addItem(label, preset_id)
+        self.preset.addItem("自定义", "custom")
+        # 打开设置时先按保存的 preset 选中对应项（含「自定义」），再连接信号，
+        # 避免构造期就套用首个预设而覆盖用户已有的自定义颜色。
+        index = self.preset.findData(values.get("preset", "custom"))
+        self.preset.setCurrentIndex(index if index >= 0 else self.preset.findData("custom"))
+        self.preset.setToolTip("一键套用整组提示条外观；手动改动任一项后自动切换为「自定义」")
+        layout.addLayout(self._row("预设", self.preset))
+        self.text = self._color(values.get("text_color"), f"{purpose}文字颜色")
+        self.fill = self._color(values.get("fill_color"), f"{purpose}填充颜色")
+        self.border = self._color(values.get("border_color"), f"{purpose}描边颜色")
+        layout.addLayout(self._row("文字颜色", self.text))
+        layout.addLayout(self._row("填充颜色", self.fill))
+        layout.addLayout(self._row("描边颜色", self.border))
+        rounded_row = QWidget(self)
+        rounded_layout = QHBoxLayout(rounded_row)
+        rounded_layout.setContentsMargins(0, 0, 0, 0)
+        rounded_layout.setSpacing(8)
+        self.rounded = QCheckBox("圆角", rounded_row)
+        self.rounded.setChecked(bool(values.get("rounded", True)))
+        self.rounded.setToolTip("关闭后提示条四角为直角")
+        self.radius = QSlider(Qt.Horizontal, rounded_row)
+        self.radius.setRange(0, 20)
+        self.radius.setValue(int(values.get("radius", 5) or 0))
+        self.radius.setToolTip("提示条圆角半径（0–20 像素），仅在勾选「圆角」时生效")
+        self.radius_value = QLabel(str(self.radius.value()), rounded_row)
+        self.radius_value.setMinimumWidth(18)
+        self.radius_value.setToolTip("当前圆角半径（像素）")
+        rounded_layout.addWidget(self.rounded)
+        rounded_layout.addWidget(self.radius, 1)
+        rounded_layout.addWidget(self.radius_value)
+        layout.addLayout(self._row("圆角半径", rounded_row))
+        self.preset.currentIndexChanged.connect(self._apply_preset)
+        self.rounded.toggled.connect(self._on_change)
+        self.radius.valueChanged.connect(self._on_change)
+        self._sync_radius()
+
+    def _row(self, caption, widget):
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        label = QLabel(caption, self)
+        label.setMinimumWidth(56)
+        label.setToolTip(self.toolTip())
+        row.addWidget(label)
+        row.addWidget(widget, 1)
+        return row
+
+    def _color(self, color, purpose):
+        button = ColorButton(color or "#000000", lambda _value: self._on_change(), purpose=purpose)
+        button.setToolTip(f"选择{purpose}（改后记为「自定义」）")
+        return button
+
+    def _sync_radius(self):
+        self.radius.setEnabled(self.rounded.isChecked())
+        self.radius_value.setText(str(self.radius.value()))
+
+    def _apply_preset(self, index):
+        fields = self._presets.get(self.preset.itemData(index))
+        if fields:
+            for widget in (self.rounded, self.radius):
+                widget.blockSignals(True)
+            try:
+                self.text.set_color(fields["text_color"])
+                self.fill.set_color(fields["fill_color"])
+                self.border.set_color(fields["border_color"])
+                self.rounded.setChecked(bool(fields["rounded"]))
+                self.radius.setValue(int(fields["radius"]))
+            finally:
+                for widget in (self.rounded, self.radius):
+                    widget.blockSignals(False)
+        self._on_change()
+
+    def _on_change(self, *_args):
+        """任一子项变化：刷新圆角显示、回算当前预设名，再把整组值通知出去。"""
+        self._sync_radius()
+        matched = self._matching_preset()
+        self.preset.blockSignals(True)
+        self.preset.setCurrentIndex(max(0, self.preset.findData(matched)))
+        self.preset.blockSignals(False)
+        self.value_changed.emit(self.value())
+
+    def _matching_preset(self):
+        current = self.value()
+        for preset_id, fields in self._presets.items():
+            if all(current.get(field) == fields[field] for field in HINT_BAR_STYLE_FIELDS):
+                return preset_id
+        return "custom"
+
+    def value(self):
+        return {
+            "preset": self.preset.currentData(),
+            "text_color": self.text.color,
+            "fill_color": self.fill.color,
+            "border_color": self.border.color,
+            "rounded": self.rounded.isChecked(),
+            "radius": int(self.radius.value()),
+        }
+
+    def set_value(self, values):
+        values = dict(values or {})
+        widgets = (self.rounded, self.radius, self.preset)
+        for widget in widgets:
+            widget.blockSignals(True)
+        try:
+            self.text.set_color(values.get("text_color") or "#ffffff")
+            self.fill.set_color(values.get("fill_color") or "#141c22")
+            self.border.set_color(values.get("border_color") or "#141c22")
+            self.rounded.setChecked(bool(values.get("rounded", True)))
+            self.radius.setValue(int(values.get("radius", 5) or 0))
+            index = self.preset.findData(values.get("preset", "custom"))
+            self.preset.setCurrentIndex(index if index >= 0 else self.preset.findData("custom"))
+        finally:
+            for widget in widgets:
+                widget.blockSignals(False)
+        self._sync_radius()
+
+
 HOVER_STYLE_PRESETS = (
     ("海湾青", "lagoon", {
         "window_hover_color": "#0c887b",
@@ -281,6 +421,9 @@ class ScreenshotPage(SettingsPage):
         self.number("capture_hint_per_line", "每行提示数", 0, 8,
                     "每行最多显示几个提示项（1–8）；0 表示不限制，只按宽度自动换行。\n"
                     "配合上面的顺序列表，可以把重要的键位放在第一行。")
+        self.number("capture_hint_gap", "与放大镜间距 (px)", 0, 40,
+                    "提示条与放大镜框之间的间距（0–40 像素）；0 表示提示条边缘紧贴放大镜。\n"
+                    "提示条的左右边始终与放大镜的左/右边对齐，不再额外偏移。")
         # 实时预览：与截图遮罩共用同一套文案与排版，改键/勾选/排序后立刻能看到效果。
         self._hint_preview = HintBarPreview(self.config)
         self.previews.append(self._hint_preview)
@@ -302,6 +445,27 @@ class ScreenshotPage(SettingsPage):
         master.toggled.connect(intruder_list.set_enabled)
         self._intruder_master = master
         self._intruder_list = intruder_list
+        # 两套提示条外观互相独立：上面先预览普通样式，再把警示样式接在采集自检警示之后。
+        self._section("默认提示条外观")
+        normal_preview = HintBarStylePreview(self.config, "hint_bar_style", warning=False)
+        self.previews.append(normal_preview)
+        self.form.addRow(normal_preview)
+        normal_editor = HintBarStyleEditor(
+            HINT_BAR_PRESETS, self.config.data.get("hint_bar_style"), "提示条")
+        self.controls["hint_bar_style"] = normal_editor
+        self.form.addRow("提示条外观", normal_editor)
+        normal_editor.value_changed.connect(
+            lambda value: self.update_value("hint_bar_style", value))
+        self._section("采集自检警示外观")
+        warning_preview = HintBarStylePreview(self.config, "hint_bar_warning_style", warning=True)
+        self.previews.append(warning_preview)
+        self.form.addRow(warning_preview)
+        warning_editor = HintBarStyleEditor(
+            HINT_BAR_WARNING_PRESETS, self.config.data.get("hint_bar_warning_style"), "警示条")
+        self.controls["hint_bar_warning_style"] = warning_editor
+        self.form.addRow("警示条外观", warning_editor)
+        warning_editor.value_changed.connect(
+            lambda value: self.update_value("hint_bar_warning_style", value))
         self.group("定位辅助")
         # 整体效果预览放到分组最前，避免被挤到末尾；下面用小节标题替代嵌套子框。
         self._effect_preview("assist")

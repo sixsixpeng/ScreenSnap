@@ -56,6 +56,42 @@ INTRUDER_WARNING_ITEMS = (
 INTRUDER_WARNING_IDS = tuple(item_id for item_id, _label in INTRUDER_WARNING_ITEMS)
 INTRUDER_WARNING_LABELS = dict(INTRUDER_WARNING_ITEMS)
 
+# 提示条可配置的外观字段：预设一次性写入这些字段，设置页按同样顺序给出控件。
+HINT_BAR_STYLE_FIELDS = ("text_color", "fill_color", "border_color", "rounded", "radius")
+
+# 提示条样式预设：id → 显示名 → 各外观字段取值。
+# 普通提示条与「采集自检警示」提示条各用一套、互不影响；设置页选中预设会一次性写入这些字段。
+# 配色取自程序既有风格：深色底 #141c22 / 墨青 #102a31 / 强调蓝 #168cff / 暖色警示 #603410。
+HINT_BAR_PRESETS = (
+    ("dark", "深色半透明", {"text_color": "#ffffff", "fill_color": "#141c22",
+                          "border_color": "#141c22", "rounded": True, "radius": 5}),
+    ("ink", "墨青玻璃", {"text_color": "#eaf7f4", "fill_color": "#102a31",
+                       "border_color": "#1f5a63", "rounded": True, "radius": 6}),
+    ("paper", "浅色纸张", {"text_color": "#1b2a30", "fill_color": "#f4f7f8",
+                         "border_color": "#c3ced6", "rounded": True, "radius": 6}),
+    ("graphite", "石墨灰", {"text_color": "#eef2f4", "fill_color": "#273b44",
+                          "border_color": "#3d5762", "rounded": True, "radius": 3}),
+)
+HINT_BAR_WARNING_PRESETS = (
+    ("amber", "暖琥珀", {"text_color": "#ffeccf", "fill_color": "#603410",
+                       "border_color": "#b06a1c", "rounded": True, "radius": 5}),
+    ("alert_red", "警示红", {"text_color": "#fff0f0", "fill_color": "#6e1f24",
+                           "border_color": "#c0383f", "rounded": True, "radius": 5}),
+    ("sun", "亮黄警示", {"text_color": "#5a3a00", "fill_color": "#ffd75e",
+                       "border_color": "#e0a33c", "rounded": True, "radius": 5}),
+    ("amber_square", "琥珀直角", {"text_color": "#ffeccf", "fill_color": "#603410",
+                                "border_color": "#b06a1c", "rounded": False, "radius": 0}),
+)
+HINT_BAR_PRESET_IDS = frozenset(preset_id for preset_id, _label, _values in HINT_BAR_PRESETS)
+HINT_BAR_WARNING_PRESET_IDS = frozenset(
+    preset_id for preset_id, _label, _values in HINT_BAR_WARNING_PRESETS)
+# 两套默认样式：普通提示条沿用原有深色半透明外观，警示提示条沿用原有暖色警示外观。
+DEFAULT_HINT_BAR_STYLE = {"preset": "dark", **HINT_BAR_PRESETS[0][2]}
+DEFAULT_HINT_BAR_WARNING_STYLE = {"preset": "amber", **HINT_BAR_WARNING_PRESETS[0][2]}
+# 填充色不透明度：沿用改造前的观感（普通 220 / 警示 232），不单独暴露为设置项。
+HINT_BAR_FILL_ALPHA = 220
+HINT_BAR_WARNING_FILL_ALPHA = 232
+
 
 DEFAULTS = {
     "hotkeys_enabled": True,
@@ -170,6 +206,11 @@ DEFAULTS = {
     # 子项决定哪些自身窗口参与警示（分类见 INTRUDER_WARNING_ITEMS）。
     "intruder_warning_enabled": False,
     "intruder_warning_items": {item_id: True for item_id in INTRUDER_WARNING_IDS},
+    # 提示条与放大镜之间的间距（像素）：0 表示紧贴放大镜边缘。
+    "capture_hint_gap": 0,
+    # 两套提示条外观：普通提示条与采集自检警示提示条各自独立，互不影响。
+    "hint_bar_style": copy.deepcopy(DEFAULT_HINT_BAR_STYLE),
+    "hint_bar_warning_style": copy.deepcopy(DEFAULT_HINT_BAR_WARNING_STYLE),
     "ruler_enabled": True, "ruler_color": "#00ad91",
     # 标注：序号
     "sequence_font_size": 14, "sequence_start": 1,
@@ -207,6 +248,47 @@ def canonical_hotkey(binding):
     if not all(parts) or len(parts) != len(set(parts)):
         raise ValueError("快捷键组合格式错误")
     return "+".join(sorted(parts))
+
+
+def _validate_hint_bar_style(key, value):
+    """校验一套提示条外观；预设与颜色/圆角/半径都必须是合法值。"""
+    defaults = (DEFAULT_HINT_BAR_WARNING_STYLE if key == "hint_bar_warning_style"
+                else DEFAULT_HINT_BAR_STYLE)
+    valid_ids = (HINT_BAR_WARNING_PRESET_IDS if key == "hint_bar_warning_style"
+                 else HINT_BAR_PRESET_IDS)
+    if not isinstance(value, dict):
+        raise ValueError("提示条样式必须是字典")
+    preset = value.get("preset", defaults["preset"])
+    result = {"preset": preset if preset in valid_ids else "custom"}
+    for field in ("text_color", "fill_color", "border_color"):
+        color = value.get(field, defaults[field])
+        if not isinstance(color, str) or not re.fullmatch(r"#[0-9a-fA-F]{6}", color):
+            raise ValueError("提示条样式颜色必须是六位十六进制颜色")
+        result[field] = color.lower()
+    rounded = value.get("rounded", defaults["rounded"])
+    if type(rounded) is not bool:
+        raise ValueError("提示条圆角开关必须是布尔值")
+    radius = value.get("radius", defaults["radius"])
+    if type(radius) is not int or not 0 <= radius <= 20:
+        raise ValueError("提示条圆角半径必须是 0 到 20 的整数")
+    result["rounded"] = rounded
+    result["radius"] = radius
+    return result
+
+
+def hint_bar_style(settings, warning):
+    """按是否出现采集自检警示，取对应的提示条外观（缺省回退内置默认样式）。
+
+    返回值在样式字段外附带 `alpha`：填充色不透明度取该套样式的默认值，
+    以保证默认外观与改造前一致（普通 220 / 警示 232）；该键只在绘制期使用，不落盘。
+    """
+    key = "hint_bar_warning_style" if warning else "hint_bar_style"
+    fallback = DEFAULT_HINT_BAR_WARNING_STYLE if warning else DEFAULT_HINT_BAR_STYLE
+    style = (settings or {}).get(key)
+    if not isinstance(style, dict):
+        style = fallback
+    alpha = HINT_BAR_WARNING_FILL_ALPHA if warning else HINT_BAR_FILL_ALPHA
+    return {**style, "alpha": alpha}
 
 
 def validate(data):
@@ -351,6 +433,12 @@ def validate(data):
             raise ValueError("放大镜尺寸必须在 100 到 320 像素之间")
         elif key == "capture_hint_per_line" and not 0 <= value <= 8:
             raise ValueError("每行提示数必须在 0 到 8 之间（0 表示按宽度自动换行）")
+        elif key == "capture_hint_gap" and not 0 <= value <= 40:
+            raise ValueError("提示条与放大镜间距必须在 0 到 40 像素之间")
+        elif key in ("hint_bar_style", "hint_bar_warning_style"):
+            # 提示条外观：只认已知字段与合法取值，非法颜色/圆角/半径直接回退默认样式。
+            result[key] = _validate_hint_bar_style(key, value)
+            continue
         elif key == "capture_hint_order":
             # 提示项列表既是开关也是顺序：只保留已知 id，去重且保持用户顺序。
             if not isinstance(value, list) or any(not isinstance(item, str) for item in value):

@@ -19,7 +19,7 @@ from core.screen_capture import to_qimage
 from core.window_boundaries import visible_windows
 from core.window_elements import element_chain
 from core.window_focus import activate_window
-from config.config_manager import INTRUDER_WARNING_LABELS
+from config.config_manager import INTRUDER_WARNING_LABELS, hint_bar_style
 from logger.log_rate import log_every
 from editor.annotation_canvas import AnnotationCanvas
 from editor.image_effects import apply_output_effects
@@ -192,6 +192,7 @@ class InfoBar(QWidget):
         self.view = view
         self.rows = []
         self.warning = None
+        self.style = None
         self.bar = QRect()
         self.align_right = False
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
@@ -209,11 +210,13 @@ class InfoBar(QWidget):
             return
         metrics = self.fontMetrics()
         warning = view.self_check_warning()
-        # 传入光标（逻辑坐标）：提示条据此与放大镜一起翻转、并与放大镜的边缘对齐。
+        settings = view.settings or {}
+        # 传入光标（逻辑坐标）：提示条据此与放大镜一起翻转、并与放大镜的边缘直接对齐。
         bar, rows, align_right = info_bar_layout(
             metrics, view.rect(), view.magnifier_frame(), view.capture_hint_items(),
             warning=warning, per_line=view.hint_per_line(),
-            cursor=view.to_logical_point(view.position))
+            cursor=view.to_logical_point(view.position),
+            gap=int(settings.get("capture_hint_gap", 0) or 0))
         if bar.isEmpty():
             self.bar = QRect()
             self.hide()
@@ -221,6 +224,8 @@ class InfoBar(QWidget):
         self.bar, self.rows = bar, rows
         self.align_right = align_right
         self.warning = warning
+        # 无警示时用普通样式；出现采集自检警示时整条换成警示样式。
+        self.style = hint_bar_style(settings, warning)
         self.setGeometry(bar)
         if not self.isVisible():
             self.show()
@@ -230,7 +235,7 @@ class InfoBar(QWidget):
 
     def paintEvent(self, event):
         painter = QPainter(self)
-        paint_info_bar(painter, self.rect(), self.rows, self.warning, self.fontMetrics(),
+        paint_info_bar(painter, self.rect(), self.rows, self.style, self.fontMetrics(),
                        align_right=self.align_right)
 
 

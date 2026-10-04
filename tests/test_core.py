@@ -786,6 +786,7 @@ class CoreTests(unittest.TestCase):
             "magnifier_size": int, "capture_hint_order": list,
             "capture_hint_per_line": int, "capture_hints_enabled": bool,
             "intruder_warning_enabled": bool, "intruder_warning_items": dict,
+            "capture_hint_gap": int, "hint_bar_style": dict, "hint_bar_warning_style": dict,
             "magnifier_grid_color": str, "ruler_enabled": bool, "ruler_color": str,
             "sequence_font_size": int, "sequence_start": int, "sequence_shape": str,
             "sequence_text_color": str, "sequence_fill_color": str,
@@ -836,6 +837,30 @@ class CoreTests(unittest.TestCase):
             "intruder_warning_items"])
         with self.assertRaises(ValueError):
             validate({"intruder_warning_items": ["sticker"]})
+        # 提示条与放大镜间距：默认 0（紧贴），合法范围 0–40，越界被拒绝。
+        self.assertEqual(result["capture_hint_gap"], 0)
+        self.assertEqual(validate({"capture_hint_gap": 12})["capture_hint_gap"], 12)
+        with self.assertRaises(ValueError):
+            validate({"capture_hint_gap": 41})
+        with self.assertRaises(ValueError):
+            validate({"capture_hint_gap": -1})
+        # 两套提示条外观：默认取预设，非法颜色/半径/圆角类型被拒绝，颜色统一小写。
+        from config.config_manager import (DEFAULT_HINT_BAR_STYLE,
+                                           DEFAULT_HINT_BAR_WARNING_STYLE)
+        self.assertEqual(result["hint_bar_style"], DEFAULT_HINT_BAR_STYLE)
+        self.assertEqual(result["hint_bar_warning_style"], DEFAULT_HINT_BAR_WARNING_STYLE)
+        self.assertEqual(validate({"hint_bar_style": {"text_color": "#ABCDEF"}})[
+            "hint_bar_style"]["text_color"], "#abcdef")
+        for bad in ({"text_color": "red"}, {"fill_color": "#12345"},
+                    {"radius": 21}, {"radius": -1}, {"rounded": "yes"},
+                    {"radius": True}, "not-a-dict"):
+            with self.subTest(bad=bad), self.assertRaises(ValueError):
+                validate({"hint_bar_style": bad})
+        # 预设 id 只在各自那套里有效：普通样式塞警示预设、或反之，都归为「自定义」。
+        self.assertEqual(validate({"hint_bar_style": {"preset": "amber"}})[
+            "hint_bar_style"]["preset"], "custom")
+        self.assertEqual(validate({"hint_bar_warning_style": {"preset": "dark"}})[
+            "hint_bar_warning_style"]["preset"], "custom")
 
         from ui.settings_window import SettingsWindow
         with tempfile.TemporaryDirectory() as folder:
@@ -853,10 +878,16 @@ class CoreTests(unittest.TestCase):
                 "magnifier_size": 300,
                 "intruder_warning_enabled": True,
                 "intruder_warning_items": {"sticker": False},
+                "capture_hint_gap": 18,
+                "hint_bar_style": {"preset": "custom", "text_color": "#010203",
+                                   "fill_color": "#040506", "border_color": "#070809",
+                                   "rounded": False, "radius": 0},
             }), encoding="utf-8")
             manager = ConfigManager(path)
             self.assertTrue(manager.data["intruder_warning_enabled"])
             self.assertFalse(manager.data["intruder_warning_items"]["sticker"])
+            self.assertEqual(manager.data["capture_hint_gap"], 18)
+            self.assertEqual(manager.data["hint_bar_style"]["text_color"], "#010203")
             self.assertFalse(manager.data["ruler_enabled"])
             self.assertEqual(manager.data["capture_recapture_shortcut"], "Alt+R")
             settings = SettingsWindow(manager)
@@ -890,6 +921,17 @@ class CoreTests(unittest.TestCase):
             self.assertFalse(screenshot.controls["intruder_warning_enabled"].isChecked())
             self.assertEqual(screenshot.controls["intruder_warning_items"].value(),
                              DEFAULTS["intruder_warning_items"])
+            # 提示条间距与两套外观同样在本页重置范围内，复合控件同步回默认。
+            self.assertEqual(manager.data["capture_hint_gap"], DEFAULTS["capture_hint_gap"])
+            self.assertEqual(manager.data["hint_bar_style"], DEFAULTS["hint_bar_style"])
+            self.assertEqual(manager.data["hint_bar_warning_style"],
+                             DEFAULTS["hint_bar_warning_style"])
+            self.assertEqual(screenshot.controls["capture_hint_gap"].value(),
+                             DEFAULTS["capture_hint_gap"])
+            self.assertEqual(screenshot.controls["hint_bar_style"].value(),
+                             DEFAULTS["hint_bar_style"])
+            self.assertEqual(screenshot.controls["hint_bar_warning_style"].value(),
+                             DEFAULTS["hint_bar_warning_style"])
 
             # 编辑器页重置：序号形状回到默认。
             editor.reset_page()
@@ -904,6 +946,9 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(reloaded["capture_hint_order"], DEFAULTS["capture_hint_order"])
             self.assertEqual(reloaded["capture_hint_per_line"], DEFAULTS["capture_hint_per_line"])
             self.assertEqual(reloaded["magnifier_size"], DEFAULTS["magnifier_size"])
+            self.assertEqual(reloaded["capture_hint_gap"], DEFAULTS["capture_hint_gap"])
+            self.assertEqual(reloaded["hint_bar_style"], DEFAULTS["hint_bar_style"])
+            self.assertEqual(reloaded["hint_bar_warning_style"], DEFAULTS["hint_bar_warning_style"])
 
             self.assertEqual(reloaded["sequence_shape"], DEFAULTS["sequence_shape"])
             settings.close()
@@ -1391,9 +1436,10 @@ class CoreTests(unittest.TestCase):
                                      "capture_recapture_shortcut", "capture_window_edit_shortcut",
                                      "capture_copy_shortcut", "capture_toolbar_hide_shortcut")),
                 ("截图", "操作提示", ("capture_hints_enabled", "capture_hint_order",
-                                  "capture_hint_per_line",
+                                  "capture_hint_per_line", "capture_hint_gap",
                                   "intruder_warning_enabled",
-                                  "intruder_warning_items")),
+                                  "intruder_warning_items", "hint_bar_style",
+                                  "hint_bar_warning_style")),
                 ("截图", "窗口与控件识别", ("window_detection", "window_auto_select", "window_hover_detect",
                                       "window_hover_color", "window_hover_opacity", "window_uia_detect",
                                       "window_hover_interval", "element_depth")),
@@ -1425,7 +1471,8 @@ class CoreTests(unittest.TestCase):
                     self.assertTrue(box.isAncestorOf(control), (title, key))
             preview_groups = {
                 "截图": {"assist": "定位辅助", "hover": "窗口与控件识别",
-                         "selection": "遮罩与选区", "hints": "操作提示"},
+                         "selection": "遮罩与选区", "hints": "操作提示",
+                         "hint_style": "操作提示", "hint_warning_style": "操作提示"},
                 "剪贴板贴图": {"text": "文字贴图", "color": "颜色贴图", "file": "文件贴图"},
             }
             for page_title, kinds in preview_groups.items():
@@ -1447,7 +1494,9 @@ class CoreTests(unittest.TestCase):
                     self.assertEqual(editor_page.controls["eraser_width"].maximum(), 100)
                     screenshot_previews = {preview.kind: preview
                                for preview in settings.page("截图").previews}
-                    self.assertEqual(set(screenshot_previews), {"assist", "hover", "selection", "hints"})
+                    self.assertEqual(set(screenshot_previews),
+                                     {"assist", "hover", "selection", "hints",
+                                      "hint_style", "hint_warning_style"})
                     self.assertTrue(all(not preview.grab().isNull()
                             for preview in screenshot_previews.values()))
                     clipboard_page = settings.page("剪贴板贴图")
@@ -5771,26 +5820,31 @@ class CoreTests(unittest.TestCase):
         """提示条与放大镜边缘对齐：放大镜在光标右侧（贴左）时左对齐，翻到左侧时右对齐。"""
         from PySide6.QtCore import QRect
         from PySide6.QtGui import QFont, QFontMetrics
-        from screenshot.overlay_info import HINT_BAR_SHIFT_X, info_bar_layout
+        from screenshot.overlay_info import info_bar_layout
 
         metrics = QFontMetrics(QFont())
         area = QRect(0, 0, 600, 400)
         items = ["20, 20  200 x 100", "拖动移动"]
-        # 放大镜在光标右侧（普通情形）：提示条左边对齐放大镜左边，再往右挪一点，文字左对齐。
+        # 放大镜在光标右侧（普通情形）：提示条左边直接对齐放大镜左边，不再额外偏移；文字左对齐。
         cursor = (100, 30)
         right_anchor = QRect(132, 62, 140, 140)
         bar, _rows, align_right = info_bar_layout(metrics, area, right_anchor, items,
                                                   cursor=cursor)
         self.assertFalse(align_right)
-        self.assertEqual(bar.left(), right_anchor.left() + HINT_BAR_SHIFT_X)
-        self.assertGreaterEqual(bar.top(), right_anchor.bottom())
-        # 放大镜翻到光标左侧（贴右沿）：提示条右边对齐放大镜右边，文字右对齐。
+        self.assertEqual(bar.left(), right_anchor.left())
+        # 默认间距为 0：提示条上边紧贴放大镜下边（相邻不重叠）。
+        self.assertEqual(bar.top(), right_anchor.bottom() + 1)
+        # 间距可配置：gap 越大，提示条离放大镜越远。
+        gap_bar, _rows, _align = info_bar_layout(metrics, area, right_anchor, items,
+                                                 cursor=cursor, gap=12)
+        self.assertEqual(gap_bar.top(), right_anchor.bottom() + 1 + 12)
+        # 放大镜翻到光标左侧（贴右沿）：提示条右边直接对齐放大镜右边，文字右对齐。
         left_anchor = QRect(area.right() - 172, 62, 140, 140)
         bar2, _rows2, align_right2 = info_bar_layout(metrics, area, left_anchor, items,
                                                      cursor=(area.right() - 40, 30))
         self.assertTrue(align_right2)
-        # 条右边缘对齐放大镜右边缘并往左挪 HINT_BAR_SHIFT_X（QRect.right() 已含 -1）。
-        self.assertEqual(bar2.right(), left_anchor.right() - HINT_BAR_SHIFT_X)
+        # 条右边缘对齐放大镜右边缘（QRect.right() 已含 -1）。
+        self.assertEqual(bar2.right(), left_anchor.right())
 
     def test_info_bar_flips_with_magnifier_and_never_covers_cursor(self):
         """贴下沿时提示条跟着放大镜翻到上方，且不横跨光标位置。"""
@@ -5845,6 +5899,55 @@ class CoreTests(unittest.TestCase):
         short = info_bar_layout(metrics, area, anchor, items, per_line=0)[0]
         self.assertGreater(tall.height(), short.height())
 
+    def test_hint_bar_style_config_and_editor(self):
+        """两套提示条外观：解析、非法值逐键回退、编辑器预设套用与「自定义」识别。"""
+        from config.config_manager import (DEFAULTS, DEFAULT_HINT_BAR_STYLE,
+                                           DEFAULT_HINT_BAR_WARNING_STYLE, HINT_BAR_FILL_ALPHA,
+                                           HINT_BAR_PRESETS, HINT_BAR_WARNING_FILL_ALPHA,
+                                           hint_bar_style, repair)
+        from ui.settings_screenshot import HintBarStyleEditor
+
+        # 解析：无警示取普通样式，有警示取警示样式；缺失或非字典时回退内置默认样式。
+        # 返回值附带绘制期的 alpha（普通 220 / 警示 232），保证默认外观与改造前一致。
+        settings = {"hint_bar_style": DEFAULT_HINT_BAR_STYLE,
+                    "hint_bar_warning_style": DEFAULT_HINT_BAR_WARNING_STYLE}
+        self.assertEqual(hint_bar_style(settings, False),
+                         {**DEFAULT_HINT_BAR_STYLE, "alpha": HINT_BAR_FILL_ALPHA})
+        self.assertEqual(hint_bar_style(settings, True),
+                         {**DEFAULT_HINT_BAR_WARNING_STYLE, "alpha": HINT_BAR_WARNING_FILL_ALPHA})
+        self.assertEqual(hint_bar_style({}, False),
+                         {**DEFAULT_HINT_BAR_STYLE, "alpha": HINT_BAR_FILL_ALPHA})
+        self.assertEqual(hint_bar_style({"hint_bar_style": "bad"}, True),
+                         {**DEFAULT_HINT_BAR_WARNING_STYLE, "alpha": HINT_BAR_WARNING_FILL_ALPHA})
+        # 两套默认外观确实不同，且不把 alpha 写回配置（validate/编辑器都不产出该键）。
+        self.assertNotEqual(DEFAULT_HINT_BAR_STYLE, DEFAULT_HINT_BAR_WARNING_STYLE)
+        self.assertNotIn("alpha", DEFAULTS["hint_bar_style"])
+
+        # 错误回滚：非法样式只丢弃这一项，其余用户设置保留。
+        fixed, dropped = repair({"hint_bar_style": {"text_color": "red"}, "magnifier_size": 200})
+        self.assertIn("hint_bar_style", dropped)
+        self.assertEqual(fixed["hint_bar_style"], DEFAULTS["hint_bar_style"])
+        self.assertEqual(fixed["magnifier_size"], 200)
+
+        # 编辑器：选预设一次性套用整组外观；手动改任一项后自动记为「自定义」。
+        editor = HintBarStyleEditor(HINT_BAR_PRESETS, DEFAULT_HINT_BAR_STYLE, "提示条")
+        self.assertEqual(editor.value(), DEFAULT_HINT_BAR_STYLE)
+        editor.preset.setCurrentIndex(editor.preset.findData("ink"))
+        self.assertEqual(editor.value(), dict(HINT_BAR_PRESETS[1][2], preset="ink"))
+        editor.radius.setValue(11)
+        self.assertEqual(editor.value()["preset"], "custom")
+        self.assertEqual(editor.value()["radius"], 11)
+        # set_value 把配置写回界面（重置/同步路径），预设名也一并还原。
+        editor.set_value(DEFAULT_HINT_BAR_STYLE)
+        self.assertEqual(editor.value(), DEFAULT_HINT_BAR_STYLE)
+        editor.deleteLater()
+        # 已保存为「自定义」的样式：打开设置时预设栏应显示「自定义」而不是首个预设名。
+        custom = {"preset": "custom", "text_color": "#010203", "fill_color": "#040506",
+                  "border_color": "#070809", "rounded": False, "radius": 0}
+        editor2 = HintBarStyleEditor(HINT_BAR_PRESETS, custom, "提示条")
+        self.assertEqual(editor2.value(), custom)
+        editor2.deleteLater()
+
     def test_hint_order_buttons_move_items(self):
         """顺序既支持拖动，也支持选中后上移/下移按钮。"""
         from config.config_manager import HINT_ITEM_IDS, HINT_LABELS
@@ -5885,7 +5988,8 @@ class CoreTests(unittest.TestCase):
 
     def test_info_bar_is_overlay_above_inline_canvas_and_follows_magnifier(self):
         """提示条是遮罩的子控件并抬在编辑画布之上：光标进选区也不会被内容盖住。"""
-        from config.config_manager import DEFAULTS
+        from config.config_manager import (DEFAULTS, HINT_BAR_FILL_ALPHA,
+                                           HINT_BAR_WARNING_FILL_ALPHA)
         from screenshot.mask_window import InfoBar, MaskWindow
 
         bounds = {"left": 0, "top": 0, "width": 900, "height": 700}
@@ -5915,6 +6019,14 @@ class CoreTests(unittest.TestCase):
         mask.position = QPoint(60, 60)
         mask.update_all()
         self.assertNotEqual(first, bar.geometry())
+        # 无警示时用普通样式；出现采集自检警示时整条换成警示样式（附绘制期 alpha）。
+        self.assertEqual(bar.style,
+                         {**settings["hint_bar_style"], "alpha": HINT_BAR_FILL_ALPHA})
+        with patch.object(mask, "self_check_warning", return_value="选区内有贴图"):
+            mask.update_all()
+        self.assertEqual(bar.style,
+                         {**settings["hint_bar_warning_style"],
+                          "alpha": HINT_BAR_WARNING_FILL_ALPHA})
         # 关掉总开关后整条消失。
         settings["capture_hints_enabled"] = False
         mask.update_all()
