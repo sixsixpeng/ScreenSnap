@@ -101,6 +101,66 @@ def available():
     return module() is not None
 
 
+class _PropertyCache:
+    """单次查询内的控件属性缓存。
+
+    读取 UIA 属性是跨进程调用，也是本模块的主要开销；同一次查询里同一个控件会被
+    多次访问（下钻时入栈/出栈、向上收集层级等）。缓存后每个控件每个属性只读一次，
+    结果与逐次读取完全一致，只是不再重复往返。
+    """
+
+    def __init__(self):
+        self._items = {}
+
+    def _props(self, control):
+        # 用 id 作键并同时持有控件引用：防止控件在查询中途被回收后 id 复用串味。
+        entry = self._items.get(id(control))
+        if entry is None or entry[0] is not control:
+            entry = (control, {})
+            self._items[id(control)] = entry
+        return entry[1]
+
+    def rect(self, control):
+        props = self._props(control)
+        if "rect" not in props:
+            props["rect"] = rectangle_of(control)
+        return props["rect"]
+
+    def type(self, control):
+        props = self._props(control)
+        if "type" not in props:
+            props["type"] = type_of(control)
+        return props["type"]
+
+    def name(self, control):
+        props = self._props(control)
+        if "name" not in props:
+            props["name"] = name_of(control)
+        return props["name"]
+
+    def handle(self, control):
+        props = self._props(control)
+        if "handle" not in props:
+            props["handle"] = handle_of(control)
+        return props["handle"]
+
+
+def _rect_of(control, cache):
+    return cache.rect(control) if cache is not None else rectangle_of(control)
+
+
+def _type_of(control, cache):
+    return cache.type(control) if cache is not None else type_of(control)
+
+
+def _name_of(control, cache):
+    return cache.name(control) if cache is not None else name_of(control)
+
+
+def _handle_of(control, cache):
+    return cache.handle(control) if cache is not None else handle_of(control)
+
+
 def element_chain(point, max_depth=3, exclude_hwnd=None, debug_tree=False):
     """返回覆盖该点的 UIA 控件矩形链（由外到内）；不可用时返回空列表。
 
@@ -131,6 +191,8 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
     """真正执行一次 UIA 查询，调用方负责计时与异常兜底。"""
     global _disabled_until, _last_debug_signature
     x, y = int(point[0]), int(point[1])
+    # 同一次查询里对同一控件的属性只读一次，避免反复跨进程取值。
+    cache = _PropertyCache()
     try:
         # 鼠标下最上面的一定是本进程的遮罩，而 UIA 是树结构没有 Z 序概念，
         # 所以先用 Win32 找到遮罩下面的外部窗口，识别结果必须落在它里面。
@@ -139,17 +201,20 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
             logger.debug("UIA 之前未取到外部窗口: 物理点(%d,%d)", x, y)
             return []
         win_rect = physical_rect_of(handle)
-        control = control_at(automation, x, y, handle, logger, exclude_hwnd)
+        control = control_at(automation, x, y, handle, logger, exclude_hwnd, cache)
         if control is None:
             return []
-        signature = (handle, type_of(control), name_of(control), rectangle_of(control))
-        if debug_tree and signature != _last_debug_signature:
-            _last_debug_signature = signature
-            logger.info("UIA 结构诊断（最多 60 个节点；不读取控件值）:\n%s",
-                        format_control_tree(control, logger))
-        elif not debug_tree:
+        if debug_tree:
+            # 结构诊断才需要这组属性；常规识别下取它纯属浪费跨进程调用。
+            signature = (handle, _type_of(control, cache), _name_of(control, cache),
+                         _rect_of(control, cache))
+            if signature != _last_debug_signature:
+                _last_debug_signature = signature
+                logger.info("UIA 结构诊断（最多 60 个节点；不读取控件值）:\n%s",
+                            format_control_tree(control, logger))
+        else:
             _last_debug_signature = None
-        chain = climb(control, handle, max_depth, logger, win_rect)
+        chain = climb(control, handle, max_depth, logger, win_rect, cache)
         logger.debug("UIA 识别到 %d 层元素: %s", len(chain), chain)
         return chain
     except Exception as error:
@@ -160,7 +225,7 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
         return []
 
 
-def control_at(automation, x, y, handle, logger, exclude_hwnd=None):
+def control_at(automation, x, y, handle, logger, exclude_hwnd=None, cache=None):
     """取该点最深的控件：原生命中后继续下钻到容器里的具体项，失败再退回下钻兜底。
 
     ControlFromPoint 已能命中大多数自绘界面的最里层（按钮、地址栏、网页焦点等），
@@ -168,11 +233,12 @@ def control_at(automation, x, y, handle, logger, exclude_hwnd=None):
     命中成功后仍沿它的子树继续向下钻，把具体的列表项/树节点也找出来。只有当原生命
     中完全失败（比如打在本进程遮罩上）时，才退回 ControlFromHandle + 下钻兜底。
     """
-    hit = control_from_point(automation, x, y, logger, exclude_hwnd)
+    hit = control_from_point(automation, x, y, logger, exclude_hwnd, cache)
     if hit is not None:
-        logger.debug("UIA 原生命中最深控件: 名称=%r 类型=%r",
-                     name_of(hit), type_of(hit))
-        return deepest_at(hit, x, y, logger)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("UIA 原生命中最深控件: 名称=%r 类型=%r",
+                         _name_of(hit, cache), _type_of(hit, cache))
+        return deepest_at(hit, x, y, logger, cache=cache)
     try:
         control = automation.ControlFromHandle(handle)
     except Exception as error:
@@ -181,12 +247,13 @@ def control_at(automation, x, y, handle, logger, exclude_hwnd=None):
     if control is None:
         logger.debug("UIA 取不到窗口 %d 的控件", handle)
         return None
-    logger.debug("UIA 从窗口 %d 开始下钻: 名称=%r 类型=%r",
-                 handle, name_of(control), type_of(control))
-    return deepest_at(control, x, y, logger)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("UIA 从窗口 %d 开始下钻: 名称=%r 类型=%r",
+                     handle, _name_of(control, cache), _type_of(control, cache))
+    return deepest_at(control, x, y, logger, cache=cache)
 
 
-def control_from_point(automation, x, y, logger, exclude_hwnd=None):
+def control_from_point(automation, x, y, logger, exclude_hwnd=None, cache=None):
     """用 UIA 自己的命中测试取最深控件；命中本进程窗口（遮罩）时返回 None。
 
     exclude_hwnd 是置顶遮罩句柄：查询瞬间让它命中穿透，这样 ControlFromPoint
@@ -207,22 +274,25 @@ def control_from_point(automation, x, y, logger, exclude_hwnd=None):
             restore()
     if control is None:
         return None
-    rectangle = rectangle_of(control)
+    rectangle = _rect_of(control, cache)
     if rectangle is None or not covers(rectangle, x, y):
-        logger.debug("UIA 命中测试没有可用结果: 名称=%r 类型=%r 矩形=%s",
-                     name_of(control), type_of(control), rectangle)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("UIA 命中测试没有可用结果: 名称=%r 类型=%r 矩形=%s",
+                         _name_of(control, cache), _type_of(control, cache), rectangle)
         return None
-    if own_control(control):
+    if own_control(control, cache):
         # 只让位给截图遮罩和贴图；本程序普通窗口仍允许参与 UIA 识别。
-        logger.debug("UIA 命中测试命中本程序覆盖层，继续向下穿透: 名称=%r 类型=%r",
-                     name_of(control), type_of(control))
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("UIA 命中测试命中本程序覆盖层，继续向下穿透: 名称=%r 类型=%r",
+                         _name_of(control, cache), _type_of(control, cache))
         return None
-    logger.debug("UIA 命中控件: 名称=%r 类型=%r 矩形=%s",
-                 name_of(control), type_of(control), rectangle)
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug("UIA 命中控件: 名称=%r 类型=%r 矩形=%s",
+                     _name_of(control, cache), _type_of(control, cache), rectangle)
     return control
 
 
-def own_control(control):
+def own_control(control, cache=None):
     """命中控件是否属于需穿透的截图遮罩。
 
     只有遮罩窗口（screensnap_mask）会被忽略；贴图、菜单等其它本程序窗口
@@ -232,15 +302,19 @@ def own_control(control):
     for _ in range(PARENT_LIMIT):
         if current is None:
             return False
-        handle = handle_of(current)
+        handle = _handle_of(current, cache)
         if handle:
-            if process_of(handle) == os.getpid() and ignored_mask_window(handle):
+            pid = process_of(handle)
+            # 已经上溯到其它进程的控件，就不可能是本程序遮罩的后代，直接结束。
+            if pid and pid != os.getpid():
+                return False
+            if pid == os.getpid() and ignored_mask_window(handle):
                 return True
         current = parent_of(current)
     return False
 
 
-def climb(control, handle, max_depth, logger, win_rect=None):
+def climb(control, handle, max_depth, logger, win_rect=None, cache=None):
     """从最深控件往上收集矩形，遇到目标窗口层为止。
 
     不再把“桌面”根算进来，否则它会白占一层，导致最里面的控件被截掉。
@@ -249,30 +323,37 @@ def climb(control, handle, max_depth, logger, win_rect=None):
     """
     chain = []
     current = control
+    # 名称与类型只用于日志；DEBUG 关闭时不再为它们付出跨进程读取的代价。
+    verbose = logger.isEnabledFor(logging.DEBUG)
     for _ in range(PARENT_LIMIT):
         if current is None or len(chain) >= max_depth:
             break
-        rectangle = rectangle_of(current)
-        if rectangle is None and handle_of(current) == handle and win_rect is not None:
+        rectangle = _rect_of(current, cache)
+        current_handle = _handle_of(current, cache)
+        if rectangle is None and current_handle == handle and win_rect is not None:
             rectangle = win_rect
         if rectangle is None:
-            logger.debug("UIA 跳过元素: 名称=%r 类型=%r（矩形无效或小于 %d 像素）",
-                         name_of(current), type_of(current), MIN_SIZE)
+            if verbose:
+                logger.debug("UIA 跳过元素: 名称=%r 类型=%r（矩形无效或小于 %d 像素）",
+                             _name_of(current, cache), _type_of(current, cache), MIN_SIZE)
         elif rectangle in chain:
-            logger.debug("UIA 跳过元素: 名称=%r 类型=%r 矩形=%s（与已有层重复）",
-                         name_of(current), type_of(current), rectangle)
+            if verbose:
+                logger.debug("UIA 跳过元素: 名称=%r 类型=%r 矩形=%s（与已有层重复）",
+                             _name_of(current, cache), _type_of(current, cache), rectangle)
         else:
             chain.append(rectangle)
-            logger.debug("UIA 元素[%d]: 名称=%r 类型=%r 矩形=%s",
-                         len(chain), name_of(current), type_of(current), rectangle)
-        if handle_of(current) == handle:
+            if verbose:
+                logger.debug("UIA 元素[%d]: 名称=%r 类型=%r 矩形=%s",
+                             len(chain), _name_of(current, cache),
+                             _type_of(current, cache), rectangle)
+        if current_handle == handle:
             break
         current = parent_of(current)
     chain.reverse()
     return chain
 
 
-def deepest_at(control, x, y, logger, limit=DESCEND_LIMIT):
+def deepest_at(control, x, y, logger, limit=DESCEND_LIMIT, cache=None):
     """向下找覆盖该点的最深“可选项”控件。
 
     ControlFromPoint 对虚拟化列表常常只给到列表容器，这里沿它的子树继续下钻：
@@ -289,17 +370,18 @@ def deepest_at(control, x, y, logger, limit=DESCEND_LIMIT):
         if identity in visited:
             continue
         visited.add(identity)
-        rect = rectangle_of(current)
+        rect = _rect_of(current, cache)
         if rect is None or not covers(rect, x, y):
             continue
         area = (rect[2] - rect[0]) * (rect[3] - rect[1])
-        is_container = type_of(current) in CONTAINER_TYPES
-        candidates.append(((area, is_container, not bool(name_of(current)), -depth), current))
+        is_container = _type_of(current, cache) in CONTAINER_TYPES
+        # 名称只用于“同尺寸时优先取有名者”的兜底，这里先不读，留到决出并列者再取。
+        candidates.append(((area, is_container, -depth), current))
         if depth >= limit or not is_container:
             continue
         children = direct_children(current, logger)
         for child in reversed(children):
-            child_rect = rectangle_of(child)
+            child_rect = _rect_of(child, cache)
             if child_rect is not None and covers(child_rect, x, y):
                 pending.append((child, depth + 1))
 
@@ -307,7 +389,17 @@ def deepest_at(control, x, y, logger, limit=DESCEND_LIMIT):
         logger.debug("UIA 下钻达到节点预算 %d，未检查剩余分支", VISIT_BUDGET)
     if not candidates:
         return control
-    return min(candidates, key=lambda candidate: candidate[0])[1]
+    # 与原先按 (面积, 是否容器, 有无名称, 层级) 取最小等价：先选出面积/容器/深度的
+    # 最小者，再从并列者中取第一个有名称的；都无名称则取第一个。只有唯一候选时
+    # 连名称都不用读。
+    best_key = min(candidate[0] for candidate in candidates)
+    tied = [candidate for candidate in candidates if candidate[0] == best_key]
+    if len(tied) == 1:
+        return tied[0][1]
+    for _, candidate in tied:
+        if _name_of(candidate, cache):
+            return candidate
+    return tied[0][1]
 
 
 def direct_children(control, logger):
@@ -319,8 +411,9 @@ def direct_children(control, logger):
     try:
         children = control.GetChildren()
     except Exception as error:
-        logger.debug("UIA 读取子控件失败: 名称=%r 类型=%r %s",
-                     name_of(control), type_of(control), error)
+        if logger.isEnabledFor(logging.DEBUG):
+            logger.debug("UIA 读取子控件失败: 名称=%r 类型=%r %s",
+                         name_of(control), type_of(control), error)
         return []
     if not isinstance(children, (list, tuple)):
         return []

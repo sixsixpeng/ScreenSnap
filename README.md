@@ -573,6 +573,15 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon icon.ico --add-data "ic
 
 ## 调整记录
 
+### 2026-10-04 UIA 识别性能优化（识别结果不变）
+
+- **单次查询属性缓存**：读取 UIA 属性是跨进程调用，也是识别的主要开销；同一次查询里同一控件会被反复访问（下钻入栈/出栈、向上收集层级）。新增 `_PropertyCache`，让每个控件的矩形/类型/名称/窗口句柄在一次查询内只读一次，结果与逐次读取完全一致。`query` 建立缓存并贯穿 `control_at → control_from_point → own_control → deepest_at → climb`；未传缓存的旧调用路径（如诊断、测试）保持原行为。
+- **日志读取守卫**：`climb`、`control_at`、`control_from_point`、`direct_children` 里仅用于 DEBUG 日志的名称/类型读取，改为先判断 `logger.isEnabledFor(logging.DEBUG)`。Python 日志的参数先求值、级别过滤只省格式化与写盘，因此默认 INFO 日志下这些跨进程读取原本是纯浪费；现在不再发生。
+- **诊断属性惰性化**：`query` 中用于结构诊断 signature 的类型/名称/矩形只在 `debug_tree` 打开时读取，常规识别不再多读一遍。
+- **下钻名称惰性化**：`deepest_at` 候选排序键由 `(面积, 是否容器, 有无名称, 层级)` 改为 `(面积, 是否容器, 层级)` 两段式——先取最小者，仅在同键并列时按“优先有名者、否则取先访问者”决出，与旧结果严格等价；唯一候选时连名称都不读。
+- **跨进程早停**：`own_control` 上溯父链时，一旦发现控件属于其它进程即返回 `False`（外部窗口不可能是本程序遮罩的后代），不必再走满父链；命中本进程遮罩时行为不变。
+- **验证**：新增 `test_uia_property_cache_reads_each_property_once`、`test_uia_climb_skips_name_type_reads_when_debug_disabled`、`test_uia_deepest_at_reads_name_only_for_ties`、`test_uia_own_control_stops_at_foreign_process`；原有 UIA 下钻/重叠候选/层级收集/只忽略遮罩/熔断冷却/元素链回退等定向用例分小批复跑通过。未改动识别候选的选取规则与最终结果。
+
 ### 2026-10-04 提示条与放大镜对齐微调 + 两套提示条外观（普通 / 警示）
 
 - **去掉横向额外偏移**：删除提示条相对放大镜硬编码的 10px 右移（原 `HINT_BAR_SHIFT_X`）。现在横向直接按移动位置算法与放大镜边缘对齐——放大镜在光标右侧就对齐其左边（文字左对齐），在左侧就对齐其右边（文字右对齐），被屏边推回时按推回后的那一侧决定对齐。

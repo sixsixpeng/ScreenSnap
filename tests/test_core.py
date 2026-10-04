@@ -11666,6 +11666,161 @@ class CoreTests(unittest.TestCase):
 
         self.assertIs(deepest_at(root, 50, 50, logging.getLogger("test")), icon)
 
+    def test_uia_property_cache_reads_each_property_once(self):
+        from types import SimpleNamespace
+        from core import window_uia
+
+        class CountingControl:
+            def __init__(self):
+                self._rect = SimpleNamespace(left=0, top=0, right=10, bottom=10)
+                self.reads = {"name": 0, "type": 0, "handle": 0, "rect": 0}
+
+            @property
+            def Name(self):
+                self.reads["name"] += 1
+                return "控件"
+
+            @property
+            def ControlTypeName(self):
+                self.reads["type"] += 1
+                return "ButtonControl"
+
+            @property
+            def NativeWindowHandle(self):
+                self.reads["handle"] += 1
+                return 42
+
+            @property
+            def BoundingRectangle(self):
+                self.reads["rect"] += 1
+                return self._rect
+
+        control = CountingControl()
+        cache = window_uia._PropertyCache()
+        for _ in range(3):
+            self.assertEqual(window_uia._name_of(control, cache), "控件")
+            self.assertEqual(window_uia._type_of(control, cache), "ButtonControl")
+            self.assertEqual(window_uia._handle_of(control, cache), 42)
+            self.assertEqual(window_uia._rect_of(control, cache), (0, 0, 10, 10))
+        # 每个属性只跨进程读一次，重复查询命中缓存。
+        self.assertEqual(control.reads, {"name": 1, "type": 1, "handle": 1, "rect": 1})
+        # 未传缓存时退回直读，保证其它调用方的旧行为不变。
+        self.assertEqual(window_uia._name_of(control, None), "控件")
+        self.assertEqual(window_uia._name_of(control, None), "控件")
+        self.assertEqual(control.reads["name"], 3)
+
+    def test_uia_climb_skips_name_type_reads_when_debug_disabled(self):
+        import logging
+        from types import SimpleNamespace
+        from core.window_uia import climb
+
+        class CountingControl:
+            def __init__(self):
+                self.reads = {"name": 0, "type": 0}
+
+            @property
+            def Name(self):
+                self.reads["name"] += 1
+                return "按钮"
+
+            @property
+            def ControlTypeName(self):
+                self.reads["type"] += 1
+                return "ButtonControl"
+
+            @property
+            def NativeWindowHandle(self):
+                return 42
+
+            @property
+            def BoundingRectangle(self):
+                return SimpleNamespace(left=0, top=0, right=10, bottom=10)
+
+            def GetParentControl(self):
+                return None
+
+        control = CountingControl()
+        silent = logging.getLogger("test.climb.silent")
+        silent.setLevel(logging.INFO)
+        # 默认 INFO 日志下不读取名称/类型，避免为不输出的日志付出跨进程开销。
+        self.assertEqual(climb(control, 42, 3, silent), [(0, 0, 10, 10)])
+        self.assertEqual(control.reads, {"name": 0, "type": 0})
+
+        loud = logging.getLogger("test.climb.loud")
+        loud.setLevel(logging.DEBUG)
+        with self.assertLogs(loud, level="DEBUG"):
+            self.assertEqual(climb(control, 42, 3, loud), [(0, 0, 10, 10)])
+        # 打开 DEBUG 后仍照常输出名称/类型，日志内容没有丢失。
+        self.assertGreater(control.reads["name"], 0)
+        self.assertGreater(control.reads["type"], 0)
+
+    def test_uia_deepest_at_reads_name_only_for_ties(self):
+        import logging
+        from types import SimpleNamespace
+        from core.window_uia import deepest_at
+
+        class CountingControl:
+            def __init__(self, name, control_type, rect, children=()):
+                self._name = name
+                self._type = control_type
+                self._rect = SimpleNamespace(
+                    left=rect[0], top=rect[1], right=rect[2], bottom=rect[3])
+                self.children = list(children)
+                self.name_reads = 0
+
+            @property
+            def Name(self):
+                self.name_reads += 1
+                return self._name
+
+            @property
+            def ControlTypeName(self):
+                return self._type
+
+            @property
+            def BoundingRectangle(self):
+                return self._rect
+
+            def GetChildren(self):
+                return self.children
+
+        logger = logging.getLogger("test")
+        unique = CountingControl("小按钮", "ButtonControl", (40, 40, 60, 60))
+        root = CountingControl("根", "PaneControl", (0, 0, 100, 100), [unique])
+        # 唯一最小候选时无需读名称即返回。
+        self.assertIs(deepest_at(root, 50, 50, logger), unique)
+        self.assertEqual(unique.name_reads, 0)
+
+        # 同名尺寸并列时，仍按原规则优先取有名者。
+        named = CountingControl("有名字", "ButtonControl", (40, 40, 60, 60))
+        unnamed = CountingControl("", "ButtonControl", (40, 40, 60, 60))
+        tied_root = CountingControl("根", "PaneControl", (0, 0, 100, 100),
+                                    [unnamed, named])
+        self.assertIs(deepest_at(tied_root, 50, 50, logger), named)
+
+    def test_uia_own_control_stops_at_foreign_process(self):
+        import os
+        from unittest.mock import patch
+        from core import window_uia
+
+        class FakeControl:
+            def __init__(self, handle, parent=None):
+                self._handle = handle
+                self._parent = parent
+
+            @property
+            def NativeWindowHandle(self):
+                return self._handle
+
+            def GetParentControl(self):
+                return self._parent
+
+        child = FakeControl(100, FakeControl(200))
+        with patch("core.window_uia.process_of", return_value=os.getpid() + 1) as process:
+            self.assertFalse(window_uia.own_control(child))
+        # 上溯到其它进程即可断定不是本程序遮罩，无需继续走满父链。
+        process.assert_called_once()
+
     def test_uia_element_chain_walks_parents(self):
         import sys
         import os
