@@ -3,16 +3,30 @@
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QPen
 
+# 放大镜尺寸（正方形边长）与缩放倍率：采样区域 = 尺寸 / 倍率，
+# 因此 140 px 的默认尺寸仍是 20 px 采样，与原行为一致；用户放大尺寸时视野同步变大。
+MAGNIFIER_DEFAULT_SIZE = 140
+MAGNIFIER_MIN_SIZE = 100
+MAGNIFIER_MAX_SIZE = 320
+MAGNIFIER_ZOOM = 7.0
+# 放大镜偏移光标的距离（像素）：默认在右下，贴边时翻到左上。
+MAGNIFIER_OFFSET = 32
 
-def magnifier_rect(point, bounds):
-    width = min(140, max(1, bounds.width() - 20))
-    height = min(140, max(1, bounds.height() - 20))
-    x = point.x() + 32
-    y = point.y() + 32
+
+def sample_size(size):
+    """按放大镜尺寸换算采样区域边长（像素），保证缩放倍率恒定。"""
+    return max(1, int(round(max(1, size) / MAGNIFIER_ZOOM)))
+
+
+def magnifier_rect(point, bounds, size=MAGNIFIER_DEFAULT_SIZE):
+    width = min(size, max(1, bounds.width() - 20))
+    height = min(size, max(1, bounds.height() - 20))
+    x = point.x() + MAGNIFIER_OFFSET
+    y = point.y() + MAGNIFIER_OFFSET
     if x + width + 4 > bounds.width():
-        x = point.x() - width - 32
+        x = point.x() - width - MAGNIFIER_OFFSET
     if y + height + 4 > bounds.height():
-        y = point.y() - height - 32
+        y = point.y() - height - MAGNIFIER_OFFSET
     return QRect(
         min(max(x, 2), max(2, bounds.width() - width - 2)),
         min(max(y, 2), max(2, bounds.height() - height - 2)),
@@ -21,17 +35,18 @@ def magnifier_rect(point, bounds):
 
 
 def paint_magnifier(painter, image, point, bounds, source_point=None, grid=False,
-                    grid_color=None):
+                    grid_color=None, size=MAGNIFIER_DEFAULT_SIZE):
     """把光标周围的小块原图放大绘制到遮罩上的悬浮区域。"""
     source_point = source_point or point
-    sample_width = min(20, image.width())
-    sample_height = min(20, image.height())
+    side = sample_size(size)
+    sample_width = min(side, image.width())
+    sample_height = min(side, image.height())
     sample = QRect(
         min(max(0, source_point.x() - sample_width // 2), image.width() - sample_width),
         min(max(0, source_point.y() - sample_height // 2), image.height() - sample_height),
         sample_width, sample_height,
     )
-    frame = magnifier_rect(point, bounds)
+    frame = magnifier_rect(point, bounds, size)
     target = frame.adjusted(2, 2, -2, -2)
     painter.fillRect(frame, QColor("#ffffff"))
     painter.drawImage(target, image, sample)

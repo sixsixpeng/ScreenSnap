@@ -778,7 +778,13 @@ class CoreTests(unittest.TestCase):
         from config.config_manager import DEFAULTS, validate, ConfigManager
 
         new_keys = {
+            # 选区阶段四个功能键 + 原地编辑工具栏隐藏键：按钮已移除/不加按钮，改为可配置快捷键。
+            "capture_custom_size_shortcut": str, "capture_recapture_shortcut": str,
+            "capture_window_edit_shortcut": str, "capture_copy_shortcut": str,
+            "capture_toolbar_hide_shortcut": str,
             "capture_picker_shortcut": str, "magnifier_grid": bool,
+            "magnifier_size": int, "capture_hint_order": list,
+            "capture_hint_per_line": int, "capture_hints_enabled": bool,
             "magnifier_grid_color": str, "ruler_enabled": bool, "ruler_color": str,
             "sequence_font_size": int, "sequence_start": int, "sequence_shape": str,
             "sequence_text_color": str, "sequence_fill_color": str,
@@ -796,6 +802,28 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(result["magnifier_grid"])
         self.assertTrue(result["sticker_recycle_enabled"])
         self.assertEqual(result["sequence_shape"], "circle")
+        # 旧配置缺键时四个选区功能键与工具栏隐藏键也要补齐默认值（初始化/升级路径）。
+        self.assertEqual({key: result[key] for key in (
+            "capture_custom_size_shortcut", "capture_recapture_shortcut",
+            "capture_window_edit_shortcut", "capture_copy_shortcut",
+            "capture_toolbar_hide_shortcut")},
+            {"capture_custom_size_shortcut": "F", "capture_recapture_shortcut": "R",
+             "capture_window_edit_shortcut": "E", "capture_copy_shortcut": "Y",
+             "capture_toolbar_hide_shortcut": "`"})
+        # 提示项清单与放大镜尺寸同样补齐默认值：默认全部提示项都开启、顺序即默认顺序。
+        from config.config_manager import HINT_ITEM_IDS
+        self.assertEqual(result["capture_hint_order"], list(HINT_ITEM_IDS))
+        self.assertEqual(result["magnifier_size"], 140)
+        # 提示条默认每行两个提示，且总开关默认开启；越界的每行提示数会被拒绝。
+        self.assertEqual(result["capture_hint_per_line"], 2)
+        self.assertTrue(result["capture_hints_enabled"])
+        with self.assertRaises(ValueError):
+            validate({"capture_hint_per_line": 9})
+        # 提示项顺序只保留已知 id、去重且保持用户顺序。
+        self.assertEqual(validate({"capture_hint_order": ["copy", "copy", "unknown", "coords"]})[
+            "capture_hint_order"], ["copy", "coords"])
+        with self.assertRaises(ValueError):
+            validate({"magnifier_size": 400})
 
         from ui.settings_window import SettingsWindow
         with tempfile.TemporaryDirectory() as folder:
@@ -805,16 +833,40 @@ class CoreTests(unittest.TestCase):
                 "ruler_enabled": False, "ruler_color": "#123456",
                 "sequence_shape": "star",
                 "capture_after_selection": "edit",
+                "capture_recapture_shortcut": "Alt+R",
+                "capture_copy_shortcut": "Alt+C",
+                "capture_toolbar_hide_shortcut": "Alt+H",
+                "capture_hint_order": ["coords"],
+                "capture_hint_per_line": 5,
+                "magnifier_size": 300,
             }), encoding="utf-8")
             manager = ConfigManager(path)
             self.assertFalse(manager.data["ruler_enabled"])
+            self.assertEqual(manager.data["capture_recapture_shortcut"], "Alt+R")
             settings = SettingsWindow(manager)
             screenshot = settings.page("截图")
             editor = settings.page("编辑器")
-            # 截图页重置：标尺/标尺颜色回到默认。
+            # 截图页重置：标尺/标尺颜色与四个选区功能键一起回到默认。
             screenshot.reset_page()
             self.assertTrue(manager.data["ruler_enabled"])
             self.assertEqual(manager.data["ruler_color"], DEFAULTS["ruler_color"])
+            self.assertEqual(manager.data["capture_recapture_shortcut"],
+                             DEFAULTS["capture_recapture_shortcut"])
+            self.assertEqual(manager.data["capture_copy_shortcut"],
+                             DEFAULTS["capture_copy_shortcut"])
+            self.assertEqual(manager.data["capture_toolbar_hide_shortcut"],
+                             DEFAULTS["capture_toolbar_hide_shortcut"])
+            # 提示项清单与放大镜尺寸也在本页重置范围内，界面控件同步回默认。
+            self.assertEqual(manager.data["capture_hint_order"], DEFAULTS["capture_hint_order"])
+            self.assertEqual(manager.data["magnifier_size"], DEFAULTS["magnifier_size"])
+            self.assertEqual(screenshot.controls["capture_hint_order"].value(),
+                             DEFAULTS["capture_hint_order"])
+            self.assertEqual(screenshot.controls["magnifier_size"].value(),
+                             DEFAULTS["magnifier_size"])
+            self.assertEqual(manager.data["capture_hint_per_line"],
+                             DEFAULTS["capture_hint_per_line"])
+            self.assertEqual(screenshot.controls["capture_hint_per_line"].value(),
+                             DEFAULTS["capture_hint_per_line"])
 
             # 编辑器页重置：序号形状回到默认。
             editor.reset_page()
@@ -823,6 +875,12 @@ class CoreTests(unittest.TestCase):
             reloaded = ConfigManager(path).data
             self.assertTrue(reloaded["ruler_enabled"])
             self.assertEqual(reloaded["ruler_color"], DEFAULTS["ruler_color"])
+            self.assertEqual(reloaded["capture_recapture_shortcut"],
+                             DEFAULTS["capture_recapture_shortcut"])
+            self.assertEqual(reloaded["capture_copy_shortcut"], DEFAULTS["capture_copy_shortcut"])
+            self.assertEqual(reloaded["capture_hint_order"], DEFAULTS["capture_hint_order"])
+            self.assertEqual(reloaded["capture_hint_per_line"], DEFAULTS["capture_hint_per_line"])
+            self.assertEqual(reloaded["magnifier_size"], DEFAULTS["magnifier_size"])
 
             self.assertEqual(reloaded["sequence_shape"], DEFAULTS["sequence_shape"])
             settings.close()
@@ -975,6 +1033,8 @@ class CoreTests(unittest.TestCase):
         self.assertFalse(toolbar.previews["text"].isHidden())
         self.assertLessEqual({0, 3, 4, 5, 28, 29, 35, 36},
                              set(toolbar._last_option_rows))
+        # 工具栏「外观」弹层是 Qt.Tool 的 QFrame，需自报标签才会被采集自检点名。
+        self.assertEqual(toolbar.appearance_menu.property("screensnap_self_window"), "外观弹层")
         toolbar.close()
 
         # ③④ 新建 / 编辑对话框：控件齐全且带（实时文字）预览。
@@ -1301,9 +1361,14 @@ class CoreTests(unittest.TestCase):
             self.app.processEvents()
             expected = (
                 ("截图", "截图后", ("inline_edit", "capture_after_selection")),
-                ("截图", "定位辅助", ("crosshair", "crosshair_color", "crosshair_width")),
+                ("截图", "定位辅助", ("crosshair", "crosshair_color", "crosshair_width",
+                                  "magnifier_size", "magnifier_grid")),
                 ("截图", "截图快捷操作", ("capture_quick_sticker_enabled", "capture_quick_sticker_shortcut",
-                                     "capture_save_shortcut")),
+                                     "capture_save_shortcut", "capture_custom_size_shortcut",
+                                     "capture_recapture_shortcut", "capture_window_edit_shortcut",
+                                     "capture_copy_shortcut", "capture_toolbar_hide_shortcut")),
+                ("截图", "操作提示", ("capture_hints_enabled", "capture_hint_order",
+                                  "capture_hint_per_line")),
                 ("截图", "窗口与控件识别", ("window_detection", "window_auto_select", "window_hover_detect",
                                       "window_hover_color", "window_hover_opacity", "window_uia_detect",
                                       "window_hover_interval", "element_depth")),
@@ -1335,7 +1400,7 @@ class CoreTests(unittest.TestCase):
                     self.assertTrue(box.isAncestorOf(control), (title, key))
             preview_groups = {
                 "截图": {"assist": "定位辅助", "hover": "窗口与控件识别",
-                         "selection": "遮罩与选区"},
+                         "selection": "遮罩与选区", "hints": "操作提示"},
                 "剪贴板贴图": {"text": "文字贴图", "color": "颜色贴图", "file": "文件贴图"},
             }
             for page_title, kinds in preview_groups.items():
@@ -1357,7 +1422,7 @@ class CoreTests(unittest.TestCase):
                     self.assertEqual(editor_page.controls["eraser_width"].maximum(), 100)
                     screenshot_previews = {preview.kind: preview
                                for preview in settings.page("截图").previews}
-                    self.assertEqual(set(screenshot_previews), {"assist", "hover", "selection"})
+                    self.assertEqual(set(screenshot_previews), {"assist", "hover", "selection", "hints"})
                     self.assertTrue(all(not preview.grab().isNull()
                             for preview in screenshot_previews.values()))
                     clipboard_page = settings.page("剪贴板贴图")
@@ -1745,36 +1810,46 @@ class CoreTests(unittest.TestCase):
         from PySide6.QtGui import QColor, QImage, QPainter
         from screenshot.overlay_info import paint_info
 
-        image = QImage(800, 100, QImage.Format_ARGB32)
+        anchor = QRect(300, 240, 140, 140)
+        area = QRect(0, 0, 800, 600)
+        image = QImage(800, 600, QImage.Format_ARGB32)
         image.fill(QColor("white"))
         painter = QPainter(image)
-        paint_info(painter, QPoint(20, 20), None, QRect(0, 0, 800, 100))
+        bar = paint_info(painter, anchor, area, ["20, 20", "拖拽框选", "Esc取消"])
         painter.end()
-        # 提示条贴顶后只有上下各 4px 内边距，取样避开文字区域。
-        backdrop = image.pixelColor(400, 2)
+        # 提示条画在放大镜下方，整条有对比底色（不是白底）。
+        self.assertGreaterEqual(bar.top(), anchor.bottom())
+        backdrop = image.pixelColor(bar.center().x(), bar.top() + 1)
         self.assertNotEqual(backdrop.name(), "#ffffff")
         self.assertLess(backdrop.red(), 100)
         self.assertEqual(backdrop.alpha(), 255)
-        self.assertEqual(image.pixelColor(400, 50).name(), "#ffffff")
+        # 提示条之外仍是原图（提示只画在遮罩表面）。
+        self.assertEqual(image.pixelColor(400, 20).name(), "#ffffff")
 
         painter = Mock()
         painter.device.return_value.width.return_value = 800
-        painter.device.return_value.height.return_value = 100
+        painter.device.return_value.height.return_value = 600
         painter.fontMetrics.return_value.horizontalAdvance.side_effect = lambda text: len(text) * 8
         painter.fontMetrics.return_value.height.return_value = 16
-        painter.fontMetrics.return_value.elidedText.side_effect = lambda text, mode, width: text
-        paint_info(painter, QPoint(20, 20), None)
-        self.assertIn("拖拽框选", " ".join(call.args[-1] for call in painter.drawText.call_args_list))
-        self.assertGreaterEqual(painter.drawText.call_count, 1)
-        # 提示条只占一行：文字高度 + 上下各 4px 内边距。
+        painter.fontMetrics.return_value.elidedText.side_effect = lambda text, *_: text
+        bar = paint_info(painter, anchor, area, ["拖动移动", "四角/边中点缩放"])
+        rows = [call.args[-1] for call in painter.drawText.call_args_list]
+        # 一行放得下就不换行，提示项之间用 ` | ` 分隔。
+        self.assertEqual(rows, ["拖动移动 | 四角/边中点缩放"])
         self.assertEqual(painter.drawRoundedRect.call_args.args[0].height(), 16 + 8)
+        self.assertEqual(bar, painter.drawRoundedRect.call_args.args[0])
+        # 超宽时按项换行（不截断单个提示项），高度随行数增长。
         painter.drawText.reset_mock()
-        paint_info(painter, QPoint(20, 20), QRect(10, 10, 40, 30))
-        selected_hint = " ".join(call.args[-1] for call in painter.drawText.call_args_list)
-        self.assertIn("拖动移动", selected_hint)
-        self.assertIn("Enter/双击编辑", selected_hint)
-        self.assertIn("右键双击保存", selected_hint)
-        self.assertIn("四角/边中点缩放", selected_hint)
+        painter.drawRoundedRect.reset_mock()
+        paint_info(painter, anchor, area, ["甲" * 40, "乙" * 40])
+        rows = [call.args[-1] for call in painter.drawText.call_args_list]
+        self.assertEqual(rows, ["甲" * 40, "乙" * 40])
+        self.assertEqual(painter.drawRoundedRect.call_args.args[0].height(), 16 * 2 + 8)
+        # 空项（当前阶段不适用）直接跳过，不留下多余分隔符。
+        painter.drawText.reset_mock()
+        paint_info(painter, anchor, area, ["20, 20", "", "拖拽框选"])
+        self.assertEqual([call.args[-1] for call in painter.drawText.call_args_list],
+                         ["20, 20 | 拖拽框选"])
 
     def test_capture_element_size_badge_tracks_selected_rect(self):
         from screenshot.overlay_info import paint_info
@@ -1784,7 +1859,7 @@ class CoreTests(unittest.TestCase):
         painter.fontMetrics.return_value.height.return_value = 16
         painter.fontMetrics.return_value.elidedText.side_effect = lambda text, *_: text
         element_rect = QRect(120, 130, 80, 30)
-        paint_info(painter, QPoint(0, 0), None, QRect(0, 0, 500, 400),
+        paint_info(painter, QRect(10, 10, 140, 140), QRect(0, 0, 500, 400), ["20, 20"],
                    element_rect=element_rect, element_size=(160, 60),
                    element_border_color="#54E0C5", element_text_color="#F2FFFC",
                    element_background_color="#103B3A", element_font_size=18)
@@ -1852,20 +1927,25 @@ class CoreTests(unittest.TestCase):
         painter.fontMetrics.return_value.horizontalAdvance.side_effect = lambda text: len(text) * 12
         painter.fontMetrics.return_value.height.return_value = 16
         painter.fontMetrics.return_value.elidedText.side_effect = lambda text, *_: text
-        paint_info(painter, QPoint(20, 20), QRect(10, 10, 40, 30), QRect(0, 0, 1920, 1080))
+        anchor = QRect(200, 200, 140, 140)
+        paint_info(painter, anchor, QRect(0, 0, 1920, 1080),
+                   ["20, 20", "拖拽框选", "Esc取消"], max_width=1920)
         wide_rect = painter.drawRoundedRect.call_args.args[0]
-        self.assertLessEqual(wide_rect.width(), 1920 - 16)
-        self.assertEqual(wide_rect.left(), (1920 - wide_rect.width()) // 2)
-        # 宽度贴合文字而不是占满可用宽度，并紧贴显示器顶部。
+        # 宽度贴合文字而不是占满可用宽度，且仍限制在屏内。
         self.assertLess(wide_rect.width(), 1920 - 16)
-        self.assertEqual(wide_rect.top(), 0)
-        self.assertTrue(all(call.args[1] & Qt.AlignHCenter for call in painter.drawText.call_args_list))
-        self.assertTrue(painter.fontMetrics.return_value.elidedText.called)
+        self.assertGreaterEqual(wide_rect.left(), 4)
+        self.assertLessEqual(wide_rect.right(), 1920 - 4)
+        # 文字按屏边对齐：光标在屏幕左侧区域时左对齐（不再居中）。
+        self.assertTrue(all(call.args[1] & Qt.AlignLeft
+                            for call in painter.drawText.call_args_list))
+        # 屏幕变窄时提示条不超宽，并自动换行（行数增加）。
         painter.drawText.reset_mock()
-        paint_info(painter, QPoint(20, 20), QRect(10, 10, 40, 30), QRect(0, 0, 600, 300))
-        self.assertLessEqual(painter.drawRoundedRect.call_args.args[0].width(), 584)
-        self.assertEqual(painter.drawText.call_count, 1)
-        self.assertIn("Esc取消", " ".join(call.args[-1] for call in painter.drawText.call_args_list))
+        paint_info(painter, anchor, QRect(0, 0, 600, 300), ["Esc取消", "甲" * 30, "乙" * 30],
+                   max_width=600)
+        self.assertLessEqual(painter.drawRoundedRect.call_args.args[0].width(), 600 - 16)
+        self.assertGreater(painter.drawText.call_count, 1)
+        self.assertIn("Esc取消",
+                      " ".join(call.args[-1] for call in painter.drawText.call_args_list))
 
     def test_capture_tips_keep_long_coordinates_visible_in_inline_edit(self):
         from screenshot.overlay_info import paint_info
@@ -1874,48 +1954,59 @@ class CoreTests(unittest.TestCase):
         painter.fontMetrics.return_value.horizontalAdvance.side_effect = lambda text: len(text) * 12
         painter.fontMetrics.return_value.height.return_value = 16
         painter.fontMetrics.return_value.elidedText.side_effect = lambda text, *_: text
-        paint_info(painter, QPoint(-123456, 987654), QRect(20, 20, 800, 600),
-                   QRect(0, 0, 1920, 1080))
+        paint_info(painter, QRect(400, 400, 140, 140), QRect(0, 0, 1920, 1080),
+                   ["-123456, 987654", "拖拽框选"])
         rect = painter.drawRoundedRect.call_args.args[0]
         self.assertLessEqual(rect.width(), 1920 - 16)
-        self.assertEqual(rect.left(), (1920 - rect.width()) // 2)
-        self.assertIn("-123456, 987654", " ".join(call.args[-1] for call in painter.drawText.call_args_list))
-        self.assertEqual(painter.drawText.call_count, 1)
+        self.assertGreaterEqual(rect.left(), 4)
+        self.assertLessEqual(rect.right(), 1920 - 4)
+        # 负坐标位数多时也不截断提示项本身。
+        self.assertIn("-123456, 987654",
+                      " ".join(call.args[-1] for call in painter.drawText.call_args_list))
 
     def test_capture_tips_width_follows_coordinates_and_selection_size(self):
         from screenshot.overlay_info import paint_info
 
-        def bar_width(position, selection=None):
+        def bar_width(items):
             painter = Mock()
             painter.device.return_value.width.return_value = 1920
             painter.device.return_value.height.return_value = 1080
             painter.fontMetrics.return_value.horizontalAdvance.side_effect = lambda text: len(text) * 12
             painter.fontMetrics.return_value.height.return_value = 16
             painter.fontMetrics.return_value.elidedText.side_effect = lambda text, *_: text
-            paint_info(painter, position, selection, QRect(0, 0, 1920, 1080))
-            return painter.drawRoundedRect.call_args.args[0].width()
+            bar = paint_info(painter, QRect(400, 400, 140, 140), QRect(0, 0, 1920, 1080), items,
+                             max_width=1920)
+            return bar.width()
 
-        short = bar_width(QPoint(1, 2))
+        short = bar_width(["1, 2"])
         # 坐标位数增加（含负坐标显示器）时提示条必须跟着变宽，不能是固定宽度。
-        self.assertGreater(bar_width(QPoint(-123456, 987654)), short)
+        self.assertGreater(bar_width(["-123456, 987654"]), short)
         # 选区尺寸同样计入文案，出现选区后条宽也会变化。
-        self.assertGreater(bar_width(QPoint(1, 2), QRect(0, 0, 800, 600)), short)
+        self.assertGreater(bar_width(["1, 2  800 x 600"]), short)
+        # 提示项全部为空（都被关掉）时不画提示条，也不留空条。
+        self.assertEqual(bar_width(["", ""]), 0)
 
-    def test_capture_operation_tips_are_centered_on_each_monitor(self):
+    def test_capture_operation_tips_follow_magnifier_on_each_monitor(self):
         from PySide6.QtGui import QColor, QImage, QPainter
         from screenshot.overlay_info import paint_info
 
         image = QImage(2000, 900, QImage.Format_ARGB32)
         image.fill(QColor("white"))
         painter = QPainter(image)
-        paint_info(painter, QPoint(0, 0), None, QRect(0, 0, 1000, 900))
-        paint_info(painter, QPoint(0, 0), None, QRect(1000, 0, 1000, 900))
+        # 每个显示器各画一条：提示条跟着各自的放大镜框走，而不是贴屏顶居中。
+        first = paint_info(painter, QRect(200, 200, 140, 140), QRect(0, 0, 1000, 900),
+                           ["20, 20", "拖拽框选"])
+        second = paint_info(painter, QRect(1200, 200, 140, 140), QRect(1000, 0, 1000, 900),
+                            ["20, 20", "拖拽框选"])
         painter.end()
-        self.assertGreater(image.pixelColor(4, 20).red(), 200)
-        self.assertGreater(image.pixelColor(995, 20).red(), 200)
-        self.assertGreater(image.pixelColor(1004, 20).red(), 200)
-        self.assertLess(image.pixelColor(500, 2).red(), 100)
-        self.assertLess(image.pixelColor(1500, 2).red(), 100)
+        for bar, anchor in ((first, QRect(200, 200, 140, 140)), (second, QRect(1200, 200, 140, 140))):
+            self.assertGreaterEqual(bar.top(), anchor.bottom())
+            self.assertGreater(bar.center().x(), anchor.center().x() - 200)
+            self.assertLess(bar.center().x(), anchor.center().x() + 200)
+            self.assertLess(image.pixelColor(bar.center().x(), bar.top() + 1).red(), 100)
+        # 提示条之外（含屏顶）保持原图。
+        self.assertGreater(image.pixelColor(500, 2).red(), 200)
+        self.assertGreater(image.pixelColor(1500, 2).red(), 200)
 
     def test_annotation_choices_restore_from_config(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -3960,10 +4051,14 @@ class CoreTests(unittest.TestCase):
         ]
         with patch("screenshot.mask_window.visible_windows", return_value=[]), \
                 patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos):
-            mask = MaskWindow(Image.new("RGB", (3840, 3240), "white"), bounds, monitors, settings)
+            mask = MaskWindow(Image.new("RGB", (3840, 3240), "white"), bounds, monitors, settings,
+                              extra_intruders=[("弹出菜单", QRect(10, 10, 20, 20))])
 
         self.assertEqual([view.geometry() for view in mask.session.views],
                          [QRect(0, 0, 3072, 1728), QRect(0, 2160, 1920, 1080)])
+        # 采集自检的外部线索也要落到其它显示器的遮罩上，否则只有主屏提示条会警示。
+        self.assertEqual(mask.session.views[1].extra_intruders,
+                         [("弹出菜单", QRect(10, 10, 20, 20))])
         self.assertEqual(mask.session.views[1].logical_window_offset(), QPoint(0, 1728))
         self.assertEqual(mask.session.views[1].to_physical_point(QPoint(0, 0)), QPoint(0, 2160))
         self.assertEqual(mask.to_logical_rect(QRect(0, 2160, 1920, 1080)).toRect(),
@@ -4064,6 +4159,31 @@ class CoreTests(unittest.TestCase):
             "capture_save_shortcut"], "Alt+S")
         with self.assertRaises(ValueError):
             validate({"capture_save_shortcut": "Ctrl+K, Ctrl+S"})
+
+        # 四个选区功能键（自定义尺寸/重新截图/窗口编辑/仅复制）：初始化为单键，
+        # 改动立即落配置；非法组合或清空一律回滚到上一个有效值。
+        action_keys = {
+            "capture_custom_size_shortcut": "F",
+            "capture_recapture_shortcut": "R",
+            "capture_window_edit_shortcut": "E",
+            "capture_copy_shortcut": "Y",
+            "capture_toolbar_hide_shortcut": "`",
+        }
+        for key, default in action_keys.items():
+            self.assertEqual(DEFAULTS[key], default, key)
+            edit = page.controls[key]
+            self.assertEqual(edit.keySequence().toString(), default, key)
+            edit.setKeySequence(QKeySequence("L"))
+            self.assertEqual(config.data[key], "L", key)
+            # 清空（空序列）没意义：控件与配置一起回滚到上一个有效键。
+            edit.clear()
+            self.assertEqual(edit.keySequence().toString(), "L", key)
+            self.assertEqual(config.data[key], "L", key)
+            self.assertEqual(validate({key: "Alt+L"})[key], "Alt+L")
+            with self.assertRaises(ValueError):
+                validate({key: "Ctrl+K, Ctrl+S"})
+            with self.assertRaises(ValueError):
+                validate({key: ""})
 
     def test_capture_save_shortcut_saves_selected_region_directly(self):
         from config.config_manager import DEFAULTS
@@ -4184,26 +4304,7 @@ class CoreTests(unittest.TestCase):
         from screenshot.overlay_info import paint_info
         from screenshot.mask_window import MaskWindow
 
-        # 取色提示已并入顶部提示栏（paint_info），不再有独立 QLabel。
-        # 1) 取色模式下，paint_info 顶部提示栏始终显示取色说明（即便尚未取到色值）。
-        painter = Mock()
-        painter.fontMetrics.return_value.horizontalAdvance.side_effect = lambda text: len(text) * 8
-        painter.fontMetrics.return_value.height.return_value = 16
-        painter.fontMetrics.return_value.elidedText.side_effect = lambda text, *_: text
-        paint_info(painter, QPoint(20, 20), None, QRect(0, 0, 800, 100), picker_mode=True)
-        drawn = " ".join(call.args[-1] for call in painter.drawText.call_args_list)
-        self.assertIn("取色", drawn)
-        self.assertIn("退出取色", drawn)
-        self.assertNotIn("拖拽框选", drawn)
-        self.assertNotIn("拖动移动", drawn)
-        # 2) 非取色模式仍显示原始操作说明。
-        painter.drawText.reset_mock()
-        paint_info(painter, QPoint(20, 20), None, QRect(0, 0, 800, 100))
-        drawn = " ".join(call.args[-1] for call in painter.drawText.call_args_list)
-        self.assertIn("拖拽框选", drawn)
-        # 非取色模式顶部提示栏应说明如何进入取色模式。
-        self.assertIn("取色", drawn)
-        # 3) 真实遮罩不再持有独立 picker_hint 控件（避免与提示栏重叠）。
+        # 取色说明并入提示条（paint_info），不再有独立 QLabel。
         bounds = {"left": 0, "top": 0, "width": 160, "height": 100}
         monitors = [{"left": 0, "top": 0, "width": 160, "height": 100}]
         screen_infos = [{"geometry": QRect(0, 0, 160, 100), "dpr": 1.0}]
@@ -4212,6 +4313,18 @@ class CoreTests(unittest.TestCase):
                 patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos):
             mask = MaskWindow(Image.new("RGB", (160, 100), "blue"), bounds,
                               monitors, settings)
+        # 1) 取色模式下，提示项只保留取色说明（即便尚未取到色值）。
+        mask.picker_mode = True
+        picked = " ".join(mask.capture_hint_items())
+        self.assertIn("退出取色", picked)
+        self.assertNotIn("拖拽框选", picked)
+        self.assertNotIn("拖动移动", picked)
+        # 2) 非取色模式仍显示原始操作说明，并提示如何进入取色模式。
+        mask.picker_mode = False
+        normal = " ".join(mask.capture_hint_items())
+        self.assertIn("拖拽框选", normal)
+        self.assertIn("取色", normal)
+        # 3) 真实遮罩不再持有独立 picker_hint 控件（避免与提示栏重叠）。
         self.assertFalse(hasattr(mask, "picker_hint"))
         mask.close()
 
@@ -4774,7 +4887,9 @@ class CoreTests(unittest.TestCase):
         from screenshot.mask_window import MaskWindow
 
         bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
-        settings = {**DEFAULTS, "magnifier": True, "crosshair": False, "mask_opacity": 0}
+        # 提示条会画在光标附近，本用例只校验放大镜，故关掉全部提示项避免遮挡取样点。
+        settings = {**DEFAULTS, "magnifier": True, "crosshair": False, "mask_opacity": 0,
+                    "capture_hint_order": []}
         with patch("screenshot.mask_window.visible_windows", return_value=[]), \
                 patch.object(QCursor, "pos", return_value=QPoint(70, 50)):
             mask = MaskWindow(Image.new("RGB", (320, 240), "blue"), bounds, [bounds], settings)
@@ -4782,6 +4897,8 @@ class CoreTests(unittest.TestCase):
         self.app.processEvents()
         self.assertTrue(mask.magnifier_overlay.isVisible())
         self.assertEqual(mask.magnifier_overlay.grab().toImage().pixelColor(0, 0).name(), "#ffffff")
+        # 放大镜是独立浮层窗口，遮罩表面仍是原图；关掉提示项后遮罩上不再画提示条。
+        self.assertTrue(mask.info_bar_rect.isEmpty())
         self.assertEqual(mask.grab().toImage().pixelColor(88, 68).name(), "#0000ff")
         mask.close()
 
@@ -4790,8 +4907,9 @@ class CoreTests(unittest.TestCase):
         from screenshot.mask_window import MaskWindow
 
         bounds = {"left": 0, "top": 0, "width": 500, "height": 400}
+        # 提示条会画在光标附近，本用例只校验圆角预览，故关掉全部提示项避免遮挡取样点。
         settings = {**DEFAULTS, "crosshair": False, "mask_opacity": 100,
-                    "editor_image_corner_radius": 24}
+                    "editor_image_corner_radius": 24, "capture_hint_order": []}
         with patch("screenshot.mask_window.visible_windows", return_value=[]):
             mask = MaskWindow(Image.new("RGB", (500, 400), "#2040c0"),
                               bounds, [bounds], settings)
@@ -5227,6 +5345,92 @@ class CoreTests(unittest.TestCase):
                                                                         button.width(), button.isHidden()) for button in tools]))
             mask.close()
 
+    def test_inline_toolbar_drags_snaps_hides_and_hints_keys(self):
+        """原地编辑工具栏：抓手/空白处可整体拖动并吸附，快捷键临时隐藏，提示条给出当前键位。"""
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtWidgets import QLabel
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 1200, "height": 900}
+            settings = {**DEFAULTS, "auto_dir": folder, "filename": "inline", "inline_edit": True,
+                        "crosshair": False, "magnifier": False, "mask_opacity": 0, "bubble": False,
+                        "capture_after_selection": "edit", "sound": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (1200, 900), "blue"), bounds, [bounds], settings)
+            mask.selection.rects.append(QRect(260, 720, 160, 80))
+            mask.complete()
+            self.app.processEvents()
+            editor = mask.session.inline_editor
+            toolbar = editor.toolbar
+            mask.show()
+            self.app.processEvents()
+
+            # 抓手是"边缘抓取提示"而不是按钮：无边框 QLabel，贴在工具栏左内侧。
+            handle = editor.toolbar_handle
+            self.assertIsInstance(handle, QLabel)
+            self.assertEqual(handle.objectName(), "inlineToolbarHandle")
+            self.assertLess(handle.x(), 4)
+            self.assertLessEqual(handle.geometry().right(), toolbar.width())
+
+            # 拖动提示不只在抓手：整条工具栏（含按钮间空白）都是"可移动"光标，
+            # 按钮自身保持箭头，避免在按钮上也暗示可以拖动整条工具栏。
+            self.assertEqual(toolbar.cursor().shape(), Qt.SizeAllCursor)
+            self.assertEqual(handle.cursor().shape(), Qt.SizeAllCursor)
+            self.assertEqual(toolbar.tool_buttons["pen"].cursor().shape(), Qt.ArrowCursor)
+
+            # 提示条：原地编辑中给出"移动工具栏"与隐藏键（默认 `），键位取当前设置。
+            hints = [item for item in mask.capture_hint_items() if item]
+            self.assertIn("拖动边缘/空白处 移动工具栏", hints)
+            self.assertIn("` 隐藏工具栏", hints)
+
+            def mouse(kind, widget, point, buttons=Qt.LeftButton, button=Qt.LeftButton):
+                event = QMouseEvent(kind, QPointF(point), QPointF(widget.mapToGlobal(point)),
+                                    button, buttons, Qt.NoModifier)
+                self.app.sendEvent(widget, event)
+
+            # 隐藏键：按 ` 隐藏并提示"显示工具栏"，再按一次恢复。
+            QTest.keyClick(mask, Qt.Key_QuoteLeft)
+            self.app.processEvents()
+            self.assertTrue(editor.toolbar_hidden)
+            self.assertFalse(toolbar.isVisible())
+            self.assertIn("` 显示工具栏", mask.capture_hint_items())
+            QTest.keyClick(mask, Qt.Key_QuoteLeft)
+            self.app.processEvents()
+            self.assertFalse(editor.toolbar_hidden)
+            self.assertTrue(toolbar.isVisible())
+
+            # 拖动：抓手按下后工具栏整体跟着走，落在视图内不会跑出屏幕。
+            auto_position = QPoint(toolbar.pos())
+            candidates, _left, _right = editor.toolbar_placement_candidates(
+                editor.canvas.geometry(), toolbar.size())
+            mouse(QEvent.MouseButtonPress, handle, QPoint(4, handle.height() // 2))
+            self.assertTrue(editor.toolbar_dragging)
+            drop = QPoint(4 + 200, handle.height() // 2 + 120)
+            mouse(QEvent.MouseMove, handle, drop)
+            mouse(QEvent.MouseButtonRelease, handle, drop)
+            self.assertFalse(editor.toolbar_dragging)
+            self.assertTrue(editor.toolbar_manual)
+            self.assertNotEqual(toolbar.pos(), auto_position)
+            self.assertGreaterEqual(toolbar.x(), 8)
+            self.assertGreaterEqual(toolbar.y(), 8)
+
+            # 松手位置离候选位够近时吸附过去（吸附阈值内取最近的一个）。
+            target = candidates[0]
+            toolbar.move(target + QPoint(6, 6))
+            editor.begin_toolbar_drag(QPoint(0, 0))
+            editor.end_toolbar_drag()
+            self.assertEqual(toolbar.pos(), target)
+
+            # 拖过之后双击空白处：放弃手动位置，回到自动摆位。
+            mouse(QEvent.MouseButtonDblClick, toolbar,
+                  QPoint(toolbar.width() // 2, 2), buttons=Qt.NoButton, button=Qt.LeftButton)
+            self.assertFalse(editor.toolbar_manual)
+            self.assertEqual(toolbar.pos(), auto_position)
+            mask.close()
+
     def test_mask_inline_toolbar_avoids_selection_when_space_allows(self):
         from config.config_manager import DEFAULTS
         from screenshot.mask_window import MaskWindow
@@ -5344,7 +5548,6 @@ class CoreTests(unittest.TestCase):
 
     def test_mask_escape_before_selection_and_fixed_size(self):
         from PySide6.QtWidgets import QDialog
-        from PySide6.QtWidgets import QPushButton
         from PySide6.QtCore import QRect
         from config.config_manager import DEFAULTS
         from screenshot.mask_window import MaskWindow
@@ -5354,13 +5557,14 @@ class CoreTests(unittest.TestCase):
         mask.show()
         self.app.processEvents()
         self.assertTrue(mask.hasFocus())
-        self.assertFalse(mask.capture_actions.isVisible())
+        # 四个按钮已移除，改为快捷键 + 提示条第二行：无选区时不提示这四个键。
+        self.assertFalse(hasattr(mask, "capture_actions"))
+        self.assertIsNone(mask.capture_action_hints())
         mask.selection.rects.append(QRect(10, 10, 60, 40))
         mask.update_all()
-        self.assertTrue(mask.capture_actions.isVisible())
-        self.assertEqual({button.toolTip().splitlines()[0] for button in
-                  mask.capture_actions.findChildren(QPushButton)},
-             {"自定义尺寸", "重新截图", "窗口编辑", "仅复制"})
+        self.assertEqual(mask.capture_action_hints(),
+                         [("F", "尺寸"), ("R", "重新截图"),
+                          ("E", "窗口编辑"), ("Y", "仅复制")])
         QTest.keyClick(mask, Qt.Key_Escape)
         self.assertFalse(mask.isVisible())
         self.assertFalse(mask.selection.rects)
@@ -5381,17 +5585,22 @@ class CoreTests(unittest.TestCase):
 
         with patch("screenshot.mask_window.visible_windows", return_value=[]):
             mask = MaskWindow(Image.new("RGB", (200, 150)), bounds, [bounds], DEFAULTS)
+        # 自定义尺寸现在是可配置快捷键（默认单键 F，走 QShortcut），需窗口活动才触发。
+        mask.show()
+        self.app.processEvents()
         mask.position = QPoint(0, 0)
         with patch("screenshot.mask_window.QDialog.exec", return_value=QDialog.Rejected):
-            QTest.keyClick(mask, Qt.Key_F, Qt.ControlModifier)
+            QTest.keyClick(mask, Qt.Key_F)
         self.assertFalse(mask.selection.rects)
         with patch("screenshot.mask_window.QDialog.exec", return_value=QDialog.Accepted):
-            QTest.keyClick(mask, Qt.Key_F, Qt.ControlModifier)
+            QTest.keyClick(mask, Qt.Key_F)
         self.assertEqual((mask.selection.rects[-1].width(), mask.selection.rects[-1].height()), (200, 150))
         mask.close()
 
-    def test_capture_actions_below_hint_and_enter_window_editor(self):
+    def test_capture_action_shortcuts_replace_buttons_and_open_window_editor(self):
+        """选区阶段的四个按钮已移除，改由可配置快捷键触发；提示条第二行按当前设置显示。"""
         from config.config_manager import DEFAULTS
+        from PySide6.QtGui import QKeySequence
         from PySide6.QtWidgets import QPushButton
         from screenshot.mask_window import MaskWindow
 
@@ -5400,28 +5609,58 @@ class CoreTests(unittest.TestCase):
         with patch("screenshot.mask_window.visible_windows", return_value=[]):
             mask = MaskWindow(Image.new("RGB", (1200, 800), "blue"), bounds,
                               [bounds], settings)
+        # 按钮连容器一起移除，遮罩上不再有任何操作按钮。
+        self.assertFalse(hasattr(mask, "capture_actions"))
+        self.assertEqual(mask.findChildren(QPushButton), [])
+        # 默认键位都是单键：自定义尺寸 F、重新截图 R、窗口编辑 E、仅复制 Y。
+        self.assertEqual(
+            {name: shortcut.key().toString(QKeySequence.PortableText)
+             for name, shortcut in mask.capture_action_shortcuts.items()},
+            {"custom_size": "F", "recapture": "R",
+             "window_edit": "E", "copy": "Y"})
+
+        # 无选区不提示；有选区（未进入编辑）补第二行，取值即当前设置。
+        self.assertIsNone(mask.capture_action_hints())
         mask.selection.rects.append(QRect(30, 40, 80, 60))
         mask.update_all()
-        actions = mask.capture_actions
-        self.assertLessEqual(abs(actions.x() - (mask.width() - actions.width()) // 2), 1)
-        self.assertEqual(actions.y(), 8 + mask.fontMetrics().height() + 18)
-        buttons = actions.findChildren(QPushButton)
-        self.assertEqual([button.height() for button in buttons], [32, 32, 32, 32])
-        self.assertFalse(buttons[1].icon().isNull())
-        self.assertNotEqual(buttons[0].icon().pixmap(24, 24).toImage(),
-                    buttons[1].icon().pixmap(24, 24).toImage())
-        self.assertGreaterEqual(buttons[1].x() - buttons[0].geometry().right() - 1, 8)
-        edited = []
-        mask.edit_requested.connect(lambda images, positions: edited.append((images, positions)))
-        next(button for button in actions.findChildren(QPushButton)
-             if button.text() == "窗口编辑").click()
-        self.assertEqual(len(edited), 1)
-        self.assertEqual(edited[0][0][0][0].size, (80, 60))
+        self.assertEqual(mask.capture_action_hints(),
+                         [("F", "尺寸"), ("R", "重新截图"),
+                          ("E", "窗口编辑"), ("Y", "仅复制")])
+        # 遮罩与配置共用同一个 dict：改设置后提示与快捷键一起变，不是写死文案。
+        settings["capture_recapture_shortcut"] = "Alt+R"
+        settings["capture_window_edit_shortcut"] = "Ctrl+E"
+        mask.sync_capture_action_shortcuts(settings)
+        self.assertEqual(mask.capture_action_hints()[1], ("Alt+R", "重新截图"))
+        self.assertEqual(mask.capture_action_shortcuts["window_edit"].key().toString(
+            QKeySequence.PortableText), "Ctrl+E")
+
+        # 真按键即可触发（单键，无需组合）：按 Y（仅复制）把选区写入剪贴板并关闭遮罩。
+        copied = []
+        mask.copy_done.connect(copied.append)
+        mask.show()
+        self.app.processEvents()
+        QTest.keyClick(mask, Qt.Key_Y)
+        self.assertEqual(len(copied), 1)
+        self.assertEqual(copied[0].size, (80, 60))
         self.assertFalse(mask.isVisible())
 
-    def test_capture_actions_exist_below_hint_on_each_monitor(self):
+        # 改键后立即生效：新的 Alt+R（重新截图）放弃当前画面并请求重截。
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            second = MaskWindow(Image.new("RGB", (1200, 800), "blue"), bounds,
+                                [bounds], settings)
+        second.selection.rects.append(QRect(30, 40, 80, 60))
+        recaptured = []
+        second.recapture_requested.connect(recaptured.append)
+        second.show()
+        self.app.processEvents()
+        QTest.keyClick(second, Qt.Key_R, Qt.AltModifier)
+        self.assertEqual(len(recaptured), 1)
+        self.assertFalse(second.isVisible())
+        self.assertFalse(mask.isVisible())
+
+    def test_capture_action_hints_on_each_monitor_and_only_primary_has_shortcuts(self):
+        """多显示器：每条提示条都按当前设置显示四个功能键，快捷键只在主遮罩上创建。"""
         from config.config_manager import DEFAULTS
-        from PySide6.QtWidgets import QPushButton
         from screenshot.mask_window import MaskWindow
 
         bounds = {"left": 0, "top": 0, "width": 400, "height": 160}
@@ -5433,7 +5672,8 @@ class CoreTests(unittest.TestCase):
             {"geometry": QRect(0, 0, 200, 160), "dpr": 1.0},
             {"geometry": QRect(200, 0, 200, 160), "dpr": 1.0},
         ]
-        settings = dict(DEFAULTS, inline_edit=False, crosshair=False, magnifier=False)
+        settings = dict(DEFAULTS, inline_edit=False, crosshair=False, magnifier=False,
+                        capture_recapture_shortcut="F2")
         with patch("screenshot.mask_window.visible_windows", return_value=[]), \
                 patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos):
             mask = MaskWindow(Image.new("RGB", (400, 160), "blue"), bounds,
@@ -5443,19 +5683,273 @@ class CoreTests(unittest.TestCase):
         mask.show()
         self.app.processEvents()
         self.assertEqual(len(mask.session.views), 2)
+        expected = [("F", "尺寸"), ("F2", "重新截图"),
+                    ("E", "窗口编辑"), ("Y", "仅复制")]
         for view in mask.session.views:
-            actions = view.capture_actions
-            self.assertTrue(actions.isVisible())
-            self.assertEqual(actions.y(), 8 + view.fontMetrics().height() + 18)
-            self.assertLessEqual(abs(actions.x() - (view.width() - actions.width()) // 2), 1)
-            self.assertEqual(len(actions.findChildren(QPushButton)), 4)
-        secondary_edit = mask.session.views[1].capture_action_buttons[2]
-        self.assertEqual(secondary_edit.text(), "")
-        edited = []
-        mask.edit_requested.connect(lambda images, positions: edited.append((images, positions)))
-        secondary_edit.click()
-        self.assertEqual(len(edited), 1)
+            self.assertEqual(view.capture_action_hints(), expected)
+        # 快捷键是应用级的，只需主遮罩创建一份，避免多屏各注册一次互相抢键。
+        self.assertIsNotNone(mask.capture_action_shortcuts)
+        self.assertTrue(all(view.capture_action_shortcuts is None
+                            for view in mask.session.views[1:]))
+        # 提示条跟随放大镜：位置随光标变化，无需再"移入隐藏/移出恢复"。
+        mask.position = QPoint(20, 20)
+        mask.update_all()
+        first = mask.session.views[0].magnifier_frame()
+        mask.position = QPoint(150, 120)
+        mask.update_all()
+        self.assertNotEqual(first, mask.session.views[0].magnifier_frame())
+        # 放大镜关闭时仍能算出一个跟随光标的框，提示条因此照常显示。
+        mask.settings["magnifier"] = False
+        mask.position = QPoint(150, 120)
+        disabled_frame = mask.session.views[0].magnifier_frame()
+        mask.settings["magnifier"] = True
+        self.assertEqual(disabled_frame, mask.session.views[0].magnifier_frame())
+        self.assertLessEqual((disabled_frame.topLeft() - mask.position).manhattanLength(), 400)
+        # 放大镜尺寸可调：框随设置变大（仍受视图大小钳制），采样范围等比换算。
+        from screenshot.magnifier_widget import sample_size
+        mask.settings["magnifier_size"] = 100
+        self.assertEqual(mask.session.views[0].magnifier_frame().width(), 104)
+        self.assertEqual(sample_size(280), 40)
+        self.assertEqual(sample_size(140), 20)
         mask.close()
+
+    def test_capture_hint_items_follow_config_order_and_toggles(self):
+        """提示项按配置顺序显示、可逐项关闭；键位取当前设置，改键后提示立刻跟随。"""
+        from config.config_manager import DEFAULTS, HINT_ITEM_IDS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 400, "height": 300}
+        settings = dict(DEFAULTS, inline_edit=False, crosshair=False, magnifier=False,
+                        capture_recapture_shortcut="F2")
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (400, 300), "blue"), bounds, [bounds], settings)
+        mask.selection.rects.append(QRect(30, 40, 80, 60))
+        # 默认全部开启；有选区且未进入编辑时，不适用的项（框选/固定尺寸/工具栏两项）为空。
+        items = [item for item in mask.capture_hint_items() if item]
+        self.assertEqual(len(items), len(HINT_ITEM_IDS) - 4)
+        self.assertIn("F2 重新截图", items)
+        self.assertIn("Esc取消", items)
+        self.assertNotIn("拖拽框选", items)
+        self.assertEqual(len(mask.capture_hint_items()), len(HINT_ITEM_IDS))
+        # 只保留两项并按给定顺序：顺序即配置顺序，不在清单里的不显示。
+        settings["capture_hint_order"] = ["copy", "coords"]
+        ordered = [item for item in mask.capture_hint_items() if item]
+        self.assertEqual(len(ordered), 2)
+        self.assertEqual(ordered[0], "Y 仅复制")
+        self.assertIn("80 x 60", ordered[1])
+        # 全部关闭时不显示任何提示项（绘制端会跳过空项，因此不会留下空条）。
+        settings["capture_hint_order"] = []
+        self.assertEqual([item for item in mask.capture_hint_items() if item], [])
+        mask.close()
+
+    def test_info_bar_alignment_follows_screen_side(self):
+        """提示条与放大镜边缘对齐：放大镜在光标右侧（贴左）时左对齐，翻到左侧时右对齐。"""
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QFont, QFontMetrics
+        from screenshot.overlay_info import HINT_BAR_SHIFT_X, info_bar_layout
+
+        metrics = QFontMetrics(QFont())
+        area = QRect(0, 0, 600, 400)
+        items = ["20, 20  200 x 100", "拖动移动"]
+        # 放大镜在光标右侧（普通情形）：提示条左边对齐放大镜左边，再往右挪一点，文字左对齐。
+        cursor = (100, 30)
+        right_anchor = QRect(132, 62, 140, 140)
+        bar, _rows, align_right = info_bar_layout(metrics, area, right_anchor, items,
+                                                  cursor=cursor)
+        self.assertFalse(align_right)
+        self.assertEqual(bar.left(), right_anchor.left() + HINT_BAR_SHIFT_X)
+        self.assertGreaterEqual(bar.top(), right_anchor.bottom())
+        # 放大镜翻到光标左侧（贴右沿）：提示条右边对齐放大镜右边，文字右对齐。
+        left_anchor = QRect(area.right() - 172, 62, 140, 140)
+        bar2, _rows2, align_right2 = info_bar_layout(metrics, area, left_anchor, items,
+                                                     cursor=(area.right() - 40, 30))
+        self.assertTrue(align_right2)
+        # 条右边缘对齐放大镜右边缘并往左挪 HINT_BAR_SHIFT_X（QRect.right() 已含 -1）。
+        self.assertEqual(bar2.right(), left_anchor.right() - HINT_BAR_SHIFT_X)
+
+    def test_info_bar_flips_with_magnifier_and_never_covers_cursor(self):
+        """贴下沿时提示条跟着放大镜翻到上方，且不横跨光标位置。"""
+        from PySide6.QtCore import QPoint, QRect
+        from PySide6.QtGui import QFont, QFontMetrics
+        from screenshot.magnifier_widget import magnifier_rect
+        from screenshot.overlay_info import info_bar_layout
+
+        metrics = QFontMetrics(QFont())
+        area = QRect(0, 0, 600, 400)
+        items = ["20, 20  200 x 100", "拖动移动", "Esc取消"]
+        # 光标贴近下沿：放大镜自身已翻到光标上方（magnifier_rect 的既有行为）。
+        cursor = (200, area.bottom() - 20)
+        anchor = magnifier_rect(QPoint(*cursor), area, 140)
+        self.assertLess(anchor.bottom(), cursor[1])
+        bar, _rows, _align = info_bar_layout(metrics, area, anchor, items, cursor=cursor)
+        # 提示条也在光标上方，且与放大镜不重叠——两条同侧，不会盖住光标中心。
+        self.assertLessEqual(bar.bottom(), cursor[1])
+        self.assertFalse(bar.intersects(anchor))
+        self.assertLessEqual(bar.bottom(), anchor.top())
+        # 光标在上半屏时仍贴在放大镜下方，同样不横跨光标。
+        upper_cursor = (200, 60)
+        upper_anchor = magnifier_rect(QPoint(*upper_cursor), area, 140)
+        upper_bar, _rows2, _ = info_bar_layout(metrics, area, upper_anchor, items,
+                                               cursor=upper_cursor)
+        self.assertGreaterEqual(upper_bar.top(), upper_cursor[1])
+        self.assertFalse(upper_bar.intersects(upper_anchor))
+
+    def test_hint_per_line_controls_items_per_row(self):
+        """「每行提示数」：按数量强制换行，0 表示只按宽度自动换行。"""
+        from PySide6.QtCore import QRect
+        from PySide6.QtGui import QFont, QFontMetrics
+        from screenshot.overlay_info import info_bar_layout
+
+        metrics = QFontMetrics(QFont())
+        area = QRect(0, 0, 900, 400)
+        anchor = QRect(400, 60, 140, 140)
+        items = ["甲", "乙", "丙", "丁"]
+        # 每行两个：恰好两行，且每行只有一个分隔符。
+        bar, rows, _align = info_bar_layout(metrics, area, anchor, items, per_line=2)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0].count(" | "), 1)
+        self.assertEqual(rows[1].count(" | "), 1)
+        # 每行一个：四行。
+        _bar, rows_one, _ = info_bar_layout(metrics, area, anchor, items, per_line=1)
+        self.assertEqual(len(rows_one), 4)
+        # 0（不限制）时宽度足够，全部挤在一行。
+        _bar, rows_auto, _ = info_bar_layout(metrics, area, anchor, items, per_line=0)
+        self.assertEqual(len(rows_auto), 1)
+        # 行数变多时提示条变高（同一块区域内）。
+        tall = info_bar_layout(metrics, area, anchor, items, per_line=1)[0]
+        short = info_bar_layout(metrics, area, anchor, items, per_line=0)[0]
+        self.assertGreater(tall.height(), short.height())
+
+    def test_hint_order_buttons_move_items(self):
+        """顺序既支持拖动，也支持选中后上移/下移按钮。"""
+        from config.config_manager import HINT_ITEM_IDS, HINT_LABELS
+        from ui.widgets.hint_order_list import HintOrderList
+
+        widget = HintOrderList(HINT_ITEM_IDS, HINT_LABELS)
+        self.assertTrue(widget.toolTip().strip())
+        # 未选中时两个按钮都不可用。
+        widget.list.setCurrentRow(-1)
+        self.assertFalse(widget.up_button.isEnabled())
+        self.assertFalse(widget.down_button.isEnabled())
+        # 选中第二项后上移：顺序变化并写回值。
+        widget.list.setCurrentRow(1)
+        self.assertTrue(widget.up_button.isEnabled())
+        widget.up_button.click()
+        self.assertEqual(widget.value()[0], HINT_ITEM_IDS[1])
+        self.assertEqual(widget.list.currentRow(), 0)
+        # 首项时上移不可用，下移可用；下移后回到原位。
+        self.assertFalse(widget.up_button.isEnabled())
+        widget.down_button.click()
+        self.assertEqual(widget.value()[0], HINT_ITEM_IDS[0])
+        # 末项时下移不可用。
+        widget.list.setCurrentRow(widget.count() - 1)
+        self.assertFalse(widget.down_button.isEnabled())
+
+    def test_capture_hints_master_switch_and_master_reset(self):
+        """「显示快捷键提示」总开关：关掉后整条不显示，放大镜等其它辅助不受影响。"""
+        from config.config_manager import DEFAULTS
+        from screenshot.hint_items import hint_items
+
+        settings = dict(DEFAULTS, crosshair=False, magnifier=True)
+        items = lambda: [item for item in hint_items(settings, (10, 20), (80, 60)) if item]
+        self.assertTrue(items())
+        settings["capture_hints_enabled"] = False
+        self.assertEqual(items(), [])
+        # 总开关只影响提示条，放大镜开关不变。
+        self.assertTrue(settings["magnifier"])
+
+    def test_info_bar_is_overlay_above_inline_canvas_and_follows_magnifier(self):
+        """提示条是遮罩的子控件并抬在编辑画布之上：光标进选区也不会被内容盖住。"""
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import InfoBar, MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 900, "height": 700}
+        settings = {**DEFAULTS, "auto_dir": tempfile.mkdtemp(), "inline_edit": True,
+                    "crosshair": False, "magnifier": True, "mask_opacity": 0,
+                    "capture_after_selection": "edit", "sound": False}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (900, 700), "blue"), bounds, [bounds], settings)
+        mask.selection.rects.append(QRect(300, 300, 200, 150))
+        mask.complete()
+        mask.show()
+        self.app.processEvents()
+        editor = mask.session.inline_editor
+        bar = mask.info_bar
+        self.assertIsInstance(bar, InfoBar)
+        self.assertIs(bar.parent(), mask)
+        self.assertTrue(bar.testAttribute(Qt.WA_TransparentForMouseEvents))
+        # 光标移到选区内部（原地编辑画布所在处）：提示条仍在，且被抬到画布之上。
+        mask.position = QPoint(400, 380)
+        mask.update_all()
+        self.assertFalse(bar.bar.isEmpty())
+        self.assertTrue(bar.isVisible())
+        children = mask.children()
+        self.assertGreater(children.index(bar), children.index(editor.canvas))
+        # 位置跟着放大镜：换光标位置后条的位置随之变化。
+        first = QRect(bar.geometry())
+        mask.position = QPoint(60, 60)
+        mask.update_all()
+        self.assertNotEqual(first, bar.geometry())
+        # 关掉总开关后整条消失。
+        settings["capture_hints_enabled"] = False
+        mask.update_all()
+        self.assertFalse(bar.isVisible())
+        mask.close()
+
+    def test_hint_preview_tracks_latest_keys_and_switches(self):
+        """设置页预览：改键后立刻显示新键位；关掉提示/放大镜后对应部分消失。"""
+        from PySide6.QtGui import QPainter, QImage
+        from config.config_manager import DEFAULTS
+        from screenshot.hint_items import hint_items
+        from types import SimpleNamespace
+        from ui.widgets.hint_preview import HintBarPreview
+
+        config = SimpleNamespace(data=dict(DEFAULTS, capture_recapture_shortcut="R"))
+        preview = HintBarPreview(config)
+        self.assertEqual(preview.kind, "hints")
+        preview.resize(320, 120)
+        # 预览必须能整体绘制出来（关掉/开启各画一次，确保 paintEvent 不抛错）。
+        for data in ({"magnifier": True}, {"magnifier": False},
+                     {"capture_hints_enabled": False}):
+            config.data.update(data)
+            image = QImage(320, 120, QImage.Format_ARGB32)
+            image.fill(Qt.white)
+            preview.render(image)
+            self.assertEqual(image.size(), preview.size())
+        # 预览不持有键位快照：每次都读当前配置，因此改键后显示的是新键位。
+        config.data["capture_hints_enabled"] = True
+        config.data["capture_recapture_shortcut"] = "F9"
+        text = " ".join(hint_items(config.data, (10, 20), (300, 200)))
+        self.assertIn("F9 重新截图", text)
+        config.data["capture_hints_enabled"] = False
+        self.assertEqual([item for item in hint_items(config.data, (10, 20), (300, 200))
+                          if item], [])
+
+    def test_hint_order_list_toggles_and_reorders(self):
+        """设置页提示项列表：勾选即开关，拖动即顺序，值可直接写回配置。"""
+        from PySide6.QtCore import QModelIndex
+        from config.config_manager import HINT_ITEM_IDS, HINT_LABELS
+        from ui.widgets.hint_order_list import HintOrderList
+
+        widget = HintOrderList(HINT_ITEM_IDS, HINT_LABELS)
+        self.assertEqual(widget.value(), list(HINT_ITEM_IDS))
+        # 取消勾选第一项后，它不再出现在值里（界面行仍在原处）。
+        widget.item(0).setCheckState(Qt.Unchecked)
+        self.assertEqual(widget.value(), list(HINT_ITEM_IDS[1:]))
+        self.assertEqual(widget.count(), len(HINT_ITEM_IDS))
+        # 重新勾选后按当前行位置参与排序。
+        widget.item(0).setCheckState(Qt.Checked)
+        self.assertEqual(widget.value(), list(HINT_ITEM_IDS))
+        # 拖动排序：把末项移到首位，值顺序随之变化。
+        widget.model().moveRow(QModelIndex(), len(HINT_ITEM_IDS) - 1, QModelIndex(), 0)
+        self.assertEqual(widget.value()[0], HINT_ITEM_IDS[-1])
+        # set_value 恢复配置顺序与勾选，未勾选的项留在界面上。
+        widget.set_value(["copy", "coords"])
+        self.assertEqual(widget.value(), ["copy", "coords"])
+        self.assertEqual(widget.count(), len(HINT_ITEM_IDS))
+        unchecked = [widget.item(i) for i in range(widget.count())
+                     if widget.item(i).checkState() == Qt.Unchecked]
+        self.assertEqual(len(unchecked), len(HINT_ITEM_IDS) - 2)
 
     def test_inline_region_reset_keeps_rounded_preview(self):
         from config.config_manager import DEFAULTS
@@ -5802,10 +6296,11 @@ class CoreTests(unittest.TestCase):
         from screenshot.mask_window import _mask_overlay_color
         from ui.settings_screenshot import ScreenshotPage
 
-        self.assertEqual(DEFAULTS["mask_color"], "#D9EDFF")
+        self.assertEqual(DEFAULTS["mask_color"], "#000000")
         default_overlay = _mask_overlay_color(DEFAULTS)
-        self.assertEqual(default_overlay.name(), "#d9edff")
-        self.assertEqual(default_overlay.alpha(), 128)
+        self.assertEqual(default_overlay.name(), "#000000")
+        self.assertEqual(default_overlay.alpha(),
+                         round(DEFAULTS["mask_opacity"] * 255 / 100))
         self.assertEqual(validate({"mask_theme": "dark"})["mask_color"], "#000000")
         self.assertEqual(validate({"mask_theme": "light"})["mask_color"], "#ffffff")
         self.assertEqual(validate({"mask_theme": "dark", "mask_color": "#DDF5E4"})[
@@ -8039,6 +8534,26 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(canvas.annotations()), 1)
         canvas.close()
 
+    def test_erase_layer_hit_shape_limited_to_strokes(self):
+        """擦除层命中范围限定在笔迹上：整图矩形会让任何场景命中测试被整屏挡住。"""
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import EraseMaskItem
+
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 140), "white"), dict(DEFAULTS))
+        canvas.erase_segment(QPointF(20, 40), QPointF(120, 40))
+        item = canvas.erase_items()[0]
+        self.assertIsInstance(item, EraseMaskItem)
+        # boundingRect 仍是整幅图（渲染需要），但 shape 只覆盖笔迹附近。
+        self.assertTrue(item.boundingRect().contains(QPointF(10, 120)))
+        self.assertFalse(item.shape().contains(QPointF(10, 120)))
+        self.assertTrue(item.shape().contains(QPointF(70, 40)))
+        # 未被擦过的位置不再命中擦除层（旧实现的整图 shape 会到处命中）。
+        hits = [other for other in canvas.scene_data.items(
+            QPointF(10, 120), Qt.IntersectsItemShape, Qt.DescendingOrder, canvas.transform())
+            if isinstance(other, EraseMaskItem)]
+        self.assertEqual(hits, [])
+        canvas.close()
+
     def test_erased_annotation_still_editable_and_deletable(self):
         """被橡皮擦覆盖过的标注：命中测试跳过擦除层，右键与双击仍作用于标注本身。"""
         from config.config_manager import DEFAULTS
@@ -8646,6 +9161,171 @@ class CoreTests(unittest.TestCase):
             app.config.data["last_capture_rect"] = []
             app.start_capture("repeat")
             app.notify.assert_called_with("暂无上次截图区域")
+
+    def test_capture_does_no_preprocessing_of_own_windows(self):
+        """抓屏前不动本程序的任何窗口：截图就是截图，不替用户关通知/贴图/设置。"""
+        import logging
+        from PySide6.QtWidgets import QWidget
+        from main import Application
+
+        app = Application.__new__(Application)
+        app.mask = None
+        app.config = Mock(data={})
+        app.logger = logging.getLogger("screensnap")
+        notice = QWidget()
+        notice.show()
+        app.capture_notice = notice
+        tooltip = QWidget(None, Qt.ToolTip)
+        tooltip.show()
+        self.app.processEvents()
+        # 抓屏前没有任何"自身窗口预处理"入口。
+        self.assertFalse(hasattr(app, "pre_capture_self_check"))
+        self.assertTrue(notice.isVisible())
+        self.assertTrue(tooltip.isVisible())
+        self.assertIs(app.capture_notice, notice)
+        notice.close()
+        tooltip.close()
+
+    def test_mask_warns_when_selection_covers_own_window(self):
+        """采集自检：选区内含本程序窗口时给出警示，移开后不再警示。"""
+        from PySide6.QtWidgets import QDialog
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 150}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (200, 150), "white"), bounds, [bounds],
+                              dict(DEFAULTS, inline_edit=False, magnifier=False))
+        mask.show()
+        self.app.processEvents()
+        mask.selection.rects.append(QRect(40, 30, 100, 80))
+
+        # 一个落在选区内的本程序对话框会被检出，并在提示里点名。
+        dialog = QDialog()
+        dialog.setGeometry(QRect(60, 50, 60, 40))
+        dialog.show()
+        self.app.processEvents()
+        self.assertIn(dialog, mask.intruding_windows())
+        warning = mask.self_check_warning()
+        self.assertIsNotNone(warning)
+        self.assertIn("本程序窗口", warning)
+        self.assertIn("重截", warning)
+
+        # 移出选区后不再算作干扰。
+        dialog.setGeometry(QRect(180, 130, 18, 18))
+        self.app.processEvents()
+        self.assertNotIn(dialog, mask.intruding_windows())
+        dialog.close()
+        mask.close()
+
+    def test_mask_self_check_flags_popup_rect(self):
+        """采集自检把抓屏瞬间的弹出菜单（已烤进冻结帧）并入警示；系统通知不再提示。"""
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow, window_label
+
+        class FakeOverlay:
+            """顶替真实浮层：测试里不创建系统级窗口（多窗口反复销毁会引发堆损坏）。"""
+
+            def __init__(self, rect, label=None):
+                self._rect = rect
+                self._label = label
+
+            def isWindow(self):
+                return True
+
+            def isVisible(self):
+                return True
+
+            def frameGeometry(self):
+                return self._rect
+
+            def property(self, name):
+                return self._label if name == "screensnap_self_window" else None
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 150}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (200, 150), "white"), bounds, [bounds],
+                              dict(DEFAULTS, inline_edit=False, magnifier=False),
+                              extra_intruders=[("弹出菜单", QRect(50, 40, 60, 40))])
+        mask.selection.rects.append(QRect(40, 30, 100, 80))
+        # 菜单此刻已关闭、枚举不到，仅凭抓屏前记录的矩形也能警示。
+        warning = mask.self_check_warning()
+        self.assertIn("弹出菜单", warning)
+        # 记录落在选区外时不再警示；没有任何来源时整体不提示。
+        mask.selection.rects[-1] = QRect(0, 0, 10, 10)
+        self.assertIsNone(mask.self_check_warning())
+        mask.extra_intruders = []
+        self.assertIsNone(mask.self_check_warning())
+
+        # 工具栏「外观」弹层是 QFrame、不在登记表里，靠自报标签才能被点名（旧实现完全枚举不到）。
+        overlay = FakeOverlay(QRect(45, 35, 40, 20), "外观弹层")
+        plain = FakeOverlay(QRect(45, 35, 40, 20))
+        mask.selection.rects[-1] = QRect(40, 30, 100, 80)
+        with patch("screenshot.mask_window.QApplication.allWidgets",
+                   return_value=[overlay, plain]):
+            self.assertIn(overlay, mask.intruding_windows())
+            self.assertNotIn(plain, mask.intruding_windows())
+            self.assertIn("外观弹层", mask.self_check_warning())
+        self.assertEqual(window_label(overlay), "外观弹层")
+        mask.close()
+
+    def test_show_mask_passes_self_check_hints(self):
+        """show_mask 把抓屏前记录的弹出菜单矩形交给遮罩；不再传系统通知提示。"""
+        from types import SimpleNamespace
+        from main import Application
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 150}
+        app = Application.__new__(Application)
+        app.mask = None
+        app.config = Mock(data={"cursor": False})
+        app.logger = Mock()
+        app.popup_intruders = Mock(return_value=[("弹出菜单", QRect(5, 5, 10, 10))])
+        for name in ("_connect_sticker_signals", "remember_region", "handle_capture_selection",
+                     "edit_images", "save_capture_images", "saved", "initial_save_failed",
+                     "close_all_editors", "restart_capture"):
+            setattr(app, name, Mock())
+        primary = Mock()
+        primary.session = SimpleNamespace(views=[])
+        image = Image.new("RGB", (20, 10), "white")
+        with patch("main.capture", return_value=(image, bounds, [bounds], None)), \
+                patch("main.MaskWindow", return_value=primary) as mask_cls, \
+                patch("main.QTimer.singleShot"):
+            app.show_mask("capture")
+        self.assertEqual(mask_cls.call_args.kwargs["extra_intruders"],
+                         [("弹出菜单", QRect(5, 5, 10, 10))])
+        # 系统通知不再提示：既没有这个方法，也不会作为参数传下去。
+        self.assertNotIn("notification_note", mask_cls.call_args.kwargs)
+        self.assertFalse(hasattr(app, "recent_notification_note"))
+        # 抓屏前不做任何自身窗口预处理。
+        self.assertFalse(hasattr(app, "pre_capture_self_check"))
+
+    def test_inline_editor_output_contains_no_ui(self):
+        """未做编辑时，内联编辑的画布渲染必须与冻结帧选区逐点一致（不含按钮/提示等 UI）。"""
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        frozen = Image.new("RGB", (200, 150))
+        for y in range(150):
+            for x in range(200):
+                frozen.putpixel((x, y), ((x * 3) % 256, (y * 5) % 256, ((x + y) * 7) % 256))
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 150}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(frozen, bounds, [bounds],
+                              dict(DEFAULTS, inline_edit=True, magnifier=False,
+                                   capture_after_selection="edit"))
+        mask.selection.rects.append(QRect(40, 30, 100, 80))
+        mask.complete()
+        mask.show()
+        self.app.processEvents()
+        editor = mask.session.inline_editor
+        self.assertIsNotNone(editor)
+        rendered = editor.canvas.render_image()
+        self.assertEqual((rendered.width(), rendered.height()), (100, 80))
+        for x, y in ((0, 0), (50, 40), (99, 79), (10, 70), (99, 0)):
+            expected = frozen.getpixel((40 + x, 30 + y))
+            color = rendered.pixelColor(x, y)
+            self.assertEqual((color.red(), color.green(), color.blue()), expected, (x, y))
+        mask.close()
 
     def test_recapture_restores_secondary_monitor_region_with_mixed_dpi(self):
         from PySide6.QtCore import QPoint, QRect
@@ -10272,8 +10952,9 @@ class CoreTests(unittest.TestCase):
         from screenshot.mask_window import MaskWindow
 
         bounds = {"left": 0, "top": 0, "width": 100, "height": 80}
+        # 提示条画在光标附近；本用例只校验悬停高亮，关掉提示项避免它盖住取样区。
         settings = dict(DEFAULTS, magnifier=False, crosshair=False, window_detection=True,
-                        window_hover_detect=True, element_depth=3)
+                        window_hover_detect=True, element_depth=3, capture_hint_order=[])
         chain = [(0, 0, 100, 80), (10, 10, 60, 50)]
         with patch("screenshot.mask_window.visible_windows", return_value=[]), \
                 patch("screenshot.mask_window.element_chain", return_value=chain):

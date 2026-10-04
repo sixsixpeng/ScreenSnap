@@ -1,6 +1,5 @@
 """全屏统一遮罩与多选区事件分发。"""
 
-import ctypes
 import logging
 import os
 import re
@@ -10,9 +9,8 @@ from datetime import datetime
 from PySide6.QtCore import Qt, Signal, QPoint, QPointF, QRect, QEvent, QMimeData, QTimer, QSize
 from PySide6.QtGui import (QColor, QCursor, QPainter, QPainterPath, QPen, QGuiApplication,
                            QMouseEvent, QShortcut, QKeySequence)
-from PySide6.QtWidgets import (QWidget, QApplication, QDialog, QDialogButtonBox, QFormLayout, QSpinBox, QStyle,
-                               QFrame, QGraphicsView, QToolButton, QLabel,
-                               QHBoxLayout, QPushButton)
+from PySide6.QtWidgets import (QWidget, QApplication, QDialog, QDialogButtonBox, QFormLayout, QSpinBox,
+                               QFrame, QGraphicsView, QMenu, QToolButton, QLabel)
 
 from core.dpi import DisplayMapper
 from core.image_io import save_image, saved_extension
@@ -25,10 +23,11 @@ from logger.log_rate import log_every
 from editor.annotation_canvas import AnnotationCanvas
 from editor.image_effects import apply_output_effects
 from editor.toolbar_widget import ToolbarWidget, rich_tooltip
-from ui.action_icons import action_icon
 from screenshot.selection_rect import SelectionRects
-from screenshot.overlay_info import paint_info
-from screenshot.magnifier_widget import magnifier_rect, paint_magnifier
+from screenshot.overlay_info import info_bar_layout, paint_info_bar, paint_info_badge
+from screenshot.magnifier_widget import (MAGNIFIER_DEFAULT_SIZE, magnifier_rect,
+                                         paint_magnifier)
+from screenshot.hint_items import CAPTURE_ACTION_KEYS, TOOLBAR_HIDE_KEY, hint_items, hint_texts
 
 # 鼠标移动时悬停识别的刷新间隔由设置“window_hover_interval”控制（毫秒），避免每个移动事件都调用系统 API。
 
@@ -38,6 +37,49 @@ ESCAPE_FALLBACK_ENABLED = os.name == "nt"
 # 原地编辑两排图标条的紧凑尺寸：按钮边长与图标边长，尽量减少对截图区域的遮挡。
 INLINE_BUTTON_SIZE = 24
 INLINE_ICON_SIZE = 16
+
+# 拖动工具栏后松手时，与候选位置的距离（曼哈顿，像素）在此以内就吸附过去。
+# 拖动工具栏后松手时，与候选位置的距离（曼哈顿，像素）在此以内就吸附过去。
+TOOLBAR_SNAP_DISTANCE = 24
+# 工具栏左端抓取提示的宽度（像素）：拖动整条工具栏的入口，兼作视觉提示。
+TOOLBAR_HANDLE_WIDTH = 10
+
+# 采集自检：会在屏幕上长期存在、可能被一起采进画面的自身窗口（类名 → 提示用中文名）。
+# 新增这类常驻窗口时请一并登记；遮罩自身、放大镜 HUD 与内部控件不在其中（只画在遮罩表面）。
+INTRUDING_WINDOW_LABELS = {
+    "CaptureNotification": "通知缩略图",
+    "EditorWindow": "编辑器",
+    "SettingsWindow": "设置窗口",
+    "StickerItem": "贴图",
+    "StickerPanel": "贴图管理",
+    "RecycleWindow": "贴图回收站",
+}
+
+
+def window_label(widget):
+    """干扰窗口在提示条里的中文名：窗口可自报（`screensnap_self_window`），否则查登记表。
+
+    自报用于类名不在登记表里的本程序浮层（例如工具栏的「外观」弹层是 `QFrame`），
+    否则这类窗口会被采进画面却连一句警示都没有。
+    """
+    return (widget.property("screensnap_self_window")
+            or INTRUDING_WINDOW_LABELS.get(type(widget).__name__, "本程序窗口"))
+
+
+try:
+    from shiboken6 import isValid as _cpp_alive
+except ImportError:  # 理论上不会发生：PySide6 一定带 shiboken6
+    def _cpp_alive(widget):
+        return True
+
+
+def live_widget(widget):
+    """控件底层的 C++ 对象是否仍然存在。
+
+    控件被析构后，PySide6 仍可能保留（或被别的列表引用）包装对象；对这类对象调用
+    任何方法都会访问已释放内存，在绘制期间遍历窗口时会让整个进程崩掉。
+    """
+    return _cpp_alive(widget)
 
 
 def _hover_fill_color(settings):
@@ -94,7 +136,7 @@ class MagnifierOverlay(QWidget):
         if not visible:
             self.hide()
             return
-        frame = magnifier_rect(view.to_logical_point(view.position), view.rect())
+        frame = view.magnifier_frame()
         self.setGeometry(QRect(view.mapToGlobal(frame.topLeft()), frame.size()))
         if not self.isVisible():
             self.show()
@@ -108,12 +150,68 @@ class MagnifierOverlay(QWidget):
             return
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("white"))
-        frame = magnifier_rect(view.to_logical_point(view.position), view.rect())
+        frame = view.magnifier_frame()
         painter.translate(-frame.x(), -frame.y())
         paint_magnifier(painter, view.preview, view.to_logical_point(view.position),
                         view.rect(), view.position,
                         grid=view.settings.get("magnifier_grid", False),
-                        grid_color=view.settings.get("magnifier_grid_color", "#cccccc"))
+                        grid_color=view.settings.get("magnifier_grid_color", "#cccccc"),
+                        size=view.magnifier_size())
+
+
+class InfoBar(QWidget):
+    """选区提示条：遮罩的**子控件**，始终抬在原地编辑画布与工具栏之上。
+
+    过去它画在遮罩的 `paintEvent` 里，光标一移进选区就被选区预览和原地编辑画布盖住
+    （画布是遮罩的子控件，天然在遮罩绘制之上）。改成子控件后与放大镜浮层一样压在
+    内容之上；本身不接受鼠标事件，也不参与命中。
+    """
+
+    def __init__(self, view):
+        super().__init__(view)
+        self.view = view
+        self.rows = []
+        self.warning = None
+        self.bar = QRect()
+        self.align_right = False
+        self.setAttribute(Qt.WA_TransparentForMouseEvents)
+        self.hide()
+
+    def sync(self):
+        """按当前光标位置重算位置与内容；没有内容或不该显示时整条隐藏。"""
+        view = self.view
+        if not view.isVisible():
+            self.hide()
+            return
+        # 模态对话框或下拉弹出层打开时隐藏，避免作为置顶浮层盖住这些控件。
+        if QGuiApplication.modalWindow() is not None or QApplication.activePopupWidget() is not None:
+            self.hide()
+            return
+        metrics = self.fontMetrics()
+        warning = view.self_check_warning()
+        # 传入光标（逻辑坐标）：提示条据此与放大镜一起翻转、并与放大镜的边缘对齐。
+        bar, rows, align_right = info_bar_layout(
+            metrics, view.rect(), view.magnifier_frame(), view.capture_hint_items(),
+            warning=warning, per_line=view.hint_per_line(),
+            cursor=view.to_logical_point(view.position))
+        if bar.isEmpty():
+            self.bar = QRect()
+            self.hide()
+            return
+        self.bar, self.rows = bar, rows
+        self.align_right = align_right
+        self.warning = warning
+        self.setGeometry(bar)
+        if not self.isVisible():
+            self.show()
+        # 画布与工具栏是遮罩的子控件：每次都重新抬到最上层，保证提示条不被它们盖住。
+        self.raise_()
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        paint_info_bar(painter, self.rect(), self.rows, self.warning, self.fontMetrics(),
+                       align_right=self.align_right)
 
 
 class InlineEditor(QWidget):
@@ -135,12 +233,23 @@ class InlineEditor(QWidget):
         self.last_path = None
         self.suppress_save_notification = False
         self.resizing_region = False
+        # 工具栏拖放与临时隐藏：都只影响本次原地编辑，不落盘。
+        # 拖过就以用户放下的位置为准，选区/窗口变化触发重排时回到自动位置。
+        self.toolbar_manual = False
+        self.toolbar_hidden = False
+        self.toolbar_dragging = False
+        self.toolbar_drag_grab = None
+        self.toolbar_handle = None
         self.initial_save_timer = QTimer(self)
         self.initial_save_timer.setSingleShot(True)
         self.initial_save_timer.timeout.connect(self.save_initial_region)
         self.toolbar = ToolbarWidget(self.settings["pen_color"], self.settings,
                          show_capture_actions=True)
         self.toolbar.setObjectName("inlineCaptureToolbar")
+        self.toolbar.setToolTip(rich_tooltip(
+            "原地编辑工具栏",
+            "按住左侧抓手（或工具栏空白处）可整体拖动到不遮挡内容的位置，松手自动吸附；"
+            "拖动过之后双击空白处可恢复自动位置。"))
         self.toolbar.setAutoFillBackground(True)
         for button, action in self.toolbar.command_buttons:
             if action == "close_all_editors":
@@ -221,6 +330,25 @@ class InlineEditor(QWidget):
         if watched is menu or menu.isAncestorOf(watched):
             return super().eventFilter(watched, event)
         event_type = event.type()
+        # 工具栏整体拖动：抓手、工具栏空白处与中间挡片都能按住拖走。
+        # 只有拖过之后才把双击当"复位"，免得抢掉"双击空白=确认截图"的既有行为。
+        if (watched is self.toolbar_handle or watched is self.toolbar or
+                watched is getattr(self, "output_edit_spacer", None)):
+            if event_type == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
+                self.begin_toolbar_drag(watched.mapTo(view, event.position().toPoint()))
+                return True
+            if event_type == QEvent.MouseMove and self.toolbar_dragging:
+                self.drag_toolbar_to(watched.mapTo(view, event.position().toPoint()))
+                return True
+            if event_type == QEvent.MouseButtonRelease and self.toolbar_dragging:
+                self.end_toolbar_drag()
+                return True
+            if event_type == QEvent.MouseButtonDblClick and self.toolbar_manual:
+                self.reset_toolbar_position()
+                return True
+        if event_type == QEvent.Resize and watched is self.toolbar:
+            # 工具栏高度随排版变化，抓手需要重新贴到左内侧垂直居中。
+            self.place_toolbar_handle()
         if event_type == QEvent.KeyPress and event.key() == Qt.Key_Escape:
             # 取色、字体等模态框或下拉弹出层打开时，Esc 由它们自身处理，不要再关掉原地编辑。
             if (QGuiApplication.modalWindow() is None and
@@ -299,6 +427,48 @@ class InlineEditor(QWidget):
         self.toolbar.options_button.setText("")
         self.toolbar.options_button.setFixedSize(INLINE_BUTTON_SIZE, INLINE_BUTTON_SIZE)
         self.arrange_inline_output_edit()
+        self.create_toolbar_handle()
+
+    def create_toolbar_handle(self):
+        """工具栏左端的可见抓手：原地编辑才出现，用来把整条工具栏拖开。
+
+        比"拖任意空白处"更容易被发现；它不参与 `reflow()` 的网格（否则会被重排打乱），
+        而是在 `section_layout` 左侧预留等宽内边距后贴在左上角内侧。
+        """
+        if self.toolbar_handle is not None:
+            return self.toolbar_handle
+        handle = QLabel("≡", self.toolbar)
+        handle.setObjectName("inlineToolbarHandle")
+        handle.setFixedSize(TOOLBAR_HANDLE_WIDTH, INLINE_BUTTON_SIZE)
+        handle.setAlignment(Qt.AlignCenter)
+        handle.setCursor(Qt.SizeAllCursor)
+        # 只作为"边缘抓取提示"，不做成按钮：无边框、无底色、用调色板中灰色，深浅主题都合适。
+        handle.setStyleSheet(
+            "QLabel { background: transparent; border: none; color: palette(mid); }")
+        handle.setToolTip("按住拖动移动工具栏；双击恢复自动位置")
+        # 整条工具栏（含按钮之间的空白）都显示"可移动"光标，而不只是左侧抓手；
+        # 内部按钮各自恢复箭头光标，避免在按钮上也提示可以拖动整条工具栏。
+        self.toolbar.setCursor(Qt.SizeAllCursor)
+        spacer = getattr(self, "output_edit_spacer", None)
+        for child in self.toolbar.findChildren(QWidget):
+            if child is handle:
+                continue
+            # 中间挡片本身就是拖动入口，保持可移动光标；其余子控件（按钮）恢复箭头。
+            child.setCursor(Qt.SizeAllCursor if child is spacer else Qt.ArrowCursor)
+        margins = self.toolbar.section_layout.contentsMargins()
+        self.toolbar.section_layout.setContentsMargins(
+            margins.left() + TOOLBAR_HANDLE_WIDTH, margins.top(),
+            margins.right(), margins.bottom())
+        self.toolbar_handle = handle
+        self.place_toolbar_handle()
+        return handle
+
+    def place_toolbar_handle(self):
+        """把抓手贴在工具栏左内侧并垂直居中（工具栏高度会随重排变化）。"""
+        handle = self.toolbar_handle
+        if handle is None:
+            return
+        handle.move(2, max(0, (self.toolbar.height() - handle.height()) // 2))
 
     def apply_compact_buttons(self):
         icon_size = QSize(INLINE_ICON_SIZE, INLINE_ICON_SIZE)
@@ -324,6 +494,8 @@ class InlineEditor(QWidget):
             self.toolbar.output_grid.addWidget(widget, 0, column, Qt.AlignVCenter)
 
     def position_widgets(self):
+        # 选区/窗口变化后回到自动位置：手动拖动的位置只在本次原地编辑内有效，不落盘。
+        self.toolbar_manual = False
         selection = self.view.to_logical_rect(self.rect).toRect()
         self.canvas.setGeometry(selection)
         if self.canvas.image.width and self.canvas.image.height:
@@ -354,22 +526,10 @@ class InlineEditor(QWidget):
         toolbar_size.setHeight(max(toolbar_size.height(), self.toolbar.section_layout.sizeHint().height()))
         safe_area = self.view.rect().adjusted(margin, margin, -margin, -margin)
         selection_with_handles = selection.adjusted(-16, -16, 16, 16)
-        left_x = selection.left()
-        right_x = selection.right() - toolbar_size.width() + 1
-        first_x, second_x = (right_x, left_x) if selection.center().x() > self.view.width() // 2 else (left_x, right_x)
-        candidates = (
-            QPoint(first_x, selection_with_handles.bottom() + margin),
-            QPoint(second_x, selection_with_handles.bottom() + margin),
-            QPoint(first_x, selection_with_handles.top() - toolbar_size.height() - margin),
-            QPoint(second_x, selection_with_handles.top() - toolbar_size.height() - margin),
-            QPoint(selection_with_handles.right() + margin, selection.top()),
-            QPoint(selection_with_handles.left() - toolbar_size.width() - margin, selection.top()),
-        )
+        candidates, left_x, right_x = self.toolbar_placement_candidates(
+            selection, toolbar_size, margin)
         target = None
         for candidate in candidates:
-            x = min(max(candidate.x(), margin), max(margin, self.view.width() - toolbar_size.width() - margin))
-            y = min(max(candidate.y(), margin), max(margin, self.view.height() - toolbar_size.height() - margin))
-            candidate = QPoint(x, y)
             rect = QRect(candidate, toolbar_size)
             if safe_area.contains(rect) and not rect.intersects(selection_with_handles):
                 target = candidate
@@ -388,10 +548,89 @@ class InlineEditor(QWidget):
         self.toolbar.setGeometry(x, y, toolbar_size.width(), toolbar_size.height())
         self.toolbar.section_layout.invalidate()
         self.toolbar.section_layout.activate()
+        self.place_toolbar_handle()
         logging.getLogger("screensnap").debug(
             "原地编辑工具栏布局：选区 %sx%s，工具栏 %sx%s，位置 (%s,%s)%s",
             selection.width(), selection.height(), toolbar_size.width(), toolbar_size.height(),
             x, y, "" if target is not None else "，空间不足回退到选区内部")
+
+    def toolbar_placement_candidates(self, selection, toolbar_size, margin=8):
+        """工具栏的候选摆放位置：选区外侧上下左右（近的先试），都已钳制在视图内。
+
+        返回值同时带上选区左右两侧的 x（`left_x`/`right_x`），供"空间不足时回退到
+        选区内部"与"拖动松手吸附"复用，保证自动摆位与吸附用的是同一套目标位置。
+        """
+        left_x = selection.left()
+        right_x = selection.right() - toolbar_size.width() + 1
+        first_x, second_x = (right_x, left_x) if selection.center().x() > self.view.width() // 2 else (left_x, right_x)
+        box = selection.adjusted(-16, -16, 16, 16)
+        raw = (
+            QPoint(first_x, box.bottom() + margin),
+            QPoint(second_x, box.bottom() + margin),
+            QPoint(first_x, box.top() - toolbar_size.height() - margin),
+            QPoint(second_x, box.top() - toolbar_size.height() - margin),
+            QPoint(box.right() + margin, selection.top()),
+            QPoint(box.left() - toolbar_size.width() - margin, selection.top()),
+        )
+        max_x = max(margin, self.view.width() - toolbar_size.width() - margin)
+        max_y = max(margin, self.view.height() - toolbar_size.height() - margin)
+        candidates = [QPoint(min(max(point.x(), margin), max_x),
+                             min(max(point.y(), margin), max_y)) for point in raw]
+        return candidates, left_x, right_x
+
+    def apply_toolbar_visibility(self):
+        """按隐藏状态显示/隐藏工具栏（隐藏是本次编辑内的临时状态）。"""
+        if self.toolbar_hidden:
+            self.toolbar.hide()
+        else:
+            self.toolbar.show()
+            self.toolbar.raise_()
+
+    def toggle_toolbar(self):
+        """临时隐藏/恢复工具栏，返回隐藏后的状态；只由快捷键触发，没有对应按钮。"""
+        self.toolbar_hidden = not self.toolbar_hidden
+        self.apply_toolbar_visibility()
+        self.view.update_all()
+        return self.toolbar_hidden
+
+    def begin_toolbar_drag(self, view_point):
+        """开始拖动工具栏：记住鼠标相对工具栏左上角的偏移，拖动时保持不掉手。"""
+        self.toolbar_dragging = True
+        self.toolbar_drag_grab = view_point - self.toolbar.pos()
+        if self.toolbar_handle is not None:
+            self.toolbar_handle.setCursor(Qt.ClosedHandCursor)
+        self.toolbar.raise_()
+
+    def drag_toolbar_to(self, view_point):
+        """工具栏跟着鼠标走，并限制在视图内，避免拖出屏幕看不见。"""
+        if self.toolbar_drag_grab is None:
+            return
+        margin = 8
+        target = view_point - self.toolbar_drag_grab
+        max_x = max(margin, self.view.width() - self.toolbar.width() - margin)
+        max_y = max(margin, self.view.height() - self.toolbar.height() - margin)
+        self.toolbar.move(min(max(target.x(), margin), max_x),
+                          min(max(target.y(), margin), max_y))
+        self.toolbar_manual = True
+
+    def end_toolbar_drag(self):
+        """松手：离候选位够近就吸附过去，否则就留在用户放下的位置。"""
+        self.toolbar_dragging = False
+        self.toolbar_drag_grab = None
+        if self.toolbar_handle is not None:
+            self.toolbar_handle.setCursor(Qt.SizeAllCursor)
+        selection = self.view.to_logical_rect(self.rect).toRect()
+        candidates, _left_x, _right_x = self.toolbar_placement_candidates(
+            selection, self.toolbar.size())
+        current = self.toolbar.pos()
+        nearest = min(candidates, key=lambda point: (point - current).manhattanLength())
+        if (nearest - current).manhattanLength() <= TOOLBAR_SNAP_DISTANCE:
+            self.toolbar.move(nearest)
+
+    def reset_toolbar_position(self):
+        """双击空白处：放弃手动位置，回到自动摆位。"""
+        self.toolbar_manual = False
+        self.position_widgets()
 
     def reset_region(self, rect, image, alternate, cursor_enabled):
         """选区尺寸调整后重置内联编辑底图，并保留同一个保存路径。"""
@@ -408,7 +647,8 @@ class InlineEditor(QWidget):
         self.canvas.refresh_image()
         self.position_widgets()
         self.canvas.show()
-        self.toolbar.show()
+        # 隐藏状态是本次编辑内的临时状态：重置底图时不要把它又显示出来。
+        self.apply_toolbar_visibility()
         self.view.magnifier_overlay.raise_()
         if not self.last_path:
             self.initial_save_timer.start(0)
@@ -654,7 +894,7 @@ class MaskWindow(QWidget):
 
     def __init__(self, image, bounds, monitors, settings, mode="capture", alternate=None,
                  session=None, monitor=None, primary=True, initial_rect=None,
-                 preferred_monitor=None):
+                 preferred_monitor=None, extra_intruders=None):
         super().__init__()
         self.setProperty("screensnap_overlay", True)
         # screensnap_mask 单独标记截图遮罩：UIA 与点击识别只穿透它，
@@ -665,6 +905,12 @@ class MaskWindow(QWidget):
         self.preview = to_qimage(image)
         self.bounds = bounds
         self.monitors = monitors
+        # 采集自检的外部线索：抓屏瞬间仍在屏幕上的弹出菜单——抓屏之后才关闭，此刻已枚举
+        # 不到，但它的像素已经进了冻结帧，只能靠抓屏前记下的矩形补警示。
+        # 系统通知（Win11 Toast / 托盘气泡）不做提示：它是操作系统窗口，抓屏前关不掉也
+        # 枚举不到，"刚有系统通知"这类常驻提醒对用户是噪音。
+        self.extra_intruders = [(str(label), QRect(rect))
+                                for label, rect in (extra_intruders or ())]
         self.mapper = session.mapper if session is not None else DisplayMapper(bounds, monitors)
         global_bounds = QRect(bounds["left"], bounds["top"], bounds["width"], bounds["height"])
         initial_global_rect = QRect(*initial_rect).intersected(global_bounds) if initial_rect else QRect()
@@ -703,6 +949,8 @@ class MaskWindow(QWidget):
         self.hover_rect = None
         self.hover_stamp = 0.0
         self.press_position = None
+        # 采集自检：缓存上次检测到的“落在选区内的自身窗口”类型，仅在变化时写日志。
+        self.intruding_window_kinds = ()
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.StrongFocus)
@@ -728,10 +976,14 @@ class MaskWindow(QWidget):
         else:
             self.capture_save_shortcut = None
         self.magnifier_overlay = MagnifierOverlay(self)
+        self.info_bar = InfoBar(self)
         if primary:
             for extra_monitor in monitors[1:]:
+                # 采集自检的外部线索（抓屏前记录的弹出菜单矩形）同样交给其它显示器的遮罩，
+                # 否则只有主屏提示条会给出这类警示。
                 MaskWindow(image, bounds, monitors, settings, mode, alternate,
-                           self.session, extra_monitor, primary=False)
+                           self.session, extra_monitor, primary=False,
+                           extra_intruders=extra_intruders)
         if primary and not initial_global_rect.isEmpty():
             self.selection.rects.append(initial_global_rect.translated(-bounds["left"], -bounds["top"]))
         elif primary and mode == "fullscreen":
@@ -747,8 +999,22 @@ class MaskWindow(QWidget):
         # 窗口未显示时先识别一次，此时命中测试不会被本进程遮罩挡住。
         self.element_chain = []
         self.element_index = -1
-        self.capture_actions = self.create_capture_actions()
-        self.update_capture_actions()
+        # 提示条跟着放大镜走，因此不再需要记录上一帧矩形与"鼠标移入隐藏"状态。
+        self.info_bar_rect = QRect()
+        # 选区阶段的四个功能快捷键取代了原先的按钮，只在主遮罩上创建（应用级，遮罩活动即生效）。
+        self.capture_action_shortcuts = None
+        self.toolbar_hide_shortcut = None
+        if primary:
+            slots = {"custom_size": self.select_fixed_size,
+                     "recapture": self.request_recapture,
+                     "window_edit": self.complete_in_window_editor,
+                     "copy": self.copy_selection_to_clipboard}
+            self.capture_action_shortcuts = {
+                name: self._capture_action_shortcut(settings, key, default, slots[name])
+                for name, key, default, _label in CAPTURE_ACTION_KEYS}
+            # 原地编辑工具栏的隐藏键：同一个机制，只加键位、不加按钮。
+            self.toolbar_hide_shortcut = self._capture_action_shortcut(
+                settings, *TOOLBAR_HIDE_KEY, self.toggle_inline_toolbar)
         if primary and settings.get("window_detection", True):
             point = self.mapper.logical_global_to_physical_global(QCursor.pos())
             self.element_chain = element_chain((point.x(), point.y()),
@@ -765,54 +1031,89 @@ class MaskWindow(QWidget):
                 self.apply_element(0)
 
 
-    def create_capture_actions(self):
-        actions = QWidget(self)
-        actions.setObjectName("captureSelectionActions")
-        action_layout = QHBoxLayout(actions)
-        action_layout.setContentsMargins(0, 0, 0, 0)
-        action_layout.setSpacing(8)
-        owner = self.session.views[0]
-        custom_size = QPushButton("自定义尺寸", actions)
-        custom_size.setIcon(action_icon("resize"))
-        custom_size.clicked.connect(owner.select_fixed_size)
-        recapture = QPushButton("重新截图", actions)
-        recapture.setIcon(action_icon("camera"))
-        recapture.clicked.connect(self.request_recapture)
-        window_edit = QPushButton("窗口编辑", actions)
-        window_edit.setIcon(action_icon("window_edit"))
-        window_edit.clicked.connect(owner.complete_in_window_editor)
-        copy_only = QPushButton("仅复制", actions)
-        copy_only.setIcon(action_icon("clipboard_image"))
-        copy_only.clicked.connect(self.copy_selection_to_clipboard)
-        action_layout.addWidget(custom_size)
-        action_layout.addWidget(recapture)
-        action_layout.addWidget(window_edit)
-        action_layout.addWidget(copy_only)
-        for button in (custom_size, recapture, window_edit, copy_only):
-            button.setFixedHeight(32)
-            button.setIconSize(QSize(14, 14))
-            # 截图遮罩是键盘驱动的取景层，操作按钮只用鼠标点击，不应抢占 Tab 焦点，
-            # 否则 Tab 会被焦点遍历抢走，无法在窗口元素层级间循环。
-            button.setFocusPolicy(Qt.NoFocus)
-        custom_size.setToolTip(rich_tooltip(
-            "自定义尺寸",
-            "按指定宽高创建选区：宽高默认填整屏像素，可改成任意尺寸（如 1920 × 1080），"
-            "选区左上角对齐当前鼠标位置；截图时按 Ctrl+F 也能打开。"))
-        recapture.setToolTip(rich_tooltip(
-            "重新截图",
-            "放弃当前这一屏已冻结的画面，回到同一显示器重新框选；"
-            "适合画面还没准备好或想换区域的情况，当前标注不会保留。"))
-        window_edit.setToolTip(rich_tooltip(
-            "窗口编辑",
-            "把当前选区送进独立编辑器窗口，使用完整工具栏编辑；"
-            "适合标注较多，或需要缩放、旋转、裁剪、调外观的场景。"))
-        copy_only.setToolTip(rich_tooltip(
-            "仅复制",
-            "把当前整屏截图（有选区时取选区）直接写入剪贴板并关闭遮罩，不落盘、不进入编辑器；"
-            "右键双击与快速保存快捷键仍直接保存。"))
-        self.capture_action_buttons = (custom_size, recapture, window_edit, copy_only)
-        actions.adjustSize()
-        return actions
+    def _capture_action_shortcut(self, settings, key, default, slot):
+        """选区阶段的功能快捷键（自定义尺寸 / 重新截图 / 窗口编辑 / 仅复制）。
+
+        默认：自定义尺寸 `F`、重新截图 `R`、窗口编辑 `E`、仅复制 `Y`（都用单键，
+        替换掉此前的 `Ctrl+F`）；都可在「设置 > 截图 > 截图快捷操作」里改键。
+        """
+        shortcut = QShortcut(QKeySequence(settings.get(key, default)), self)
+        shortcut.setContext(Qt.ApplicationShortcut)
+        shortcut.activated.connect(slot)
+        return shortcut
+
+    def magnifier_size(self):
+        """当前生效的放大镜边长（像素）；非法或缺失时回落到默认尺寸。"""
+        try:
+            size = int(self.settings.get("magnifier_size", MAGNIFIER_DEFAULT_SIZE))
+        except (TypeError, ValueError):
+            return MAGNIFIER_DEFAULT_SIZE
+        return min(max(size, 100), 320)
+
+    def hint_per_line(self):
+        """「每行提示数」配置：0 表示只按宽度自动换行。"""
+        try:
+            value = int(self.settings.get("capture_hint_per_line", 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+        return min(max(value, 0), 8)
+
+    def magnifier_frame(self):
+        """放大镜框（本视图逻辑坐标）。
+
+        放大镜关闭、被模态弹窗遮挡时**仍返回按同一避让规则算出的框**，提示条因此
+        仍然跟着光标显示，不会因为放大镜不画了就消失。
+        """
+        return magnifier_rect(self.to_logical_point(self.position), self.rect(),
+                              self.magnifier_size())
+
+    def capture_hint_items(self):
+        """提示条内容：按「设置里的顺序」给出当前阶段的提示文案。
+
+        每个提示项都能在设置里单独开关（不在 `capture_hint_order` 里的不显示），
+        顺序也以那份配置为准；总开关关闭时整条不显示。文案与设置页预览共用
+        `screenshot.hint_items`，因此改键后两处显示的都是最新键位。
+        """
+        selection = self.selection.active or (
+            self.selection.rects[-1] if self.selection.rects else None)
+        editor = self.session.inline_editor
+        return hint_items(
+            self.settings, (self.position.x(), self.position.y()),
+            (selection.width(), selection.height()) if selection else None,
+            inline=self.inline_active(), picker=self.picker_mode,
+            picker_color=self.picker_color,
+            toolbar_hidden=bool(editor is not None and editor.toolbar_hidden))
+
+    def hint_texts(self, selection, inline):
+        """提示项 id → 文案（供用例复用；实际显示走 `capture_hint_items`）。"""
+        editor = self.session.inline_editor
+        return hint_texts(
+            self.settings, (self.position.x(), self.position.y()),
+            (selection.width(), selection.height()) if selection else None,
+            inline=inline, picker=self.picker_mode, picker_color=self.picker_color,
+            toolbar_hidden=bool(editor is not None and editor.toolbar_hidden))
+
+    def capture_action_hints(self):
+        """兼容旧调用：返回提示项里四个选区功能键的 (键, 名称) 列表（供用例复用）。"""
+        if self.picker_mode or self.inline_active():
+            return None
+        selection = self.selection.active or (
+            self.selection.rects[-1] if self.selection.rects else None)
+        if selection is None:
+            return None
+        return [(str(self.settings.get(key, default)), label)
+                for _name, key, default, label in CAPTURE_ACTION_KEYS]
+
+    def toggle_inline_toolbar(self):
+        """快捷键临时隐藏/恢复原地编辑工具栏。
+
+        界面上不加任何隐藏/显示按钮，提示条第二行负责告诉用户按哪个键。
+        """
+        editor = self.session.inline_editor
+        if editor is None:
+            return
+        hidden = editor.toggle_toolbar()
+        logging.getLogger("screensnap").debug("原地编辑工具栏%s", "已隐藏" if hidden else "已恢复")
 
     def logical_window_offset(self):
         """当前窗口左上角相对整轮遮罩 logical_bounds 的偏移。"""
@@ -824,14 +1125,14 @@ class MaskWindow(QWidget):
             for view in self.session.views:
                 QWidget.show(view)
                 view.magnifier_overlay.sync()
-                view.update_capture_actions()
+                view.info_bar.sync()
             activate_window(self)
             self.setFocus(Qt.ActiveWindowFocusReason)
             QTimer.singleShot(0, self._focus_capture)
         else:
             QWidget.show(self)
             self.magnifier_overlay.sync()
-            self.update_capture_actions()
+            self.info_bar.sync()
             self.activateWindow()
             self.setFocus(Qt.ActiveWindowFocusReason)
         self._sync_escape_fallback()
@@ -924,6 +1225,7 @@ class MaskWindow(QWidget):
         self.hover_stamp = 0.0
         self.press_position = None
         self.magnifier_overlay.hide()
+        self.info_bar.hide()
         editor = self.session.inline_editor
         if editor is not None:
             editor.cleanup()
@@ -945,34 +1247,11 @@ class MaskWindow(QWidget):
             self.capture_save_shortcut.setEnabled(self.selection.nudge_index is None)
         self.session.position = QPoint(self.position)
         for view in self.session.views:
-            view.update_capture_actions()
             view.position = QPoint(self.session.position)
             view.update()
             view.magnifier_overlay.sync()
-
-    def update_capture_actions(self):
-        if self.capture_actions is None:
-            return
-        visible = bool(self.selection.rects) and not self.inline_active()
-        self.capture_actions.setVisible(visible)
-        if visible:
-            labels = ("自定义尺寸", "重新截图", "窗口编辑", "仅复制")
-            compact_labels = ("尺寸", "重截", "编辑", "复制")
-            for button, label in zip(self.capture_action_buttons, labels):
-                button.setText(label)
-            self.capture_actions.adjustSize()
-            if self.width() < self.capture_actions.width() + 16:
-                for button, label in zip(self.capture_action_buttons, compact_labels):
-                    button.setText(label)
-                self.capture_actions.adjustSize()
-            if self.width() < self.capture_actions.width() + 16:
-                for button in self.capture_action_buttons:
-                    button.setText("")
-                self.capture_actions.adjustSize()
-            x = max(8, (self.width() - self.capture_actions.width()) // 2)
-            y = 8 + self.fontMetrics().height() + 12 + 6
-            y = min(y, max(8, self.height() - self.capture_actions.height() - 8))
-            self.capture_actions.move(x, y)
+            # 提示条是子控件：位置与内容都跟着光标变，每帧同步一次并抬到画布之上。
+            view.info_bar.sync()
 
     def request_recapture(self):
         context = {"monitor": dict(self.monitor)}
@@ -1018,13 +1297,104 @@ class MaskWindow(QWidget):
             sequence = QKeySequence("S")
         self.capture_save_shortcut.setKey(sequence)
 
+    def sync_capture_action_shortcuts(self, settings):
+        """改键后同步四个选区阶段功能键与原工具栏隐藏键（提示条读的是同一份设置）。"""
+        if self.toolbar_hide_shortcut is not None:
+            key, default = TOOLBAR_HIDE_KEY
+            sequence = QKeySequence(settings.get(key, default))
+            if sequence.isEmpty():
+                sequence = QKeySequence(default)
+            self.toolbar_hide_shortcut.setKey(sequence)
+        if not self.capture_action_shortcuts:
+            return
+        for name, key, default, _label in CAPTURE_ACTION_KEYS:
+            shortcut = self.capture_action_shortcuts.get(name)
+            if shortcut is None:
+                continue
+            sequence = QKeySequence(settings.get(key, default))
+            if sequence.isEmpty():
+                sequence = QKeySequence(default)
+            shortcut.setKey(sequence)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self.update_capture_actions()
         self.magnifier_overlay.sync()
+        self.info_bar.sync()
 
     def inline_active(self):
         return self.session.inline_editor is not None
+
+    def _selection_area(self, selection=None):
+        """选区在屏幕物理坐标下的矩形；没有有效选区时返回 None。"""
+        if selection is None:
+            selection = self.selection.active or (
+                self.selection.rects[-1] if self.selection.rects else None)
+        if selection is None or selection.isEmpty():
+            return None
+        return selection.translated(self.bounds["left"], self.bounds["top"])
+
+    def window_label(self, widget):
+        """干扰窗口在提示条里的中文名（窗口可自报，见 `screensnap_self_window`）。"""
+        return window_label(widget)
+
+    def intruding_windows(self, selection=None):
+        """采集自检：返回落在选区内的本程序窗口（它们会被一起采进画面）。
+
+        只统计会在屏幕上长期存在的自身窗口：上一轮通知缩略图、贴图、设置窗口、
+        编辑器与弹出菜单/对话框。遮罩自身、放大镜 HUD 以及按钮组、原地编辑工具栏等
+        内部控件不算——它们只画在遮罩表面，不会进入裁切像素。带 `screensnap_self_window`
+        属性自报的浮层（如工具栏「外观」弹层）同样计入，避免"被采进画面却无警示"。
+        """
+        area = self._selection_area(selection)
+        if area is None:
+            return []
+        hits = []
+        for widget in QApplication.allWidgets():
+            # 只看真正的窗口（含带父窗口的对话框），内部子控件（遮罩上的按钮组、原地编辑
+            # 工具栏等）不进入裁切像素，因此一律跳过。
+            # 先确认底层 C++ 对象仍在：控件析构后包装对象可能还留在列表里，直接调用会崩。
+            if not live_widget(widget):
+                continue
+            if widget is self or not widget.isWindow() or not widget.isVisible():
+                continue
+            if widget in self.session.views:
+                continue
+            if isinstance(widget, (MaskWindow, MagnifierOverlay)):
+                continue
+            own = widget.property("screensnap_self_window") or \
+                widget.property("screensnap_overlay") or \
+                type(widget).__name__ in INTRUDING_WINDOW_LABELS
+            if not own and not isinstance(widget, (QMenu, QDialog)):
+                continue
+            rect = widget.frameGeometry()
+            if rect.width() > 0 and rect.height() > 0 and area.intersects(rect):
+                hits.append(widget)
+        return hits
+
+    def self_check_warning(self, selection=None):
+        """采集自检：选区含本程序内容时返回提示文案，否则返回 None。
+
+        两类来源合并成一句：选区内的常驻自身窗口，以及抓屏瞬间记录下的弹出菜单
+        （它已被烤进冻结帧，此刻枚举不到）。系统通知不作提示（对用户是噪音）。
+        """
+        hits = self.intruding_windows(selection)
+        kinds = tuple(sorted(type(widget).__name__ for widget in hits))
+        logger = logging.getLogger("screensnap")
+        if kinds != self.intruding_window_kinds:
+            self.intruding_window_kinds = kinds
+            if kinds:
+                logger.warning("选区含本程序窗口，可能被一起采集: %s", ", ".join(kinds))
+            else:
+                logger.debug("选区已不含本程序窗口")
+        labels = {self.window_label(widget) for widget in hits}
+        area = self._selection_area(selection)
+        if area is not None:
+            for label, rect in self.extra_intruders:
+                if rect.width() > 0 and rect.height() > 0 and area.intersects(rect):
+                    labels.add(label)
+        if not labels:
+            return None
+        return f"选区内有{'、'.join(sorted(labels))}，移开后重截"
 
     def set_inline_custom_size(self, editor):
         bounds = self.mapper.full_physical_local_rect()
@@ -1091,8 +1461,6 @@ class MaskWindow(QWidget):
         if self.session.completing or self.session.closing:
             return
         self.session.completing = True
-        if self.capture_actions is not None:
-            self.capture_actions.hide()
         self.selection.finish()
 
         bounds = self.mapper.full_physical_local_rect()
@@ -1257,35 +1625,22 @@ class MaskWindow(QWidget):
                                 self.settings.get("crosshair_width", 1)))
             painter.drawLine(logical_position.x(), 0, logical_position.x(), self.height())
             painter.drawLine(0, logical_position.y(), self.width(), logical_position.y())
-        global_position = self.position + QPoint(self.bounds["left"], self.bounds["top"])
         current_selection = self.selection.active or (
             self.selection.rects[-1] if self.selection.rects else None
         )
-        for monitor in self.monitors:
-            monitor_area = self.to_logical_rect(self.mapper.monitor_local_rect(monitor)).toRect()
-            element_rect, element_size = self.element_size_hint(current_selection)
-            if element_rect is not None and not monitor_area.intersects(element_rect):
-                element_rect = None
-            quick_sticker = (self.settings.get("capture_quick_sticker_shortcut", "Space")
-                             if self.settings.get("capture_quick_sticker_enabled", False)
-                             else False)
-            pick_color = None
-            if self.picker_mode:
-                px = self.position.x() + self.bounds["left"]
-                py = self.position.y() + self.bounds["top"]
-                if 0 <= px < self.image.width and 0 <= py < self.image.height:
-                    r, g, b = self.image.convert("RGB").getpixel((px, py))
-                    pick_color = "#%02x%02x%02x" % (r, g, b)
-            paint_info(painter, global_position, current_selection, monitor_area, quick_sticker,
-                       self.settings.get("capture_save_shortcut", "S"), element_rect,
-                       element_size,
-                       self.settings.get("window_hover_border_color", "#168cff"),
-                       self.settings.get("window_hover_text_color", "#F4FFFC"),
-                       self.settings.get("window_hover_badge_color", "#102A31"),
-                       self.settings.get("window_hover_font_size", 12),
-                       self.settings.get("window_hover_border_width", 2),
-                       pick_color, picker_mode=self.picker_mode,
-                       picker_shortcut=self.settings.get("capture_picker_shortcut", "C"))
+        # 提示条本身是子控件 InfoBar（压在编辑画布之上），这里只画尺寸徽标，并避开提示条。
+        monitor_area = self.to_logical_rect(self.monitor_rect).toRect()
+        element_rect, element_size = self.element_size_hint(current_selection)
+        if element_rect is not None and not monitor_area.intersects(element_rect):
+            element_rect = None
+        self.info_bar_rect = paint_info_badge(
+            painter, monitor_area, element_rect, element_size,
+            element_border_color=self.settings.get("window_hover_border_color", "#168cff"),
+            element_text_color=self.settings.get("window_hover_text_color", "#F4FFFC"),
+            element_background_color=self.settings.get("window_hover_badge_color", "#102A31"),
+            element_font_size=self.settings.get("window_hover_font_size", 12),
+            element_border_width=self.settings.get("window_hover_border_width", 2),
+            bar=self.info_bar.bar if self.info_bar is not None else None)
         painter.setPen(QPen(QColor(self.settings.get("selection_border_color", "#ff0000")), 1))
         painter.setBrush(Qt.NoBrush)
         for selection_path in selection_paths:
@@ -1510,8 +1865,6 @@ class MaskWindow(QWidget):
             self.close()
         elif key in (Qt.Key_Return, Qt.Key_Enter):
             self.complete()
-        elif key == Qt.Key_F and event.modifiers() & Qt.ControlModifier:
-            self.select_fixed_size()
         else:
             dx = (-1 if key in (Qt.Key_A, Qt.Key_Left) else 1 if key in (Qt.Key_D, Qt.Key_Right) else 0)
             dy = (-1 if key in (Qt.Key_W, Qt.Key_Up) else 1 if key in (Qt.Key_S, Qt.Key_Down) else 0)

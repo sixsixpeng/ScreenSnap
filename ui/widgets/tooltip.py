@@ -76,6 +76,9 @@ class SettingsPage(QWidget):
                     widget.set_color(value)
                 elif isinstance(widget, FilePathEdit):
                     widget.input.setText(str(value or ""))
+                elif hasattr(widget, "set_value"):
+                    # 复合控件（如提示项列表）自带 set_value，用来把配置写回界面。
+                    widget.set_value(copy.deepcopy(value))
         for key, button in self.color_buttons.items():
             button.set_color(self.config.data.get(key, "#000000"))
 

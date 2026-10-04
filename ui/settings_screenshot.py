@@ -1,11 +1,15 @@
 """截图行为、画面识别和选区设置。"""
 
+import logging
+
 from PySide6.QtCore import QSignalBlocker, QRectF, Qt
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen
-from PySide6.QtWidgets import (QKeySequenceEdit, QComboBox, QSizePolicy, QWidget,
-                              QGroupBox, QFormLayout, QLabel)
+from PySide6.QtWidgets import QKeySequenceEdit, QComboBox, QSizePolicy, QWidget, QLabel
 
+from config.config_manager import HINT_ITEM_IDS, HINT_LABELS
 from ui.widgets.color_button import ColorButton
+from ui.widgets.hint_order_list import HintOrderList
+from ui.widgets.hint_preview import HintBarPreview
 from ui.widgets.tooltip import SettingsPage
 
 
@@ -71,7 +75,11 @@ class ScreenshotEffectPreview(QWidget):
                 painter.drawLine(int(center.x()), int(area.top()), int(center.x()), int(area.bottom()))
                 painter.drawLine(int(area.left()), int(center.y()), int(area.right()), int(center.y()))
             if self.config.data.get("magnifier", True):
-                lens = QRectF(center.x() - 27, center.y() - 22, 54, 44)
+                # 预览里的放大镜按设置尺寸等比缩放（最大不超过预览区高度的一半），
+                # 因此调大尺寸时能直观看到放大镜变大，而不是永远同一个圆圈。
+                size = int(self.config.data.get("magnifier_size", 140) or 140)
+                side = max(24.0, min(float(size) * 0.4, area.height() * 0.55))
+                lens = QRectF(center.x() - side / 2, center.y() - side / 2, side, side)
                 if self.config.data.get("magnifier_grid", True):
                     painter.save()
                     painter.setClipRect(lens)
@@ -204,11 +212,42 @@ class ScreenshotPage(SettingsPage):
                        "选区存在时直接保存；沿用输出外观、保存格式、剪贴板和成功通知设置")
         self._shortcut("capture_picker_shortcut", "取色按键", "C",
                        "选区确认前按此键进入/退出取色模式；取色态下左键取样会把色值复制到剪贴板")
+        self._shortcut("capture_custom_size_shortcut", "自定义尺寸按键", "F",
+                       "选区存在时按此键打开“自定义尺寸”对话框，按指定宽高重建选区")
+        self._shortcut("capture_recapture_shortcut", "重新截图按键", "R",
+                       "放弃当前冻结画面，回到同一显示器重新框选（不保留当前标注）")
+        self._shortcut("capture_window_edit_shortcut", "窗口编辑按键", "E",
+                       "把当前选区送进独立编辑器窗口，使用完整工具栏编辑")
+        self._shortcut("capture_copy_shortcut", "仅复制按键", "Y",
+                       "把整屏截图（有选区时取选区）写入剪贴板并关闭遮罩，不落盘、不进入编辑器")
+        self._shortcut("capture_toolbar_hide_shortcut", "隐藏工具栏按键", "`",
+                       "原地编辑中按此键临时隐藏/恢复工具栏，方便查看与操作被它遮住的内容；"
+                       "工具栏也可按住空白处拖动，这个键在顶部提示条里有说明")
+        self.group("操作提示")
+        self.check("capture_hints_enabled", "显示快捷键提示",
+                   "在截图时于放大镜旁显示快捷键与操作提示；关闭后整条提示不显示，\n"
+                   "放大镜、十字线等其它定位辅助不受影响")
+        hint_list = HintOrderList(HINT_ITEM_IDS, HINT_LABELS)
+        hint_list.set_value(self.config.data.get("capture_hint_order"))
+        self.controls["capture_hint_order"] = hint_list
+        self.form.addRow("提示项与顺序", hint_list)
+        hint_list.value_changed.connect(
+            lambda value: self.update_value("capture_hint_order", value))
+        self.number("capture_hint_per_line", "每行提示数", 0, 8,
+                    "每行最多显示几个提示项（1–8）；0 表示不限制，只按宽度自动换行。\n"
+                    "配合上面的顺序列表，可以把重要的键位放在第一行。")
+        # 实时预览：与截图遮罩共用同一套文案与排版，改键/勾选/排序后立刻能看到效果。
+        self._hint_preview = HintBarPreview(self.config)
+        self.previews.append(self._hint_preview)
+        self.form.addRow(self._hint_preview)
         self.group("定位辅助")
         # 整体效果预览放到分组最前，避免被挤到末尾；下面用小节标题替代嵌套子框。
         self._effect_preview("assist")
         self._section("放大镜")
         self.check("magnifier", "实时放大镜", "截图时放大鼠标附近像素")
+        self.number("magnifier_size", "放大镜尺寸 (px)", 100, 320,
+                    "放大镜为正方形，边长 100–320 像素；采样区域按同一缩放倍率等比换算，\n"
+                    "调大尺寸会同时看到更大范围，不会变成更模糊的放大")
         self.check("magnifier_grid", "放大镜像素网格", "放大镜内叠加像素网格线，便于 1px 级对齐")
         grid_color = ColorButton(config.data["magnifier_grid_color"],
                                  lambda color: self.update_value("magnifier_grid_color", color))
@@ -456,7 +495,23 @@ class ScreenshotPage(SettingsPage):
             lambda value, setting=key, fallback=default: self._shortcut_changed(setting, fallback, value))
 
     def _shortcut_changed(self, key, default, sequence):
-        if sequence.isEmpty():
-            self.controls[key].setKeySequence(QKeySequence(default))
+        """键位变化：空值或非法组合一律**回滚**到上一个有效值。
+
+        清空控件得到的空序列没有意义（按什么键都触发不了），非法组合也不能落盘；
+        两种情况下都把控件与配置恢复成上一个有效键（没有则用默认键），避免这个功能
+        在界面上看着有、实际按不出来。
+        """
+        from config.config_manager import validate
+
+        text = "" if sequence.isEmpty() else sequence.toString(QKeySequence.PortableText)
+        if text:
+            try:
+                validate({key: text})
+            except ValueError:
+                text = ""
+        if not text:
+            fallback = self.config.data.get(key) or default
+            self.controls[key].setKeySequence(QKeySequence(fallback))
+            logging.getLogger("screensnap").info("快捷键 %s 非法或为空，回滚为 %s", key, fallback)
             return
-        self.update_value(key, sequence.toString(QKeySequence.PortableText))
+        self.update_value(key, text)

@@ -15,6 +15,30 @@ TOOL_WIDTH_KEYS = {
     "pen": "pen_width", "marker": "marker_width", "eraser": "eraser_width",
 }
 
+# 提示条可开关的提示项：id → 设置页里显示的名字（顺序＝默认显示顺序）。
+# 这里是**唯一来源**：遮罩按这些 id 组织文案，设置页按同样的清单给出勾选项，
+# 放在配置层而不是绘制模块，避免设置页导入时触发 screenshot 包初始化。
+HINT_ITEMS = (
+    ("coords", "鼠标坐标与选区尺寸"),
+    ("drag_move", "拖动移动"),
+    ("resize", "四角/边中点缩放"),
+    ("select", "拖拽框选"),
+    ("edit", "Enter/双击编辑"),
+    ("nudge", "WASD/方向键微调"),
+    ("cancel", "Esc 取消"),
+    ("save", "右键双击/快捷键保存"),
+    ("quick_sticker", "快速贴图"),
+    ("picker", "取色"),
+    ("fixed_size", "自定义尺寸"),
+    ("recapture", "重新截图"),
+    ("window_edit", "窗口编辑"),
+    ("copy", "仅复制"),
+    ("toolbar_move", "移动原地编辑工具栏"),
+    ("toolbar_hide", "隐藏/恢复原地编辑工具栏"),
+)
+HINT_ITEM_IDS = tuple(item_id for item_id, _label in HINT_ITEMS)
+HINT_LABELS = dict(HINT_ITEMS)
+
 
 DEFAULTS = {
     "hotkeys_enabled": True,
@@ -61,6 +85,14 @@ DEFAULTS = {
     "capture_quick_sticker_enabled": True,
     "capture_quick_sticker_shortcut": "Space",
     "capture_save_shortcut": "S",
+    # 选区阶段的四个功能键：原先由遮罩上的按钮触发，按钮已移除，改为可配置快捷键。
+    # 都用单键（这几个功能只存在于主屏遮罩，不必用组合键，单键更快也不易漏按）。
+    "capture_custom_size_shortcut": "F",
+    "capture_recapture_shortcut": "R",
+    "capture_window_edit_shortcut": "E",
+    "capture_copy_shortcut": "Y",
+    # 原地编辑工具栏的隐藏键：只靠快捷键触发，界面上不加隐藏/显示按钮。
+    "capture_toolbar_hide_shortcut": "`",
     "text_sticker_font": "", "text_sticker_font_size": 18,
     "text_sticker_color": "#ffffff", "text_sticker_background": "#1f6f5c",
     "text_sticker_width": 420, "text_sticker_lines": 40,
@@ -108,6 +140,15 @@ DEFAULTS = {
     # 截图取色与定位辅助增强
     "capture_picker_shortcut": "C",
     "magnifier_grid": True, "magnifier_grid_color": "#cccccc",
+    # 放大镜尺寸（像素，正方形边长）：采样区域按同一缩放倍率等比换算，见 magnifier_widget。
+    "magnifier_size": 140,
+    # 提示条要显示的提示项，**列表本身就是开关与顺序**：不在列表里的不显示，
+    # 顺序即显示顺序（设置页里勾选与拖动排序，顺序以用户添加的为准）。
+    "capture_hint_order": list(HINT_ITEM_IDS),
+    # 快捷键提示总开关：关掉后整条提示条不画（放大镜等其它定位辅助不受影响）。
+    "capture_hints_enabled": True,
+    # 每行提示数：默认每行 2 个；0 表示不限制，只按宽度自动换行。
+    "capture_hint_per_line": 2,
     "ruler_enabled": True, "ruler_color": "#00ad91",
     # 标注：序号
     "sequence_font_size": 14, "sequence_start": 1,
@@ -201,7 +242,10 @@ def validate(data):
             raise ValueError("裁剪框颜色必须是六位十六进制颜色")
         elif key == "crop_width" and not 1 <= value <= 12:
             raise ValueError("裁剪框线宽必须在 1 到 12 像素之间")
-        elif key in ("capture_quick_sticker_shortcut", "capture_save_shortcut"):
+        elif key in ("capture_quick_sticker_shortcut", "capture_save_shortcut",
+                     "capture_custom_size_shortcut", "capture_recapture_shortcut",
+                     "capture_window_edit_shortcut", "capture_copy_shortcut",
+                     "capture_toolbar_hide_shortcut"):
             from PySide6.QtGui import QKeySequence
 
             sequence = QKeySequence(value.strip())
@@ -282,6 +326,20 @@ def validate(data):
             raise ValueError("十字线宽度必须在 1 到 8 像素之间")
         elif key == "mask_opacity" and not 0 <= value <= 100:
             raise ValueError("遮罩透明度必须在 0 到 100 之间")
+        elif key == "magnifier_size" and not 100 <= value <= 320:
+            raise ValueError("放大镜尺寸必须在 100 到 320 像素之间")
+        elif key == "capture_hint_per_line" and not 0 <= value <= 8:
+            raise ValueError("每行提示数必须在 0 到 8 之间（0 表示按宽度自动换行）")
+        elif key == "capture_hint_order":
+            # 提示项列表既是开关也是顺序：只保留已知 id，去重且保持用户顺序。
+            if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
+                raise ValueError("提示项配置必须是字符串列表")
+            seen = []
+            for item in value:
+                if item in HINT_ITEM_IDS and item not in seen:
+                    seen.append(item)
+            result[key] = seen
+            continue
         elif key == "element_depth" and not 1 <= value <= 32:
             raise ValueError("窗口元素识别层级必须在 1 到 32 之间")
         elif key in ("archive_by_month", "archive_by_day") and type(value) is not bool:
