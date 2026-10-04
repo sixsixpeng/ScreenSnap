@@ -749,6 +749,7 @@ class InlineEditor(QWidget):
         self.settings[key] = color
         self.toolbar.sync_tool_color(key, color)
         self.canvas.set_selected_color(color)
+        self.canvas.refresh_tool_cursor()
         self.canvas.update()
         self.toolbar.set_active_tool(self.canvas.tool, self.last_color_tool)
         self.view.tool_color_changed.emit(tool, color)
@@ -785,6 +786,8 @@ class InlineEditor(QWidget):
                     else self.canvas.tool)
             if key == f"{tool}_color":
                 self.canvas.set_selected_color(value)
+            # 当前工具光标颜色跟随该工具的取色项变化即时刷新。
+            self.canvas.refresh_tool_cursor()
         if key == "editor_image_round_corners":
             self.round_corners = value
         elif key == "editor_image_corner_radius":

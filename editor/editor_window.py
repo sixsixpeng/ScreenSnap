@@ -136,6 +136,7 @@ class EditorWindow(QMainWindow):
         self.toolbar.sync_tool_color(key, color)
         self.canvas.settings[key] = color
         self.canvas.set_selected_color(color)
+        self.canvas.refresh_tool_cursor()
         self.canvas.update()
         self.tool_color_changed.emit(tool, color)
         if tool == "pen":
@@ -169,6 +170,8 @@ class EditorWindow(QMainWindow):
             if key == f"{tool}_color":
                 self.canvas.set_selected_color(value)
                 self.canvas.update()
+            # 当前工具光标颜色跟随该工具的取色项变化即时刷新。
+            self.canvas.refresh_tool_cursor()
         if key == "editor_image_round_corners":
             self.round_corners = value
         if key in ("editor_image_round_corners", "editor_image_corner_radius"):

@@ -28,6 +28,19 @@ STRAIGHT_MIN_DISTANCE = 3
 MIN_TEXT_WIDTH = 40.0
 MIN_TEXT_HEIGHT = 24.0
 
+# 绘制类工具在画布上使用的工具字形光标：位图逻辑尺寸、热点（锚点即真实落点）与配色来源。
+CURSOR_BITMAP_SIZE = 32
+TOOL_CURSOR_TOOLS = ("pen", "marker", "rect", "ellipse", "text", "arrow")
+TOOL_CURSOR_COLOR_KEYS = {"pen": "pen_color", "marker": "marker_color",
+                          "rect": "rect_color", "ellipse": "ellipse_color",
+                          "text": "text_color", "arrow": "arrow_color"}
+# pen/marker/arrow 热点在笔尖/箭尾，rect/ellipse 在拖拽起始角，text 在插入点。
+TOOL_CURSOR_HOTSPOTS = {"pen": (5, 27), "marker": (5, 27), "arrow": (5, 27),
+                        "rect": (6, 26), "ellipse": (6, 26), "text": (7, 25)}
+# 白色外描边 + 深青内描边，保证深浅底色下都清晰可辨，与取色光标同一配色语言。
+CURSOR_OUTLINE_LIGHT = "#f7fbfa"
+CURSOR_OUTLINE_DARK = "#142c32"
+
 
 def mosaic_image(sample, mode, size):
     """对框选像素生成可移动的方块、细粒或毛玻璃标注。"""
@@ -89,6 +102,10 @@ class AnnotationCanvas(QGraphicsView):
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.tool = "select"
         self._picker_cursor = self._create_picker_cursor()
+        # 工具字形光标按 (工具, 颜色, 是否按下) 惰性构建并缓存；左键按下时切换按下态。
+        self._tool_cursor_cache = {}
+        self._applied_cursor_key = None
+        self._left_button_down = False
         self.text_alignment = Qt.AlignLeft
         self.start = None
         self.drawing = None
@@ -162,6 +179,173 @@ class AnnotationCanvas(QGraphicsView):
         painter.end()
         return QCursor(pixmap, 4, 28)
 
+    @staticmethod
+    def _create_tool_cursor(tool, color, pressed=False):
+        """绘制绘制类工具的字形光标。
+
+        位图为 32×32 逻辑像素、透明底：先以浅色画粗描边作衬底，再以深青描边勾形，
+        主体用工具当前色填充，保证在任意底色上都清晰。热点是该工具的真实绘制落点；
+        按下态只加粗描边、绕热点轻微放大并在锚点套一圈高亮环，热点坐标保持不变。
+        """
+        pixmap = QPixmap(CURSOR_BITMAP_SIZE, CURSOR_BITMAP_SIZE)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        ink = QColor(color)
+        if not ink.isValid():
+            ink = QColor("#ff0000")
+        light = QColor(CURSOR_OUTLINE_LIGHT)
+        dark = QColor(CURSOR_OUTLINE_DARK)
+        outline = 2.6 if pressed else 2.0
+
+        def stroke_and_fill(path, brush):
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(light, outline + 2.0, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(path)
+            painter.setPen(QPen(dark, outline, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(brush)
+            painter.drawPath(path)
+
+        if pressed:
+            anchor_x, anchor_y = TOOL_CURSOR_HOTSPOTS[tool]
+            painter.save()
+            painter.translate(anchor_x, anchor_y)
+            painter.scale(1.08, 1.08)
+            painter.translate(-anchor_x, -anchor_y)
+
+        if tool == "pen":
+            shaft = QPainterPath()
+            shaft.addPolygon(QPolygonF([QPointF(9, 19.5), QPointF(21, 7.5),
+                                        QPointF(26, 12.5), QPointF(14, 24.5)]))
+            shaft.closeSubpath()
+            nib = QPainterPath()
+            nib.addPolygon(QPolygonF([QPointF(5, 27), QPointF(9, 19.5), QPointF(14, 24.5)]))
+            nib.closeSubpath()
+            stroke_and_fill(shaft, light)
+            stroke_and_fill(nib, ink)
+            painter.setPen(QPen(dark, 1.2, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(QPointF(12.5, 16.5), QPointF(17.5, 21.5))
+        elif tool == "marker":
+            shaft = QPainterPath()
+            shaft.addPolygon(QPolygonF([QPointF(10.5, 18.5), QPointF(22, 7),
+                                        QPointF(28, 13), QPointF(16.5, 24.5)]))
+            shaft.closeSubpath()
+            chisel = QPainterPath()
+            chisel.addPolygon(QPolygonF([QPointF(5, 27), QPointF(10.5, 18.5),
+                                         QPointF(16.5, 24.5)]))
+            chisel.closeSubpath()
+            stroke_and_fill(shaft, QColor(ink.red(), ink.green(), ink.blue(), 150))
+            stroke_and_fill(chisel, ink)
+            painter.setPen(QPen(dark, 1.2, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(QPointF(13, 16), QPointF(18.5, 21.5))
+        elif tool == "arrow":
+            line = QPainterPath(QPointF(5, 27))
+            line.lineTo(24, 8)
+            head = QPainterPath()
+            head.addPolygon(QPolygonF([QPointF(24, 8), QPointF(16.5, 9.5),
+                                       QPointF(22.5, 15.5)]))
+            head.closeSubpath()
+            stroke_and_fill(line, ink)
+            stroke_and_fill(head, ink)
+            painter.setBrush(light)
+            painter.setPen(QPen(dark, 1.2))
+            painter.drawEllipse(QPointF(5, 27), 2.2, 2.2)
+        elif tool in ("rect", "ellipse"):
+            body = QPainterPath()
+            if tool == "rect":
+                body.addRoundedRect(QRectF(9, 6, 19, 19), 2.5, 2.5)
+            else:
+                body.addEllipse(QRectF(9, 6, 19, 19))
+            stroke_and_fill(body, Qt.NoBrush)
+            painter.setBrush(light)
+            painter.setPen(QPen(dark, 1.2))
+            painter.drawEllipse(QPointF(6, 26), 1.8, 1.8)
+        elif tool == "text":
+            caret = QPainterPath()
+            caret.moveTo(7, 7)
+            caret.lineTo(17, 7)
+            caret.moveTo(12, 7)
+            caret.lineTo(12, 25)
+            caret.moveTo(7, 25)
+            caret.lineTo(17, 25)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(light, 4.4, Qt.SolidLine, Qt.RoundCap))
+            painter.drawPath(caret)
+            painter.setPen(QPen(ink, 2.2, Qt.SolidLine, Qt.RoundCap))
+            painter.drawPath(caret)
+
+        if pressed:
+            painter.restore()
+            anchor_x, anchor_y = TOOL_CURSOR_HOTSPOTS[tool]
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(light, 3.4, Qt.SolidLine))
+            painter.drawEllipse(QPointF(anchor_x, anchor_y), 3.4, 3.4)
+            painter.setPen(QPen(dark, 1.6, Qt.SolidLine))
+            painter.drawEllipse(QPointF(anchor_x, anchor_y), 3.4, 3.4)
+        painter.end()
+        hotspot = TOOL_CURSOR_HOTSPOTS[tool]
+        return QCursor(pixmap, hotspot[0], hotspot[1])
+
+    def _current_cursor_color(self):
+        """当前工具光标应使用的颜色名；缺失或无效时退回画笔色，再退回红色。"""
+        key = TOOL_CURSOR_COLOR_KEYS.get(self.tool)
+        raw = self.settings.get(key) if key else None
+        raw = raw or self.settings.get("pen_color") or "#ff0000"
+        color = QColor(raw)
+        return color.name() if color.isValid() else "#ff0000"
+
+    def _tool_cursor(self, tool, pressed=False):
+        color = self._current_cursor_color()
+        key = (tool, color, bool(pressed))
+        cursor = self._tool_cursor_cache.get(key)
+        if cursor is None:
+            cursor = self._create_tool_cursor(tool, color, pressed)
+            if len(self._tool_cursor_cache) >= 64:
+                self._tool_cursor_cache.clear()
+            self._tool_cursor_cache[key] = cursor
+        return cursor
+
+    def _apply_tool_cursor(self):
+        """按当前工具与是否按下左键应用光标；用「上次应用键」去抖，避免重复 setCursor。
+
+        仅处理取色与六种绘制工具；其余工具的光标由调用方（缩放手柄、抓平移等）自行管理，
+        这里保持不动，避免覆盖它们的专用光标。
+        """
+        if self.tool == "picker":
+            key = ("picker",)
+            if key != self._applied_cursor_key:
+                self._applied_cursor_key = key
+                self.setCursor(self._picker_cursor)
+            return
+        if self.tool not in TOOL_CURSOR_TOOLS:
+            return
+        pressed = bool(self._left_button_down) and self.tool != "text"
+        key = (self.tool, self._current_cursor_color(), pressed)
+        if key != self._applied_cursor_key:
+            self._applied_cursor_key = key
+            self.setCursor(self._tool_cursor(self.tool, pressed))
+
+    def refresh_tool_cursor(self):
+        """标注颜色等设置变化后，作废当前工具的光标缓存并重建。"""
+        if self.tool not in TOOL_CURSOR_TOOLS:
+            return
+        for key in [item for item in self._tool_cursor_cache if item[0] == self.tool]:
+            self._tool_cursor_cache.pop(key, None)
+        self._applied_cursor_key = None
+        self._apply_tool_cursor()
+
+    def _reset_hover_cursor(self):
+        """悬停交互结束（划出场景/松开缩放手柄）后的光标回退。
+
+        select 与手型工具回退为系统箭头；绘制工具与取色恢复各自的工具字形光标，
+        避免右键平移或划出场景后把工具光标误清成箭头。
+        """
+        if self.tool in TOOL_CURSOR_TOOLS or self.tool == "picker":
+            self._applied_cursor_key = None
+            self._apply_tool_cursor()
+        else:
+            self.unsetCursor()
+
     def set_tool(self, tool):
         """切换标注工具并同步其专属光标。"""
         if tool != self.tool:
@@ -170,11 +354,12 @@ class AnnotationCanvas(QGraphicsView):
             self.preview_end = None
             self.committed_segments = []
             self.straight_drawing = False
-        previous = self.tool
         self.tool = tool
-        if tool == "picker":
-            self.setCursor(self._picker_cursor)
-        elif previous == "picker" or tool != "select":
+        self._left_button_down = False
+        self._applied_cursor_key = None
+        if tool in TOOL_CURSOR_TOOLS or tool == "picker":
+            self._apply_tool_cursor()
+        else:
             self.unsetCursor()
 
     def _chain_tool(self):
@@ -1257,6 +1442,10 @@ class AnnotationCanvas(QGraphicsView):
 
     def mousePressEvent(self, event):
         """根据工具决定选中图元、取色或开始新的标注。"""
+        if event.button() == Qt.LeftButton and self.tool in TOOL_CURSOR_TOOLS and self.tool != "text":
+            # 绘制工具按住左键时切换「按下态」光标；文字工具点击即弹对话框，不进入按下态。
+            self._left_button_down = True
+            self._apply_tool_cursor()
         if event.button() == Qt.RightButton and self.chain_active and self._chain_tool():
             # 多段绘制进行中，右键直接结束连续绘制并保留已画图形。
             self._finish_chain()
@@ -1341,6 +1530,10 @@ class AnnotationCanvas(QGraphicsView):
                 self._add_annotation(
                     text_item(point, text, self.settings, self.text_alignment))
                 self.checkpoint()
+            # 对话框是模态的，关闭后按当前状态重新校准字形光标，避免残留按下态或箭头。
+            self._left_button_down = False
+            self._applied_cursor_key = None
+            self._apply_tool_cursor()
             return
         if self.tool == "number":
             number = self.next_sequence_number()
@@ -1547,7 +1740,7 @@ class AnnotationCanvas(QGraphicsView):
     def _update_resize_cursor(self, position):
         point = self.mapToScene(position)
         if not self.sceneRect().contains(point):
-            self.unsetCursor()
+            self._reset_hover_cursor()
             QToolTip.hideText()
             return
         for item in self.scene_data.selectedItems() if self.tool == "select" else ():
@@ -1582,7 +1775,7 @@ class AnnotationCanvas(QGraphicsView):
                 self.setCursor(Qt.SizeAllCursor)
                 QToolTip.hideText()
                 return
-        self.unsetCursor()
+        self._reset_hover_cursor()
         QToolTip.hideText()
 
     @staticmethod
@@ -1606,6 +1799,8 @@ class AnnotationCanvas(QGraphicsView):
     def leaveEvent(self, event):
         self.eraser_point = None
         self.mosaic_point = None
+        # 清除「上次应用键」，使重新进入时能按当前状态重新应用工具光标。
+        self._applied_cursor_key = None
         self.viewport().update()
         super().leaveEvent(event)
 
@@ -1761,6 +1956,11 @@ class AnnotationCanvas(QGraphicsView):
 
     def mouseReleaseEvent(self, event):
         """按当前工具提交图元；裁剪时两版截图使用相同区域。"""
+        if self._left_button_down:
+            # 松开左键无条件退出「按下态」光标；多段绘制松手后仍保持链状态。
+            self._left_button_down = False
+            self._applied_cursor_key = None
+            self._apply_tool_cursor()
         if self.rotating is not None:
             self.rotating = None
             self.checkpoint()
@@ -1955,6 +2155,9 @@ class AnnotationCanvas(QGraphicsView):
                 self._finish_chain()
                 event.accept()
                 return
+            self._left_button_down = False
+            self._applied_cursor_key = None
+            self._apply_tool_cursor()
             self.cancelled.emit()
         elif event.key() == Qt.Key_Space:
             self.space_pressed = True
@@ -1979,8 +2182,9 @@ class AnnotationCanvas(QGraphicsView):
         super().keyReleaseEvent(event)
 
     def focusOutEvent(self, event):
-        # 焦点丢失时清空空格状态，避免拖拽判定残留。
+        # 焦点丢失时清空空格状态，避免拖拽判定残留；并作废光标应用键以便重新校准。
         self.space_pressed = False
+        self._applied_cursor_key = None
         super().focusOutEvent(event)
 
     def wheelEvent(self, event):

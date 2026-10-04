@@ -8035,7 +8035,133 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(canvas.cursor().shape(), Qt.BitmapCursor)
             self.assertEqual(canvas.cursor().hotSpot(), QPoint(4, 28))
             canvas.set_tool("pen")
+            self.assertEqual(canvas.cursor().shape(), Qt.BitmapCursor)
+            self.assertEqual(canvas.cursor().hotSpot(), QPoint(5, 27))
+        finally:
+            canvas.close()
+
+    def test_drawing_tools_use_tool_glyph_cursor_with_hotspot(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_canvas import TOOL_CURSOR_HOTSPOTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), DEFAULTS)
+        try:
+            for tool, hotspot in TOOL_CURSOR_HOTSPOTS.items():
+                canvas.set_tool(tool)
+                self.assertEqual(canvas.cursor().shape(), Qt.BitmapCursor, tool)
+                self.assertEqual(canvas.cursor().hotSpot(), QPoint(*hotspot), tool)
+                self.assertFalse(canvas.cursor().pixmap().isNull(), tool)
+            # 其余工具不占用字形光标，回退为系统箭头。
+            canvas.set_tool("select")
             self.assertEqual(canvas.cursor().shape(), Qt.ArrowCursor)
+        finally:
+            canvas.close()
+
+    def test_tool_cursor_pressed_state_on_press_and_release(self):
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), DEFAULTS)
+        try:
+            def pixels(cursor):
+                return bytes(cursor.pixmap().toImage().constBits())
+
+            canvas.set_tool("pen")
+            normal = canvas.cursor()
+            self.assertFalse(canvas._left_button_down)
+            canvas.mousePressEvent(QMouseEvent(
+                QEvent.MouseButtonPress, QPointF(20, 20), QPointF(20, 20),
+                Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+            self.assertTrue(canvas._left_button_down)
+            pressed = canvas.cursor()
+            # 按下态切换了位图内容，但热点（真实落点）保持不变。
+            self.assertNotEqual(pixels(pressed), pixels(normal))
+            self.assertEqual(pressed.hotSpot(), normal.hotSpot())
+            canvas.mouseReleaseEvent(QMouseEvent(
+                QEvent.MouseButtonRelease, QPointF(20, 20), QPointF(20, 20),
+                Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+            self.assertFalse(canvas._left_button_down)
+            self.assertEqual(pixels(canvas.cursor()), pixels(normal))
+        finally:
+            canvas.close()
+
+    def test_tool_cursor_follows_current_color(self):
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), DEFAULTS)
+        try:
+            def pixels(cursor):
+                return bytes(cursor.pixmap().toImage().constBits())
+
+            canvas.set_tool("pen")
+            before = pixels(canvas.cursor())
+            canvas.settings["pen_color"] = "#00ff00"
+            canvas.refresh_tool_cursor()
+            self.assertNotEqual(pixels(canvas.cursor()), before)
+            # 非当前工具的取色项变化不应影响当前光标。
+            after = pixels(canvas.cursor())
+            canvas.settings["rect_color"] = "#0000ff"
+            canvas.refresh_tool_cursor()
+            self.assertEqual(pixels(canvas.cursor()), after)
+        finally:
+            canvas.close()
+
+    def test_text_tool_cursor_not_stuck_after_dialog(self):
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), DEFAULTS)
+        try:
+            canvas.set_tool("text")
+            canvas.input_text = Mock(return_value=(None, {}, False))
+            canvas.mousePressEvent(QMouseEvent(
+                QEvent.MouseButtonPress, QPointF(20, 20), QPointF(20, 20),
+                Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+            # 文字工具点击即弹对话框，不进入按下态，关闭后光标仍是常规字形。
+            self.assertFalse(canvas._left_button_down)
+            self.assertEqual(canvas.cursor().shape(), Qt.BitmapCursor)
+            self.assertEqual(canvas.cursor().hotSpot(), QPoint(7, 25))
+        finally:
+            canvas.close()
+
+    def test_tool_cursor_restored_after_right_pan_and_outside_scene(self):
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), DEFAULTS)
+        try:
+            canvas.set_tool("pen")
+            # 悬停到场景外：应恢复工具字形光标，而不是被清成箭头。
+            canvas._update_resize_cursor(QPoint(-50, -50))
+            self.assertEqual(canvas.cursor().shape(), Qt.BitmapCursor)
+            self.assertEqual(canvas.cursor().hotSpot(), QPoint(5, 27))
+            # 右键平移期间临时抓手光标，松开后回到工具字形光标。
+            canvas.mousePressEvent(QMouseEvent(
+                QEvent.MouseButtonPress, QPointF(30, 30), QPointF(30, 30),
+                Qt.RightButton, Qt.RightButton, Qt.NoModifier))
+            self.assertEqual(canvas.cursor().shape(), Qt.ClosedHandCursor)
+            canvas.mouseReleaseEvent(QMouseEvent(
+                QEvent.MouseButtonRelease, QPointF(30, 30), QPointF(30, 30),
+                Qt.RightButton, Qt.NoButton, Qt.NoModifier))
+            self.assertEqual(canvas.cursor().shape(), Qt.BitmapCursor)
+            self.assertEqual(canvas.cursor().hotSpot(), QPoint(5, 27))
+        finally:
+            canvas.close()
+
+    def test_tool_cursor_ignores_view_zoom(self):
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), DEFAULTS)
+        try:
+            canvas.set_tool("rect")
+            canvas.set_zoom(250)
+            # 位图与热点按逻辑像素固定，缩放视图不改变光标定位精度。
+            self.assertEqual(canvas.cursor().shape(), Qt.BitmapCursor)
+            self.assertEqual(canvas.cursor().hotSpot(), QPoint(6, 26))
+            self.assertEqual(canvas.cursor().pixmap().size(), canvas._tool_cursor("rect").pixmap().size())
         finally:
             canvas.close()
 
@@ -8470,7 +8596,8 @@ class CoreTests(unittest.TestCase):
             Qt.NoButton, Qt.NoButton, Qt.NoModifier))
         self.assertEqual(editor.canvas.cursor().shape(), Qt.SizeFDiagCursor)
         editor.set_tool("pen")
-        self.assertEqual(editor.canvas.cursor().shape(), Qt.ArrowCursor)
+        self.assertEqual(editor.canvas.cursor().shape(), Qt.BitmapCursor)
+        self.assertEqual(editor.canvas.cursor().hotSpot(), QPoint(5, 27))
         editor.close()
 
     def test_toolbar_resets_last_angle_without_discarding_later_edits(self):
