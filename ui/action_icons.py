@@ -3,17 +3,43 @@
 from functools import lru_cache
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QColor, QIcon, QPainter, QPainterPath, QPen, QPixmap
+from PySide6.QtGui import (QColor, QIcon, QIconEngine, QPainter, QPainterPath,
+                           QPen, QPixmap, QPalette)
+from PySide6.QtWidgets import QApplication
 
 
-@lru_cache(maxsize=64)
 def action_icon(name):
+    return QIcon(_PaletteActionIconEngine(name))
+
+
+class _PaletteActionIconEngine(QIconEngine):
+    def __init__(self, name):
+        super().__init__()
+        self.name = name
+
+    def clone(self):
+        return _PaletteActionIconEngine(self.name)
+
+    def paint(self, painter, rect, mode, state):
+        pixmap = self.pixmap(rect.size(), mode, state)
+        painter.drawPixmap(QRectF(rect), pixmap, QRectF(pixmap.rect()))
+
+    def pixmap(self, size, mode, state):
+        application = QApplication.instance()
+        palette = application.palette() if application is not None else QPalette()
+        ink = palette.color(QPalette.WindowText).name()
+        accent = palette.color(QPalette.Highlight).name()
+        return _render_action_icon(self.name, ink, accent).pixmap(size, mode, state)
+
+
+@lru_cache(maxsize=192)
+def _render_action_icon(name, ink_color, accent_color):
     pixmap = QPixmap(24, 24)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
     painter.setRenderHint(QPainter.Antialiasing)
-    ink = QColor("#344a52")
-    accent = QColor("#168d7a")
+    ink = QColor(ink_color)
+    accent = QColor(accent_color)
     painter.setPen(QPen(ink, 1.8, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
     painter.setBrush(Qt.NoBrush)
 
@@ -260,6 +286,12 @@ def action_icon(name):
         for y in (6, 12, 18):
             painter.drawEllipse(QRectF(3, y - 1, 2, 2))
             painter.drawLine(8, y, 21, y)
+    elif name == "exit":
+        painter.drawRoundedRect(QRectF(3, 3, 12, 18), 1.5, 1.5)
+        painter.setPen(QPen(accent, 2.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawLine(10, 12, 21, 12)
+        painter.drawLine(17, 8, 21, 12)
+        painter.drawLine(17, 16, 21, 12)
 
     painter.end()
     return QIcon(pixmap)

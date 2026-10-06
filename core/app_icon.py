@@ -11,9 +11,10 @@ ICON_FILES = ("icon.ico", "icon.png")
 
 
 def icon_dir():
-    """图标目录：PyInstaller 打包后为解包目录，源码运行为项目根目录。"""
+    """图标目录：源码与 PyInstaller 均统一使用 ui/assets。"""
     bundled = getattr(sys, "_MEIPASS", None)
-    return Path(bundled) if bundled else Path(__file__).resolve().parent.parent
+    root = Path(bundled) if bundled else Path(__file__).resolve().parent.parent
+    return root / "ui" / "assets"
 
 
 def app_icon():

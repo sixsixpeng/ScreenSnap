@@ -1,6 +1,6 @@
 """托盘菜单。"""
 
-from PySide6.QtWidgets import QMenu, QStyle
+from PySide6.QtWidgets import QMenu
 from core.constants import shortcut_suffix, shortcut_label
 from ui.action_icons import action_icon
 
@@ -60,6 +60,6 @@ def make_tray_menu(app, capture, settings, quit_app, edit_clipboard=None, open_i
     menu.addSeparator()
     add_action(action_icon("settings"), "设置", "打开设置窗口，调整截图、保存、快捷键和外观。", settings)
     menu.addSeparator()
-    add_action(app.style().standardIcon(QStyle.SP_DialogCloseButton), "退出",
+    add_action(action_icon("exit"), "退出",
                "关闭 ScreenSnap 并结束后台运行。", quit_app)
     return menu
