@@ -110,7 +110,7 @@ DEFAULTS = {
         "recycle_bin": "ctrl+alt+r",
     },
     "capture_delay": 0,
-    "capture_hotkey_suppress": False,
+    "capture_hotkey_suppress": True,
     "theme": "system",
     "bubble": True, "notification_backend": "win11toast",
     "notification_timeout": 2,
@@ -188,7 +188,7 @@ DEFAULTS = {
     "editor_border_color": "#000000", "editor_border_width": 1,
     "marker_opacity": 38, "font": "", "font_size": 18,
     "line_spacing": 1.2, "mosaic_size": 10,
-    "mosaic_mode": "blocks", "mosaic_brush": False, "mosaic_width": 20,
+    "mosaic_mode": "blur", "mosaic_brush": True, "mosaic_width": 20,
     "eraser_erase_base": False,
     # 截图取色与定位辅助增强
     "capture_picker_shortcut": "C",

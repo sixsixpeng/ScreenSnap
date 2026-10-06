@@ -32,8 +32,8 @@ class ClipboardCardPreview(QWidget):
         if self.kind == "text":
             self.images = [
                 render_text_card("Planning notes\nReview the marked items", settings),
-                render_html_card("<b>Release summary</b><br><span style='color:#d85d45'>Three updates ready</span>",
-                                 "Release summary\nThree updates ready", settings),
+                render_html_card("<b>版本摘要</b><br><span style='color:#d85d45'>已准备 3 项更新</span>",
+                                 "版本摘要\n已准备 3 项更新", settings),
             ]
         elif self.kind == "color":
             self.images = [render_color_card("#42A68A", settings)]

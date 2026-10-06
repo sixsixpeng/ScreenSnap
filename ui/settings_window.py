@@ -64,7 +64,6 @@ class SettingsWindow(QWidget):
             "清空剪贴板历史": "清空本次运行期间捕获的剪贴板内容；已创建的贴图不会受影响",
         }
         for label, icon, method in [("导入配置", QStyle.SP_DialogOpenButton, self.import_settings),
-                                    ("导出配置", QStyle.SP_DialogSaveButton, self.export_settings),
                                     ("恢复全部默认", QStyle.SP_DialogResetButton, self.reset_defaults),
                                     ("清理贴图会话", QStyle.SP_DialogDiscardButton,
                                      self.clear_sticker_session)]:
@@ -177,7 +176,7 @@ class SettingsWindow(QWidget):
         with QSignalBlocker(control):
             if key in page.color_buttons:
                 control.set_color(value)
-            elif key == "cursor":
+            elif isinstance(value, bool):
                 control.setChecked(value)
             elif key in ("font", "mosaic_mode", "annotation_tool", "text_alignment", "arrow_style",
                          "rect_style", "ellipse_style"):
