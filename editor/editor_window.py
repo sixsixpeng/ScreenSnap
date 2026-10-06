@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
                                QDialog, QDialogButtonBox, QDial, QDoubleSpinBox, QHBoxLayout, QLabel,
                                QStyle, QSlider, QSpinBox, QGraphicsView)
 
-from core.image_io import save_image, saved_extension
+from core.image_io import matches_saved_format, save_image, saved_extension
 from core.path_utils import resolved_dir
 from config.config_manager import TOOL_WIDTH_KEYS, fill_colors_following_stroke
 from editor.annotation_canvas import AnnotationCanvas
@@ -249,7 +249,8 @@ class EditorWindow(QMainWindow):
     def save(self, automatic=False, copy_to_clipboard=False, force_copy_image=False):
         """首次保存分配文件名；后续保存覆盖同一路径，避免重复文件。"""
         logger = logging.getLogger("screensnap")
-        path = self.last_path or self.allocate_path(automatic)
+        path = (self.last_path if matches_saved_format(self.last_path, self.settings)
+            else self.allocate_path(automatic))
         result = self.output_image()
         if not save_image(result, path, self.settings):
             logger.error("图片保存失败: %s（格式 %s，质量 %s）", path,
