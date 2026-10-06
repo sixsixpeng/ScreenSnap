@@ -3,7 +3,7 @@
 import logging
 from functools import lru_cache
 
-from PySide6.QtCore import Signal, Qt, QSize, QTimer, QSignalBlocker, QEvent, QRectF
+from PySide6.QtCore import Signal, Qt, QSize, QTimer, QSignalBlocker, QEvent, QRect, QRectF
 from PySide6.QtGui import (QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QColor,
                            QGuiApplication)
 from PySide6.QtGui import QCursor
@@ -14,6 +14,7 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, Q
                                QApplication, QComboBox)
 from editor.annotation_items import SEQUENCE_PRESETS
 from ui.widgets.color_button import ColorButton
+from ui.window_bounds import anchored_popup_geometry
 from ui.action_icons import action_icon
 from config.config_manager import DEFAULTS, TOOL_WIDTH_KEYS
 from core.constants import shortcut_label
@@ -52,8 +53,18 @@ def text_icon():
     return QIcon(pixmap)
 
 
-@lru_cache(maxsize=32)
 def annotation_icon(tool):
+    from PySide6.QtWidgets import QApplication
+    from PySide6.QtGui import QPalette
+
+    application = QApplication.instance()
+    theme_ink = (application.palette().color(QPalette.ButtonText).name()
+                 if application is not None else "#202020") if tool == "number" else ""
+    return _annotation_icon_cached(tool, theme_ink)
+
+
+@lru_cache(maxsize=64)
+def _annotation_icon_cached(tool, theme_ink):
     pixmap = QPixmap(24, 24)
     pixmap.fill(Qt.transparent)
     painter = QPainter(pixmap)
@@ -120,14 +131,15 @@ def annotation_icon(tool):
         painter.setBrush(Qt.NoBrush)
         painter.drawRect(4, 4, 14, 14)
     elif tool == "number":
+        icon_ink = QColor(theme_ink)
         painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor("#3a3a3a"), 2))
+        painter.setPen(QPen(icon_ink, 2))
         painter.drawEllipse(2, 2, 20, 20)
         font = QFont()
         font.setPixelSize(15)
         font.setBold(True)
         painter.setFont(font)
-        painter.setPen(QColor("#3a3a3a"))
+        painter.setPen(icon_ink)
         painter.drawText(QRectF(2, 2, 20, 20), Qt.AlignCenter, "1")
     painter.end()
     return QIcon(pixmap)
@@ -202,14 +214,14 @@ class ToolbarWidget(QWidget):
             button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
             tool_tips = {
                 "select": "选择已有标注；可移动、缩放或调整层级",
-                "pen": "按住并拖动自由绘制线条；使用当前颜色和画笔线宽",
-                "marker": "绘制半透明重点标记；适合高亮文字或区域",
+                "pen": "按住并拖动自由绘制线条；按住 Ctrl 或 Alt 任一键可临时绘制直线",
+                "marker": "绘制半透明重点标记；按住 Ctrl 或 Alt 任一键可临时绘制直线",
                 "text": "单击图片添加文字；字体、字号和对齐可在更多设置中调整",
                 "arrow": "拖动绘制箭头、线段或虚线；样式、线宽和颜色可调整",
-                "rect": "拖动绘制矩形边框；支持实线或虚线",
-                "ellipse": "拖动绘制椭圆边框；支持实线或虚线",
+                "rect": "拖动绘制矩形边框；按住 Ctrl 或 Alt 任一键可绘制正方形；支持实线或虚线",
+                "ellipse": "拖动绘制椭圆边框；按住 Ctrl 或 Alt 任一键可绘制正圆；支持实线或虚线",
                 "eraser": "拖过已有标注，将经过的标注内容擦除",
-                "mosaic": "拖动区域添加马赛克；可选择方块、毛玻璃或细粒效果",
+                "mosaic": "默认按笔迹涂抹毛玻璃；涂抹时按住 Ctrl 或 Alt 任一键可直线涂抹；关闭涂抹后拖框选区域",
                 "picker": "从图片中取色，并设置为后续标注颜色",
                 "number": "单击图片放置步骤序号；号码自动递增，颜色与字号在设置中调整",
                 "crop": "拖动裁剪图片；裁剪框颜色和线宽会保存为下次编辑的默认值",
@@ -291,11 +303,11 @@ class ToolbarWidget(QWidget):
         self.font_size.valueChanged.connect(lambda value: self.setting_changed.emit("font_size", value))
         self.mosaic_mode = self.radio_options(
             "mosaic_mode", (("方块", "blocks"), ("毛玻璃", "blur"), ("细粒", "fine")),
-            settings.get("mosaic_mode", "blocks"), "马赛克效果")
+            settings.get("mosaic_mode", "blur"), "马赛克效果")
         self.mosaic_mode.setToolTip("马赛克效果")
         self.mosaic_size = QSlider(Qt.Horizontal)
         self.mosaic_size.setRange(2, 100)
-        self.mosaic_size.setValue(settings.get("mosaic_size", 12))
+        self.mosaic_size.setValue(settings.get("mosaic_size", 10))
         self.mosaic_size.setMinimumWidth(220)
         self.mosaic_size.setMinimumHeight(38)
         self.mosaic_size.setToolTip("马赛克颗粒度")
@@ -306,8 +318,9 @@ class ToolbarWidget(QWidget):
             lambda value: self.mosaic_size_label.setText(f"{value} px"))
         self.mosaic_size.valueChanged.connect(lambda value: self.setting_changed.emit("mosaic_size", value))
         self.mosaic_brush = QCheckBox("涂抹模式（自由笔刷）")
-        self.mosaic_brush.setChecked(settings.get("mosaic_brush", False))
-        self.mosaic_brush.setToolTip("开启后按住拖动可沿笔迹涂抹马赛克/模糊；关闭则为拖框选矩形")
+        self.mosaic_brush.setChecked(settings.get("mosaic_brush", True))
+        self.mosaic_brush.setToolTip(
+            "开启后按住拖动可沿笔迹涂抹马赛克/模糊；按住 Ctrl 或 Alt 任一键可直线涂抹；关闭则为拖框选矩形")
         self.mosaic_brush.toggled.connect(lambda value: self.setting_changed.emit("mosaic_brush", value))
         # 切换涂抹模式会改变可用参数行（笔刷宽度只在涂抹模式下有意义），需重算可见行。
         self.mosaic_brush.toggled.connect(lambda _value: self._refresh_option_rows())
@@ -398,12 +411,12 @@ class ToolbarWidget(QWidget):
         self.pen_chain = QCheckBox("多段绘制")
         self.pen_chain.setChecked(settings.get("pen_chain", False))
         self.pen_chain.setToolTip("开启后，画笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
-                                  "按鼠标右键结束连续绘制。按住 Ctrl+Alt 也可临时绘制单段直线。")
+                      "按鼠标右键结束连续绘制。未开启时按住 Ctrl 或 Alt 任一键也可临时绘制单段直线。")
         self.pen_chain.toggled.connect(lambda value: self.setting_changed.emit("pen_chain", value))
         self.marker_chain = QCheckBox("多段绘制")
         self.marker_chain.setChecked(settings.get("marker_chain", False))
         self.marker_chain.setToolTip("开启后，记号笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
-                                    "按鼠标右键结束连续绘制。按住 Ctrl+Alt 也可临时绘制单段直线。")
+                        "按鼠标右键结束连续绘制。未开启时按住 Ctrl 或 Alt 任一键也可临时绘制单段直线。")
         self.marker_chain.toggled.connect(lambda value: self.setting_changed.emit("marker_chain", value))
         self.rect_style = self.radio_options(
             "rect_style", (("实线", "solid"), ("虚线", "dash")),
@@ -818,13 +831,13 @@ class ToolbarWidget(QWidget):
         # 采集自检：这是 Qt.Tool 浮层，类名是 QFrame，既不在遮罩的自身窗口登记表里，
         # 也不是 QMenu/QDialog，过去会被采进画面却连警示都没有；自报标签后遮罩才能点名。
         self.appearance_menu.setProperty("screensnap_self_window", "外观弹层")
-        self.appearance_menu.setFixedWidth(960)
+        self.appearance_menu.setMaximumWidth(960)
         self.appearance_panel.setMinimumWidth(944)
         self.appearance_panel.setObjectName("outputAppearancePanel")
         self.appearance_scroll = QScrollArea()
         self.appearance_scroll.setWidgetResizable(True)
         self.appearance_scroll.setFrameShape(QFrame.NoFrame)
-        self.appearance_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+        self.appearance_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
         self.appearance_scroll.setWidget(self.appearance_panel)
         popup_layout = QVBoxLayout(self.appearance_menu)
         popup_layout.setContentsMargins(0, 0, 0, 0)
@@ -844,11 +857,20 @@ class ToolbarWidget(QWidget):
         super().changeEvent(event)
         if event.type() in (QEvent.PaletteChange, QEvent.ApplicationPaletteChange):
             self._apply_hover_style()
+            self.sync_theme_icons()
+
+    def sync_theme_icons(self):
+        number_button = getattr(self, "tool_buttons", {}).get("number")
+        if number_button is not None:
+            number_button.setIcon(annotation_icon("number"))
 
     def _apply_hover_style(self):
         """统一灰黑选中反馈，并按应用实际主题保证前景与背景对比。"""
         from PySide6.QtGui import QPalette
-        dark = QApplication.palette().color(QPalette.Window).lightness() < 128
+        palette = QApplication.palette()
+        dark = palette.color(QPalette.Window).lightness() < 128
+        disabled_background = palette.color(QPalette.Disabled, QPalette.Button).name()
+        disabled_foreground = palette.color(QPalette.Disabled, QPalette.ButtonText).name()
         if dark:
             selected, hovered, pressed = "#484848", "#535353", "#606060"
             border, foreground = "#aaaaaa", "#f5f5f5"
@@ -857,16 +879,24 @@ class ToolbarWidget(QWidget):
             border, foreground = "#666666", "#202020"
         stylesheet = """
             QToolButton {
+                color: palette(button-text);
+                background: palette(button);
                 border: 1px solid transparent;
                 border-radius: 4px;
-                color: palette(button-text);
             }
             QToolButton:hover {
                 background: palette(midlight);
+                color: palette(button-text);
                 border: 1px solid palette(mid);
             }
             QToolButton:pressed {
                 background: palette(mid);
+                color: palette(button-text);
+            }
+            QToolButton:disabled {
+                background: %s;
+                border: 1px solid palette(mid);
+                color: %s;
             }
             QToolButton[annotationTool="true"]:checked {
                 background: %s;
@@ -883,8 +913,9 @@ class ToolbarWidget(QWidget):
                 border: 1px solid %s;
                 color: %s;
             }
-        """ % (selected, border, foreground, hovered, border, foreground,
-               pressed, border, foreground)
+         """ % (disabled_background, disabled_foreground,
+             selected, border, foreground, hovered, border, foreground,
+             pressed, border, foreground)
         if self.styleSheet() != stylesheet:
             self.setStyleSheet(stylesheet)
             logging.getLogger("screensnap").debug(
@@ -1424,24 +1455,24 @@ class ToolbarWidget(QWidget):
         with QSignalBlocker(self.appearance_toggle):
             self.appearance_toggle.setChecked(True)
         self.output_preview.refresh()
-        screen = self.appearance_toggle.screen() or QGuiApplication.primaryScreen()
-        available_height = screen.availableGeometry().height() if screen else 800
-        max_height = max(220, available_height - 72)
+        anchor_global = QRect(
+            self.appearance_toggle.mapToGlobal(self.appearance_toggle.rect().topLeft()),
+            self.appearance_toggle.size())
+        screen = (QGuiApplication.screenAt(anchor_global.center())
+                  or self.appearance_toggle.screen()
+                  or QGuiApplication.primaryScreen())
+        available = screen.availableGeometry() if screen else QRect(0, 0, 960, 720)
+        max_height = max(80, available.height() - 16)
+        popup_width = min(960, max(1, available.width() - 16))
+        self.appearance_menu.setFixedWidth(popup_width)
         self.appearance_panel.adjustSize()
         panel_height = self.appearance_panel.sizeHint().height()
-        self.appearance_scroll.setFixedHeight(min(panel_height, max_height))
-        self.appearance_menu.setMaximumHeight(max_height + 20)
-        position = self.appearance_toggle.mapToGlobal(
-            self.appearance_toggle.rect().bottomLeft())
-        popup_size = self.appearance_menu.sizeHint()
-        screen = self.appearance_toggle.screen() or QGuiApplication.primaryScreen()
-        if screen is not None:
-            available = screen.availableGeometry()
-            if position.y() + min(panel_height, max_height) > available.bottom():
-                position.setY(self.appearance_toggle.mapToGlobal(
-                    self.appearance_toggle.rect().topLeft()).y() - min(panel_height, max_height))
-            position.setX(min(position.x(), available.right() - popup_size.width()))
-        self.appearance_menu.move(position)
+        self.appearance_scroll.setFixedHeight(min(panel_height, max_height - 20))
+        self.appearance_menu.setMaximumHeight(max_height)
+        self.appearance_menu.adjustSize()
+        popup_geometry = anchored_popup_geometry(
+            anchor_global, self.appearance_menu.size(), available)
+        self.appearance_menu.move(popup_geometry.topLeft())
         self.appearance_menu.show()
         self.appearance_menu.raise_()
         logging.getLogger("screensnap").debug("打开输出外观弹层")

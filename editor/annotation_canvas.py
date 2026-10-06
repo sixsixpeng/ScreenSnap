@@ -24,6 +24,18 @@ from editor.annotation_items import (shape, text_item, editable, RoundedRectItem
 # 直线/折线模式下单段最短位移（像素），低于此值视为“未确定第二点”，不绘制。
 STRAIGHT_MIN_DISTANCE = 3
 
+
+def shape_constraint_active(modifiers):
+    return bool(modifiers & (Qt.ControlModifier | Qt.AltModifier))
+
+
+def constrained_shape_endpoint(start, end):
+    dx = end.x() - start.x()
+    dy = end.y() - start.y()
+    side = max(abs(dx), abs(dy))
+    return QPointF(start.x() + (side if dx >= 0 else -side),
+                   start.y() + (side if dy >= 0 else -side))
+
 # 文字标注用边中点拖动调整文本框时的最小宽/高（像素），避免拖成不可见。
 MIN_TEXT_WIDTH = 40.0
 MIN_TEXT_HEIGHT = 24.0
@@ -102,6 +114,7 @@ class AnnotationCanvas(QGraphicsView):
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.tool = "select"
         self._picker_cursor = self._create_picker_cursor()
+        self._picker_pressed_cursor = self._create_picker_cursor(pressed=True)
         # 工具字形光标按 (工具, 颜色, 是否按下) 惰性构建并缓存；左键按下时切换按下态。
         self._tool_cursor_cache = {}
         self._applied_cursor_key = None
@@ -123,10 +136,12 @@ class AnnotationCanvas(QGraphicsView):
         self.text_resize_origin = None
         self.alignment_guides = []
         self.rotating = None
+        self.rotation_cursor = self._create_rotation_cursor()
         self.rotation_center = None
         self.rotation_start_angle = 0.0
         self.rotation_start_value = 0.0
         self.mosaic_drawing = None
+        self.mosaic_preview = None
         self.mosaic_point = None
         # 擦除以带 z 序的 EraseMaskItem 存在于场景中；该标志表示当前是否有擦除层，
         # 供实时视图决定是否走合成路径。
@@ -136,6 +151,8 @@ class AnnotationCanvas(QGraphicsView):
         self.resize_start = None
         # 空格同时是临时平移键；这里单独记录其按下状态，用于四角自由拉伸判定。
         self.space_pressed = False
+        self.space_pan_active = False
+        self.space_pan_start = None
         self.eraser_last = None
         self.eraser_point = None
         # 擦除笔迹分组编号：每次按下（或直接调用 erase_segment）递增，用于按笔迹删除擦除。
@@ -153,31 +170,47 @@ class AnnotationCanvas(QGraphicsView):
         self.zoom_percent = 100
 
     @staticmethod
-    def _create_picker_cursor():
-        """创建尖端定位明确、深浅对比清晰的滴管光标。"""
+    def _create_picker_cursor(pressed=False):
+        """创建轮廓清晰的滴管光标；按下时在取样尖端显示反馈环。"""
         pixmap = QPixmap(32, 32)
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
-        body = QPainterPath(QPointF(4, 28))
-        body.lineTo(9, 23)
-        body.lineTo(19, 13)
-        body.lineTo(25, 19)
-        body.lineTo(15, 29)
-        body.lineTo(8, 31)
+        body = QPainterPath(QPointF(4, 29))
+        body.lineTo(8, 25)
+        body.lineTo(21, 12)
+        body.lineTo(26, 17)
+        body.lineTo(13, 30)
+        body.lineTo(7, 31)
         body.closeSubpath()
-        painter.setPen(QPen(QColor("#142c32"), 2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.setBrush(QColor("#f7fbfa"))
+        painter.setPen(QPen(QColor(CURSOR_OUTLINE_LIGHT), 4.5,
+                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
         painter.drawPath(body)
-        painter.setPen(QPen(QColor("#315c66"), 2, Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(QPointF(8, 26), QPointF(19, 15))
-        painter.setPen(QPen(QColor("#142c32"), 2, Qt.SolidLine, Qt.RoundCap))
-        painter.setBrush(QColor("#00ad91"))
-        painter.drawEllipse(QPointF(24, 8), 4, 4)
-        painter.setPen(QPen(QColor("#f7fbfa"), 1.5, Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(QPointF(22, 8), QPointF(26, 8))
+        painter.setPen(QPen(QColor(CURSOR_OUTLINE_DARK), 1.8,
+                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(QColor("#e7eef0"))
+        painter.drawPath(body)
+        painter.setPen(QPen(QColor("#71858c"), 1.2, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(9, 25), QPointF(21, 13))
+        painter.setPen(QPen(QColor(CURSOR_OUTLINE_DARK), 1.6,
+                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(QColor("#31a98f"))
+        painter.drawRoundedRect(QRectF(21, 5, 7, 7), 2, 2)
+        painter.setPen(QPen(QColor(CURSOR_OUTLINE_LIGHT), 1.2,
+                            Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(23, 8), QPointF(26, 8))
+        if pressed:
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(CURSOR_OUTLINE_LIGHT), 3.4))
+            painter.drawEllipse(QPointF(5, 27), 3.8, 3.8)
+            painter.setPen(QPen(QColor("#087a68"), 1.6))
+            painter.drawEllipse(QPointF(5, 27), 3.8, 3.8)
+        painter.setPen(QPen(QColor(CURSOR_OUTLINE_DARK), 1.2))
+        painter.setBrush(QColor("#31a98f"))
+        painter.drawEllipse(QPointF(5, 27), 1.8, 1.8)
         painter.end()
-        return QCursor(pixmap, 4, 28)
+        return QCursor(pixmap, 5, 27)
 
     @staticmethod
     def _create_tool_cursor(tool, color, pressed=False):
@@ -312,10 +345,12 @@ class AnnotationCanvas(QGraphicsView):
         这里保持不动，避免覆盖它们的专用光标。
         """
         if self.tool == "picker":
-            key = ("picker",)
+            pressed = bool(self._left_button_down)
+            key = ("picker", pressed)
             if key != self._applied_cursor_key:
                 self._applied_cursor_key = key
-                self.setCursor(self._picker_cursor)
+                self.setCursor(self._picker_pressed_cursor if pressed
+                               else self._picker_cursor)
             return
         if self.tool not in TOOL_CURSOR_TOOLS:
             return
@@ -370,8 +405,14 @@ class AnnotationCanvas(QGraphicsView):
             return bool(self.settings.get(f"{self.tool}_chain", False))
         return False
 
-    def _pen_marker_straight(self, event=None):
-        """画笔/记号笔当前笔划是否按直线模式绘制：多段开关开启，或按住 Ctrl / Alt 任意一个。
+    def _shape_constraint_active(self, event=None):
+        modifiers = QApplication.keyboardModifiers()
+        modifiers = (event.modifiers() if event is not None
+                     else QApplication.keyboardModifiers())
+        return shape_constraint_active(modifiers)
+
+    def _straight_gesture_active(self, event=None):
+        """当前笔划是否为直线：多段模式，或 Ctrl、Alt 任一手势键。
 
         修饰键同时取事件自带状态与全局键盘状态：只依赖 event.modifiers() 时，
         若按下瞬间键盘状态尚未同步（或画布未持有焦点）会漏判成自由手绘。
@@ -1209,12 +1250,20 @@ class AnnotationCanvas(QGraphicsView):
         h = y1 - y0
         if w <= 0 or h <= 0:
             return
-        # Qt6 的 QGraphicsView 不再调用 drawItems，场景仍会在底层绘制底图与标注；
-        # 先铺一层视图背景覆盖，擦除底图留下的透明洞才不会透出底部旧图元。
-        background = self.backgroundBrush()
-        if background.style() == Qt.NoBrush:
-            background = self.palette().base()
-        painter.fillRect(QRectF(visible), background)
+        # 先铺透明棋盘格；擦除底图留下的洞需明确显示为透明，而不是主题纯色。
+        dark_theme = self.palette().base().color().lightness() < 128
+        first = QColor("#3b3f45" if dark_theme else "#e0e3e6")
+        second = QColor("#4c5158" if dark_theme else "#f1f3f5")
+        checker = QImage(16, 16, QImage.Format_RGB32)
+        checker.fill(first)
+        checker_painter = QPainter(checker)
+        checker_painter.fillRect(0, 0, 8, 8, second)
+        checker_painter.fillRect(8, 8, 8, 8, second)
+        checker_painter.end()
+        painter.save()
+        painter.setBrushOrigin(QPointF(0, 0))
+        painter.fillRect(QRectF(visible), QBrush(checker))
+        painter.restore()
         # 底图层：取可见区域的底图像素，开启 eraser_erase_base 时一并镂空。
         base_img = self.base.pixmap().toImage().convertToFormat(QImage.Format_ARGB32)
         if not base_img.isNull():
@@ -1281,12 +1330,15 @@ class AnnotationCanvas(QGraphicsView):
             painter.drawEllipse(self.eraser_point, radius, radius)
         # 马赛克涂抹模式：同样用虚线圆环表示笔刷宽度，便于对齐涂抹范围。
         if self.tool == "mosaic" and self.mosaic_point is not None \
-                and self.settings.get("mosaic_brush", False):
+            and self.settings.get("mosaic_brush", True):
             painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
             painter.setBrush(Qt.NoBrush)
             radius = max(2, self.settings.get("mosaic_width", 20) / 2)
             painter.drawEllipse(self.mosaic_point, radius, radius)
-        if self.start is not None and self.preview_end is not None:
+        mosaic_brush_active = (
+            self.tool == "mosaic" and self.settings.get("mosaic_brush", True))
+        if (self.start is not None and self.preview_end is not None
+            and not mosaic_brush_active):
             painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine) if self.tool == "mosaic"
                            else self.stroke_pen())
             area = QRectF(self.start, self.preview_end).normalized()
@@ -1308,6 +1360,9 @@ class AnnotationCanvas(QGraphicsView):
                               self.settings.get("arrow_style", "filled"))
                 painter.setBrush(arrow.brush())
                 painter.drawPath(arrow.path())
+        if self.mosaic_preview is not None:
+            bounds, preview = self.mosaic_preview
+            painter.drawImage(QPointF(bounds.topLeft()), preview)
         if self.mosaic_drawing is not None:
             painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
             painter.setBrush(Qt.NoBrush)
@@ -1381,9 +1436,30 @@ class AnnotationCanvas(QGraphicsView):
         handle = self.rotation_handle_position(item)
         return ((handle.x() - point.x()) ** 2 + (handle.y() - point.y()) ** 2) <= 64
 
+    @staticmethod
+    def _create_rotation_cursor():
+        pixmap = QPixmap(24, 24)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.Antialiasing)
+        rect = QRectF(4, 4, 16, 16)
+        arrow = QPolygonF((QPointF(17, 3), QPointF(21, 9), QPointF(14, 8)))
+        for color, width in ((QColor("#ffffff"), 4), (QColor("#202124"), 2)):
+            painter.setPen(QPen(color, width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawArc(rect, 35 * 16, 285 * 16)
+            painter.drawLine(QPointF(17, 3), QPointF(20, 8))
+            painter.drawLine(QPointF(17, 3), QPointF(13, 5))
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#202124"))
+        painter.drawPolygon(arrow)
+        painter.end()
+        return QCursor(pixmap, 12, 12)
+
     def _begin_rotation(self, item, point):
         """开始旋转：以项包围盒中心为支点，记录起始角度与当前旋转值。"""
         self.rotating = item
+        self.setCursor(self.rotation_cursor)
+        logging.getLogger("screensnap").debug("标注旋转开始")
         center_local = item.boundingRect().center()
         item.setTransformOriginPoint(center_local)
         center = item.mapToScene(center_local)
@@ -1403,8 +1479,8 @@ class AnnotationCanvas(QGraphicsView):
         self.rotating.setRotation(new_value)
         self.viewport().update()
 
-    def _commit_mosaic_brush(self, path):
-        """沿笔迹路径生成马赛克/模糊覆盖：取底图对应区域，按效果生成后用笔迹形状裁掉外部像素。"""
+    def _mosaic_brush_overlay(self, path):
+        """生成透明笔刷覆盖图，返回其场景边界和 QImage。"""
         radius = max(2, self.settings.get("mosaic_width", 20) / 2)
         stroker = QPainterPathStroker()
         stroker.setWidth(radius * 2)
@@ -1413,9 +1489,9 @@ class AnnotationCanvas(QGraphicsView):
         region = stroker.createStroke(path)
         bounds = region.boundingRect().toRect().intersected(self.sceneRect().toRect())
         if bounds.isEmpty():
-            return
+            return None
         sample = self.image.crop((bounds.left(), bounds.top(), bounds.right() + 1, bounds.bottom() + 1))
-        mode = self.settings.get("mosaic_mode", "blocks")
+        mode = self.settings.get("mosaic_mode", "blur")
         size = self.settings.get("mosaic_size", 10)
         result = mosaic_image(sample, mode, size).convert("RGBA")
         # 在区域尺寸的图像上用白色绘制笔迹作为透明度遮罩。
@@ -1435,14 +1511,35 @@ class AnnotationCanvas(QGraphicsView):
         op.drawImage(0, 0, to_qimage(result))
         op.end()
         out.setAlphaChannel(mask)
+        return bounds, out
+
+    def _update_mosaic_brush_preview(self):
+        self.mosaic_preview = (self._mosaic_brush_overlay(self.mosaic_drawing)
+                               if self.mosaic_drawing is not None else None)
+
+    def _commit_mosaic_brush(self, path):
+        """提交与实时预览相同的非破坏性马赛克/模糊覆盖。"""
+        overlay = self._mosaic_brush_overlay(path)
+        if overlay is None:
+            return
+        bounds, out = overlay
         item = editable(AnnotationPixmapItem(QPixmap.fromImage(out)))
         item.setOffset(QPointF(bounds.left(), bounds.top()))
         self._add_annotation(item)
         self.checkpoint()
 
     def mousePressEvent(self, event):
+        if (self.space_pressed and self.start is None
+                and self.mosaic_drawing is None
+                and event.button() == Qt.LeftButton):
+            self.space_pan_active = True
+            self.space_pan_start = event.position().toPoint()
+            event.accept()
+            return
         """根据工具决定选中图元、取色或开始新的标注。"""
-        if event.button() == Qt.LeftButton and self.tool in TOOL_CURSOR_TOOLS and self.tool != "text":
+        if (event.button() == Qt.LeftButton and
+            (self.tool in TOOL_CURSOR_TOOLS or self.tool == "picker") and
+            self.tool != "text"):
             # 绘制工具按住左键时切换「按下态」光标；文字工具点击即弹对话框，不进入按下态。
             self._left_button_down = True
             self._apply_tool_cursor()
@@ -1547,12 +1644,15 @@ class AnnotationCanvas(QGraphicsView):
             self._add_annotation(item)
             self.checkpoint()
             return
-        if self.tool == "mosaic" and self.settings.get("mosaic_brush", False) \
+        if self.tool == "mosaic" and self.settings.get("mosaic_brush", True) \
                 and event.button() == Qt.LeftButton:
-            # 自由笔刷：记录笔迹路径，松开时沿笔迹生成马赛克/模糊覆盖。
+            # 预览层只显示效果，不进场景/历史；松开后再提交正式覆盖。
+            self.start = point
+            self.straight_drawing = self._straight_gesture_active(event)
             self.mosaic_drawing = QPainterPath(point)
             self.mosaic_point = point
             self.preview_end = point
+            self._update_mosaic_brush_preview()
             self.viewport().update()
             event.accept()
             return
@@ -1562,7 +1662,7 @@ class AnnotationCanvas(QGraphicsView):
                 self.start = point
             self.preview_end = point
             if self.tool in ("pen", "marker"):
-                self.straight_drawing = self._pen_marker_straight(event)
+                self.straight_drawing = self._straight_gesture_active(event)
                 if self.straight_drawing:
                     self.drawing = QPainterPath()
                     if not self.chain_active:
@@ -1573,6 +1673,16 @@ class AnnotationCanvas(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        if self.space_pan_active:
+            point = event.position().toPoint()
+            distance = point - self.space_pan_start
+            self.horizontalScrollBar().setValue(
+                self.horizontalScrollBar().value() - distance.x())
+            self.verticalScrollBar().setValue(
+                self.verticalScrollBar().value() - distance.y())
+            self.space_pan_start = point
+            event.accept()
+            return
         """绘制期间只更新预览，松开鼠标后才提交到场景。"""
         if self.right_pan_start is not None:
             point = event.position().toPoint()
@@ -1602,12 +1712,20 @@ class AnnotationCanvas(QGraphicsView):
                 self.eraser_last = point
             self.viewport().update()
             return
-        if self.tool == "mosaic" and self.settings.get("mosaic_brush", False):
+        if self.tool == "mosaic" and self.settings.get("mosaic_brush", True):
             # 未按住时也跟随指针，用虚线圆环显示笔刷宽度与位置。
             point = self.image_point(self.mapToScene(event.position().toPoint()))
             self.mosaic_point = point
             if self.mosaic_drawing is not None:
-                self.mosaic_drawing.lineTo(point)
+                if (not self.straight_drawing and
+                        self._straight_gesture_active(event)):
+                    self.straight_drawing = True
+                if self.straight_drawing and self.start is not None:
+                    self.mosaic_drawing = QPainterPath(self.start)
+                    self.mosaic_drawing.lineTo(point)
+                else:
+                    self.mosaic_drawing.lineTo(point)
+                self._update_mosaic_brush_preview()
                 self.preview_end = point
             self.viewport().update()
             return
@@ -1652,10 +1770,13 @@ class AnnotationCanvas(QGraphicsView):
             return
         if self.start is not None:
             end = self.image_point(self.mapToScene(event.position().toPoint()))
+            if (self.tool in ("rect", "ellipse")
+                    and self._shape_constraint_active(event)):
+                end = constrained_shape_endpoint(self.start, end)
             self.preview_end = end
             if self.tool in ("pen", "marker"):
                 # 修饰键可能在鼠标按下之后才按住，拖动途中也能切换为直线模式。
-                if not self.straight_drawing and self._pen_marker_straight(event):
+                if not self.straight_drawing and self._straight_gesture_active(event):
                     self.straight_drawing = True
                     self.committed_segments = []
                 if self.straight_drawing:
@@ -1744,6 +1865,10 @@ class AnnotationCanvas(QGraphicsView):
             QToolTip.hideText()
             return
         for item in self.scene_data.selectedItems() if self.tool == "select" else ():
+            if self.rotation_handle_at(item, point):
+                self.setCursor(self.rotation_cursor)
+                QToolTip.hideText()
+                return
             handle = self.resize_handle_at(self.item_resize_handles(item), point)
             cursors = {"nw": Qt.SizeFDiagCursor, "se": Qt.SizeFDiagCursor,
                        "ne": Qt.SizeBDiagCursor, "sw": Qt.SizeBDiagCursor,
@@ -1955,6 +2080,14 @@ class AnnotationCanvas(QGraphicsView):
         self.erase_menu(point).popup(position)
 
     def mouseReleaseEvent(self, event):
+        if self.space_pan_active and event.button() == Qt.LeftButton:
+            self.space_pan_active = False
+            self.space_pan_start = None
+            if not self.space_pressed:
+                self.setDragMode(QGraphicsView.RubberBandDrag if self.tool == "select"
+                                 else QGraphicsView.NoDrag)
+            event.accept()
+            return
         """按当前工具提交图元；裁剪时两版截图使用相同区域。"""
         if self._left_button_down:
             # 松开左键无条件退出「按下态」光标；多段绘制松手后仍保持链状态。
@@ -1962,14 +2095,19 @@ class AnnotationCanvas(QGraphicsView):
             self._applied_cursor_key = None
             self._apply_tool_cursor()
         if self.rotating is not None:
+            logging.getLogger("screensnap").debug("标注旋转结束")
             self.rotating = None
             self.checkpoint()
             self.viewport().update()
+            self._update_resize_cursor(event.position().toPoint())
             event.accept()
             return
         if self.mosaic_drawing is not None:
             self._commit_mosaic_brush(self.mosaic_drawing)
             self.mosaic_drawing = None
+            self.mosaic_preview = None
+            self.start = None
+            self.straight_drawing = False
             self.preview_end = None
             self.viewport().update()
             event.accept()
@@ -2024,6 +2162,9 @@ class AnnotationCanvas(QGraphicsView):
             return
         if self.start is not None:
             end = self.image_point(self.mapToScene(event.position().toPoint()))
+            if (self.tool in ("rect", "ellipse")
+                    and self._shape_constraint_active(event)):
+                end = constrained_shape_endpoint(self.start, end)
             dragged = (end - self.start).manhattanLength() >= STRAIGHT_MIN_DISTANCE
             if self.tool in ("pen", "marker") and self.straight_drawing:
                 # 直线/折线模式：仅当确有第二点时提交一段直线；无第二点不绘制。
@@ -2077,7 +2218,7 @@ class AnnotationCanvas(QGraphicsView):
                     return
                 sample = self.image.crop((area.left(), area.top(), area.right() + 1, area.bottom() + 1))
                 size = self.settings["mosaic_size"]
-                mode = self.settings.get("mosaic_mode", "blocks")
+                mode = self.settings.get("mosaic_mode", "blur")
                 result = mosaic_image(sample, mode, size)
                 item = editable(AnnotationPixmapItem(QPixmap.fromImage(to_qimage(result))))
                 item.setPos(area.topLeft())
@@ -2161,7 +2302,9 @@ class AnnotationCanvas(QGraphicsView):
             self.cancelled.emit()
         elif event.key() == Qt.Key_Space:
             self.space_pressed = True
-            self.setDragMode(QGraphicsView.ScrollHandDrag)
+            if self.start is None and self.mosaic_drawing is None:
+                self.setDragMode(QGraphicsView.ScrollHandDrag)
+            event.accept()
         elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self.remove_selected()
         elif event.matches(QKeySequence.Undo):
@@ -2177,14 +2320,21 @@ class AnnotationCanvas(QGraphicsView):
         """松开空格后退出临时平移状态。"""
         if event.key() == Qt.Key_Space:
             self.space_pressed = False
-            self.setDragMode(QGraphicsView.RubberBandDrag if self.tool == "select"
-                             else QGraphicsView.NoDrag)
+            if not self.space_pan_active:
+                self.setDragMode(QGraphicsView.RubberBandDrag if self.tool == "select"
+                                 else QGraphicsView.NoDrag)
         super().keyReleaseEvent(event)
 
     def focusOutEvent(self, event):
         # 焦点丢失时清空空格状态，避免拖拽判定残留；并作废光标应用键以便重新校准。
         self.space_pressed = False
+        self.space_pan_active = False
+        self.space_pan_start = None
+        self.setDragMode(QGraphicsView.RubberBandDrag if self.tool == "select"
+                 else QGraphicsView.NoDrag)
+        self._left_button_down = False
         self._applied_cursor_key = None
+        self._apply_tool_cursor()
         super().focusOutEvent(event)
 
     def wheelEvent(self, event):
