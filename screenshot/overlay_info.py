@@ -26,6 +26,11 @@ HINT_SEPARATOR = " | "
 HINT_BAR_MAX_WIDTH = 420
 # 提示条与放大镜框之间的间距（像素）兜底值：实际取值来自配置 `capture_hint_gap`，默认紧贴。
 HINT_BAR_GAP = 0
+
+
+def hint_visible_on_monitor(position, monitor_rect):
+    """Return whether the shared virtual-desktop cursor belongs to this monitor."""
+    return monitor_rect.contains(position)
 # 兜底样式：没有任何配置（如一次性绘制的旧调用）时使用；alpha 沿用改造前的观感。
 FALLBACK_HINT_BAR_STYLE = {"text_color": "#ffffff", "fill_color": "#141c22",
                            "border_color": "#141c22", "rounded": True, "radius": 5,

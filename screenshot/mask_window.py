@@ -13,7 +13,7 @@ from PySide6.QtWidgets import (QWidget, QApplication, QDialog, QDialogButtonBox,
                                QFrame, QGraphicsView, QMenu, QToolButton, QLabel)
 
 from core.dpi import DisplayMapper
-from core.image_io import save_image, saved_extension
+from core.image_io import matches_saved_format, save_image, saved_extension
 from core.path_utils import resolved_dir
 from core.screen_capture import to_qimage
 from core.window_boundaries import visible_windows
@@ -25,7 +25,8 @@ from editor.annotation_canvas import AnnotationCanvas
 from editor.image_effects import apply_output_effects
 from editor.toolbar_widget import ToolbarWidget, rich_tooltip
 from screenshot.selection_rect import SelectionRects
-from screenshot.overlay_info import info_bar_layout, paint_info_bar, paint_info_badge
+from screenshot.overlay_info import (hint_visible_on_monitor, info_bar_layout,
+                                     paint_info_bar, paint_info_badge)
 from screenshot.magnifier_widget import (MAGNIFIER_DEFAULT_SIZE, magnifier_rect,
                                          paint_magnifier)
 from screenshot.hint_items import CAPTURE_ACTION_KEYS, TOOLBAR_HIDE_KEY, hint_items, hint_texts
@@ -191,6 +192,7 @@ class InfoBar(QWidget):
         super().__init__(view)
         self.view = view
         self.rows = []
+        self._cursor_monitor_active = None
         self.warning = None
         self.style = None
         self.bar = QRect()
@@ -206,6 +208,15 @@ class InfoBar(QWidget):
             return
         # 模态对话框或下拉弹出层打开时隐藏，避免作为置顶浮层盖住这些控件。
         if QGuiApplication.modalWindow() is not None or QApplication.activePopupWidget() is not None:
+            self.hide()
+            return
+        on_cursor_monitor = hint_visible_on_monitor(view.position, view.monitor_rect)
+        if self._cursor_monitor_active != on_cursor_monitor:
+            self._cursor_monitor_active = on_cursor_monitor
+            logging.getLogger("screensnap").debug(
+                "截图提示条屏幕归属切换: monitor=%s visible=%s",
+                view.monitor_rect.getRect(), on_cursor_monitor)
+        if not on_cursor_monitor:
             self.hide()
             return
         metrics = self.fontMetrics()
@@ -390,9 +401,7 @@ class InlineEditor(QWidget):
             return True
         if event_type not in (QEvent.MouseMove, QEvent.MouseButtonPress, QEvent.MouseButtonRelease):
             return super().eventFilter(watched, event)
-        if (event_type == QEvent.MouseMove and
-                (watched is self.toolbar or self.toolbar.isAncestorOf(watched)) and
-                view.selection.resizing is None and view.selection.dragging is None):
+        if watched is self.toolbar or self.toolbar.isAncestorOf(watched):
             return super().eventFilter(watched, event)
         local = watched.mapTo(view, event.position().toPoint())
         mapped = QMouseEvent(event_type, QPointF(local), QPointF(view.mapToGlobal(local)),
@@ -414,7 +423,8 @@ class InlineEditor(QWidget):
                                                           view.selection.dragging is not None):
             view.mouseReleaseEvent(mapped)
             if view.selection.resizing is None and view.selection.dragging is None:
-                view.releaseMouse()
+                if QWidget.mouseGrabber() is view:
+                    view.releaseMouse()
             return True
         return super().eventFilter(watched, event)
 
@@ -610,6 +620,7 @@ class InlineEditor(QWidget):
         else:
             self.toolbar.show()
             self.toolbar.raise_()
+            self.view.magnifier_overlay.raise_()
 
     def toggle_toolbar(self):
         """临时隐藏/恢复工具栏，返回隐藏后的状态；只由快捷键触发，没有对应按钮。"""
@@ -710,7 +721,8 @@ class InlineEditor(QWidget):
                                     self.round_corners, self.corner_radius)
 
     def save(self, automatic=False, copy_to_clipboard=False, force_copy_image=False):
-        path = self.last_path or self.allocate_path(automatic)
+        path = (self.last_path if matches_saved_format(self.last_path, self.settings)
+            else self.allocate_path(automatic))
         result = self.output_image()
         if not save_image(result, path, self.settings):
             raise OSError(f"图片保存失败：{path}")
@@ -1826,6 +1838,8 @@ class MaskWindow(QWidget):
                                                     self.selection.dragging is not None):
                 self.position = self.to_physical_point(event.position().toPoint())
                 self.selection.finish()
+                if QWidget.mouseGrabber() is self:
+                    self.releaseMouse()
                 self.update_inline_region()
                 if self.session.inline_editor is not None:
                     self.session.inline_editor.end_region_resize()
