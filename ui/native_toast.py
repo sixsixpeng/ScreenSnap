@@ -49,8 +49,22 @@ def show_native_toast(title, body="", image_path=None, on_click=None, on_failed=
     kwargs = {}
     if image_path is not None:
         kwargs["image"] = {"src": str(Path(image_path).resolve()), "placement": "hero"}
-    if on_click is not None:
-        kwargs["on_click"] = on_click
+
+    def clicked(result):
+        if on_click is not None:
+            on_click(result)
+        else:
+            logger.debug("Windows 原生通知被点击: %s", result)
+
+    def dismissed(result):
+        logger.debug("Windows 原生通知关闭: %s", result)
+
+    def failed(result):
+        logger.warning("Windows 原生通知报告失败: %s", result)
+        if on_failed is not None:
+            on_failed(result)
+
+    kwargs.update(on_click=clicked, on_dismissed=dismissed, on_failed=failed)
 
     def post():
         try:
