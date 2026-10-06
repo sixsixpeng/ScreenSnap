@@ -60,6 +60,7 @@ from sticker import StickerManager
 from ui import SettingsWindow, make_tray_menu, CaptureNotification, StickerPanel
 from ui.recycle_window import RecycleWindow
 from ui.theme import apply_theme
+from ui.window_bounds import WindowBoundsFilter
 from PIL import Image
 
 
@@ -130,6 +131,17 @@ def acquire_single_instance_lock(path=None):
     return lock if lock.tryLock(0) else None
 
 
+def notify_existing_instance():
+    message = "ScreenSnap 已经在运行。请从系统托盘打开现有窗口，或退出现有实例后再启动。"
+    if os.name == "nt":
+        try:
+            ctypes.windll.user32.MessageBoxW(None, message, "ScreenSnap", 0x40)
+            return
+        except (AttributeError, OSError):
+            pass
+    print(message, file=sys.stderr)
+
+
 class QApp(QApplication):
     """重写 notify 捕获 Qt 事件/槽中的未处理异常并写入日志（默认会静默崩溃）。"""
 
@@ -189,6 +201,8 @@ class Application:
 
     def __init__(self):
         self.qt = QApp(sys.argv)
+        self.window_bounds_filter = WindowBoundsFilter(self.qt)
+        self.qt.installEventFilter(self.window_bounds_filter)
         enable_windows_app_id()
         # 应用级图标会被设置、编辑器、贴图管理等所有未显式设置图标的窗口继承。
         self.qt.setWindowIcon(tray_icon())
@@ -294,6 +308,7 @@ class Application:
             editor.canvas.update()
             editor.toolbar.sync_tool_colors(self.config.data)
             editor.toolbar.set_active_tool(editor.canvas.tool)
+            editor.toolbar.sync_theme_icons()
             editor.round_corners = bool(self.config.data.get("editor_image_round_corners", True))
             editor.corner_radius = self.config.data.get("editor_image_corner_radius", 16)
             editor.canvas.set_round_corner_preview(editor.round_corners, editor.corner_radius)
@@ -814,6 +829,7 @@ class Application:
 if __name__ == "__main__":
     instance_lock = acquire_single_instance_lock()
     if instance_lock is None:
+        notify_existing_instance()
         sys.exit(0)
     install_exception_hooks()
     program = Application()
