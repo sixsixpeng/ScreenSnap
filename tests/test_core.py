@@ -800,6 +800,7 @@ class CoreTests(unittest.TestCase):
         # 旧配置只保留热键时，validate 应补齐全部新增键，且标尺默认开启。
         stripped = {"hotkeys": DEFAULTS["hotkeys"]}
         result = validate(stripped)
+        self.assertTrue(result["capture_hotkey_suppress"])
         self.assertTrue(result["ruler_enabled"])
         self.assertTrue(result["magnifier_grid"])
         self.assertTrue(result["sticker_recycle_enabled"])
@@ -821,6 +822,7 @@ class CoreTests(unittest.TestCase):
         self.assertTrue(result["capture_hints_enabled"])
         with self.assertRaises(ValueError):
             validate({"capture_hint_per_line": 9})
+
         # 提示项顺序只保留已知 id、去重且保持用户顺序。
         self.assertEqual(validate({"capture_hint_order": ["copy", "copy", "unknown", "coords"]})[
             "capture_hint_order"], ["copy", "coords"])
@@ -952,6 +954,22 @@ class CoreTests(unittest.TestCase):
 
             self.assertEqual(reloaded["sequence_shape"], DEFAULTS["sequence_shape"])
             settings.close()
+
+    def test_capture_hotkey_suppress_default_and_explicit_override(self):
+        from config.config_manager import DEFAULTS, validate, ConfigManager
+
+        self.assertTrue(DEFAULTS["capture_hotkey_suppress"])
+        self.assertTrue(validate({"hotkeys": DEFAULTS["hotkeys"]})[
+            "capture_hotkey_suppress"])
+        self.assertFalse(validate({"capture_hotkey_suppress": False})[
+            "capture_hotkey_suppress"])
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            self.assertTrue(manager.data["capture_hotkey_suppress"])
+            manager.data["capture_hotkey_suppress"] = False
+            manager.save()
+            self.assertFalse(ConfigManager(manager.path).data[
+                "capture_hotkey_suppress"])
 
     def test_text_width_default_validated_and_controls_box_width(self):
         from config.config_manager import DEFAULTS, validate
@@ -1124,11 +1142,15 @@ class CoreTests(unittest.TestCase):
 
     def test_text_input_dialog_shows_live_preview(self):
         from unittest.mock import patch as _patch
+        from PySide6.QtWidgets import QDialogButtonBox
         from config.config_manager import DEFAULTS
         from editor.text_input_dialog import TextInputDialog
 
         settings = dict(DEFAULTS)
         dialog = TextInputDialog(None, "文字标注", settings, "abc")
+        buttons = dialog.findChild(QDialogButtonBox)
+        self.assertEqual(buttons.button(QDialogButtonBox.Ok).text(), "确定")
+        self.assertEqual(buttons.button(QDialogButtonBox.Cancel).text(), "取消")
         self.assertIsNotNone(getattr(dialog, "preview", None))
         self.assertEqual(dialog.preview.kind, "text")
         # 预览使用编辑框里正在输入的文字，而不是固定示例文案。
@@ -1744,6 +1766,23 @@ class CoreTests(unittest.TestCase):
             self.assertEqual(ConfigManager(manager.path).data["pen_color"], "#ff0000")
             editor.close()
 
+    def test_annotation_boolean_setting_syncs_checkbox_and_persists(self):
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            settings = SettingsWindow(manager)
+            editor_page = settings.page("编辑器")
+
+            settings.set_annotation_setting("marker_chain", True)
+            settings.set_annotation_setting("text_bold", True)
+
+            self.assertTrue(editor_page.controls["marker_chain"].isChecked())
+            self.assertTrue(editor_page.controls["text_bold"].isChecked())
+            settings.flush_persist()
+            saved = ConfigManager(manager.path).data
+            self.assertTrue(saved["marker_chain"])
+            self.assertTrue(saved["text_bold"])
+            settings.close()
+
     def test_color_button_swatch_is_larger_outside_compact_controls(self):
         from PySide6.QtCore import QSize
         from ui.widgets.color_button import ColorButton
@@ -2274,10 +2313,19 @@ class CoreTests(unittest.TestCase):
             create_thread.assert_called_once()
             thread.start.assert_called_once_with()
             create_thread.call_args.kwargs["target"]()
+            callbacks = toast.call_args.kwargs
             toast.assert_called_once_with(
                 "截图", "1 张", image={"src": str(path.resolve()), "placement": "hero"},
-                on_click=click)
-            failed.assert_not_called()
+                on_click=callbacks["on_click"],
+                on_dismissed=callbacks["on_dismissed"],
+                on_failed=callbacks["on_failed"])
+            with self.assertLogs("screensnap", level="DEBUG"):
+                callbacks["on_click"]("activated")
+                callbacks["on_dismissed"]("dismissed")
+            click.assert_called_once_with("activated")
+            with self.assertLogs("screensnap", level="WARNING"):
+                callbacks["on_failed"]("failure")
+            failed.assert_called_once_with("failure")
 
     def test_native_toast_oserror_calls_fallback_without_traceback(self):
         from types import SimpleNamespace
@@ -2368,12 +2416,17 @@ class CoreTests(unittest.TestCase):
             app.open_sticker_panel.assert_called_once_with()
 
     def test_startup_notice_and_tray_icon(self):
+        import shutil
+        import sys
         from types import SimpleNamespace
         from config.config_manager import DEFAULTS
         from core.app_icon import ICON_FILES, app_icon, icon_dir
         from main import Application, drawn_icon, tray_icon
 
-        self.assertTrue(any((icon_dir() / name).is_file() for name in ICON_FILES))
+        source_icon_dir = icon_dir()
+        self.assertEqual(source_icon_dir,
+                 Path(__file__).resolve().parents[1] / "ui" / "assets")
+        self.assertTrue(all((source_icon_dir / name).is_file() for name in ICON_FILES))
         icon = tray_icon()
         self.assertFalse(icon.isNull())
         self.assertFalse(app_icon().isNull())
@@ -2385,6 +2438,15 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(picture.pixelColor(picture.width() // 2, picture.height() // 2).alpha(), 0)
         drawn = drawn_icon().pixmap(64, 64).toImage()
         self.assertGreater(drawn.pixelColor(drawn.width() // 2, drawn.height() // 2).alpha(), 0)
+
+        with tempfile.TemporaryDirectory() as bundle:
+            bundled_icon_dir = Path(bundle) / "ui" / "assets"
+            bundled_icon_dir.mkdir(parents=True)
+            for name in ICON_FILES:
+                shutil.copy2(source_icon_dir / name, bundled_icon_dir / name)
+            with patch.object(sys, "_MEIPASS", bundle, create=True):
+                self.assertEqual(icon_dir(), bundled_icon_dir)
+                self.assertFalse(app_icon().isNull())
 
         # 未显式设置图标的窗口应继承应用级图标（设置、编辑器等窗口都靠这条链路）。
         from PySide6.QtWidgets import QApplication, QWidget
@@ -2759,6 +2821,16 @@ class CoreTests(unittest.TestCase):
             next_lock = acquire_single_instance_lock(lock_path)
             self.assertIsNotNone(next_lock)
             next_lock.unlock()
+
+    def test_duplicate_startup_reports_existing_tray_instance(self):
+        import io
+        from main import notify_existing_instance
+
+        output = io.StringIO()
+        with patch("main.os.name", "posix"), patch("main.sys.stderr", output):
+            notify_existing_instance()
+        self.assertIn("已经在运行", output.getvalue())
+        self.assertIn("系统托盘", output.getvalue())
 
     def test_sticker_manager_restores_position_and_scale_before_show(self):
         import json
@@ -3223,6 +3295,113 @@ class CoreTests(unittest.TestCase):
                     QPointF(20, 20), (tool, modifier))
                 canvas.close()
 
+    def test_pen_marker_and_mosaic_draw_straight_with_ctrl_or_alt(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationPathItem, AnnotationPixmapItem
+
+        for tool in ("pen", "marker"):
+            for gesture, modifier in (("ctrl", Qt.ControlModifier),
+                                      ("alt", Qt.AltModifier)):
+                canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"),
+                                          dict(DEFAULTS))
+                canvas.resize(400, 300)
+                canvas.show()
+                canvas.set_tool(tool)
+                self.app.processEvents()
+                self._pen_drag(canvas, (20, 20), (80, 60), modifier)
+                with self.subTest(tool=tool, gesture=gesture):
+                    self.assertEqual(len(canvas.annotations()), 1)
+                    self.assertIsInstance(canvas.annotations()[0], AnnotationPathItem)
+                    self.assertEqual(canvas.annotations()[0].path().elementCount(), 2)
+                canvas.close()
+
+        for gesture, modifier in (("ctrl", Qt.ControlModifier),
+                      ("alt", Qt.AltModifier)):
+            canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"),
+                                      dict(DEFAULTS))
+            canvas.resize(400, 300)
+            canvas.show()
+            canvas.set_tool("mosaic")
+            self.app.processEvents()
+            start = QPointF(canvas.mapFromScene(QPointF(20, 20)))
+            finish = QPointF(canvas.mapFromScene(QPointF(80, 60)))
+
+            def send(kind, point, button, buttons):
+                self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                    kind, point, QPointF(canvas.viewport().mapToGlobal(point.toPoint())),
+                    button, buttons, modifier))
+
+            send(QEvent.MouseButtonPress, start, Qt.LeftButton, Qt.LeftButton)
+            send(QEvent.MouseMove, finish, Qt.NoButton, Qt.LeftButton)
+            with self.subTest(tool="mosaic", gesture=gesture):
+                self.assertTrue(canvas.straight_drawing)
+                self.assertEqual(canvas.mosaic_drawing.elementCount(), 2)
+            send(QEvent.MouseButtonRelease, finish, Qt.LeftButton, Qt.NoButton)
+            if gesture == "space":
+                canvas.keyReleaseEvent(QKeyEvent(QEvent.KeyRelease, Qt.Key_Space,
+                                                 Qt.NoModifier))
+            self.assertEqual(len(canvas.annotations()), 1)
+            self.assertIsInstance(canvas.annotations()[0], AnnotationPixmapItem)
+            canvas.close()
+
+    def test_space_is_canvas_pan_not_drawing_constraint(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QKeyEvent, QMouseEvent
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import QGraphicsView
+        from config.config_manager import DEFAULTS
+
+        for index, tool in enumerate(("pen", "marker", "mosaic", "rect", "ellipse")):
+            canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"),
+                                      dict(DEFAULTS))
+            canvas.resize(160, 120)
+            canvas.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            canvas.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+            canvas.setSceneRect(0, 0, 600, 400)
+            canvas.show()
+            canvas.set_tool(tool)
+            self.app.processEvents()
+            canvas.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space,
+                                           Qt.NoModifier))
+            with self.subTest(tool=tool):
+                self.assertEqual(canvas.dragMode(), QGraphicsView.ScrollHandDrag)
+                self.assertFalse(canvas._straight_gesture_active())
+                self.assertFalse(canvas._shape_constraint_active())
+            self.assertGreater(canvas.horizontalScrollBar().maximum(), 0)
+            self.assertGreater(canvas.verticalScrollBar().maximum(), 0)
+            start = canvas.mapFromScene(QPointF(85, 70))
+            finish = canvas.mapFromScene(QPointF(60, 50))
+            before = (canvas.horizontalScrollBar().value(),
+                      canvas.verticalScrollBar().value())
+            QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=start)
+            self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                QEvent.MouseMove, QPointF(finish),
+                QPointF(canvas.viewport().mapToGlobal(finish)),
+                Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+            after_drag = (canvas.horizontalScrollBar().value(),
+                          canvas.verticalScrollBar().value())
+            self.assertTrue(canvas.space_pan_active)
+            if index == 0:
+                canvas.keyReleaseEvent(QKeyEvent(QEvent.KeyRelease, Qt.Key_Space,
+                                                 Qt.NoModifier))
+                self.assertEqual(canvas.dragMode(), QGraphicsView.ScrollHandDrag)
+            QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=finish)
+            if index != 0:
+                canvas.keyReleaseEvent(QKeyEvent(QEvent.KeyRelease, Qt.Key_Space,
+                                                 Qt.NoModifier))
+            with self.subTest(tool=tool):
+                self.assertNotEqual(after_drag, before)
+                self.assertEqual(canvas.annotations(), [])
+                self.assertFalse(canvas.space_pan_active)
+                self.assertEqual(canvas.dragMode(), QGraphicsView.NoDrag)
+            canvas.close()
+
     def test_pen_straight_line_when_modifier_pressed_after_start(self):
         """鼠标按下之后才按住 Ctrl，拖动途中也应切换为直线（修「前几次触发不了」的时序问题）。"""
         from editor.annotation_canvas import AnnotationCanvas
@@ -3243,11 +3422,13 @@ class CoreTests(unittest.TestCase):
                 kind, QPointF(point), QPointF(canvas.viewport().mapToGlobal(point)),
                 Qt.LeftButton, buttons, modifiers))
 
-        send(QEvent.MouseButtonPress, (20, 20), Qt.NoModifier, Qt.LeftButton)
-        self.assertFalse(canvas.straight_drawing)
-        send(QEvent.MouseMove, (80, 60), Qt.ControlModifier, Qt.LeftButton)
-        self.assertTrue(canvas.straight_drawing)
-        send(QEvent.MouseButtonRelease, (80, 60), Qt.ControlModifier)
+        with patch("editor.annotation_canvas.QApplication.keyboardModifiers",
+                   return_value=Qt.NoModifier):
+            send(QEvent.MouseButtonPress, (20, 20), Qt.NoModifier, Qt.LeftButton)
+            self.assertFalse(canvas.straight_drawing)
+            send(QEvent.MouseMove, (80, 60), Qt.ControlModifier, Qt.LeftButton)
+            self.assertTrue(canvas.straight_drawing)
+            send(QEvent.MouseButtonRelease, (80, 60), Qt.ControlModifier)
         self.assertEqual(len(canvas.annotations()), 1)
         self.assertEqual(canvas.annotations()[0].path().elementCount(), 2)
         canvas.close()
@@ -3276,6 +3457,77 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(len(canvas.annotations()), 1)
         self.assertGreater(canvas.annotations()[0].path().elementCount(), 2)
         canvas.close()
+
+    def test_shape_constraint_keys_and_geometry(self):
+        from editor.annotation_canvas import (constrained_shape_endpoint,
+                                              shape_constraint_active)
+
+        for modifier in (Qt.ControlModifier, Qt.AltModifier):
+            self.assertTrue(shape_constraint_active(modifier))
+        self.assertFalse(shape_constraint_active(Qt.NoModifier))
+
+        start = QPointF(40, 50)
+        endpoint = constrained_shape_endpoint(start, QPointF(100, 70))
+        self.assertEqual(endpoint, QPointF(100, 110))
+        reverse = constrained_shape_endpoint(start, QPointF(20, 35))
+        self.assertEqual(reverse, QPointF(20, 30))
+
+        from editor.toolbar_widget import ToolbarWidget
+        from config.config_manager import DEFAULTS
+        toolbar = ToolbarWidget(settings=dict(DEFAULTS))
+        try:
+            self.assertIn("Ctrl", toolbar.tool_buttons["rect"].toolTip())
+            self.assertIn("Alt", toolbar.tool_buttons["rect"].toolTip())
+            self.assertNotIn("Space", toolbar.tool_buttons["ellipse"].toolTip())
+            for tool in ("pen", "marker", "mosaic"):
+                self.assertIn("Ctrl", toolbar.tool_buttons[tool].toolTip())
+                self.assertIn("Alt", toolbar.tool_buttons[tool].toolTip())
+                self.assertNotIn("Space", toolbar.tool_buttons[tool].toolTip())
+            for tool in ("rect", "ellipse"):
+                self.assertIn("Ctrl", toolbar.tool_buttons[tool].toolTip())
+                self.assertIn("Alt", toolbar.tool_buttons[tool].toolTip())
+                self.assertNotIn("Space", toolbar.tool_buttons[tool].toolTip())
+            self.assertNotIn("Space", toolbar.pen_chain.toolTip())
+            self.assertNotIn("Space", toolbar.marker_chain.toolTip())
+        finally:
+            toolbar.close()
+
+    def test_rect_and_ellipse_draw_square_with_modifier(self):
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+
+        for tool, modifier in (("rect", Qt.ControlModifier),
+                               ("ellipse", Qt.AltModifier)):
+            canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"),
+                                      dict(DEFAULTS))
+            canvas.resize(400, 300)
+            canvas.show()
+            canvas.set_tool(tool)
+            self.app.processEvents()
+
+            def send(kind, scene_point, modifiers, buttons):
+                point = canvas.mapFromScene(QPointF(*scene_point))
+                canvas_point = QPointF(point)
+                self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                    kind, canvas_point,
+                    QPointF(canvas.viewport().mapToGlobal(point)),
+                    Qt.LeftButton, buttons, modifiers))
+
+            try:
+                with patch("editor.annotation_canvas.QApplication.keyboardModifiers",
+                           return_value=Qt.NoModifier):
+                    send(QEvent.MouseButtonPress, (40, 40), Qt.NoModifier, Qt.LeftButton)
+                    send(QEvent.MouseMove, (100, 70), modifier, Qt.LeftButton)
+                    self.assertAlmostEqual(canvas.preview_end.x() - canvas.start.x(),
+                                           canvas.preview_end.y() - canvas.start.y())
+                    send(QEvent.MouseButtonRelease, (100, 70), modifier, Qt.NoButton)
+                    bounds = canvas.annotations()[0].boundingRect()
+                    self.assertAlmostEqual(bounds.width(), bounds.height(), places=4)
+            finally:
+                canvas.close()
 
     def test_pen_straight_line_without_second_point_draws_nothing(self):
         from editor.annotation_canvas import AnnotationCanvas
@@ -4904,8 +5156,8 @@ class CoreTests(unittest.TestCase):
             app.settings_window.close()
 
     def test_inline_options_button_opens_after_keyboard_nudge(self):
-        from PySide6.QtCore import QTimer
-        from PySide6.QtWidgets import QWidget
+        from PySide6.QtCore import QPoint, QTimer
+        from PySide6.QtWidgets import QApplication, QWidget
         from config.config_manager import DEFAULTS
         from screenshot.mask_window import MaskWindow
 
@@ -4934,6 +5186,13 @@ class CoreTests(unittest.TestCase):
             QTest.mouseClick(button, Qt.LeftButton)
             self.app.processEvents()
             self.assertEqual(opened, [True])
+            with patch("screenshot.mask_window.QCursor.setPos"):
+                QTest.keyClick(editor.canvas, Qt.Key_Right)
+            self.assertEqual(mask.selection.rects[0], QRect(42, 40, 300, 200))
+            QTimer.singleShot(0, capture_menu)
+            QTest.mouseClick(button, Qt.LeftButton)
+            self.app.processEvents()
+            self.assertEqual(opened, [True, True])
             corner = mask.selection.rects[0].bottomRight()
             viewport = editor.canvas.viewport()
             with patch.object(mask, "grabMouse", wraps=mask.grabMouse) as grab_mouse, \
@@ -4952,7 +5211,83 @@ class CoreTests(unittest.TestCase):
             QTimer.singleShot(0, capture_menu)
             QTest.mouseClick(button, Qt.LeftButton)
             self.app.processEvents()
-            self.assertEqual(opened, [True, True])
+            self.assertEqual(opened, [True, True, True])
+            corner = mask.selection.rects[0].bottomRight()
+            drag_to = corner + QPoint(-12, -8)
+            with patch.object(mask, "grabMouse", wraps=mask.grabMouse) as grab_mouse, \
+                    patch.object(mask, "releaseMouse", wraps=mask.releaseMouse) as release_mouse:
+                QTest.mousePress(viewport, Qt.LeftButton, pos=viewport.mapFrom(mask, corner))
+                QTest.mouseMove(viewport, viewport.mapFrom(mask, drag_to))
+                QTest.mouseRelease(viewport, Qt.LeftButton, pos=viewport.mapFrom(mask, drag_to))
+                grab_mouse.assert_called_once()
+                release_mouse.assert_called_once()
+            if self.app.platformName() == "windows":
+                self.assertIsNot(QWidget.mouseGrabber(), mask)
+            self.app.processEvents()
+            hit_widget = QApplication.widgetAt(button.mapToGlobal(button.rect().center()))
+            self.assertTrue(hit_widget is button or button.isAncestorOf(hit_widget))
+            self.assertIsNone(mask.selection.resizing)
+            QTimer.singleShot(0, capture_menu)
+            QTest.mouseClick(button, Qt.LeftButton)
+            self.app.processEvents()
+            self.assertEqual(opened, [True, True, True, True])
+            corner = mask.selection.rects[0].bottomRight()
+            drag_to = corner + QPoint(-8, -6)
+            QTest.mousePress(viewport, Qt.LeftButton, pos=viewport.mapFrom(mask, corner))
+            QTest.mouseMove(viewport, viewport.mapFrom(mask, drag_to))
+            QTest.mouseRelease(viewport, Qt.LeftButton, pos=viewport.mapFrom(mask, drag_to))
+            if self.app.platformName() == "windows":
+                self.assertIsNot(QWidget.mouseGrabber(), mask)
+            self.app.processEvents()
+            hit_widget = QApplication.widgetAt(button.mapToGlobal(button.rect().center()))
+            self.assertTrue(hit_widget is button or button.isAncestorOf(hit_widget))
+            QTimer.singleShot(0, capture_menu)
+            QTest.mouseClick(button, Qt.LeftButton)
+            self.app.processEvents()
+            self.assertEqual(opened, [True, True, True, True, True])
+            rect_before_move = QRect(mask.selection.rects[0])
+            move_start = QPoint(rect_before_move.left() + 24, rect_before_move.top())
+            move_end = move_start + QPoint(14, 9)
+            QTest.mousePress(viewport, Qt.LeftButton,
+                             pos=viewport.mapFrom(mask, move_start))
+            QTest.mouseMove(viewport, viewport.mapFrom(mask, move_end))
+            QTest.mouseRelease(viewport, Qt.LeftButton,
+                               pos=viewport.mapFrom(mask, move_end))
+            self.app.processEvents()
+            self.assertNotEqual(mask.selection.rects[0], rect_before_move)
+            hit_widget = QApplication.widgetAt(button.mapToGlobal(button.rect().center()))
+            self.assertTrue(hit_widget is button or button.isAncestorOf(hit_widget))
+            QTimer.singleShot(0, capture_menu)
+            QTest.mouseClick(button, Qt.LeftButton)
+            self.app.processEvents()
+            self.assertEqual(opened, [True, True, True, True, True, True])
+            rect_before_second_move = QRect(mask.selection.rects[0])
+            move_start = QPoint(rect_before_second_move.left() + 24,
+                                rect_before_second_move.top())
+            move_end = move_start + QPoint(-11, 8)
+            QTest.mousePress(viewport, Qt.LeftButton,
+                             pos=viewport.mapFrom(mask, move_start))
+            QTest.mouseMove(viewport, viewport.mapFrom(mask, move_end))
+            QTest.mouseRelease(viewport, Qt.LeftButton,
+                               pos=viewport.mapFrom(mask, move_end))
+            self.app.processEvents()
+            self.assertNotEqual(mask.selection.rects[0], rect_before_second_move)
+            if self.app.platformName() == "windows":
+                self.assertIsNot(QWidget.mouseGrabber(), mask)
+            hit_widget = QApplication.widgetAt(button.mapToGlobal(button.rect().center()))
+            self.assertTrue(hit_widget is button or button.isAncestorOf(hit_widget))
+            QTimer.singleShot(0, capture_menu)
+            QTest.mouseClick(button, Qt.LeftButton)
+            self.app.processEvents()
+            self.assertEqual(opened, [True, True, True, True, True, True, True])
+            button_point = mask.to_physical_point(
+                button.mapTo(mask, button.rect().center()))
+            mask.selection.rects[0] = QRect(
+                button_point.x() - 100, button_point.y(), 200, 120)
+            QTimer.singleShot(0, capture_menu)
+            QTest.mouseClick(button, Qt.LeftButton)
+            self.app.processEvents()
+            self.assertEqual(opened, [True, True, True, True, True, True, True, True])
             mask.close()
 
     def test_mask_selection_draws_magnifier_on_mask_surface(self):
@@ -5459,6 +5794,16 @@ class CoreTests(unittest.TestCase):
             hints = [item for item in mask.capture_hint_items() if item]
             self.assertIn("拖动边缘/空白处 移动工具栏", hints)
             self.assertIn("` 隐藏工具栏", hints)
+
+            from PySide6.QtCore import QPointF
+            from editor.annotation_items import shape
+            annotation = shape("rect", QPointF(40, 40), QPointF(100, 100), "#ff0000", 2)
+            editor.canvas.scene_data.addItem(annotation)
+            annotation.setSelected(True)
+            rotation_handle = editor.canvas.rotation_handle_position(annotation)
+            editor.canvas._update_resize_cursor(
+                editor.canvas.mapFromScene(rotation_handle))
+            self.assertFalse(editor.canvas.cursor().pixmap().isNull())
 
             def mouse(kind, widget, point, buttons=Qt.LeftButton, button=Qt.LeftButton):
                 event = QMouseEvent(kind, QPointF(point), QPointF(widget.mapToGlobal(point)),
@@ -5985,6 +6330,32 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(items(), [])
         # 总开关只影响提示条，放大镜开关不变。
         self.assertTrue(settings["magnifier"])
+
+    def test_info_bar_is_visible_only_on_cursor_monitor(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 1800, "height": 700}
+        monitors = [
+            {"left": 0, "top": 0, "width": 900, "height": 700},
+            {"left": 900, "top": 0, "width": 900, "height": 700},
+        ]
+        settings = {**DEFAULTS, "auto_dir": tempfile.mkdtemp(),
+                    "window_detection": False, "crosshair": False,
+                    "magnifier": True, "sound": False}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (1800, 700), "blue"), bounds,
+                              monitors, settings)
+        mask.show()
+        self.app.processEvents()
+        cursor = QPoint(1300, 350)
+        for view in mask.session.views:
+            view.position = QPoint(cursor)
+        mask.update_all()
+        bars = [view.info_bar for view in mask.session.views]
+        visible = [index for index, bar in enumerate(bars) if bar.isVisible()]
+        self.assertEqual(visible, [1])
+        mask.close()
 
     def test_info_bar_is_overlay_above_inline_canvas_and_follows_magnifier(self):
         """提示条是遮罩的子控件并抬在编辑画布之上：光标进选区也不会被内容盖住。"""
@@ -6524,8 +6895,8 @@ class CoreTests(unittest.TestCase):
         from config.config_manager import DEFAULTS
         from editor.annotation_canvas import AnnotationCanvas
         from PIL import Image
-        from PySide6.QtTest import QTest
-        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
 
         canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"),
                                   dict(DEFAULTS, mosaic_brush=True, mosaic_width=24))
@@ -6533,7 +6904,11 @@ class CoreTests(unittest.TestCase):
         canvas.show()
         canvas.tool = "mosaic"
         self.assertIsNone(canvas.mosaic_point)
-        QTest.mouseMove(canvas.viewport(), pos=canvas.mapFromScene(QPointF(100, 100)))
+        viewport_point = canvas.mapFromScene(QPointF(100, 100))
+        canvas.mouseMoveEvent(QMouseEvent(
+            QEvent.MouseMove, QPointF(viewport_point),
+            QPointF(canvas.viewport().mapToGlobal(viewport_point)),
+            Qt.NoButton, Qt.NoButton, Qt.NoModifier))
         self.assertIsNotNone(canvas.mosaic_point)
         self.assertAlmostEqual(canvas.mosaic_point.x(), 100, delta=1)
         self.assertAlmostEqual(canvas.mosaic_point.y(), 100, delta=1)
@@ -6549,8 +6924,7 @@ class CoreTests(unittest.TestCase):
         from editor.annotation_items import shape
         from editor.annotation_canvas import AnnotationCanvas
         from PIL import Image
-        from PySide6.QtCore import QEvent, QPointF, Qt
-        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtCore import QPointF, Qt
 
         canvas = AnnotationCanvas(Image.new("RGB", (400, 300), "white"), dict(DEFAULTS))
         canvas.resize(500, 380)
@@ -7062,18 +7436,28 @@ class CoreTests(unittest.TestCase):
     def test_single_selection_rotation_handle_rotates_and_round_trips(self):
         from config.config_manager import DEFAULTS
         from editor.annotation_items import shape
-        from PySide6.QtCore import QPointF
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
         canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"), dict(DEFAULTS))
         item = shape("rect", QPointF(80, 80), QPointF(140, 140), "#ff0000", 3)
         canvas.scene_data.addItem(item)
         item.setSelected(True)
         canvas.checkpoint()
         handle = canvas.rotation_handle_position(item)
+        canvas.show()
+        self.app.processEvents()
+        handle_position = canvas.mapFromScene(handle)
+        canvas._update_resize_cursor(handle_position)
+        rotation_cursor = canvas.cursor()
+        self.assertFalse(rotation_cursor.pixmap().isNull())
         canvas._begin_rotation(item, handle)
+        self.assertFalse(canvas.cursor().pixmap().isNull())
         canvas._rotate_to(QPointF(handle.x() + 40, handle.y()), snap=False)
         self.assertGreater(abs(item.rotation()), 30)
-        canvas.rotating = None
-        canvas.checkpoint()
+        outside = canvas.mapFromScene(QPointF(10, 10))
+        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=outside)
+        self.assertIsNone(canvas.rotating)
+        self.assertEqual(canvas.cursor().shape(), Qt.ArrowCursor)
         canvas.undo()
         self.assertEqual(len(canvas.annotations()), 1)
         self.assertAlmostEqual(canvas.annotations()[0].rotation(), 0, delta=0.5)
@@ -7181,13 +7565,87 @@ class CoreTests(unittest.TestCase):
         self.assertIsInstance(item, AnnotationPixmapItem)
         img = item.pixmap().toImage().convertToFormat(QImage.Format_ARGB32)
         # 笔迹中心应为不透明，笔迹外的圆角之外应为完全透明。
-        self.assertGreater(img.pixelColor(70, 20).alpha(), 0)
+        center = QPoint(100, 50) - item.offset().toPoint()
+        self.assertGreater(img.pixelColor(center).alpha(), 0)
         self.assertEqual(img.pixelColor(0, 0).alpha(), 0)
         canvas.close()
 
-    def test_mosaic_brush_toggle_default_keeps_rectangle(self):
+    def test_mosaic_brush_defaults_to_blur_and_brush_mode_can_be_disabled(self):
         from config.config_manager import DEFAULTS
-        self.assertFalse(DEFAULTS.get("mosaic_brush", False))
+        from config.config_manager import validate
+        from editor.annotation_canvas import AnnotationCanvas
+
+        self.assertEqual(DEFAULTS.get("mosaic_mode"), "blur")
+        self.assertTrue(DEFAULTS.get("mosaic_brush"))
+        legacy_defaults = validate({})
+        self.assertEqual(legacy_defaults["mosaic_mode"], "blur")
+        self.assertTrue(legacy_defaults["mosaic_brush"])
+        canvas = AnnotationCanvas(Image.new("RGB", (80, 60), "white"), dict(DEFAULTS))
+        try:
+            canvas.settings["mosaic_brush"] = False
+            canvas.set_tool("mosaic")
+            canvas.show()
+            self.app.processEvents()
+            start = canvas.viewport().mapFrom(canvas, canvas.mapFromScene(QPointF(10, 10)))
+            end = canvas.viewport().mapFrom(canvas, canvas.mapFromScene(QPointF(40, 35)))
+            QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=start)
+            QTest.mouseMove(canvas.viewport(), end)
+            self.assertIsNotNone(canvas.preview_end)
+            self.assertIsNone(canvas.mosaic_drawing)
+            QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=end)
+            self.assertEqual(len(canvas.annotations()), 1)
+        finally:
+            canvas.close()
+
+    def test_mosaic_brush_preview_is_visible_before_release_and_not_committed(self):
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        from editor.annotation_canvas import AnnotationCanvas
+
+        source = Image.new("RGB", (80, 60), "#ed2020")
+        for y in range(source.height):
+            for x in range(40, source.width):
+                source.putpixel((x, y), (25, 45, 230))
+        canvas = AnnotationCanvas(source, dict(DEFAULTS))
+        try:
+            canvas.settings["mosaic_mode"] = "blur"
+            canvas.settings["mosaic_brush"] = True
+            canvas.settings["mosaic_width"] = 16
+            canvas.settings["mosaic_size"] = 10
+            canvas.set_tool("mosaic")
+            canvas.resize(160, 120)
+            canvas.show()
+            self.app.processEvents()
+            start = canvas.mapFromScene(QPointF(15, 25))
+            finish = canvas.mapFromScene(QPointF(55, 25))
+            viewport_finish = canvas.viewport().mapFrom(canvas, finish)
+            viewport_sample = canvas.viewport().mapFrom(
+                canvas, canvas.mapFromScene(QPointF(40, 25)))
+            before = canvas.viewport().grab().toImage()
+            canvas.mousePressEvent(QMouseEvent(
+                QEvent.MouseButtonPress, QPointF(start), QPointF(start),
+                Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+            canvas.mouseMoveEvent(QMouseEvent(
+                QEvent.MouseMove, QPointF(finish), QPointF(finish),
+                Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+            self.app.processEvents()
+            during = canvas.viewport().grab().toImage()
+            self.assertIsNotNone(canvas.mosaic_preview)
+            self.assertEqual(len(canvas.annotations()), 0)
+            self.assertNotEqual(before, during)
+            source_color = before.pixelColor(viewport_sample)
+            preview_color = during.pixelColor(viewport_sample)
+            self.assertNotEqual(preview_color, source_color)
+            self.assertGreater(preview_color.red(), 25)
+            self.assertGreater(preview_color.blue(), 45)
+            canvas.mouseReleaseEvent(QMouseEvent(
+                QEvent.MouseButtonRelease, QPointF(finish), QPointF(finish),
+                Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+            self.assertIsNone(canvas.mosaic_preview)
+            self.assertEqual(len(canvas.annotations()), 1)
+        finally:
+            canvas.close()
 
     def test_editor_border_settings_preview_and_export(self):
         from PySide6.QtGui import QColor, QImage, QPainter
@@ -7669,6 +8127,7 @@ class CoreTests(unittest.TestCase):
 
     def test_eraser_erase_base_live_viewport_clears_background(self):
         from PySide6.QtTest import QTest
+        from PySide6.QtGui import QColor, QPalette
         from config.config_manager import DEFAULTS
         settings = dict(DEFAULTS, eraser_width=16)
         canvas = AnnotationCanvas(Image.new("RGB", (120, 100), (10, 20, 30)), settings)
@@ -7681,8 +8140,14 @@ class CoreTests(unittest.TestCase):
         QTest.mouseMove(canvas.viewport(), pos=canvas.mapFromScene(QPointF(56, 50)))
         self.app.processEvents()
         live = canvas.viewport().grab().toImage()
-        erased = live.pixelColor(press)
-        self.assertNotEqual(erased.name(), "#0a141e", "开启擦除原图后实时视图未擦除底图")
+        for base_color, expected in (("#000000", {"#3b3f45", "#4c5158"}),
+                                     ("#ffffff", {"#e0e3e6", "#f1f3f5"})):
+            palette = canvas.palette()
+            palette.setColor(QPalette.Base, QColor(base_color))
+            canvas.setPalette(palette)
+            self.app.processEvents()
+            live = canvas.viewport().grab().toImage()
+            self.assertIn(live.pixelColor(press).name(), expected)
         QTest.mouseRelease(canvas.viewport(), Qt.LeftButton,
                            pos=canvas.mapFromScene(QPointF(56, 50)))
         self.assertEqual(canvas.render_image().pixelColor(50, 50).alpha(), 0)
@@ -8016,6 +8481,35 @@ class CoreTests(unittest.TestCase):
             previews.append(image)
         self.assertEqual(previews[0], previews[1])
 
+    def test_mosaic_brush_does_not_show_selection_rectangle(self):
+        from PySide6.QtGui import QPainter, QImage
+        from config.config_manager import DEFAULTS
+
+        settings = dict(DEFAULTS)
+        canvas = AnnotationCanvas(Image.new("RGB", (100, 80), "white"), settings)
+        canvas.tool = "mosaic"
+        canvas.start = QPointF(10, 10)
+        canvas.preview_end = QPointF(80, 60)
+
+        def render_foreground():
+            image = QImage(100, 80, QImage.Format_ARGB32)
+            image.fill(Qt.transparent)
+            painter = QPainter(image)
+            try:
+                canvas.drawForeground(painter, QRectF(0, 0, 100, 80))
+            finally:
+                painter.end()
+            return image
+
+        settings["mosaic_brush"] = True
+        brush_preview = render_foreground()
+        self.assertEqual(brush_preview.pixelColor(20, 45).alpha(), 0)
+
+        settings["mosaic_brush"] = False
+        rectangle_preview = render_foreground()
+        self.assertGreater(rectangle_preview.pixelColor(20, 45).alpha(), 0)
+        canvas.close()
+
     def test_mosaic_modes_produce_distinct_pixels(self):
         from editor.annotation_canvas import mosaic_image
         sample = Image.new("RGB", (60, 40), "white")
@@ -8033,7 +8527,9 @@ class CoreTests(unittest.TestCase):
         try:
             canvas.set_tool("picker")
             self.assertEqual(canvas.cursor().shape(), Qt.BitmapCursor)
-            self.assertEqual(canvas.cursor().hotSpot(), QPoint(4, 28))
+            self.assertEqual(canvas.cursor().hotSpot(), QPoint(5, 27))
+            self.assertNotEqual(canvas._picker_cursor.pixmap().toImage(),
+                                canvas._picker_pressed_cursor.pixmap().toImage())
             canvas.set_tool("pen")
             self.assertEqual(canvas.cursor().shape(), Qt.BitmapCursor)
             self.assertEqual(canvas.cursor().hotSpot(), QPoint(5, 27))
@@ -8067,22 +8563,22 @@ class CoreTests(unittest.TestCase):
             def pixels(cursor):
                 return bytes(cursor.pixmap().toImage().constBits())
 
-            canvas.set_tool("pen")
-            normal = canvas.cursor()
-            self.assertFalse(canvas._left_button_down)
-            canvas.mousePressEvent(QMouseEvent(
-                QEvent.MouseButtonPress, QPointF(20, 20), QPointF(20, 20),
-                Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
-            self.assertTrue(canvas._left_button_down)
-            pressed = canvas.cursor()
-            # 按下态切换了位图内容，但热点（真实落点）保持不变。
-            self.assertNotEqual(pixels(pressed), pixels(normal))
-            self.assertEqual(pressed.hotSpot(), normal.hotSpot())
-            canvas.mouseReleaseEvent(QMouseEvent(
-                QEvent.MouseButtonRelease, QPointF(20, 20), QPointF(20, 20),
-                Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
-            self.assertFalse(canvas._left_button_down)
-            self.assertEqual(pixels(canvas.cursor()), pixels(normal))
+            for tool in ("pen", "picker"):
+                canvas.set_tool(tool)
+                normal = canvas.cursor()
+                self.assertFalse(canvas._left_button_down)
+                canvas.mousePressEvent(QMouseEvent(
+                    QEvent.MouseButtonPress, QPointF(20, 20), QPointF(20, 20),
+                    Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+                self.assertTrue(canvas._left_button_down, tool)
+                pressed = canvas.cursor()
+                self.assertNotEqual(pixels(pressed), pixels(normal), tool)
+                self.assertEqual(pressed.hotSpot(), normal.hotSpot(), tool)
+                canvas.mouseReleaseEvent(QMouseEvent(
+                    QEvent.MouseButtonRelease, QPointF(20, 20), QPointF(20, 20),
+                    Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+                self.assertFalse(canvas._left_button_down, tool)
+                self.assertEqual(pixels(canvas.cursor()), pixels(normal), tool)
         finally:
             canvas.close()
 
@@ -8324,6 +8820,8 @@ class CoreTests(unittest.TestCase):
 
     def test_picker_cursor_and_appearance_toggle_shared_by_both_editors(self):
         from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
         from PySide6.QtTest import QTest
         from PySide6.QtWidgets import QPushButton
         from screenshot.mask_window import MaskWindow
@@ -8365,8 +8863,23 @@ class CoreTests(unittest.TestCase):
             for editor in (window_editor, inline_editor):
                 cursor = editor.canvas.cursor()
                 self.assertEqual(cursor.shape(), Qt.BitmapCursor)
-                self.assertEqual(cursor.hotSpot(), QPoint(4, 28))
+                self.assertEqual(cursor.hotSpot(), QPoint(5, 27))
                 self.assertFalse(cursor.pixmap().isNull())
+                normal_pixels = bytes(cursor.pixmap().toImage().constBits())
+                editor.canvas.mousePressEvent(QMouseEvent(
+                    QEvent.MouseButtonPress, QPointF(10, 10), QPointF(10, 10),
+                    Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+                pressed = editor.canvas.cursor()
+                self.assertTrue(editor.canvas._left_button_down)
+                self.assertNotEqual(bytes(pressed.pixmap().toImage().constBits()),
+                                    normal_pixels)
+                self.assertEqual(pressed.hotSpot(), cursor.hotSpot())
+                editor.canvas.mouseReleaseEvent(QMouseEvent(
+                    QEvent.MouseButtonRelease, QPointF(10, 10), QPointF(10, 10),
+                    Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+                self.assertFalse(editor.canvas._left_button_down)
+                self.assertEqual(bytes(editor.canvas.cursor().pixmap().toImage().constBits()),
+                                 normal_pixels)
         finally:
             window_editor.close()
             mask.close()
@@ -11374,10 +11887,18 @@ class CoreTests(unittest.TestCase):
 
     def test_output_appearance_is_visible_and_preview_updates(self):
         from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QRect, Qt
         from PySide6.QtWidgets import QCheckBox
         from editor.toolbar_widget import ToolbarWidget, settings_icon
+        from ui.window_bounds import WindowBoundsFilter, anchored_popup_geometry
 
         toolbar = ToolbarWidget(settings=dict(DEFAULTS))
+        screen = self.app.primaryScreen()
+        available = screen.availableGeometry()
+        toolbar.resize(700, 500)
+        toolbar.move(available.left() + 40, available.top() + 40)
+        toolbar.show()
+        self.app.processEvents()
         commands = []
         toolbar.command.connect(commands.append)
         try:
@@ -11399,6 +11920,19 @@ class CoreTests(unittest.TestCase):
             toolbar.appearance_toggle.click()
             self.app.processEvents()
             self.assertTrue(toolbar.appearance_menu.isVisible())
+            self.assertFalse(WindowBoundsFilter._should_constrain(
+                toolbar.appearance_menu))
+            anchor = QRect(
+                toolbar.appearance_toggle.mapToGlobal(
+                    toolbar.appearance_toggle.rect().topLeft()),
+                toolbar.appearance_toggle.size())
+            expected = anchored_popup_geometry(
+                anchor, toolbar.appearance_menu.size(), available)
+            self.assertEqual(toolbar.appearance_menu.geometry().topLeft(),
+                             expected.topLeft())
+            self.assertTrue(available.contains(toolbar.appearance_menu.geometry()))
+            self.assertEqual(toolbar.appearance_scroll.horizontalScrollBarPolicy(),
+                             Qt.ScrollBarAsNeeded)
             toolbar.appearance_toggle.click()
             self.app.processEvents()
             self.assertFalse(toolbar.appearance_menu.isVisible())
@@ -12177,6 +12711,35 @@ class CoreTests(unittest.TestCase):
             self.assertLess(pixel.green(), 60)
             self.assertLess(pixel.blue(), 60)
 
+    def test_save_image_keeps_existing_file_when_encoding_fails(self):
+        from PySide6.QtGui import QImage
+        from core.image_io import save_image
+
+        class PartialImage:
+            @staticmethod
+            def hasAlphaChannel():
+                return False
+
+            @staticmethod
+            def save(path, _format, _quality):
+                Path(path).write_bytes(b"partial output")
+                return False
+
+        with tempfile.TemporaryDirectory() as folder:
+            target = Path(folder) / "capture.png"
+            target.write_bytes(b"original image")
+            self.assertFalse(save_image(PartialImage(), target, {"save_format": "png"}))
+            self.assertEqual(target.read_bytes(), b"original image")
+            self.assertEqual(list(Path(folder).iterdir()), [target])
+
+            image = QImage(4, 4, QImage.Format_RGB32)
+            image.fill(Qt.red)
+            with patch("core.image_io.os.replace", side_effect=OSError("replace failed")):
+                with self.assertRaises(OSError):
+                    save_image(image, target, {"save_format": "png"})
+            self.assertEqual(target.read_bytes(), b"original image")
+            self.assertEqual(list(Path(folder).iterdir()), [target])
+
     def test_save_format_and_quality_control_output(self):
         from PySide6.QtGui import QColor, QImage
         from config.config_manager import DEFAULTS
@@ -12214,9 +12777,47 @@ class CoreTests(unittest.TestCase):
             saved = editor.save()
             self.assertEqual(saved.suffix, ".jpg")
             self.assertTrue(saved.exists())
-            editor.close()
             manager = StickerManager(settings)
             self.assertEqual([path.suffix for path in manager.files()], [".jpg"])
+            settings["save_format"] = "webp"
+            resaved = editor.save()
+            self.assertEqual(resaved.suffix, ".webp")
+            self.assertTrue(saved.exists())
+            with Image.open(saved) as first_image:
+                self.assertEqual(first_image.format, "JPEG")
+            with Image.open(resaved) as second_image:
+                self.assertEqual(second_image.format, "WEBP")
+            editor.close()
+
+    def test_inline_editor_resave_uses_changed_format_extension(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+            settings = dict(DEFAULTS, auto_dir=folder, filename="inline_format",
+                            save_format="png", inline_edit=True,
+                            capture_after_selection="edit", crosshair=False,
+                            magnifier=False, mask_opacity=0, bubble=False)
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds,
+                                  [bounds], settings)
+            try:
+                mask.selection.rects.append(QRect(10, 10, 30, 20))
+                mask.complete()
+                editor = mask.session.inline_editor
+                first = editor.save(automatic=True)
+                settings["save_format"] = "jpg"
+                second = editor.save(automatic=True)
+                self.assertEqual(first.suffix, ".png")
+                self.assertEqual(second.suffix, ".jpg")
+                self.assertTrue(first.exists())
+                with Image.open(first) as first_image:
+                    self.assertEqual(first_image.format, "PNG")
+                with Image.open(second) as second_image:
+                    self.assertEqual(second_image.format, "JPEG")
+            finally:
+                mask.close()
 
     def test_sticker_panel_lists_and_locates_open_stickers(self):
         from PySide6.QtGui import QColor, QImage
@@ -12818,6 +13419,7 @@ class CoreTests(unittest.TestCase):
                 clear_history.assert_called_once_with()
                 self.assertEqual((manager.data["sticker_snap_threshold"], manager.data["log_level"]),
                                  (DEFAULTS["sticker_snap_threshold"], DEFAULTS["log_level"]))
+                self.assertTrue(manager.data["capture_hotkey_suppress"])
                 backup = Path(folder) / "settings.bak"
                 self.assertTrue(backup.is_file())
                 self.assertEqual(json.loads(backup.read_text(encoding="utf-8"))["log_level"], "TRACE")
@@ -13115,8 +13717,17 @@ class CoreTests(unittest.TestCase):
         system_window_color = self.app.palette().color(QPalette.Window).name()
         apply_theme(self.app, "dark")
         self.assertEqual(self.app.palette().color(QPalette.Window).name(), "#202124")
+        dark_stylesheet = self.app.styleSheet()
+        self.assertIn("QLineEdit", dark_stylesheet)
+        self.assertIn("QCheckBox::indicator", dark_stylesheet)
+        self.assertIn("QRadioButton::indicator", dark_stylesheet)
+        self.assertIn("checkbox-check.svg", dark_stylesheet)
+        self.assertIn("radio-dot.svg", dark_stylesheet)
+        self.assertIn("background-color: #171717", dark_stylesheet)
+        self.assertIn("color: #e8eaed", dark_stylesheet)
         apply_theme(self.app, "light")
         self.assertEqual(self.app.palette().color(QPalette.Window).name(), "#f0f0f0")
+        self.assertNotIn("QLineEdit", self.app.styleSheet())
         self.assertEqual(self.app.palette().color(QPalette.ToolTipBase).name(),
                  "#f3f3f3")
         apply_theme(self.app, "system")
@@ -13162,6 +13773,469 @@ class CoreTests(unittest.TestCase):
                   if image.pixelColor(x, y).alpha()}
         self.assertGreater(len(colors), 1)
 
+    def test_checkbox_and_radio_indicators_remain_distinct_in_both_themes(self):
+        from PySide6.QtGui import QColor
+        from PySide6.QtWidgets import QCheckBox, QRadioButton
+        from ui.theme import apply_theme
+
+        def render(widget, checked, enabled=True):
+            widget.setChecked(checked)
+            widget.setEnabled(enabled)
+            self.assertEqual(widget.isChecked(), checked,
+                             (type(widget).__name__, checked, enabled))
+            widget.show()
+            self.app.processEvents()
+            image = widget.grab().toImage()
+            return tuple(image.pixel(x, y) for y in range(image.height())
+                         for x in range(image.width()))
+
+        try:
+            for mode in ("dark", "light"):
+                apply_theme(self.app, mode)
+                for widget_type in (QCheckBox, QRadioButton):
+                    widget = widget_type()
+                    if isinstance(widget, QRadioButton):
+                        widget.setAutoExclusive(False)
+                    widget.setFixedSize(24, 24)
+                    off = render(widget, False)
+                    on = render(widget, True)
+                    disabled_off = render(widget, False, False)
+                    disabled_on = render(widget, True, False)
+                    self.assertNotEqual(off, on, (mode, widget_type.__name__, "checked"))
+                    self.assertNotEqual(disabled_off, disabled_on,
+                                        (mode, widget_type.__name__, "disabled checked"))
+                    self.assertNotEqual(on, disabled_on,
+                                        (mode, widget_type.__name__, "disabled"))
+                    if mode == "dark":
+                        visible_edge_pixels = sum(
+                            1 for pixel in off
+                            if QColor.fromRgba(pixel).alpha() and
+                            QColor.fromRgba(pixel).lightness() >= 150)
+                        self.assertGreaterEqual(visible_edge_pixels, 8,
+                                                (widget_type.__name__, visible_edge_pixels))
+                        white_marker_pixels = sum(
+                            1 for pixel in on
+                            if QColor.fromRgba(pixel).alpha() and
+                            QColor.fromRgba(pixel).red() >= 245 and
+                            QColor.fromRgba(pixel).green() >= 245 and
+                            QColor.fromRgba(pixel).blue() >= 245)
+                        self.assertGreater(white_marker_pixels, 0,
+                                           (widget_type.__name__, "missing marker"))
+                    widget.close()
+        finally:
+            apply_theme(self.app, "system")
+
+    def test_popup_geometry_clamps_to_each_screen_edge(self):
+        from PySide6.QtCore import QSize
+        from ui.window_bounds import anchored_popup_geometry, clamp_geometry
+
+        bounds = QRect(100, 100, 800, 600)
+        cases = [
+            (QRect(20, 250, 150, 100), QRect(100, 250, 150, 100)),
+            (QRect(850, 250, 150, 100), QRect(750, 250, 150, 100)),
+            (QRect(250, 20, 150, 100), QRect(250, 100, 150, 100)),
+            (QRect(250, 650, 150, 100), QRect(250, 600, 150, 100)),
+        ]
+        for original, expected in cases:
+            with self.subTest(original=original):
+                self.assertEqual(clamp_geometry(original, bounds), expected)
+        popup = anchored_popup_geometry(
+            QRect(1740, 500, 60, 34), QSize(900, 400),
+            QRect(0, 0, 1920, 1080))
+        self.assertEqual(popup, QRect(900, 534, 900, 400))
+        lower_right = anchored_popup_geometry(
+            QRect(1740, 1000, 60, 34), QSize(900, 400),
+            QRect(0, 0, 1920, 1080))
+        self.assertEqual(lower_right, QRect(900, 600, 900, 400))
+
+    def test_shown_dialog_is_moved_inside_screen(self):
+        from ui.window_bounds import WindowBoundsFilter
+        from PySide6.QtWidgets import QDialog
+
+        bounds_filter = WindowBoundsFilter(self.app)
+        self.app.installEventFilter(bounds_filter)
+        dialog = QDialog()
+        dialog.resize(180, 120)
+        area = self.app.primaryScreen().availableGeometry()
+        dialog.move(area.right() + 100, area.bottom() + 100)
+        try:
+            dialog.show()
+            self.app.processEvents()
+            self.app.processEvents()
+            self.assertTrue(area.contains(dialog.frameGeometry()))
+        finally:
+            dialog.close()
+            self.app.removeEventFilter(bounds_filter)
+
+    def test_shown_popup_menu_is_moved_inside_screen(self):
+        from PySide6.QtCore import QPoint
+        from PySide6.QtWidgets import QMenu
+        from ui.window_bounds import WindowBoundsFilter
+
+        bounds_filter = WindowBoundsFilter(self.app)
+        self.app.installEventFilter(bounds_filter)
+        menu = QMenu()
+        menu.addAction("菜单项")
+        menu.resize(180, 120)
+        area = self.app.primaryScreen().availableGeometry()
+        try:
+            self.assertTrue(bounds_filter._should_constrain(menu))
+            menu.popup(area.topLeft() + QPoint(20, 20))
+            self.app.processEvents()
+            menu.move(area.right() + 100, area.bottom() + 100)
+            self.assertFalse(area.contains(menu.frameGeometry()))
+            bounds_filter._constrain(menu)
+            self.app.processEvents()
+            self.assertTrue(area.contains(menu.frameGeometry()))
+        finally:
+            menu.close()
+            self.app.removeEventFilter(bounds_filter)
+
+    def test_action_icons_follow_light_and_dark_palette(self):
+        from ui.action_icons import action_icon
+        from ui.theme import apply_theme
+        from PySide6.QtGui import QPainter, QPalette, QPixmap
+
+        def icon_colors():
+            image = icon.pixmap(24, 24).toImage()
+            return {
+                image.pixelColor(x, y).name()
+                for y in range(image.height()) for x in range(image.width())
+                if image.pixelColor(x, y).alpha() > 0
+            }
+
+        try:
+            icon = action_icon("window_edit")
+            apply_theme(self.app, "dark")
+            target = QPixmap(24, 24)
+            target.fill(Qt.transparent)
+            painter = QPainter(target)
+            icon.paint(painter, QRect(0, 0, 24, 24))
+            painter.end()
+            self.assertGreater(sum(
+                target.toImage().pixelColor(x, y).alpha() > 0
+                for y in range(24) for x in range(24)), 0)
+            dark_colors = icon_colors()
+            self.assertIn("#e8eaed", dark_colors)
+            self.assertIn(self.app.palette().color(QPalette.Highlight).name(), dark_colors)
+            apply_theme(self.app, "light")
+            light_colors = icon_colors()
+            self.assertIn("#202020", light_colors)
+            self.assertIn("#176b87", light_colors)
+        finally:
+            apply_theme(self.app, "system")
+
+    def test_dark_theme_buttons_and_highlights_have_readable_contrast(self):
+        from PySide6.QtGui import QColor, QPalette
+        from PySide6.QtWidgets import QLineEdit, QPushButton, QToolButton
+        from ui.theme import apply_theme
+
+        def luminance(color):
+            channels = [color.redF(), color.greenF(), color.blueF()]
+            linear = [value / 12.92 if value <= 0.04045 else
+                      ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+            return sum(weight * value for weight, value in
+                       zip((0.2126, 0.7152, 0.0722), linear))
+
+        def contrast(first, second):
+            high, low = sorted((luminance(first), luminance(second)), reverse=True)
+            return (high + 0.05) / (low + 0.05)
+
+        apply_theme(self.app, "dark")
+        try:
+            palette = self.app.palette()
+            button = palette.color(QPalette.Button)
+            button_text = palette.color(QPalette.ButtonText)
+            highlight = palette.color(QPalette.Highlight)
+            highlighted_text = palette.color(QPalette.HighlightedText)
+            self.assertGreaterEqual(contrast(button, button_text), 4.5)
+            self.assertGreaterEqual(
+                contrast(palette.color(QPalette.Midlight), button_text), 4.5)
+            self.assertGreaterEqual(contrast(palette.color(QPalette.Mid), button_text), 4.5)
+            self.assertGreaterEqual(contrast(highlight, highlighted_text), 4.5)
+            disabled_text = palette.color(QPalette.Disabled, QPalette.ButtonText)
+            disabled_button = palette.color(QPalette.Disabled, QPalette.Button)
+            self.assertGreaterEqual(contrast(disabled_button, disabled_text), 4.5)
+            self.assertEqual(palette.color(QPalette.Midlight).name(), "#3b3e43")
+            stylesheet = self.app.styleSheet()
+            for selector in ("QPushButton, QToolButton", "QMenu::item:selected",
+                             "QLineEdit, QTextEdit"):
+                self.assertIn(selector, stylesheet)
+            self.assertIn(button.name(), stylesheet)
+            self.assertIn(button_text.name(), stylesheet)
+            push_button = QPushButton("操作")
+            push_button.setFixedSize(120, 40)
+            tool_button = QToolButton()
+            tool_button.setText("工具")
+            tool_button.setFixedSize(120, 40)
+            disabled_push_button = QPushButton("禁用")
+            disabled_push_button.setFixedSize(120, 40)
+            disabled_push_button.setEnabled(False)
+            enabled_input = QLineEdit("启用")
+            enabled_input.setFixedSize(160, 40)
+            disabled_input = QLineEdit("禁用")
+            disabled_input.setFixedSize(160, 40)
+            disabled_input.setEnabled(False)
+            self.assertEqual(push_button.palette().color(QPalette.Button).name(),
+                             button.name())
+            self.assertEqual(tool_button.palette().color(QPalette.ButtonText).name(),
+                             button_text.name())
+            push_button.show()
+            tool_button.show()
+            disabled_push_button.show()
+            enabled_input.show()
+            disabled_input.show()
+            self.app.processEvents()
+            for widget in (push_button, tool_button):
+                self.assertEqual(widget.grab().toImage().pixelColor(10, 20).name(),
+                                 button.name())
+            self.assertNotEqual(
+                disabled_push_button.grab().toImage().pixelColor(10, 20).name(),
+                push_button.grab().toImage().pixelColor(10, 20).name())
+            enabled_input_image = enabled_input.grab().toImage()
+            disabled_input_image = disabled_input.grab().toImage()
+            self.assertNotEqual(
+                enabled_input_image.pixelColor(145, 20).name(),
+                disabled_input_image.pixelColor(145, 20).name())
+            push_button.close()
+            tool_button.close()
+            disabled_push_button.close()
+            enabled_input.close()
+            disabled_input.close()
+            apply_theme(self.app, "light")
+            self.assertNotIn("QPushButton, QToolButton", self.app.styleSheet())
+            light_palette = self.app.palette()
+            light_disabled_text = light_palette.color(
+                QPalette.Disabled, QPalette.ButtonText)
+            light_disabled_surface = light_palette.color(
+                QPalette.Disabled, QPalette.Button)
+            self.assertGreaterEqual(
+                contrast(light_disabled_surface, light_disabled_text), 4.5)
+            enabled_light_button = QPushButton("操作")
+            enabled_light_tool_button = QToolButton()
+            enabled_light_tool_button.setText("工具")
+            disabled_light_tool_button = QToolButton()
+            disabled_light_tool_button.setText("禁用工具")
+            disabled_light_tool_button.setEnabled(False)
+            disabled_light_button = QPushButton("禁用")
+            disabled_light_button.setEnabled(False)
+            enabled_light_input = QLineEdit("启用")
+            disabled_light_input = QLineEdit("禁用")
+            disabled_light_input.setEnabled(False)
+            for widget in (enabled_light_button, enabled_light_tool_button,
+                           disabled_light_tool_button,
+                           disabled_light_button,
+                           enabled_light_input, disabled_light_input):
+                widget.setFixedSize(160, 40)
+                widget.show()
+            self.app.processEvents()
+            self.assertNotEqual(
+                enabled_light_button.grab().toImage().pixelColor(10, 20).name(),
+                disabled_light_button.grab().toImage().pixelColor(10, 20).name())
+            self.assertEqual(
+                enabled_light_tool_button.palette().color(QPalette.Button).name(),
+                light_palette.color(QPalette.Button).name())
+            self.assertNotEqual(
+                enabled_light_tool_button.grab().toImage().pixelColor(10, 20).name(),
+                disabled_light_tool_button.grab().toImage().pixelColor(10, 20).name())
+            self.assertNotEqual(
+                enabled_light_input.grab().toImage().pixelColor(145, 20).name(),
+                disabled_light_input.grab().toImage().pixelColor(145, 20).name())
+            for widget in (enabled_light_button, enabled_light_tool_button,
+                           disabled_light_tool_button,
+                           disabled_light_button,
+                           enabled_light_input, disabled_light_input):
+                widget.close()
+        finally:
+            apply_theme(self.app, "system")
+
+    def test_dark_theme_spinbox_keeps_native_side_by_side_arrows(self):
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from PySide6.QtWidgets import (QDoubleSpinBox, QSpinBox, QStyle,
+                                       QStyleOptionSpinBox)
+        from ui.theme import apply_theme
+
+        apply_theme(self.app, "dark")
+        try:
+            stylesheet = self.app.styleSheet()
+            self.assertIn("QSpinBox::up-button", stylesheet)
+            self.assertIn("QSpinBox::down-button", stylesheet)
+            self.assertIn("QSpinBox::up-button:hover", stylesheet)
+            self.assertIn("QSpinBox::down-button:hover", stylesheet)
+            self.assertIn("QSpinBox::up-button:pressed", stylesheet)
+            self.assertIn("QSpinBox::down-button:pressed", stylesheet)
+            self.assertIn("QSpinBox::up-button:hover", stylesheet)
+            self.assertIn("QSpinBox::down-button:hover", stylesheet)
+            self.assertIn("QSpinBox::up-button:pressed", stylesheet)
+            self.assertIn("QSpinBox::down-button:pressed", stylesheet)
+            self.assertNotIn("QSpinBox::up-arrow", stylesheet)
+            self.assertNotIn("QSpinBox::down-arrow", stylesheet)
+            self.assertIn("right: 28px", stylesheet)
+            self.assertIn("right: 0px", stylesheet)
+            for widget_type in (QSpinBox, QDoubleSpinBox):
+                spinbox = widget_type()
+                spinbox.setRange(0, 100)
+                spinbox.setValue(50)
+                spinbox.resize(150, 36)
+                spinbox.show()
+                self.app.processEvents()
+                option = QStyleOptionSpinBox()
+                option.initFrom(spinbox)
+                option.rect = spinbox.rect()
+                up = spinbox.style().subControlRect(
+                    QStyle.CC_SpinBox, option, QStyle.SC_SpinBoxUp, spinbox)
+                down = spinbox.style().subControlRect(
+                    QStyle.CC_SpinBox, option, QStyle.SC_SpinBoxDown, spinbox)
+                with self.subTest(widget=widget_type.__name__):
+                    self.assertGreaterEqual(up.width(), 28)
+                    self.assertGreaterEqual(up.height(), 28)
+                    self.assertGreaterEqual(down.width(), 28)
+                    self.assertGreaterEqual(down.height(), 28)
+                    self.assertFalse(up.intersects(down))
+                    self.assertLessEqual(abs(up.center().y() - down.center().y()), 2,
+                                         (widget_type.__name__, up, down))
+                    self.assertLess(up.center().x(), down.center().x(),
+                                       (widget_type.__name__, up, down))
+                    image = spinbox.grab().toImage()
+
+                    def visible_arrow_point(rect):
+                        pixels = [QPoint(x, y)
+                                  for y in range(rect.top(), rect.bottom() + 1)
+                                  for x in range(rect.left(), rect.right() + 1)
+                                  if image.pixelColor(x, y).alpha() > 0 and
+                                  image.pixelColor(x, y).lightness() > 150]
+                        self.assertTrue(pixels, (widget_type.__name__, rect))
+                        return QPoint(round(sum(point.x() for point in pixels) / len(pixels)),
+                                      round(sum(point.y() for point in pixels) / len(pixels)))
+
+                    up_arrow = visible_arrow_point(up)
+                    down_arrow = visible_arrow_point(down)
+                    original = spinbox.value()
+                    QTest.mouseClick(spinbox, Qt.LeftButton, pos=up_arrow)
+                    self.assertEqual(spinbox.value(), original + 1)
+                    QTest.mouseClick(spinbox, Qt.LeftButton, pos=down_arrow)
+                    self.assertEqual(spinbox.value(), original)
+                spinbox.close()
+
+            with tempfile.TemporaryDirectory() as folder:
+                config = ConfigManager(Path(folder) / "settings.json")
+                settings = SettingsWindow(config)
+                settings.resize(760, 570)
+                settings.show()
+                editor_page = settings.page("编辑器")
+                settings.navigation.setCurrentRow(
+                    next(index for index in range(settings.navigation.count())
+                         if settings.navigation.item(index).text() == "编辑器"))
+                self.app.processEvents()
+                spinbox = editor_page.controls["pen_width"]
+                option = QStyleOptionSpinBox()
+                option.initFrom(spinbox)
+                option.rect = spinbox.rect()
+                up = spinbox.style().subControlRect(
+                    QStyle.CC_SpinBox, option, QStyle.SC_SpinBoxUp, spinbox)
+                down = spinbox.style().subControlRect(
+                    QStyle.CC_SpinBox, option, QStyle.SC_SpinBoxDown, spinbox)
+                value = spinbox.value()
+                self.assertTrue(spinbox.lineEdit().geometry().intersects(up))
+                line_up = spinbox.lineEdit().mapFromGlobal(
+                    spinbox.mapToGlobal(up.center()))
+                QTest.mouseClick(spinbox.lineEdit(), Qt.LeftButton, pos=line_up)
+                self.assertEqual(spinbox.value(), value + 1)
+                QTest.mouseClick(spinbox, Qt.LeftButton, pos=down.center())
+                self.assertEqual(spinbox.value(), value)
+                settings.close()
+        finally:
+            apply_theme(self.app, "system")
+
+    def test_dark_theme_sequence_tool_icon_contrasts_with_button_surface(self):
+        from PySide6.QtGui import QPalette
+        from config.config_manager import DEFAULTS
+        from editor.toolbar_widget import ToolbarWidget, annotation_icon
+        from ui.theme import apply_theme
+
+        toolbar = ToolbarWidget(settings=dict(DEFAULTS))
+        try:
+            toolbar.show()
+            self.app.processEvents()
+            light_icon = toolbar.tool_buttons["number"].icon().pixmap(24, 24).toImage()
+            apply_theme(self.app, "dark")
+            toolbar.sync_theme_icons()
+            self.app.processEvents()
+            dark_icon = toolbar.tool_buttons["number"].icon().pixmap(24, 24).toImage()
+            self.assertNotEqual(bytes(light_icon.constBits()), bytes(dark_icon.constBits()))
+            background = self.app.palette().color(QPalette.Button)
+            direct_icon = annotation_icon("number").pixmap(24, 24).toImage()
+            contrasting = sum(
+                1 for y in range(direct_icon.height())
+                for x in range(direct_icon.width())
+                if direct_icon.pixelColor(x, y).alpha() > 0 and
+                direct_icon.pixelColor(x, y).value() > background.value() + 45)
+            self.assertGreater(contrasting, 20)
+        finally:
+            toolbar.close()
+            apply_theme(self.app, "system")
+
+    def test_theme_palette_propagates_to_widget_families(self):
+        from PySide6.QtGui import QPalette
+        from PySide6.QtWidgets import (QCheckBox, QColorDialog, QComboBox,
+                                       QDateEdit, QDateTimeEdit, QDialog,
+                                       QDoubleSpinBox, QFileDialog, QFontComboBox,
+                                       QGroupBox, QKeySequenceEdit, QLabel,
+                                       QLineEdit, QListWidget, QMenu, QPlainTextEdit,
+                                       QProgressBar, QPushButton, QRadioButton,
+                                       QScrollBar, QSlider, QSpinBox, QTextEdit,
+                                       QTimeEdit, QDial)
+        from ui.theme import apply_theme, THEME_DISABLED_TEXT, THEME_PALETTES
+
+        widget_types = (QLabel, QCheckBox, QRadioButton, QPushButton, QLineEdit,
+                        QTextEdit, QPlainTextEdit, QSpinBox, QDoubleSpinBox,
+                        QComboBox, QFontComboBox, QDateEdit, QTimeEdit,
+                        QDateTimeEdit, QKeySequenceEdit, QListWidget, QGroupBox,
+                        QSlider, QDial, QScrollBar, QProgressBar, QMenu, QDialog,
+                        QColorDialog, QFileDialog)
+
+        def luminance(color):
+            channels = [color.redF(), color.greenF(), color.blueF()]
+            linear = [value / 12.92 if value <= 0.04045 else
+                      ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+            return sum(weight * value for weight, value in
+                       zip((0.2126, 0.7152, 0.0722), linear))
+
+        try:
+            for mode in ("dark", "light"):
+                apply_theme(self.app, mode)
+                expected = THEME_PALETTES[mode]
+                expected_text = expected[QPalette.WindowText]
+                expected_highlight = expected[QPalette.Highlight]
+                expected_disabled = THEME_DISABLED_TEXT[mode]
+                disabled_base = self.app.palette().color(
+                    QPalette.Disabled, QPalette.Base)
+                disabled_text = self.app.palette().color(
+                    QPalette.Disabled, QPalette.Text)
+                high, low = sorted((luminance(disabled_base),
+                                    luminance(disabled_text)), reverse=True)
+                self.assertGreaterEqual((high + 0.05) / (low + 0.05), 4.5, mode)
+                for widget_type in widget_types:
+                    with self.subTest(mode=mode, widget=widget_type.__name__):
+                        widget = widget_type()
+                        palette = widget.palette()
+                        self.assertEqual(palette.color(QPalette.Active,
+                                                        QPalette.WindowText).name(),
+                                         expected_text)
+                        self.assertEqual(palette.color(QPalette.Active,
+                                                       QPalette.Base).name(),
+                                         expected[QPalette.Base])
+                        self.assertEqual(palette.color(QPalette.Active,
+                                                       QPalette.Highlight).name(),
+                                         expected_highlight)
+                        self.assertEqual(palette.color(QPalette.Disabled,
+                                                       QPalette.Text).name(),
+                                         expected_disabled)
+                        widget.close()
+        finally:
+            apply_theme(self.app, "system")
+
     def test_dark_theme_menu_text_follows_palette(self):
         from PySide6.QtGui import QPalette
         from PySide6.QtWidgets import QMenu
@@ -13173,7 +14247,7 @@ class CoreTests(unittest.TestCase):
         try:
             apply_theme(self.app, "dark")
             self.app.processEvents()
-            # 深色下注入仅作用于 QMenu 的样式，文字用调色板前景色，避免原生黑底黑字。
+            # 菜单文字使用调色板前景色，避免原生黑底黑字。
             self.assertIn("QMenu", self.app.styleSheet())
             text = self.app.palette().color(QPalette.WindowText).name()
             self.assertIn(text, self.app.styleSheet())
@@ -13192,7 +14266,8 @@ class CoreTests(unittest.TestCase):
             # 浅色主题保持原生菜单外观，不注入应用级样式表。
             apply_theme(self.app, "light")
             self.app.processEvents()
-            self.assertEqual(self.app.styleSheet(), "")
+            self.assertIn("QMenu", self.app.styleSheet())
+            self.assertIn("padding: 4px 18px 4px 4px", self.app.styleSheet())
         finally:
             self.app.setProperty("screensnap_theme_mode", original_mode)
             self.app.setPalette(original_palette)
