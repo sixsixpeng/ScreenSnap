@@ -20,9 +20,30 @@ VISIT_BUDGET = 60
 DESCEND_LIMIT = 24
 # 沿父链上溯或下钻时最多走多少层，防止异常树结构把查询拖住。
 PARENT_LIMIT = 32
+# 单次下钻最多读多少个控件的属性：网页与虚拟化列表的子控件常有上千个，逐个跨进程读
+# 矩形会让一次悬停查询卡几百毫秒。预算用尽就立即停止下钻，返回当前最优候选。
+PROPERTY_READ_BUDGET = 180
+# 单层最多枚举多少个直接子控件：用增量接口取到这个数就停，避免把上千个子控件
+# 一次性实例化成 COM 对象。
+CHILDREN_FETCH_LIMIT = 128
 # 单次查询超过这个秒数就熔断，本进程内不再使用 UIA。
 SLOW_SECONDS = 0.4
 SLOW_COOLDOWN_SECONDS = 1.0
+# 可由设置覆盖的三项性能参数（下钻读取预算 / 单层子控件上限 / 熔断阈值）；
+# 进程内全局生效，遮罩打开时按当前设置刷新一次，见 mask_window._apply_uia_limits。
+_limits = {"read_budget": PROPERTY_READ_BUDGET,
+           "children_limit": CHILDREN_FETCH_LIMIT,
+           "slow_seconds": SLOW_SECONDS}
+
+
+def set_limits(read_budget=None, children_limit=None, slow_seconds=None):
+    """按设置覆盖性能参数；传 None 表示保持当前值。"""
+    if read_budget:
+        _limits["read_budget"] = max(1, int(read_budget))
+    if children_limit:
+        _limits["children_limit"] = max(1, int(children_limit))
+    if slow_seconds:
+        _limits["slow_seconds"] = max(0.05, float(slow_seconds))
 # 这些控件类型视为“容器”，命中后继续向里钻以找出真正可点的子项（列表项、树节点、
 # 分组里的按钮等）；其余类型（按钮、文本框、图标、列表项本身）当作原子目标，命中即
 # 止，避免一路钻到按钮里的 20x20 小图标这类无意义层级。ControlFromPoint 对虚拟化列表
@@ -44,14 +65,50 @@ _warned = False
 _disabled_until = 0.0
 _last_debug_signature = None
 
+# ⚠ 不要把 UIA 查询挪到工作线程：查询里的 set_click_through 会对主线程创建的遮罩
+# 窗口做跨线程 SetWindowLongW，而 SetWindowLong 会向窗口所属线程 SendMessage
+# (WM_STYLECHANGING/WM_STYLECHANGED)；主线程一旦正在等查询结果就会死锁，加上遮罩是
+# 覆盖全屏的置顶窗口，表现就是整个系统卡死。UIA 查询必须留在调用它的线程里同步执行，
+# 由下面的 SLOW_SECONDS 熔断兜底。
+
+
+# 按遮罩句柄缓存原始扩展样式：同一块遮罩一次截图里会被查询很多次，缓存后每次
+# 查询只剩两次 SetWindowLongW。遮罩关闭时用 forget_click_through 释放，避免句柄
+# 被系统回收复用后拿到过期样式。
+_exstyle_cache = {}
+
+
+def forget_click_through(hwnd):
+    """遮罩关闭时清掉该句柄缓存的原始扩展样式。"""
+    if hwnd:
+        _exstyle_cache.pop(int(hwnd), None)
+
+
+# 鼠标左/右/中键的虚拟键码。命中穿透会让遮罩短暂对点击透明，按下期间直接不做
+# 切换，避免把用户点击透传给下面的窗口（此时 ControlFromPoint 会命中遮罩本身，
+# 由 control_at 自动退回 ControlFromHandle + 下钻）。
+MOUSE_BUTTON_KEYS = (0x01, 0x02, 0x04)
+
+
+def mouse_button_down():
+    """当前是否有鼠标按键按下；取不到状态时视为没有。"""
+    try:
+        user32 = ctypes.windll.user32
+        return any(user32.GetAsyncKeyState(key) & 0x8000 for key in MOUSE_BUTTON_KEYS)
+    except (OSError, ValueError):
+        return False
+
 
 def set_click_through(hwnd):
-    """临时把窗口设为命中测试穿透，返回还原函数；失败返回 None。"""
-    if not hwnd:
+    """临时把窗口设为命中测试穿透，返回还原函数；失败或有鼠标按下时返回 None。"""
+    if not hwnd or mouse_button_down():
         return None
     user32 = ctypes.windll.user32
     try:
-        style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+        style = _exstyle_cache.get(int(hwnd))
+        if style is None:
+            style = user32.GetWindowLongW(hwnd, GWL_EXSTYLE)
+            _exstyle_cache[int(hwnd)] = style
         user32.SetWindowLongW(hwnd, GWL_EXSTYLE, style | WS_EX_TRANSPARENT)
     except (OSError, ValueError):
         return None
@@ -66,12 +123,28 @@ def set_click_through(hwnd):
 
 
 def physical_rect_of(handle):
-    """用 Win32 取窗口的物理矩形；UIA 对部分窗口取不到 BoundingRectangle 时兜底用。"""
+    """取窗口可见物理边界，优先排除 GetWindowRect 的不可见缩放边框。"""
     if not handle:
         return None
-    user32 = ctypes.windll.user32
     bounds = wintypes.RECT()
-    if not user32.GetWindowRect(handle, ctypes.byref(bounds)):
+    try:
+        # DWMWA_EXTENDED_FRAME_BOUNDS is in physical pixels and excludes the
+        # invisible resize border that can make maximized windows look cross-screen.
+        dwm = ctypes.WinDLL("dwmapi")
+        get_attribute = dwm.DwmGetWindowAttribute
+        get_attribute.argtypes = (wintypes.HWND, wintypes.DWORD,
+                                  ctypes.POINTER(wintypes.RECT), wintypes.DWORD)
+        get_attribute.restype = ctypes.c_long
+        result = get_attribute(wintypes.HWND(handle), 9, ctypes.byref(bounds),
+                               ctypes.sizeof(bounds))
+        if result == 0:
+            rect = (bounds.left, bounds.top, bounds.right, bounds.bottom)
+            if rect[2] - rect[0] >= MIN_SIZE and rect[3] - rect[1] >= MIN_SIZE:
+                return rect
+    except (AttributeError, OSError, ValueError, ctypes.ArgumentError):
+        pass
+    bounds = wintypes.RECT()
+    if not ctypes.windll.user32.GetWindowRect(handle, ctypes.byref(bounds)):
         return None
     rect = (bounds.left, bounds.top, bounds.right, bounds.bottom)
     if rect[2] - rect[0] < MIN_SIZE or rect[3] - rect[1] < MIN_SIZE:
@@ -161,12 +234,15 @@ def _handle_of(control, cache):
     return cache.handle(control) if cache is not None else handle_of(control)
 
 
-def element_chain(point, max_depth=3, exclude_hwnd=None, debug_tree=False):
+def element_chain(point, max_depth=3, exclude_hwnd=None, debug_tree=False,
+                  deepest_only=False):
     """返回覆盖该点的 UIA 控件矩形链（由外到内）；不可用时返回空列表。
 
-    出错或过慢都会熔断，避免界面被无障碍查询拖死。
+    出错或过慢都会熔断，避免界面被无障碍查询拖死。这个函数（以及它内部的
+    set_click_through）必须留在调用它的线程里同步执行，不能挪到工作线程——原因见文件头部说明。
     exclude_hwnd 是置顶的截图遮罩句柄：查询瞬间让它命中穿透，UIA 才能越过它
     命中下面的真实窗口（ControlFromPoint 没有 Z 序概念，会打在遮罩上）。
+    deepest_only=True 时只返回最内层控件（悬停高亮用），跳过整套父链上溯。
     """
     global _disabled_until
     if time.monotonic() < _disabled_until:
@@ -178,16 +254,18 @@ def element_chain(point, max_depth=3, exclude_hwnd=None, debug_tree=False):
     logger = logging.getLogger("screensnap")
     started = time.monotonic()
     try:
-        return query(automation, point, int(max_depth), logger, exclude_hwnd, debug_tree)
+        return query(automation, point, int(max_depth), logger, exclude_hwnd, debug_tree,
+                     deepest_only)
     finally:
         cost = time.monotonic() - started
-        if cost > SLOW_SECONDS:
+        if cost > _limits["slow_seconds"]:
             _disabled_until = time.monotonic() + SLOW_COOLDOWN_SECONDS
             logger.warning("UIA 查询耗时 %.2f 秒，暂停 %.1f 秒后重试",
                            cost, SLOW_COOLDOWN_SECONDS)
 
 
-def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=False):
+def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=False,
+          deepest_only=False):
     """真正执行一次 UIA 查询，调用方负责计时与异常兜底。"""
     global _disabled_until, _last_debug_signature
     x, y = int(point[0]), int(point[1])
@@ -214,6 +292,14 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
                             format_control_tree(control, logger))
         else:
             _last_debug_signature = None
+        if deepest_only:
+            # 悬停只需要最内层：跳过父链上溯（element_depth 层，每层约两次跨进程读取）。
+            rect = _rect_of(control, cache)
+            if rect is None:
+                return []
+            if win_rect is not None:
+                rect = _clamp_rect(rect, win_rect)
+            return [rect]
         chain = climb(control, handle, max_depth, logger, win_rect, cache)
         logger.debug("UIA 识别到 %d 层元素: %s", len(chain), chain)
         return chain
@@ -330,8 +416,14 @@ def climb(control, handle, max_depth, logger, win_rect=None, cache=None):
             break
         rectangle = _rect_of(current, cache)
         current_handle = _handle_of(current, cache)
-        if rectangle is None and current_handle == handle and win_rect is not None:
-            rectangle = win_rect
+        if win_rect is not None:
+            if current_handle == handle:
+                # The native visible frame is more reliable than UIA bounds for maximized roots.
+                rectangle = win_rect
+            elif rectangle is not None:
+                # 子控件矩形也可能比窗口可见框大（虚拟滚动区、被 DPI 虚拟化、最大化窗口的
+                # 不可见 resize frame 会渗进子层），不收边会被当成跨屏选区而误进独立编辑器。
+                rectangle = _clamp_rect(rectangle, win_rect)
         if rectangle is None:
             if verbose:
                 logger.debug("UIA 跳过元素: 名称=%r 类型=%r（矩形无效或小于 %d 像素）",
@@ -353,39 +445,55 @@ def climb(control, handle, max_depth, logger, win_rect=None, cache=None):
     return chain
 
 
-def deepest_at(control, x, y, logger, limit=DESCEND_LIMIT, cache=None):
+def deepest_at(control, x, y, logger, limit=DESCEND_LIMIT, cache=None,
+               read_budget=None):
     """向下找覆盖该点的最深“可选项”控件。
 
     ControlFromPoint 对虚拟化列表常常只给到列表容器，这里沿它的子树继续下钻：
     只穿过“容器”类型（面板/分组/列表/树/工具栏…），一旦命中到非容器的原子控件
     （列表项、按钮、文本框、图标等）就停下来返回它——既把资源管理器里的单个文件、
     树里的某个节点找出来，又不会一路钻到按钮内部 20x20 的小图标。
+
+    读取 UIA 属性是跨进程调用，网页/虚拟化列表的子控件可能上千个；这里用一个总读取
+    预算兜底，预算用尽立即返回当前最优候选，保证单次悬停查询的耗时上限可控。
     """
+    read_budget = read_budget or _limits["read_budget"]
     candidates = []
     pending = [(control, 0)]
     visited = set()
-    while pending and len(visited) < VISIT_BUDGET:
+    reads = [read_budget]
+
+    def read_rect(target):
+        reads[0] -= 1
+        return _rect_of(target, cache)
+
+    while pending and len(visited) < VISIT_BUDGET and reads[0] > 0:
         current, depth = pending.pop()
         identity = id(current)
         if identity in visited:
             continue
         visited.add(identity)
-        rect = _rect_of(current, cache)
+        rect = read_rect(current)
         if rect is None or not covers(rect, x, y):
             continue
         area = (rect[2] - rect[0]) * (rect[3] - rect[1])
-        is_container = _type_of(current, cache) in CONTAINER_TYPES
+        is_container = (_type_of(current, cache) in CONTAINER_TYPES) if reads[0] > 0 else False
+        reads[0] -= 1
         # 名称只用于“同尺寸时优先取有名者”的兜底，这里先不读，留到决出并列者再取。
         candidates.append(((area, is_container, -depth), current))
         if depth >= limit or not is_container:
             continue
         children = direct_children(current, logger)
         for child in reversed(children):
-            child_rect = _rect_of(child, cache)
+            if reads[0] <= 0:
+                break
+            child_rect = read_rect(child)
             if child_rect is not None and covers(child_rect, x, y):
                 pending.append((child, depth + 1))
 
-    if pending:
+    if pending and reads[0] <= 0:
+        logger.debug("UIA 下钻达到读取预算 %d，未检查剩余分支", read_budget)
+    elif pending:
         logger.debug("UIA 下钻达到节点预算 %d，未检查剩余分支", VISIT_BUDGET)
     if not candidates:
         return control
@@ -402,12 +510,33 @@ def deepest_at(control, x, y, logger, limit=DESCEND_LIMIT, cache=None):
     return tied[0][1]
 
 
-def direct_children(control, logger):
-    """取控件全部直接子控件；任一环节失败都返回空列表，不让下钻拖垮识别。
+def direct_children(control, logger, limit=None):
+    """取控件直接子控件，最多 limit 个；任一环节失败都返回空列表。
 
-    用 GetChildren 一次性取全，比逐个 GetFirst/NextSibling 更稳，能避免某些窗口
-    首子控件取不到、导致下钻一上来就失败（只拿到窗口本身）的问题。
+    优先用 GetFirstChildControl/GetNextSiblingControl 增量枚举，取够 limit 就停，
+    避免一次性把上千个子控件都实例化成 COM 对象；增量接口取不到时退回 GetChildren
+    （取到全量后再截断），保持旧行为能拿到首子控件的稳定性。
     """
+    limit = limit or _limits["children_limit"]
+    first = getattr(control, "GetFirstChildControl", None)
+    if first is not None:
+        children = []
+        try:
+            child = first()
+            while child is not None and len(children) < limit:
+                children.append(child)
+                # 下一个兄弟要在**子控件**上取（与 uiautomation 的 GetChildren 一致）；
+                # 取到父控件的兄弟会把无关控件当成子控件，悬停会高亮错元素。
+                child = child.GetNextSiblingControl()
+        except Exception as error:
+            if logger.isEnabledFor(logging.DEBUG):
+                logger.debug("UIA 增量读取子控件失败: 名称=%r 类型=%r %s",
+                             name_of(control), type_of(control), error)
+            if children:
+                return children
+        else:
+            if children:
+                return children
     try:
         children = control.GetChildren()
     except Exception as error:
@@ -417,7 +546,7 @@ def direct_children(control, logger):
         return []
     if not isinstance(children, (list, tuple)):
         return []
-    return children
+    return list(children)[:limit]
 
 
 def rectangle_of(control):
@@ -452,6 +581,17 @@ def process_of(handle):
     except (OSError, ValueError):
         return 0
     return identifier.value
+
+
+def _clamp_rect(rectangle, frame):
+    """把控件矩形收边到窗口可见框内；完全落在框外或收成过小时保留原矩形（多为弹出层）。"""
+    left = max(rectangle[0], frame[0])
+    top = max(rectangle[1], frame[1])
+    right = min(rectangle[2], frame[2])
+    bottom = min(rectangle[3], frame[3])
+    if right - left < MIN_SIZE or bottom - top < MIN_SIZE:
+        return rectangle
+    return (left, top, right, bottom)
 
 
 def covers(rectangle, x, y):
