@@ -11158,7 +11158,11 @@ class CoreTests(unittest.TestCase):
                                        ("white", (255, 255, 255, 255))):
                 grabber.grab.side_effect = [left_shot, right_shot]
                 image, _, _, _ = capture(False, alternatives=True, gap_fill=gap_fill)
-                self.assertEqual(image.getpixel((15, 0)), expected, gap_fill)
+                # 纯色间隙用 RGB 画布（省内存、贴屏更快），只有透明间隙需要 RGBA；
+                # 因此这里按模式只比较颜色通道，并顺带锁住模式本身。
+                self.assertEqual(image.getpixel((15, 0))[:3], expected[:3], gap_fill)
+                self.assertEqual(image.mode,
+                                 "RGBA" if gap_fill == "transparent" else "RGB", gap_fill)
                 if gap_fill == "transparent":
                     from PySide6.QtGui import QImage
                     from config.config_manager import DEFAULTS
@@ -14109,7 +14113,7 @@ class CoreTests(unittest.TestCase):
         import ctypes
         from ctypes import wintypes
         from types import SimpleNamespace
-        from core.window_uia import physical_rect_of
+        from core.window_uia import physical_rect_of, reset_visible_frame_cache
 
         class DwmCall:
             def __init__(self, result, rect):
@@ -14123,10 +14127,15 @@ class CoreTests(unittest.TestCase):
                 target.left, target.top, target.right, target.bottom = self.rect
                 return self.result
 
+        # DWM 函数对象现在会被缓存，切换桩实现前先清缓存，否则第二次调用仍用上一次的函数。
         visible_call = DwmCall(0, (0, 0, 1920, 1080))
-        with patch("core.window_uia.ctypes.WinDLL",
-                   return_value=SimpleNamespace(DwmGetWindowAttribute=visible_call)):
-            self.assertEqual(physical_rect_of(0x123456789), (0, 0, 1920, 1080))
+        reset_visible_frame_cache()
+        try:
+            with patch("core.window_uia.ctypes.WinDLL",
+                       return_value=SimpleNamespace(DwmGetWindowAttribute=visible_call)):
+                self.assertEqual(physical_rect_of(0x123456789), (0, 0, 1920, 1080))
+        finally:
+            reset_visible_frame_cache()
         self.assertEqual(visible_call.args[0].value, 0x123456789)
         self.assertEqual(visible_call.args[1], 9)
 
@@ -14137,11 +14146,15 @@ class CoreTests(unittest.TestCase):
             target.left, target.top, target.right, target.bottom = (-8, -8, 1928, 1088)
             return 1
 
-        with patch("core.window_uia.ctypes.WinDLL",
-                   return_value=SimpleNamespace(DwmGetWindowAttribute=failed_call)), \
-                patch("core.window_uia.ctypes.windll.user32.GetWindowRect",
-                      side_effect=get_window_rect):
-            self.assertEqual(physical_rect_of(42), (-8, -8, 1928, 1088))
+        reset_visible_frame_cache()
+        try:
+            with patch("core.window_uia.ctypes.WinDLL",
+                       return_value=SimpleNamespace(DwmGetWindowAttribute=failed_call)), \
+                    patch("core.window_uia.ctypes.windll.user32.GetWindowRect",
+                          side_effect=get_window_rect):
+                self.assertEqual(physical_rect_of(42), (-8, -8, 1928, 1088))
+        finally:
+            reset_visible_frame_cache()
 
     def test_uia_deepest_at_reads_name_only_for_ties(self):
         import logging

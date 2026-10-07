@@ -6,7 +6,8 @@ import re
 import time
 from datetime import datetime
 
-from PySide6.QtCore import Qt, Signal, QPoint, QPointF, QRect, QEvent, QMimeData, QTimer, QSize
+from PySide6.QtCore import (Qt, Signal, QPoint, QPointF, QRect, QRectF, QEvent, QMimeData,
+                            QTimer, QSize)
 from PySide6.QtGui import (QColor, QCursor, QPainter, QPainterPath, QPen, QGuiApplication,
                            QMouseEvent, QPixmap, QShortcut, QKeySequence)
 from PySide6.QtWidgets import (QWidget, QApplication, QDialog, QDialogButtonBox, QFormLayout, QSpinBox,
@@ -1772,6 +1773,23 @@ class MaskWindow(QWidget):
         self.activateWindow()
         self.setFocus(Qt.ActiveWindowFocusReason)
 
+    def preview_pixmap(self):
+        """冻结画面的 QPixmap 缓存。
+
+        reveal 与棋盘预览每帧都要把这块画面按矩形缩放贴出来；QPixmap 是面向屏幕绘制的
+        格式，比每次都从 QImage 缩放要快。按 QImage.cacheKey 判断是否失效。
+        """
+        if self.preview is None:
+            return None
+        key = self.preview.cacheKey()
+        cached = getattr(self, "_preview_cache_pixmap", None)
+        if cached is not None and getattr(self, "_preview_cache_key", None) == key:
+            return cached
+        pixmap = QPixmap.fromImage(self.preview)
+        self._preview_cache_pixmap = pixmap
+        self._preview_cache_key = key
+        return pixmap
+
     def mask_background_pixmap(self):
         """遮罩底图（冻结画面 + 半透明遮罩）缓存成 pixmap。
 
@@ -1815,9 +1833,10 @@ class MaskWindow(QWidget):
         if (self.hover_rect is not None and self.selection.active is None and
                 self.settings.get("window_hover_fill_mode", "reveal") == "reveal"):
             hover_clipped = self.hover_rect.intersected(self.monitor_rect)
-            if not hover_clipped.isEmpty():
-                painter.drawImage(self.to_logical_rect(hover_clipped),
-                                  self.preview, hover_clipped)
+            preview = self.preview_pixmap()
+            if not hover_clipped.isEmpty() and preview is not None:
+                painter.drawPixmap(self.to_logical_rect(hover_clipped), preview,
+                                   QRectF(hover_clipped))
         selection_paths = []
         for rect in self.selection.rects + ([self.selection.active] if self.selection.active else []):
             clipped = rect.intersected(self.monitor_rect)
@@ -1837,7 +1856,9 @@ class MaskWindow(QWidget):
             selection_paths.append(selection_path)
             painter.save()
             painter.setClipPath(selection_path)
-            painter.drawImage(logical_rect, self.preview, clipped)
+            preview = self.preview_pixmap()
+            if preview is not None:
+                painter.drawPixmap(logical_rect, preview, QRectF(clipped))
             painter.restore()
             painter.setPen(QPen(QColor(self.settings.get("selection_border_color", "#168cff")), 1))
             painter.drawPath(selection_path)

@@ -75,14 +75,21 @@ def capture(cursor=False, alternatives=False, gap_fill="transparent"):
             "white": (255, 255, 255, 255),
         }
         fill = gap_colors.get(gap_fill, gap_colors["transparent"])
-        image = Image.new("RGBA", (bounds["width"], bounds["height"]), fill)
+        # 只有“透明间隙”才需要 RGBA；纯黑/纯白间隙用 RGB 画布即可 —— 省 1/4 内存，
+        # 贴屏从逐像素 alpha 合成变成纯拷贝，多屏大分辨率下抓屏更快。
+        transparent = fill[3] == 0
+        image = Image.new("RGBA" if transparent else "RGB",
+                          (bounds["width"], bounds["height"]),
+                          fill if transparent else fill[:3])
         for monitor in monitors:
             shot = grabber.grab(monitor)
-            screen = Image.frombytes("RGB", shot.size, shot.rgb).convert("RGBA")
-            image.alpha_composite(
-                screen,
-                (monitor["left"] - bounds["left"],
-                 monitor["top"] - bounds["top"]))
+            screen = Image.frombytes("RGB", shot.size, shot.rgb)
+            offset = (monitor["left"] - bounds["left"],
+                      monitor["top"] - bounds["top"])
+            if transparent:
+                image.alpha_composite(screen.convert("RGBA"), offset)
+            else:
+                image.paste(screen, offset)
     logger = logging.getLogger("screensnap")
     logger.debug("捕获虚拟桌面: %sx%s，显示器 %d 个", image.width, image.height, len(monitors))
     with_pointer = image.copy()

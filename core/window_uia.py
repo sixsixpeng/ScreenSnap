@@ -122,21 +122,47 @@ def set_click_through(hwnd):
     return restore
 
 
+# DwmGetWindowAttribute 的函数对象只取一次：悬停查询每秒会调用几十次，
+# 每次都 WinDLL + 设 argtypes 是纯浪费；老系统或没有 DWM 时缓存 None 直接走 GetWindowRect。
+_dwm_get_attribute = None
+_dwm_checked = False
+
+
+def _visible_frame_getter():
+    """惰性缓存 DwmGetWindowAttribute；取不到时返回 None。"""
+    global _dwm_get_attribute, _dwm_checked
+    if not _dwm_checked:
+        _dwm_checked = True
+        try:
+            dwm = ctypes.WinDLL("dwmapi")
+            function = dwm.DwmGetWindowAttribute
+            function.argtypes = (wintypes.HWND, wintypes.DWORD,
+                                 ctypes.POINTER(wintypes.RECT), wintypes.DWORD)
+            function.restype = ctypes.c_long
+            _dwm_get_attribute = function
+        except (AttributeError, OSError, ValueError):
+            _dwm_get_attribute = None
+    return _dwm_get_attribute
+
+
+def reset_visible_frame_cache():
+    """清掉 DWM 函数缓存，让下次查询重新取；供测试切换桩实现时使用。"""
+    global _dwm_get_attribute, _dwm_checked
+    _dwm_get_attribute = None
+    _dwm_checked = False
+
+
 def physical_rect_of(handle):
     """取窗口可见物理边界，优先排除 GetWindowRect 的不可见缩放边框。"""
     if not handle:
         return None
     bounds = wintypes.RECT()
+    get_attribute = _visible_frame_getter()
     try:
         # DWMWA_EXTENDED_FRAME_BOUNDS is in physical pixels and excludes the
         # invisible resize border that can make maximized windows look cross-screen.
-        dwm = ctypes.WinDLL("dwmapi")
-        get_attribute = dwm.DwmGetWindowAttribute
-        get_attribute.argtypes = (wintypes.HWND, wintypes.DWORD,
-                                  ctypes.POINTER(wintypes.RECT), wintypes.DWORD)
-        get_attribute.restype = ctypes.c_long
-        result = get_attribute(wintypes.HWND(handle), 9, ctypes.byref(bounds),
-                               ctypes.sizeof(bounds))
+        result = (get_attribute(wintypes.HWND(handle), 9, ctypes.byref(bounds),
+                                ctypes.sizeof(bounds)) if get_attribute is not None else 1)
         if result == 0:
             rect = (bounds.left, bounds.top, bounds.right, bounds.bottom)
             if rect[2] - rect[0] >= MIN_SIZE and rect[3] - rect[1] >= MIN_SIZE:
