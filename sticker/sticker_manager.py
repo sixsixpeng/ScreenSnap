@@ -251,9 +251,17 @@ class StickerManager(QObject):
                 raise OSError(f"无法保存贴图缓存: {source}")
         item = StickerItem(image, str(source), self.settings, origin)
         if position is None:
-            position = QCursor.pos() - QPoint(
-                item.padding() + item.pixmap.width() // 2,
-                item.padding() + item.pixmap.height() // 2)
+            # 没有记录位置的贴图（首次贴出、剪贴板/文件/文字贴图等）：放到**光标所在显示器**的
+            # 可用区域正中，而不是贴着鼠标坐标 —— 贴图通常不小，跟着鼠标容易一半在屏外、
+            # 也刚好挡住用户正在看的位置。鼠标在这里只用来决定“哪块屏”。
+            # 有记录位置的恢复路径（下面的 else）保持原样，不经过这里。
+            screen = (QGuiApplication.screenAt(QCursor.pos())
+                      or QGuiApplication.primaryScreen())
+            area = screen.availableGeometry()
+            width = item.pixmap.width() + item.padding() * 2
+            height = item.pixmap.height() + item.padding() * 2
+            position = QPoint(area.x() + (area.width() - width) // 2,
+                              area.y() + (area.height() - height) // 2)
         else:
             position = position - QPoint(item.padding(), item.padding())
         item.move(position)

@@ -16125,7 +16125,9 @@ class CoreTests(unittest.TestCase):
             popup = combo.view()
             self.assertEqual(popup.palette().color(QPalette.Base).name(), "#171717")
             self.assertEqual(popup.palette().color(QPalette.Text).name(), "#e8eaed")
-            self.assertEqual(popup.grab().toImage().pixelColor(4, 4).name(), "#161616")
+            # (4,4) 落在第一项上，而第一项是当前选中项：新的下拉样式用
+            # QComboBox QAbstractItemView 的 selection-background-color（highlight）给它上色。
+            self.assertEqual(popup.grab().toImage().pixelColor(4, 4).name(), "#2f6096")
             combo.close()
             menu = QMenu()
             menu.addAction("删除标注")
