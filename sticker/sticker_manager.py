@@ -19,7 +19,7 @@ from sticker.sticker_item import StickerItem
 
 # 贴图会话中允许保留的原始剪贴板类型。
 ORIGIN_KINDS = ("text", "html", "color", "files")
-DEFAULT_HISTORY_LIMIT = 100
+DEFAULT_HISTORY_LIMIT = 10
 MAX_STICKER_IMAGE_DIMENSION = 4096
 
 
@@ -191,6 +191,36 @@ class StickerManager(QObject):
         self.persist_clipboard_history()
         logging.getLogger("screensnap").info("清空剪贴板历史: %d 条", count)
         return count
+
+    def clear_rebuildable_cache(self):
+        """清理可重建图片缓存，不删除已保存截图或贴图会话引用的源文件。"""
+        root = data_dir()
+        clipboard_images = history_entries = sticker_images = toast_images = 0
+        # 清理范围按设置逐类勾选；未勾选的类别完全不碰。
+        if self.settings.get("cache_clear_clipboard", True):
+            clipboard_dir = root / "clipboard_history"
+            clipboard_images = len(list(clipboard_dir.glob("clipboard_*.png")))
+            history_entries = self.clear_clipboard_history()
+        if self.settings.get("cache_clear_sticker", True):
+            # 活动贴图与回收站里的贴图仍引用着各自的源文件：这些源文件不能算“可重建缓存”。
+            referenced_sources = (item.source for item in (*self.items, *self.recycle_bin)
+                                  if item.source)
+            sticker_images = self.cleanup_cache(referenced_sources)
+        if self.settings.get("cache_clear_toast", True):
+            # Toast 缩略图只是通知里的一次性预览，随时可按需重建，直接整目录清掉。
+            for image in (root / "toast_cache").glob("*.png"):
+                try:
+                    image.unlink()
+                    toast_images += 1
+                except OSError as error:
+                    logging.getLogger("screensnap").warning(
+                        "无法清理 Toast 图片缓存 %s: %s", image, error)
+        result = {"clipboard_entries": history_entries,
+                  "clipboard_images": clipboard_images,
+                  "orphan_sticker_images": sticker_images,
+                  "toast_images": toast_images}
+        logging.getLogger("screensnap").info("清理可重建图片缓存: %s", result)
+        return result
 
     def add(self, image, source=None, origin=None, position=None, show=True):
         """创建并显示贴图；关闭时释放 Qt 对象并从列表中移除。"""
@@ -600,7 +630,7 @@ class StickerManager(QObject):
 
     def _enforce_recycle_limit(self):
         """回收站超过上限时丢弃最旧的条目（已关闭隐藏，直接销毁）。"""
-        limit = self.settings.get("sticker_recycle_limit", 50)
+        limit = self.settings.get("sticker_recycle_limit", 10)
         while len(self.recycle_bin) > limit:
             old = self.recycle_bin.pop(0)
             old.deleteLater()
@@ -650,7 +680,7 @@ class StickerManager(QObject):
         """按修改时间直接读取自动保存目录，不维护内部图片数据库。"""
         from core.image_io import saved_patterns
 
-        folder = configured_dir(self.settings, "auto_dir")
+        folder = configured_dir(self.settings)
         if not folder.is_dir():
             logging.getLogger("screensnap").debug("自动保存目录不存在: %s", folder)
             return []
@@ -773,14 +803,18 @@ class StickerManager(QObject):
 
     def cleanup_cache(self, sources):
         """仅清理私有缓存中未被有效会话引用的贴图。"""
+        # 贴图私有缓存：只有当前无人引用的 sticker_*.png 才可删，返回实际删除数量供上报。
         cache = data_dir() / "sticker_cache"
         referenced = {Path(source).resolve() for source in sources}
+        removed = 0
         for file in cache.glob("sticker_*.png"):
             if file.resolve() not in referenced:
                 try:
                     file.unlink()
+                    removed += 1
                 except OSError as error:
                     logging.getLogger("screensnap").warning("无法清理贴图缓存 %s: %s", file, error)
+        return removed
 
     def restore(self):
         """跳过已丢失的源文件，避免下次启动恢复出空白贴图。"""
@@ -842,7 +876,7 @@ class StickerManager(QObject):
             if type(rotation) is int and -3600 <= rotation <= 3600:
                 item.rotate(rotation)
             item.border_enabled = state.get("border", item.settings.get("sticker_border_enabled", True))
-            item.shadow_enabled = state.get("shadow", item.settings.get("sticker_shadow_enabled", True))
+            item.shadow_enabled = state.get("shadow", item.settings.get("sticker_shadow_enabled", False))
             item.group_name = str(state.get("group", ""))
             item.set_background_mode(state.get("background_mode",
                                               item.settings.get("sticker_background_mode", "transparent")))

@@ -16,6 +16,12 @@ from core.screen_capture import to_qimage
 logger = logging.getLogger("screensnap")
 
 
+def native_toast_duration(timeout_seconds):
+    """Win11 Toast 仅接受系统定义的 short/long，不支持精确秒数。"""
+    timeout_seconds = int(timeout_seconds or 0)
+    return "short" if 0 < timeout_seconds <= 7 else "long"
+
+
 def cache_toast_image(image):
     """Write a toast image to a durable local path understood by WinRT."""
     if isinstance(image, PillowImage.Image):
@@ -36,7 +42,8 @@ def cache_toast_image(image):
     return path
 
 
-def show_native_toast(title, body="", image_path=None, on_click=None, on_failed=None):
+def show_native_toast(title, body="", image_path=None, on_click=None,
+                      on_failed=None, duration=None):
     """Post a WinRT toast off the Qt thread; return False if unavailable."""
     if os.name != "nt":
         return False
@@ -47,6 +54,8 @@ def show_native_toast(title, body="", image_path=None, on_click=None, on_failed=
         return False
 
     kwargs = {}
+    if duration in ("short", "long"):
+        kwargs["duration"] = duration
     if image_path is not None:
         kwargs["image"] = {"src": str(Path(image_path).resolve()), "placement": "hero"}
 

@@ -7,6 +7,7 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QLabel,
                                QPushButton, QScrollArea, QMessageBox, QStyle)
 
 from ui.action_icons import action_icon
+from ui.widgets.confirmation import yes_no_dialog
 
 
 class RecycleRow(QWidget):
@@ -95,9 +96,9 @@ class RecycleWindow(QWidget):
     def clear_all(self):
         if not self.manager.recycle_items():
             return
-        answer = QMessageBox.question(
-            self, "清空回收站", "确定要彻底删除回收站中的全部贴图吗？此操作不可恢复。",
-            QMessageBox.Yes | QMessageBox.No, QMessageBox.No)
+        answer = yes_no_dialog(
+            self, "清空回收站", "确定要彻底删除回收站中的全部贴图吗？此操作不可恢复。"
+        ).exec()
         if answer == QMessageBox.Yes:
             self.manager.empty_recycle()
             self.refresh()

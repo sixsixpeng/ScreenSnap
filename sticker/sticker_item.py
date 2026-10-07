@@ -47,7 +47,7 @@ class StickerItem(QWidget):
         self.click_through = False
         self.always_on_top = True
         self.border_enabled = self.settings.get("sticker_border_enabled", True)
-        self.shadow_enabled = self.settings.get("sticker_shadow_enabled", True)
+        self.shadow_enabled = self.settings.get("sticker_shadow_enabled", False)
         self.background_mode = self.settings.get("sticker_background_mode", "transparent")
         self.group_name = ""
         self.selected_for_batch = False

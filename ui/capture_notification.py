@@ -82,7 +82,8 @@ class CaptureNotification(QWidget):
         if self.backend != "win11toast":
             self._show_local_preview()
             return
-        from ui.native_toast import cache_toast_image, show_native_toast
+        from ui.native_toast import (cache_toast_image, native_toast_duration,
+                         show_native_toast)
 
         try:
             image_path = cache_toast_image(self._toast_image)
@@ -90,7 +91,8 @@ class CaptureNotification(QWidget):
             image_path = None
         if image_path and show_native_toast(
                 self.toast_title, self.toast_body, image_path,
-                self._native_activated, self.native_failed.emit):
+            self._native_activated, self.native_failed.emit,
+            duration=native_toast_duration(self.close_after)):
             return
         self._show_local_preview()
 
