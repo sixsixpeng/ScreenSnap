@@ -39,6 +39,8 @@
 - Real global hotkeys, mixed-DPI display geometry, UI Automation providers, and click-through behavior require Windows desktop verification when a change affects them.
 - The suite is 500+ Qt tests; a single-process run can stall or crash natively at offscreen shutdown. Prefer chunked runs (e.g. 20 tests per subprocess with a timeout) and read a non-zero exit together with its `OK` summary as the known shutdown crash, not a failure. Tests that genuinely need a real desktop screen (window handles, a screen wider than the editor) should be `unittest.skip` placeholders instead of failing.
 
+- `build.bat` and `start up.bat` are stored as **GBK (cp936), no BOM, CRLF** and start with `chcp 936`. cmd.exe mis-parses UTF-8 batch files under `chcp 65001` — multi-byte characters straddling a read block get split and the tail of the line is executed as a command — while a GBK file under a UTF-8 console prints mojibake. Keep both scripts GBK + `chcp 936`, keep `.gitattributes` (`*.bat text eol=crlf`), and decode them as GBK when reading or editing.
+
 ## Ownership Map
 
 - `screenshot/mask_window.py`: multi-monitor screenshot surface, selection rendering, selection actions, inline editor lifecycle.

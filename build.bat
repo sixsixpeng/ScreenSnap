@@ -1,61 +1,61 @@
 @echo off
 setlocal
-chcp 65001 >nul
+chcp 936 >nul
 cd /d "%~dp0"
 
 echo ============================================================
-echo    ScreenSnap è‡ªåŠ¨çŽ¯å¢ƒæ£€æµ‹ä¸Žæž„å»ºè„šæœ¬
+echo    ScreenSnap ×Ô¶¯»·¾³¼ì²âÓë¹¹½¨½Å±¾
 echo ============================================================
 echo.
 
-:: ---------- 1. æ£€æµ‹ Python ----------
+:: ---------- 1. ¼ì²â Python ----------
 where python >nul 2>&1
 if errorlevel 1 goto no_python
 python --version >nul 2>&1
 if errorlevel 1 goto no_python
 
-echo [æ£€æµ‹] Python å·²å°±ç»ªï¼š
+echo [¼ì²â] Python ÒÑ¾ÍÐ÷£º
 python --version
 echo.
 
-:: ---------- 2. åˆ›å»º / ä¿®å¤è™šæ‹ŸçŽ¯å¢ƒ ----------
+:: ---------- 2. ´´½¨ / ÐÞ¸´ÐéÄâ»·¾³ ----------
 if not exist ".venv\Scripts\python.exe" (
     if exist ".venv" (
-        echo [æç¤º] æ£€æµ‹åˆ°ä¸å®Œæ•´çš„è™šæ‹ŸçŽ¯å¢ƒï¼Œæ­£åœ¨é‡å»º .venv ...
+        echo [ÌáÊ¾] ¼ì²âµ½²»ÍêÕûµÄÐéÄâ»·¾³£¬ÕýÔÚÖØ½¨ .venv ...
         rmdir /s /q ".venv"
         if errorlevel 1 goto failed
     )
-    echo [1/4] æ­£åœ¨åˆ›å»ºè™šæ‹ŸçŽ¯å¢ƒ .venv ...
+    echo [1/4] ÕýÔÚ´´½¨ÐéÄâ»·¾³ .venv ...
     python -m venv ".venv"
     if errorlevel 1 goto failed
 ) else (
-    echo [1/4] è™šæ‹ŸçŽ¯å¢ƒ .venv å·²å­˜åœ¨ï¼Œè·³è¿‡åˆ›å»ºã€‚
+    echo [1/4] ÐéÄâ»·¾³ .venv ÒÑ´æÔÚ£¬Ìø¹ý´´½¨¡£
 )
 
-:: ---------- 3. å®‰è£…ä¾èµ– ----------
+:: ---------- 3. °²×°ÒÀÀµ ----------
 call ".venv\Scripts\activate.bat"
 if errorlevel 1 goto failed
 
 echo.
-echo [2/4] æ­£åœ¨å®‰è£… / æ›´æ–°ä¾èµ–ï¼ˆrequirements.txtï¼‰...
+echo [2/4] ÕýÔÚ°²×° / ¸üÐÂÒÀÀµ£¨requirements.txt£©...
 python -m pip install -r "requirements.txt"
 if errorlevel 1 goto failed
 
 python -m PyInstaller --version >nul 2>&1
 if errorlevel 1 goto no_pyinstaller
-echo [2/4] ä¾èµ–å°±ç»ªï¼ŒPyInstaller ç‰ˆæœ¬ï¼š
+echo [2/4] ÒÀÀµ¾ÍÐ÷£¬PyInstaller °æ±¾£º
 python -m PyInstaller --version
 
-:: ---------- 4. é€‰æ‹©æ‰“åŒ…æ–¹å¼ ----------
+:: ---------- 4. Ñ¡Ôñ´ò°ü·½Ê½ ----------
 :choose_mode
 echo.
-echo è¯·é€‰æ‹©æ‰“åŒ…æ–¹å¼ï¼ˆè¾“å…¥ç¼–å·åŽå›žè½¦ï¼‰ï¼š
-echo   [1] å¸¦æŽ§åˆ¶å° + å•æ–‡ä»¶     è°ƒè¯•æŽ’é”™ï¼›å•ä¸€ exe ä¾¿äºŽåˆ†å‘ï¼Œå¯åŠ¨è¾ƒæ…¢
-echo   [2] å¸¦æŽ§åˆ¶å° + ç›®å½•       è°ƒè¯•æŽ’é”™ï¼›ä¾èµ–æ•£è½åœ¨æ–‡ä»¶å¤¹ï¼Œå¯åŠ¨å¿«
-echo   [3] ä¸å¸¦æŽ§åˆ¶å° + å•æ–‡ä»¶   é¢å‘ç”¨æˆ·ï¼›æ— é»‘æ¡†ã€å•ä¸€ exeï¼Œå¯åŠ¨è¾ƒæ…¢
-echo   [4] ä¸å¸¦æŽ§åˆ¶å° + ç›®å½•     é¢å‘ç”¨æˆ·ï¼›æ— é»‘æ¡†ã€å¯åŠ¨æœ€å¿«ï¼ˆæŽ¨èå‘å¸ƒï¼‰
+echo ÇëÑ¡Ôñ´ò°ü·½Ê½£¨ÊäÈë±àºÅºó»Ø³µ£©£º
+echo   [1] ´ø¿ØÖÆÌ¨ + µ¥ÎÄ¼þ     µ÷ÊÔÅÅ´í£»µ¥Ò» exe ±ãÓÚ·Ö·¢£¬Æô¶¯½ÏÂý
+echo   [2] ´ø¿ØÖÆÌ¨ + Ä¿Â¼       µ÷ÊÔÅÅ´í£»ÒÀÀµÉ¢ÂäÔÚÎÄ¼þ¼Ð£¬Æô¶¯¿ì
+echo   [3] ²»´ø¿ØÖÆÌ¨ + µ¥ÎÄ¼þ   ÃæÏòÓÃ»§£»ÎÞºÚ¿ò¡¢µ¥Ò» exe£¬Æô¶¯½ÏÂý
+echo   [4] ²»´ø¿ØÖÆÌ¨ + Ä¿Â¼     ÃæÏòÓÃ»§£»ÎÞºÚ¿ò¡¢Æô¶¯×î¿ì£¨ÍÆ¼ö·¢²¼£©
 echo.
-set /p "CHOICE=è¯·è¾“å…¥ 1-4ï¼š"
+set /p "CHOICE=ÇëÊäÈë 1-4£º"
 
 if "%CHOICE%"=="1" goto build_console_onefile
 if "%CHOICE%"=="2" goto build_console_onedir
@@ -63,13 +63,13 @@ if "%CHOICE%"=="3" goto build_windowed_onefile
 if "%CHOICE%"=="4" goto build_windowed_onedir
 
 echo.
-echo [é”™è¯¯] è¾“å…¥æ— æ•ˆï¼Œè¯·è¾“å…¥ 1-4 ä¹‹é—´çš„æ•°å­—ã€‚
+echo [´íÎó] ÊäÈëÎÞÐ§£¬ÇëÊäÈë 1-4 Ö®¼äµÄÊý×Ö¡£
 goto choose_mode
 
-:: ---------- å„æ¨¡å¼æ‰“åŒ… ----------
+:: ---------- ¸÷Ä£Ê½´ò°ü ----------
 :build_console_onefile
 echo.
-echo [3/4] æ‰“åŒ…ï¼šå¸¦æŽ§åˆ¶å° + å•æ–‡ä»¶ï¼ˆ--console --onefileï¼‰
+echo [3/4] ´ò°ü£º´ø¿ØÖÆÌ¨ + µ¥ÎÄ¼þ£¨--console --onefile£©
 python -m PyInstaller --name ScreenSnap --console --onefile --clean --noconfirm --icon ui/assets/icon.ico --add-data "ui/assets;ui/assets" main.py
 if errorlevel 1 goto failed
 set "RESULT=dist\ScreenSnap.exe"
@@ -77,7 +77,7 @@ goto build_done
 
 :build_console_onedir
 echo.
-echo [3/4] æ‰“åŒ…ï¼šå¸¦æŽ§åˆ¶å° + ç›®å½•ï¼ˆ--console --onedirï¼‰
+echo [3/4] ´ò°ü£º´ø¿ØÖÆÌ¨ + Ä¿Â¼£¨--console --onedir£©
 python -m PyInstaller --name ScreenSnap --console --onedir --clean --noconfirm --icon ui/assets/icon.ico --add-data "ui/assets;ui/assets" main.py
 if errorlevel 1 goto failed
 set "RESULT=dist\ScreenSnap\ScreenSnap.exe"
@@ -85,7 +85,7 @@ goto build_done
 
 :build_windowed_onefile
 echo.
-echo [3/4] æ‰“åŒ…ï¼šä¸å¸¦æŽ§åˆ¶å° + å•æ–‡ä»¶ï¼ˆ--windowed --onefileï¼‰
+echo [3/4] ´ò°ü£º²»´ø¿ØÖÆÌ¨ + µ¥ÎÄ¼þ£¨--windowed --onefile£©
 python -m PyInstaller --name ScreenSnap --windowed --onefile --clean --noconfirm --icon ui/assets/icon.ico --add-data "ui/assets;ui/assets" main.py
 if errorlevel 1 goto failed
 set "RESULT=dist\ScreenSnap.exe"
@@ -93,41 +93,44 @@ goto build_done
 
 :build_windowed_onedir
 echo.
-echo [3/4] æ‰“åŒ…ï¼šä¸å¸¦æŽ§åˆ¶å° + ç›®å½•ï¼ˆ--windowed --onedirï¼‰
+echo [3/4] ´ò°ü£º²»´ø¿ØÖÆÌ¨ + Ä¿Â¼£¨--windowed --onedir£©
 python -m PyInstaller --name ScreenSnap --windowed --onedir --clean --noconfirm --icon ui/assets/icon.ico --add-data "ui/assets;ui/assets" main.py
 if errorlevel 1 goto failed
 set "RESULT=dist\ScreenSnap\ScreenSnap.exe"
 goto build_done
 
-:: ---------- å®Œæˆ ----------
+:: ---------- Íê³É ----------
 :build_done
 echo.
-echo [4/4] æž„å»ºå®Œæˆï¼äº§ç‰©ä½ç½®ï¼š
+echo [4/4] ¹¹½¨Íê³É£¡²úÎïÎ»ÖÃ£º
 echo   %RESULT%
 echo.
-echo [æç¤º] å»ºè®®åœ¨ç›®æ ‡ Windows çŽ¯å¢ƒæœ€ç»ˆéªŒæ”¶ï¼šå…¨å±€çƒ­é”®ã€åŽŸç”Ÿé€šçŸ¥ä¸Žæ··åˆ DPIã€‚
+echo [ÌáÊ¾] ½¨ÒéÔÚÄ¿±ê Windows »·¾³×îÖÕÑéÊÕ£ºÈ«¾ÖÈÈ¼ü¡¢Ô­ÉúÍ¨ÖªÓë»ìºÏ DPI¡£
+echo.
+echo [Íê³É] °´ÈÎÒâ¼ü¹Ø±Õ´Ë´°¿Ú ...
+pause >nul
 exit /b 0
 
-:: ---------- é”™è¯¯å¤„ç† ----------
+:: ---------- ´íÎó´¦Àí ----------
 :no_python
 echo.
-echo [é”™è¯¯] æœªæ£€æµ‹åˆ° Pythonï¼Œè¯·å®‰è£… Python 3.10 æˆ–æ›´é«˜ç‰ˆæœ¬å¹¶å‹¾é€‰ "Add to PATH"ï¼Œ
-echo        å®‰è£…åŽé‡æ–°æ‰“å¼€æœ¬è„šæœ¬é‡è¯•ã€‚
+echo [´íÎó] Î´¼ì²âµ½ Python£¬Çë°²×° Python 3.10 »ò¸ü¸ß°æ±¾²¢¹´Ñ¡ "Add to PATH"£¬
+echo        °²×°ºóÖØÐÂ´ò¿ª±¾½Å±¾ÖØÊÔ¡£
 echo.
 pause
 exit /b 1
 
 :no_pyinstaller
 echo.
-echo [é”™è¯¯] PyInstaller æœªèƒ½æ­£å¸¸å®‰è£…ï¼Œè¯·æ£€æŸ¥ requirements.txt ä¸­çš„ pyinstaller ä¾èµ–ã€‚
-echo        å¯å°è¯•æ‰‹åŠ¨æ‰§è¡Œï¼š.venv\Scripts\python -m pip install "pyinstaller>=6,<7"
+echo [´íÎó] PyInstaller Î´ÄÜÕý³£°²×°£¬Çë¼ì²é requirements.txt ÖÐµÄ pyinstaller ÒÀÀµ¡£
+echo        ¿É³¢ÊÔÊÖ¶¯Ö´ÐÐ£º.venv\Scripts\python -m pip install "pyinstaller>=6,<7"
 echo.
 pause
 exit /b 1
 
 :failed
 echo.
-echo [é”™è¯¯] æž„å»ºè¿‡ç¨‹ä¸­æ–­ï¼Œè¯·æ£€æŸ¥ä¸Šæ–¹é”™è¯¯ä¿¡æ¯ã€‚
+echo [´íÎó] ¹¹½¨¹ý³ÌÖÐ¶Ï£¬Çë¼ì²éÉÏ·½´íÎóÐÅÏ¢¡£
 echo.
 pause
 exit /b 1

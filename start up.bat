@@ -1,6 +1,6 @@
 @echo off
 setlocal
-chcp 65001 >nul
+chcp 936 >nul
 cd /d "%~dp0"
 
 where python >nul 2>&1
@@ -30,12 +30,12 @@ exit /b 0
 
 :no_python
 echo [ERROR] Python is not installed or is not available on PATH.
-echo [æç¤º] æœªæ£€æµ‹åˆ° Pythonï¼Œè¯·å®‰è£… Python 3.10 æˆ–æ›´é«˜ç‰ˆæœ¬å¹¶æ·»åŠ åˆ° PATHã€‚
+echo [ÌáÊ¾] Î´¼ì²âµ½ Python£¬Çë°²×° Python 3.10 »ò¸ü¸ß°æ±¾²¢Ìí¼Óµ½ PATH¡£
 pause
 exit /b 1
 
 :failed
 echo [ERROR] ScreenSnap setup or launch failed. See the error above.
-echo [æç¤º] ç¯å¢ƒå®‰è£…æˆ–ç¨‹åºå¯åŠ¨å¤±è´¥ï¼Œè¯·æ£€æŸ¥ä¸Šæ–¹é”™è¯¯ä¿¡æ¯ã€‚
+echo [ÌáÊ¾] »·¾³°²×°»ò³ÌĞòÆô¶¯Ê§°Ü£¬Çë¼ì²éÉÏ·½´íÎóĞÅÏ¢¡£
 pause
 exit /b 1
