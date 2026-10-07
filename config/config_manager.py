@@ -177,7 +177,7 @@ DEFAULTS = {
     "window_hover_detect": True, "window_uia_detect": True,
     "uia_debug_tree": False,
     # 悬停与 UIA 的性能参数：复用半径 0 表示每次都重新查询；预算/熔断给慢机器留出放宽空间。
-    "window_hover_reuse_radius": 4,
+    "window_hover_reuse_radius": 8,
     "uia_read_budget": 180, "uia_children_limit": 128, "uia_slow_seconds": 0.4,
     "window_hover_interval": 80, "window_hover_color": "#168cff",
     "window_hover_border_color": "#168cff",
@@ -679,6 +679,8 @@ def migrate_legacy_settings(data):
         "sticker_shadow_enabled": (True, False),
         "sticker_recycle_limit": (50, 10),
         "marker_width": (2, 4),
+        # 实机实测：旧默认 180 时单次悬停查询约 65ms 且每次都跑满预算，故与复用半径一起下调。
+        "window_hover_reuse_radius": (4, 8),
     }
     for key, (old_default, new_default) in default_updates.items():
         if migrated.get(key) == old_default:

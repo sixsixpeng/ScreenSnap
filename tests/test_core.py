@@ -13207,7 +13207,7 @@ class CoreTests(unittest.TestCase):
         expected = {"editor_zoom_wheel_step": 10, "editor_rotation_snap": 15,
                     "editor_rotation_handle": "center", "editor_overcanvas_mode": "clip",
                     "editor_checker_tile_size": 8, "editor_text_click_delay": 180,
-                    "window_hover_reuse_radius": 4, "uia_read_budget": 180,
+                    "window_hover_reuse_radius": 8, "uia_read_budget": 180,
                     "uia_children_limit": 128, "uia_slow_seconds": 0.4,
                     "cache_clear_clipboard": True, "cache_clear_toast": True,
                     "cache_clear_sticker": True, "cache_cleanup_timing": "off"}
