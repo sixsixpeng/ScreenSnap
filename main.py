@@ -44,12 +44,13 @@ def enable_windows_app_id():
 enable_windows_dpi_awareness()
 
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer, QSignalBlocker, QObject, Signal, Slot, QLockFile
-from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen, QGuiApplication, QFont
+from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen, QGuiApplication, QFont, QCursor
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QGraphicsView, QFileDialog
 
 from config import ConfigManager
 from config.config_manager import TOOL_WIDTH_KEYS
 from core import app_icon, data_dir, capture, qimage_to_pillow
+from core.dpi import DisplayMapper
 from core.startup import set_start_on_boot
 from editor import EditorWindow
 from hotkey import HotkeyManager
@@ -63,137 +64,16 @@ from ui.theme import apply_theme
 from ui.window_bounds import WindowBoundsFilter
 from PIL import Image
 
+from app.bootstrap import (QApp, acquire_single_instance_lock, install_exception_hooks,
+                           notify_existing_instance)
+from app.notifications import NotificationBridge, drawn_icon, tray_icon
 
-class NotificationBridge(QObject):
-    """将 Toast 的后台线程回调安全地送回 Qt 主线程。"""
-
-    activated = Signal(object)
-    failed = Signal(object)
-
-    def __init__(self, application):
-        super().__init__(application.qt)
-        self.application = application
-        self.activated.connect(self._activate)
-        self.failed.connect(self._fallback)
-
-    @Slot(object)
-    def _activate(self, target):
-        path, fallback = target
-        self.application._notification_target_path = path
-        self.application._notification_fallback = fallback
-        self.application.open_notification_target(path)
-
-    @Slot(object)
-    def _fallback(self, payload):
-        message, target = payload
-        path, fallback = target
-        self.application._notification_target_path = path
-        self.application._notification_fallback = fallback
-        self.application.tray.showMessage(
-            "ScreenSnap", message, QSystemTrayIcon.Information, 2500)
+from app.capture_flow import CaptureFlowMixin
+from app.notification_flow import NotificationMixin
+from app.sticker_flow import StickerFlowMixin
 
 
-def drawn_icon():
-    """现场绘制高分辨率取景框图标，仅在没有图标文件时兜底。"""
-    pixmap = QPixmap(64, 64)
-    pixmap.fill(Qt.transparent)
-    painter = QPainter(pixmap)
-    painter.setRenderHint(QPainter.Antialiasing)
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor("#18343b"))
-    painter.drawRoundedRect(2, 2, 60, 60, 14, 14)
-    painter.setPen(QPen(QColor("#f5fbfa"), 5, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-    for points in [((15, 26), (15, 15), (26, 15)),
-                   ((38, 15), (49, 15), (49, 26)),
-                   ((49, 38), (49, 49), (38, 49)),
-                   ((26, 49), (15, 49), (15, 38))]:
-        painter.drawLine(*points[0], *points[1])
-        painter.drawLine(*points[1], *points[2])
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor("#30d2a2"))
-    painter.drawEllipse(26, 26, 12, 12)
-    painter.end()
-    pixmap.setDevicePixelRatio(2)
-    return QIcon(pixmap)
-
-
-def tray_icon():
-    """托盘与应用图标：优先使用项目图标文件，缺失时用内置绘制图标。"""
-    icon = app_icon()
-    return icon if not icon.isNull() else drawn_icon()
-
-
-def acquire_single_instance_lock(path=None):
-    """获取进程级应用锁；返回 None 表示已有实例持锁。"""
-    lock_path = Path(path) if path is not None else data_dir() / "screensnap.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    lock = QLockFile(str(lock_path))
-    return lock if lock.tryLock(0) else None
-
-
-def notify_existing_instance():
-    message = "ScreenSnap 已经在运行。请从系统托盘打开现有窗口，或退出现有实例后再启动。"
-    if os.name == "nt":
-        try:
-            ctypes.windll.user32.MessageBoxW(None, message, "ScreenSnap", 0x40)
-            return
-        except (AttributeError, OSError):
-            pass
-    print(message, file=sys.stderr)
-
-
-class QApp(QApplication):
-    """重写 notify 捕获 Qt 事件/槽中的未处理异常并写入日志（默认会静默崩溃）。"""
-
-    def notify(self, receiver, event):
-        try:
-            return super().notify(receiver, event)
-        except Exception:
-            logging.getLogger("screensnap").exception(
-                "未捕获异常（事件类型 0x%x，接收者 %s）",
-                event.type() if event is not None else -1,
-                type(receiver).__name__ if receiver is not None else None)
-            return False
-
-
-def _log_uncaught(exc_type, exc_value, exc_traceback):
-    """把未捕获异常写入 screensnap 日志；若日志尚未配置处理器，额外兜底写入文件。"""
-    logger = logging.getLogger("screensnap")
-    logger.exception("未捕获的全局异常", exc_info=(exc_type, exc_value, exc_traceback))
-    # 日志处理器在 Application.__init__ 中才配置；在此之前崩溃也要保证写进文件。
-    if not logger.handlers:
-        try:
-            log_dir = Path("logs") / _now_month()
-            log_dir.mkdir(parents=True, exist_ok=True)
-            import traceback as _tb
-            with open(log_dir / "app.log", "a", encoding="utf-8") as fh:
-                fh.write("\n=== 未捕获全局异常（日志未配置时的兜底写入）===\n")
-                _tb.print_exception(exc_type, exc_value, exc_traceback, file=fh)
-        except Exception:
-            pass
-
-
-def _now_month():
-    from datetime import datetime
-    return datetime.now().strftime("%Y-%m")
-
-
-def install_exception_hooks():
-    """安装全局兜底：主线程顶层异常、Qt 事件异常、子线程异常都写入日志，避免静默崩溃。"""
-    sys.excepthook = _log_uncaught
-    if hasattr(threading, "excepthook"):
-        _orig = threading.excepthook
-
-        def _thread_hook(args):
-            try:
-                _log_uncaught(args.exc_type, args.exc_value, args.exc_traceback)
-            finally:
-                _orig(args)
-
-        threading.excepthook = _thread_hook
-
-
-class Application:
+class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
     """集中连接托盘、热键和窗口；具体业务交由各模块处理。"""
 
     # 日志处理器随设置重建，logger 对象本身保持不变。
@@ -221,9 +101,12 @@ class Application:
         self.hotkeys.triggered.connect(self.dispatch)
         self.hotkeys.failed.connect(self.hotkey_error)
         self.stickers = StickerManager(self.config.data)
+        # 「自动清理时机」设为启动时的话，等事件循环起来再清理，别拖慢启动。
+        QTimer.singleShot(0, lambda: self.cleanup_cache_if_scheduled("start"))
         self.stickers.edit_requested.connect(self.edit_sticker)
         self.settings_window = SettingsWindow(
-            self.config, self.stickers.clear_clipboard_history)
+            self.config, self.stickers.clear_clipboard_history,
+            self.stickers.clear_rebuildable_cache)
         self.settings_window.changed.connect(self.refresh)
         self.settings_window.recording.connect(self.pause_hotkeys)
         self.hotkey_recording = False
@@ -257,21 +140,25 @@ class Application:
         # 托盘显示后等事件循环启动，再请求系统显示就绪提示。
         QTimer.singleShot(0, self.announce_startup)
 
+
     def announce_startup(self):
         """事件循环开始后提示就绪，沿用托盘气泡总开关。"""
         self.logger.info("ScreenSnap 已启动")
         self.notify("已启动，可使用快捷键截图或右键托盘打开设置")
+
 
     def tray_clicked(self, reason):
         """仅在托盘双击时启动自由截图，右键留给菜单。"""
         if reason == QSystemTrayIcon.DoubleClick:
             self.start_capture("capture")
 
+
     def open_settings(self):
         """复用同一个设置窗口并将其带到前台。"""
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
+
 
     def refresh(self):
         """配置落盘后更新热键、日志和已打开编辑器的标注颜色。"""
@@ -305,7 +192,17 @@ class Application:
                     editor.canvas.settings[key] = value
                     if key == f"{editor.canvas.tool}_color":
                         editor.canvas.set_selected_color(value)
+            for key in ("rect_fill_enabled", "rect_fill_opacity", "rect_fill_color",
+                        "ellipse_fill_enabled", "ellipse_fill_opacity", "ellipse_fill_color",
+                        "mosaic_cursor_color", "eraser_cursor_color", "mosaic_width",
+                        "mosaic_brush", "eraser_width"):
+                value = self.config.data[key]
+                editor.settings[key] = value
+                editor.canvas.settings[key] = value
+                editor.toolbar.sync_setting(key, value)
             editor.canvas.update()
+            editor.canvas.refresh_tool_cursor()
+            editor.canvas.viewport().update()
             editor.toolbar.sync_tool_colors(self.config.data)
             editor.toolbar.set_active_tool(editor.canvas.tool)
             editor.toolbar.sync_theme_icons()
@@ -357,6 +254,7 @@ class Application:
         self.stickers.refresh_style()
         self.logger.info("配置已更新")
 
+
     def pause_hotkeys(self, recording):
         """录制期间注销全局热键，结束后按最新配置重新注册。"""
         self.hotkey_recording = recording
@@ -365,10 +263,12 @@ class Application:
         settings["hotkeys_enabled"] = False if recording else self.config.data["hotkeys_enabled"]
         self.hotkeys.register(settings)
 
+
     def hotkey_error(self, message):
         """即使关闭普通提示，也将热键注册失败报告给用户。"""
         self.logger.error("热键注册失败: %s", message)
         self.notify(f"热键注册失败: {message}")
+
 
     def dispatch(self, action):
         """在 Qt 主线程把热键动作分发给截图或贴图模块。"""
@@ -409,408 +309,17 @@ class Application:
         else:
             self.logger.warning("未处理的热键动作: %s", action)
 
-    def edit_clipboard_image(self):
-        """读取系统剪贴板中的图像并交给截图编辑器。"""
-        image = QGuiApplication.clipboard().image()
-        if image.isNull():
-            self.logger.debug("剪贴板中没有图片，无法打开编辑器")
-            self.notify("剪贴板中没有图片；文字、颜色或文件可用“贴剪贴板内容”直接贴出")
+
+    def cleanup_cache_if_scheduled(self, when):
+        """按「自动清理时机」在启动/退出时清理一次可重建缓存；失败只记日志不影响退出。"""
+        if self.config.data.get("cache_cleanup_timing", "off") != when:
             return
         try:
-            source = qimage_to_pillow(image)
+            result = self.stickers.clear_rebuildable_cache()
         except (OSError, ValueError) as error:
-            self.logger.warning("读取剪贴板图片失败: %s", error)
-            self.notify(f"无法读取剪贴板图片: {error}")
+            self.logger.warning("自动清理缓存失败(%s): %s", when, error)
             return
-        self.logger.info("编辑剪贴板图片: %sx%s", image.width(), image.height())
-        self.edit_images([(source, None)], from_capture=False)
-
-    def open_and_edit_image(self):
-        """多选磁盘图片并分别打开截图编辑器。"""
-        paths, _ = QFileDialog.getOpenFileNames(
-            None, "打开并编辑图片", "",
-            "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff)",
-        )
-        if not paths:
-            return
-        images = []
-        failed = []
-        for path in paths:
-            try:
-                with Image.open(path) as opened:
-                    images.append((opened.convert("RGBA").copy(), None))
-            except (OSError, ValueError) as error:
-                self.logger.warning("打开图片失败 %s: %s", path, error)
-                failed.append(path)
-        if failed:
-            self.notify(f"无法打开 {len(failed)} 张图片")
-        if not images:
-            return
-        self.logger.info("多选打开图片: %d 张", len(images))
-        self.edit_images(images, from_capture=False)
-
-    def start_capture(self, mode, from_tray=False, initial_rect=None, preferred_monitor=None):
-        """跳过已显示的遮罩；仅托盘菜单发起的截图等待菜单关闭。"""
-        if self.mask is not None and self.mask.isVisible():
-            self.logger.debug("遮罩已显示，忽略截图请求: %s", mode)
-            return
-        if mode == "repeat" and not self.config.data["last_capture_rect"]:
-            self.logger.debug("尚无上次截图区域，跳过重复截图")
-            self.notify("暂无上次截图区域")
-            return
-        # 托盘菜单发起时稍后捕获，避免菜单进入截图；用户设置的延迟在此基础上累加。
-        delay = int(self.config.data.get("capture_delay", 0) or 0)
-        waiting = (150 if from_tray else 0) + delay
-        if delay:
-            self.logger.info("截图延迟 %d 毫秒后显示遮罩: %s", delay, mode)
-        QTimer.singleShot(waiting, lambda: self.show_mask(mode, initial_rect, preferred_monitor))
-
-    def popup_intruders(self):
-        """抓屏瞬间仍在屏幕上的本程序弹出菜单，返回 [(中文名, 屏幕矩形)]。
-
-        这类菜单抓屏之后才关闭（避免它悬浮在遮罩之上），因此像素已经进了冻结帧，
-        而那时它已不在窗口列表里、枚举不到；只有抓屏前记下的矩形能让遮罩在选区覆盖
-        它时给出警示。托盘菜单自身有 150 毫秒等待，抓屏时通常已关闭，故不重复报告。
-        """
-        popup = QApplication.activePopupWidget()
-        if popup is None or popup is getattr(self, "menu", None):
-            return []
-        rect = popup.frameGeometry()
-        if rect.width() <= 0 or rect.height() <= 0:
-            return []
-        return [(window_label(popup), rect)]
-
-    def show_mask(self, mode, initial_rect=None, preferred_monitor=None):
-        """保存两版画面并显示覆盖虚拟桌面的选区遮罩。
-
-        抓屏前**不动**本程序的任何窗口：用户常拿程序自身的贴图/设置/编辑器当内容来
-        测截图，抓屏就是抓屏；哪些自身窗口进了画面只通过遮罩的提示条告知
-        （`MaskWindow.self_check_warning`），不替用户关窗口。
-        """
-        # 同一时刻保留带光标和不带光标的画面，供编辑器临时切换。
-        image, bounds, monitors, alternate = capture(self.config.data["cursor"], alternatives=True)
-        # 抓取完成后再关闭本程序残留的活动弹出菜单（如贴图右键菜单），
-        # 让它留在冻结画面里，又不会继续悬浮在遮罩之上；关闭前先记下它的位置，
-        # 好在选区覆盖它时补一句"已进入画面"的警示。
-        popup_intruders = self.popup_intruders()
-        popup = QApplication.activePopupWidget()
-        if popup is not None and popup is not getattr(self, "menu", None):
-            popup.close()
-        if mode == "repeat":
-            rect = QRect(*self.config.data["last_capture_rect"]).intersected(
-                QRect(bounds["left"], bounds["top"], bounds["width"], bounds["height"]))
-            if rect.isEmpty():
-                self.logger.warning("上次截图区域已不在屏幕范围内: %s",
-                                    self.config.data["last_capture_rect"])
-                self.notify("上次截图区域已不在当前屏幕")
-                return
-            left, top = rect.x() - bounds["left"], rect.y() - bounds["top"]
-            crop = (left, top, left + rect.width(), top + rect.height())
-            self.edit_images([(image.crop(crop), alternate.crop(crop) if alternate else None)])
-            return
-        self.mask = MaskWindow(image, bounds, monitors, self.config.data, mode, alternate,
-                       initial_rect=initial_rect, preferred_monitor=preferred_monitor,
-                       extra_intruders=popup_intruders)
-        self.mask.setAttribute(Qt.WA_DeleteOnClose)
-        self.mask.last_region.connect(self.remember_region)
-        if hasattr(self, "settings_window"):
-            self.mask.annotation_setting_changed.connect(self.settings_window.set_annotation_setting)
-            self.mask.tool_color_changed.connect(self.settings_window.set_tool_color)
-        for view in self.mask.session.views:
-            view.selected.connect(self.handle_capture_selection)
-            view.edit_requested.connect(self.edit_images)
-            view.save_requested.connect(self.save_capture_images)
-            view.copy_done.connect(self.notify_capture_copied)
-            view.picker_copied.connect(self.notify_color_picked)
-            view.image_saved.connect(self.saved)
-            view.image_saved_silently.connect(
-                lambda path, image: self.saved(path, image, notify=False))
-            view.save_failed.connect(self.initial_save_failed)
-            view.recapture_requested.connect(self.restart_capture)
-        self._connect_sticker_signals(self.mask.session.views)
-        self.mask.close_all_requested.connect(self.close_all_editors)
-        self.mask.destroyed.connect(lambda obj=None, current=self.mask: setattr(self, "mask", None)
-                                    if self.mask is current else None)
-        self.mask.show()
-        self.mask.raise_()
-        self.mask.activateWindow()
-        self.mask.setFocus(Qt.ActiveWindowFocusReason)
-        QTimer.singleShot(0, self._activate_capture_mask)
-        for view in self.mask.session.views:
-            view.magnifier_overlay.sync()
-        self.logger.info("开始截图: %s", mode)
-
-    def _connect_sticker_signals(self, views):
-        for view in views:
-            view.sticker_requested.connect(self.add_sticker)
-            view.quick_sticker_requested.connect(self.add_sticker)
-
-    def _activate_capture_mask(self):
-        """显示完成后再次请求 Windows 将键盘焦点交给截图遮罩。"""
-        if not isinstance(self.mask, MaskWindow) or not self.mask.isVisible():
-            return
-        self.mask.raise_()
-        window = self.mask.windowHandle()
-        if window is not None:
-            window.requestActivate()
-        self.mask.activateWindow()
-        self.mask.setFocus(Qt.ActiveWindowFocusReason)
-
-    def remember_region(self, rect):
-        self.config.data["last_capture_rect"] = rect
-        self.config.save()
-
-    def edit_images(self, images, positions=None, from_capture=True):
-        """为每个选区打开独立编辑器，并连接保存与贴图输出。"""
-        # 每个选区对应独立编辑器，保持多选区之间的编辑状态互不影响。
-        capture_editor = None
-        for index, (image, alternate) in enumerate(images):
-            editor = EditorWindow(image, self.config.data, alternate,
-                                  from_capture=from_capture)
-            editor.sticker_position = positions[index] if positions and index < len(positions) else None
-            if from_capture and capture_editor is None:
-                capture_editor = editor
-            editor.initial_capture_save_pending = bool(from_capture)
-            editor.image_saved.connect(
-                lambda path, saved_image, current=editor:
-                self.editor_saved(current, path, saved_image))
-
-            def add_editor_sticker(result, current=editor):
-                position = current.sticker_position
-                if position is None:
-                    frame = current.frameGeometry()
-                    screen = current.screen().availableGeometry()
-                    right = frame.right() + 12
-                    left = frame.left() - result.width() - 12
-                    if right + result.width() <= screen.right() + 1:
-                        x = right
-                    elif left >= screen.left():
-                        x = left
-                    else:
-                        x = screen.left() + 12
-                    y = max(screen.top(), min(
-                        frame.top() + 36,
-                        screen.bottom() - result.height() + 1))
-                    position = QPoint(x, y)
-                self.add_sticker(result, position)
-
-            editor.sticker_requested.connect(add_editor_sticker)
-            editor.recapture_requested.connect(lambda current=editor: self.restart_capture(current))
-            editor.close_all_requested.connect(self.close_all_editors)
-            editor.status.connect(self.notify)
-            editor.tool_color_changed.connect(self.settings_window.set_tool_color)
-            editor.setting_changed.connect(self.settings_window.set_annotation_setting)
-            editor.destroyed.connect(lambda obj=None, current=editor: self.editors.remove(current) if current in self.editors else None)
-            editor.setAttribute(Qt.WA_DeleteOnClose)
-            self.editors.append(editor)
-            editor.show()
-            if from_capture:
-                editor.initial_save_timer = QTimer(editor)
-                editor.initial_save_timer.setSingleShot(True)
-                editor.initial_save_timer.timeout.connect(
-                    lambda current=editor: self.save_initial_capture(current))
-                editor.initial_save_timer.start(0)
-        if from_capture and images and self.config.data["bubble"] and self.config.data["capture_notification"]:
-            if self.capture_notice is not None:
-                self.capture_notice.close()
-            self.capture_notice = CaptureNotification(
-                images[0][0], len(images),
-                backend=self.config.data["notification_backend"],
-                close_after=self.config.data["notification_timeout"])
-            self.capture_notice.file_activated.connect(self.open_notification_target)
-            if capture_editor is not None:
-                capture_editor.capture_notification = self.capture_notice
-            self.capture_notice.show_preview()
-        if from_capture and self.config.data["sound"]:
-            QApplication.beep()
-        self.logger.info("完成截图: %s 张" if from_capture else "打开图片编辑: %s 张", len(images))
-
-    def save_initial_capture(self, editor):
-        """窗口显示后再做初始落盘，避免双击等待图片编码和文件写入。"""
-        try:
-            editor.save(automatic=True)
-        except OSError as error:
-            editor.initial_capture_save_pending = False
-            self.initial_save_failed(f"初始保存失败: {error}")
-
-    def editor_saved(self, editor, path, image=None):
-        """首次自动落盘由截图预览说明，不再额外替换一次成功图片通知。"""
-        notify = (not editor.initial_capture_save_pending and
-              not getattr(editor, "suppress_save_notification", False))
-        capture_notification = getattr(editor, "capture_notification", None)
-        if capture_notification is not None:
-            capture_notification.set_target_path(path)
-        editor.initial_capture_save_pending = False
-        self.saved(path, image, notify=notify)
-
-    def handle_capture_selection(self, images, positions=None):
-        """按用户默认偏好保存截图，或打开编辑器继续处理。"""
-        if self.config.data.get("capture_after_selection", "save") == "edit":
-            self.edit_images(images, positions=positions)
-        else:
-            self.save_capture_images(images)
-
-    def notify_capture_copied(self, image=None):
-        """仅复制模式：选区已写入剪贴板，发送带缩略图的图片提示。"""
-        if image is None:
-            self.notify("已复制到剪贴板", "capture_notification")
-            return
-        if self.config.data["capture_notification"]:
-            # 复制反馈的核心是“看到复制了什么”，强制本地预览以保证缩略图一定可见；
-            # 不依赖系统 Toast 是否能可靠附带图片（Win11 Toast 的 hero 图有时不显示）。
-            notice = CaptureNotification(image, title="已复制到剪贴板", backend="legacy",
-                                      close_after=self.config.data["notification_timeout"])
-            notice.file_activated.connect(self.open_notification_target)
-            if self.capture_notice is not None:
-                self.capture_notice.close()
-            self.capture_notice = notice
-            notice.show_preview()
-        else:
-            self.notify("已复制到剪贴板", "capture_notification")
-
-    def notify_color_picked(self, color):
-        """取色模式：色值已复制到剪贴板，发一次轻量提示。"""
-        self.notify(f"已复制颜色 {color}", "capture_notification")
-
-    def save_capture_images(self, images, positions=None):
-        """直接保存选区图片，但沿用编辑器最终效果与手动保存配置。"""
-        for image, alternate in images:
-            editor = EditorWindow(image, self.config.data, alternate, from_capture=True)
-            editor.image_saved.connect(self.saved)
-            try:
-                editor.save(automatic=True, copy_to_clipboard=True)
-            except OSError as error:
-                self.initial_save_failed(f"直接保存截图失败: {error}")
-            finally:
-                editor.close()
-
-    def initial_save_failed(self, message):
-        self.logger.exception("%s", message)
-        self.notify(message)
-
-    def close_all_editors(self):
-        """关闭当前全部截图编辑器窗口。"""
-        for editor in list(self.editors):
-            editor.close()
-
-    def restart_capture(self, context=None):
-        """关闭当前编辑窗口/遮罩后重新进入实时截图选区。"""
-        if isinstance(context, dict):
-            preferred_monitor = context.get("monitor")
-        else:
-            preferred_monitor = None
-        editor = None if isinstance(context, dict) else context
-        if editor is not None:
-            editor.close()
-        if self.mask is not None:
-            self.mask.close()
-        QTimer.singleShot(0, lambda: self.start_capture(
-            "capture", initial_rect=None, preferred_monitor=preferred_monitor))
-
-    def add_sticker(self, image, position=None):
-        """创建新贴图并根据独立设置决定是否显示托盘提示。"""
-        try:
-            item = self.stickers.add(image, position=position)
-            item.raise_()
-            item.activateWindow()
-        except (OSError, TypeError, ValueError, RuntimeError) as error:
-            self.logger.error("创建贴图失败: %s", error, exc_info=True)
-            self.notify(f"创建贴图失败: {error}")
-            return
-        self.logger.info("贴图已创建并置于前台: %s", getattr(item, "source", "临时图片"))
-        self.notify("已创建贴图", "sticker_notification",
-                getattr(item, "source", None), "sticker_panel")
-
-    def edit_sticker(self, image):
-        """在独立编辑器中编辑贴图副本；首次保存会分配新文件名。"""
-        self.edit_images([(image.copy(), None)], from_capture=False)
-
-    def paste_clipboard(self):
-        """把剪贴板中的图片、文件、颜色或文字直接贴到屏幕上。"""
-        item = self.stickers.paste_clipboard()
-        if item is None:
-            self.logger.debug("剪贴板中没有可贴出的图片、文件、颜色或文字")
-            self.notify("剪贴板中没有可贴出的内容")
-            return
-        self.notify("已贴出剪贴板内容", "sticker_notification",
-                getattr(item, "source", None), "sticker_panel")
-
-    def open_sticker_panel(self):
-        """复用同一个贴图管理窗口，打开时按当前贴图重建列表。"""
-        if self.sticker_panel is None:
-            self.sticker_panel = StickerPanel(self.stickers)
-        self.logger.debug("打开贴图管理窗口: %d 张贴图", len(self.stickers.items))
-        self.sticker_panel.refresh()
-        self.sticker_panel.show()
-        self.sticker_panel.raise_()
-        self.sticker_panel.activateWindow()
-
-    def open_recycle_bin(self):
-        """复用同一个回收站窗口，打开时按当前回收内容重建列表。"""
-        if self.recycle_window is None:
-            self.recycle_window = RecycleWindow(self.stickers, self.config)
-        self.logger.debug("打开贴图回收站: %d 张", len(self.stickers.recycle_items()))
-        self.recycle_window.refresh()
-        self.recycle_window.show()
-        self.recycle_window.raise_()
-        self.recycle_window.activateWindow()
-
-    def saved(self, path, image=None, notify=True):
-        """记录保存结果并按保存通知设置显示提示。"""
-        self.logger.info("图片已保存: %s", path)
-        if notify and image is not None and self.config.data["bubble"] and self.config.data["save_notification"]:
-            self.show_image_notice(image, "图片已保存", str(path), path)
-        elif notify and image is None:
-            self.notify(f"图片已保存: {path}", "save_notification", path)
-        if notify and image is not None and self.config.data["sound"]:
-            QApplication.beep()
-
-    def show_image_notice(self, image, title, detail="", target_path=None):
-        """新的图片提示替换旧提示，避免多个窗口堆叠。"""
-        if self.capture_notice is not None:
-            self.capture_notice.close()
-        self.capture_notice = CaptureNotification(image, title=title, detail=detail,
-                              target_path=target_path,
-                              backend=self.config.data["notification_backend"],
-                              close_after=self.config.data["notification_timeout"])
-        self.capture_notice.file_activated.connect(self.open_notification_target)
-        self.capture_notice.show_preview()
-
-    def notify(self, message, setting=None, target_path=None, fallback=None):
-        """总开关与分类开关控制气泡；音效仍由音效设置独立控制。"""
-        if self.config.data["bubble"] and (setting is None or self.config.data[setting]):
-            self._notification_target_path = str(target_path) if target_path else None
-            self._notification_fallback = fallback
-            if self.config.data["notification_backend"] == "win11toast":
-                from ui.native_toast import show_native_toast
-
-                target = (self._notification_target_path, fallback)
-                bridge = self.notification_bridge
-                sent = show_native_toast(
-                    "ScreenSnap", message,
-                    on_click=lambda *args: bridge.activated.emit(target),
-                    on_failed=lambda error: bridge.failed.emit((message, target)))
-                if not sent:
-                    self.tray.showMessage(
-                        "ScreenSnap", message, QSystemTrayIcon.Information, 2500)
-            else:
-                self.tray.showMessage(
-                    "ScreenSnap", message, QSystemTrayIcon.Information, 2500)
-        if self.config.data["sound"]:
-            QApplication.beep()
-
-    def open_notification_target(self, path=None):
-        """在资源管理器中选中文件；没有文件的贴图提示则打开贴图面板。"""
-        target = str(path) if path else getattr(self, "_notification_target_path", None)
-        if target and os.path.isfile(target):
-            if not self.config.data.get("open_notification_file", True):
-                return False
-            subprocess.Popen(["explorer.exe", f"/select,{os.path.abspath(target)}"])
-            return True
-        if path is None and getattr(self, "_notification_fallback", None) == "sticker_panel":
-            self.open_sticker_panel()
-            return True
-        return False
+        self.logger.info("已按设置自动清理缓存(%s): %s", when, result)
 
     def shutdown(self):
         """退出前保存贴图会话并释放全局热键和托盘。"""
@@ -821,9 +330,12 @@ class Application:
             self.stickers.persist_clipboard_history()
         except OSError as error:
             self.logger.error("保存贴图会话失败: %s", error, exc_info=True)
+        # 会话先落盘再清理缓存，避免把本会话还引用着的贴图源文件当成孤儿删掉。
+        self.cleanup_cache_if_scheduled("exit")
         self.hotkeys.stop()
         self.tray.hide()
         self.logger.info("已退出")
+
 
 
 if __name__ == "__main__":
