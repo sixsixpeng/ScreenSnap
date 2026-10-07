@@ -63,6 +63,7 @@ class EditorPage(SettingsPage):
         self.group("橡皮擦")
         self.preview("eraser")
         self.number("eraser_width", "橡皮擦直径", 10, 100, "只影响橡皮擦工具，范围 10–100")
+        self.add_color("eraser_cursor_color", "示意圈颜色")
         self.check("eraser_erase_base", "同时擦除原图",
                    "开启后新擦除会同时擦掉截图原图（只影响之后的擦除）；关闭则只擦标注、露出原图（非破坏性）。已有擦除可在该处右键单独设置")
         self.group("荧光笔")
@@ -119,10 +120,40 @@ class EditorPage(SettingsPage):
                    "开启后按住拖动可沿笔迹涂抹马赛克/模糊；关闭则为拖框选矩形")
         self.number("mosaic_width", "涂抹笔刷宽度 (px)", 4, 100,
                     "涂抹模式下的笔刷直径，数值越大单次涂抹覆盖越宽")
+        self.add_color("mosaic_cursor_color", "示意圈颜色")
         self.group("编辑区边框")
         self.number("editor_border_width", "编辑区边框粗细", 1, 12,
                     "只在编辑画布中显示，不写入图片")
         self.add_color("editor_border_color", "编辑区边框颜色")
+        # 透明像素的预览底色：只影响编辑画布显示，导出仍按真实 alpha 写出，所以单独成组。
+        self.group("透明背景")
+        self.choice("editor_transparent_background", "透明区域显示",
+                    [("跟随主题棋盘", "theme"), ("暗色棋盘", "dark_checker"),
+                     ("亮色棋盘", "light_checker"), ("纯透明", "transparent")],
+                    "编辑画布中透明像素（多显示器间隙、擦除镂空、圆角外）的预览底色；"
+                    "只影响编辑时的显示，不写入导出图片")
+        self.group("编辑工具栏")
+        self.check("editor_toolbar_shadow_enabled", "工具栏阴影光晕",
+                   "给编辑工具栏加一圈阴影光晕，编辑大图且整片接近底色（如都是浅色）时也能一眼找到工具栏")
+        self.color("editor_toolbar_shadow_color", "阴影颜色", "工具栏阴影/光晕颜色；建议选与画面成对比的深色或浅色")
+        self.number("editor_toolbar_shadow_strength", "阴影强度", 0, 100,
+                    "0 表示不绘制；数值越大越明显，模糊范围也越大")
+        self.group("画布与标注交互")
+        self.number("editor_zoom_wheel_step", "滚轮缩放步进 (%)", 1, 50,
+                    "独立编辑器里按住 Ctrl 滚动滚轮时每一格的缩放百分比；数值越大缩放越快")
+        self.choice("editor_rotation_snap", "旋转吸附", [(f"{value}°", value) for value in (0, 5, 15, 45)],
+                    "旋转标注时按住 Shift 的吸附角度；0° 表示不吸附，可自由旋转")
+        self.choice("editor_rotation_handle", "旋转按钮位置",
+                    [("标注中心", "center"), ("顶部外侧", "top")],
+                    "单选标注时旋转按钮画在哪里：中心随图形移动/旋转、始终在图形内；"
+                    "顶部外侧更接近常见习惯，但放大或旋转后可能被挤出画面")
+        self.choice("editor_overcanvas_mode", "标注超出画布", [("直接裁切", "clip"), ("禁止移出", "block")],
+                    "标注被拖到画布外时：直接裁掉超出部分（导出同样裁切），或限制它不能移出画布")
+        self.number("editor_checker_tile_size", "棋盘格边长 (px)", 4, 32,
+                    "透明像素预览棋盘的方格边长；太小会显得密，太大看不出透明")
+        self.number("editor_text_click_delay", "文字单击等待 (ms)", 60, 400,
+                    "文字工具单击后等待多久才弹出输入框，用来和双击保存区分；"
+                    "实际等待不会超过系统双击间隔")
         self.group("裁剪框")
         self.preview("crop", 84)
         self.add_color("crop_color", "裁剪框颜色")
@@ -158,6 +189,8 @@ class EditorPage(SettingsPage):
             "text_background": "新建文字标注背景色块的颜色；仅当“文字背景”开启时生效。",
             "rect_fill_color": "矩形标注的填充颜色；默认与矩形线条颜色一致，改线色会自动跟随。",
             "ellipse_fill_color": "椭圆标注的填充颜色；默认与椭圆线条颜色一致，改线色会自动跟随。",
+            "mosaic_cursor_color": "编辑画布中马赛克涂抹范围示意圆圈的颜色。",
+            "eraser_cursor_color": "编辑画布中橡皮擦直径示意圆圈的颜色。",
         }[key]
         button = ColorButton(self.config.data[key],
                              lambda color: self.update_value(key, color))

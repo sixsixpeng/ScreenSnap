@@ -9,7 +9,7 @@
 
 from PySide6.QtCore import Qt, Signal
 from PySide6.QtWidgets import (QHBoxLayout, QListWidget, QListWidgetItem, QPushButton,
-                               QVBoxLayout, QWidget)
+                               QStyle, QVBoxLayout, QWidget)
 
 
 class HintOrderList(QWidget):
@@ -41,6 +41,9 @@ class HintOrderList(QWidget):
         buttons.setSpacing(6)
         self.up_button = QPushButton("上移", self)
         self.down_button = QPushButton("下移", self)
+        # 项目约定：可见命令都要有图标；排序按钮用系统标准上下箭头即可。
+        self.up_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowUp))
+        self.down_button.setIcon(self.style().standardIcon(QStyle.SP_ArrowDown))
         self.up_button.setToolTip("把选中的提示项往上移动一位（顺序即提示条里的显示顺序）")
         self.down_button.setToolTip("把选中的提示项往下移动一位")
         buttons.addWidget(self.up_button)

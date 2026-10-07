@@ -4,7 +4,7 @@ from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import (QColor, QFont, QLinearGradient, QImage, QPainter, QPainterPath,
                            QPen, QPixmap)
 from PySide6.QtWidgets import (QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsRectItem,
-                               QGraphicsScene, QSizePolicy, QWidget)
+                               QGraphicsEllipseItem, QGraphicsScene, QSizePolicy, QWidget)
 
 from config.config_manager import DEFAULTS
 from core.constants import CHECKER_TILE_SIZE
@@ -142,7 +142,7 @@ class AnnotationPreview(QWidget):
                                 QPointF(width * 0.71, height * 0.79),
                                 settings.get("rect_color", color), settings["rect_width"], settings["rect_style"],
                                 corner_radius=(settings.get("rect_corner_radius", 12)
-                                               if settings.get("rect_corner_enabled", False) else 0),
+                                               if settings.get("rect_corner_enabled", True) else 0),
                                 fill_enabled=settings.get("rect_fill_enabled", False),
                                 fill_opacity=settings.get("rect_fill_opacity", 35),
                                 fill_color=settings.get("rect_fill_color")))
@@ -184,8 +184,9 @@ class AnnotationPreview(QWidget):
             overlay_painter.end()
             scene.removeItem(background_item)
             scene.addItem(QGraphicsPixmapItem(QPixmap.fromImage(preview)))
-            cursor = QGraphicsRectItem(eraser_rect)
-            cursor.setPen(QPen(QColor("#263238"), 1, Qt.DashLine))
+            cursor = QGraphicsEllipseItem(eraser_rect)
+            cursor.setPen(QPen(QColor(settings.get("eraser_cursor_color", "#ff8c00")),
+                               1.5, Qt.SolidLine))
             cursor.setBrush(Qt.NoBrush)
             scene.addItem(cursor)
         elif self.kind == "marker":
@@ -210,6 +211,15 @@ class AnnotationPreview(QWidget):
             divider = QGraphicsRectItem(QRectF(half - 0.5, 0, 1, height))
             divider.setPen(QPen(QColor("#ffffff"), 1))
             scene.addItem(divider)
+            diameter = min(settings.get("mosaic_width", 20), height * 0.72)
+            center = QPointF(width * 0.68, height * 0.68)
+            ring = QGraphicsEllipseItem(QRectF(center.x() - diameter / 2,
+                                                center.y() - diameter / 2,
+                                                diameter, diameter))
+            ring.setPen(QPen(QColor(settings.get("mosaic_cursor_color", "#00c853")),
+                             1.5, Qt.SolidLine))
+            ring.setBrush(Qt.NoBrush)
+            scene.addItem(ring)
         elif self.kind == "crop":
             frame = QGraphicsRectItem(QRectF(width * 0.18, height * 0.18,
                                              width * 0.64, height * 0.64))

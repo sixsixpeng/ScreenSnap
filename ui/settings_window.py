@@ -20,6 +20,7 @@ from ui.settings_sticker import StickerPage
 from ui.settings_clipboard import ClipboardPage
 from core.startup import set_start_on_boot
 from ui.action_icons import action_icon
+from ui.widgets.confirmation import yes_no_dialog
 
 
 class SettingsWindow(QWidget):
@@ -28,10 +29,12 @@ class SettingsWindow(QWidget):
     changed = Signal()
     recording = Signal(bool)
 
-    def __init__(self, config, clear_clipboard_history=None):
+    def __init__(self, config, clear_clipboard_history=None, clear_cache=None):
         super().__init__()
         self.config = config
         self.clear_clipboard_history_callback = clear_clipboard_history
+        # 缓存清理由 main 注入：设置窗口不直接依赖贴图管理器，避免 ui 反向依赖 sticker。
+        self.clear_cache_callback = clear_cache
         self._saved_start_on_boot = config.data["start_on_boot"]
         self._persist_timer = QTimer(self)
         self._persist_timer.setSingleShot(True)
@@ -97,8 +100,13 @@ class SettingsWindow(QWidget):
                            "贴图": "sticker"}.get(title)
             icon = action_icon(custom_icon) if custom_icon else self.style().standardIcon(icon)
             self.navigation.addItem(QListWidgetItem(icon, title))
-            self.pages.addWidget(page(self.config, self.persist, self.recording.emit)
-                                 if page is HotkeyPage else page(self.config, self.persist))
+            if page is HotkeyPage:
+                widget = page(self.config, self.persist, self.recording.emit)
+            elif page is SaveOutputPage:
+                widget = page(self.config, self.persist, self.clear_cache_callback)
+            else:
+                widget = page(self.config, self.persist)
+            self.pages.addWidget(widget)
 
     def persist(self):
         """合并短时间内的设置变化，避免滑块连续操作反复写入整份 JSON。"""
@@ -218,10 +226,10 @@ class SettingsWindow(QWidget):
     def reset_defaults(self):
         """先备份当前配置，再把所有设置恢复成默认值并重建界面。"""
         backup = self.config.path.with_suffix(".bak")
-        if QMessageBox.question(
-                self, "恢复默认设置",
-                f"当前设置会先备份到：\n{backup}\n然后全部恢复为默认值。是否继续？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        if yes_no_dialog(
+            self, "恢复默认设置",
+            f"当前设置会先备份到：\n{backup}\n然后全部恢复为默认值。是否继续？"
+        ).exec() != QMessageBox.Yes:
             return
         self._persist_timer.stop()
         try:
@@ -244,11 +252,11 @@ class SettingsWindow(QWidget):
         """删除贴图会话与私有缓存，方便从空白状态验证贴图功能。"""
         session = data_dir() / "stickers.json"
         cache = data_dir() / "sticker_cache"
-        if QMessageBox.question(
-                self, "清理贴图会话",
-                "删除贴图会话文件与贴图私有缓存，下次启动不再恢复贴图。\n"
-                "当前已打开的贴图不受影响，退出时仍会重新保存。是否继续？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        if yes_no_dialog(
+            self, "清理贴图会话",
+            "删除贴图会话文件与贴图私有缓存，下次启动不再恢复贴图。\n"
+            "当前已打开的贴图不受影响，退出时仍会重新保存。是否继续？"
+        ).exec() != QMessageBox.Yes:
             return
         removed = 0
         try:
@@ -270,10 +278,10 @@ class SettingsWindow(QWidget):
         callback = self.clear_clipboard_history_callback
         if callback is None:
             return
-        if QMessageBox.question(
-                self, "清空剪贴板历史",
-                "清空本次运行期间捕获的剪贴板历史？已创建的贴图不会受影响。",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
+        if yes_no_dialog(
+            self, "清空剪贴板历史",
+            "清空本次运行期间捕获的剪贴板历史？已创建的贴图不会受影响。"
+        ).exec() != QMessageBox.Yes:
             return
         count = callback()
         QMessageBox.information(self, "已清空剪贴板历史", f"共清空 {count} 条记录。")
@@ -282,8 +290,13 @@ class SettingsWindow(QWidget):
         """配置导入后重建页面内容，保留原有导航分类和选中项。"""
         for page in (GeneralPage, HotkeyPage, ScreenshotPage, EditorPage, StickerPage,
                  ClipboardPage, AppearancePage, SaveOutputPage, LogPage):
-            self.pages.addWidget(page(self.config, self.persist, self.recording.emit)
-                                 if page is HotkeyPage else page(self.config, self.persist))
+            if page is HotkeyPage:
+                widget = page(self.config, self.persist, self.recording.emit)
+            elif page is SaveOutputPage:
+                widget = page(self.config, self.persist, self.clear_cache_callback)
+            else:
+                widget = page(self.config, self.persist)
+            self.pages.addWidget(widget)
 
     def page(self, title):
         """按导航分类标题查找设置页，避免页面顺序变化破坏同步回调。"""

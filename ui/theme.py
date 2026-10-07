@@ -158,6 +158,19 @@ QDateEdit, QTimeEdit, QDateTimeEdit {{
     selection-background-color: {highlight};
     selection-color: {highlighted_text};
 }}
+/* 深色主题下 QComboBox 弹出列表默认沿用系统浅色底，和深色输入框反差过大；
+   这里显式给下拉项上底色/文字/选中态，并去掉聚焦时的点线框。 */
+QComboBox QAbstractItemView {{
+    background-color: {base};
+    color: {text};
+    border: 1px solid {border};
+    selection-background-color: {highlight};
+    selection-color: {highlighted_text};
+    outline: 0;
+}}
+QComboBox QAbstractItemView::item:disabled {{
+    color: {disabled};
+}}
 QLineEdit:focus, QTextEdit:focus, QPlainTextEdit:focus, QSpinBox:focus,
 QDoubleSpinBox:focus, QComboBox:focus, QDateEdit:focus, QTimeEdit:focus,
 QDateTimeEdit:focus {{

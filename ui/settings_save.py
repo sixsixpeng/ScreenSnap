@@ -1,16 +1,24 @@
-"""自动与手动保存目录配置。"""
+"""统一保存目录、归档与图片缓存管理。"""
 
-from PySide6.QtWidgets import QLabel
+import logging
 
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QDesktopServices
+from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QStyle
+
+from core.path_utils import configured_dir, data_dir
+from ui.widgets.confirmation import yes_no_dialog
 from ui.widgets.file_path_edit import FilePathEdit
 from ui.widgets.tooltip import SettingsPage
 
 
 class SaveOutputPage(SettingsPage):
-    """设置输出图像外观，以及自动与手动保存行为。"""
+    """设置输出图像外观、统一保存位置和缓存维护。"""
 
-    def __init__(self, config, changed):
+    def __init__(self, config, changed, clear_cache=None):
         super().__init__(config, changed)
+        # 设置页不直接持有贴图管理器：清理缓存通过回调注入，避免 ui 反向依赖 sticker。
+        self.clear_cache_callback = clear_cache
         self.group("输出图像外观")
         self.preview("output", 120)
         self.check("editor_image_round_corners", "输出透明圆角",
@@ -29,22 +37,22 @@ class SaveOutputPage(SettingsPage):
         self.number("editor_image_shadow_strength", "阴影强度 (%)", 0, 100,
                     "阴影不透明度；0 表示不绘制")
         self.color("editor_image_shadow_color", "输出阴影颜色", "写入最终图像的阴影颜色")
-        self.group("自动保存")
-        for key, label in [("auto_dir", "自动保存目录"), ("manual_dir", "手动保存目录")]:
-            if key == "manual_dir":
-                self.group("手动保存")
-            widget = FilePathEdit(config.data[key], lambda value, name=key: self.update_value(name, value))
-            widget.setToolTip("留空时使用图片文件夹中的 ScreenSnap/Auto 或 ScreenSnap/Manual；\n"
-                              "启用归档后，图片会保存在该目录下自动创建的年月或日期子文件夹")
-            self.controls[key] = widget
-            self.form.addRow(label, widget)
+        self.group("保存位置")
+        widget = FilePathEdit(
+            config.data["save_dir"],
+            lambda value: self.update_value("save_dir", value),
+            open_path=lambda: configured_dir(self.config.data))
+        widget.setToolTip("截图自动保存、手动保存和历史图片共用此目录；留空使用图片文件夹中的 ScreenSnap。\n"
+                          "自动/手动保存均遵守下方归档设置。")
+        self.controls["save_dir"] = widget
+        self.form.addRow("图片保存目录", widget)
         self.group("图片归档")
         archive_month = self.check(
             "archive_by_month", "按月归档",
-            "自动保存和手动保存都按保存月份存入 YYYY-MM 子文件夹；跨月后自动使用新月份目录。")
+            "所有保存都按保存月份存入 YYYY-MM 子文件夹；跨月后自动使用新月份目录。")
         archive_day = self.check(
             "archive_by_day", "按日归档",
-            "自动保存和手动保存都按保存日期存入 YYYY-MM-DD 子文件夹。开启后会自动关闭按月归档。")
+            "所有保存都按保存日期存入 YYYY-MM-DD 子文件夹。开启后会自动关闭按月归档。")
         archive_month.toggled.connect(
             lambda checked: archive_day.setChecked(False) if checked else None)
         archive_day.toggled.connect(
@@ -67,3 +75,71 @@ class SaveOutputPage(SettingsPage):
         self.group("手动保存后复制")
         self.check("copy_saved_image", "图片", "双击保存和保存按钮将合成图片放入剪贴板")
         self.check("copy_saved_path", "文件路径文字", "双击保存和保存按钮将保存路径作为文字放入剪贴板")
+        self.group("缓存管理")
+        self.check("cache_clear_clipboard", "清理剪贴板历史",
+                   "连同剪贴板历史图片一起清理；不影响已创建的贴图")
+        self.check("cache_clear_toast", "清理 Toast 缩略图",
+                   "通知里用过的缩略图缓存，随时可按需重建")
+        self.check("cache_clear_sticker", "清理孤儿贴图缓存",
+                   "只删当前没有任何活动/回收站贴图引用的私有贴图缓存")
+        self.choice("cache_cleanup_timing", "自动清理时机",
+                    [("仅手动", "off"), ("启动时", "start"), ("退出时", "exit")],
+                    "除手动按钮外，是否在启动或退出时按上面的范围自动清理一次缓存")
+        self.form.addRow(self._cache_controls())
+
+    def _cache_controls(self):
+        from PySide6.QtWidgets import QHBoxLayout, QWidget
+
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        self.clear_cache_button = QPushButton("清理可重建缓存")
+        self.clear_cache_button.setIcon(self.style().standardIcon(QStyle.SP_DialogDiscardButton))
+        self.clear_cache_button.setToolTip(
+            "清理剪贴板历史图片、Toast 缩略图及未被活动贴图引用的私有缓存；\n"
+            "不会删除已保存截图或当前贴图的源文件。")
+        # 没有注入清理回调（例如独立构造设置页的测试/工具场景）时按钮置灰，避免点了没反应。
+        self.clear_cache_button.setEnabled(self.clear_cache_callback is not None)
+        self.clear_cache_button.clicked.connect(self.clear_rebuildable_cache)
+        self.open_cache_button = QPushButton("打开缓存目录")
+        self.open_cache_button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
+        self.open_cache_button.setToolTip("打开 ScreenSnap 缓存根目录")
+        self.open_cache_button.clicked.connect(self.open_cache_directory)
+        row.addWidget(self.clear_cache_button)
+        row.addWidget(self.open_cache_button)
+        row.addStretch()
+        container = QWidget()
+        container.setLayout(row)
+        return container
+
+    def open_cache_directory(self):
+        """打开缓存根目录；目录不存在就先建出来，再交给系统资源管理器。"""
+        directory = data_dir()
+        try:
+            directory.mkdir(parents=True, exist_ok=True)
+        except OSError as error:
+            logging.getLogger("screensnap").warning("无法创建缓存目录 %s: %s", directory, error)
+            QMessageBox.warning(self, "无法打开缓存目录", str(error))
+            return
+        QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
+
+    def clear_rebuildable_cache(self):
+        """先确认再清理：这是删除操作，必须让用户明确知道删掉的是什么、保留的是什么。"""
+        if self.clear_cache_callback is None:
+            return
+        if yes_no_dialog(
+                self, "清理可重建缓存",
+                "清除剪贴板历史记录及其图片、Toast 缩略图和未引用的贴图缓存？\n"
+                "已保存截图和当前贴图源文件不会删除。是否继续？").exec() != QMessageBox.Yes:
+            return
+        try:
+            result = self.clear_cache_callback()
+        except (OSError, ValueError) as error:
+            logging.getLogger("screensnap").error("清理图片缓存失败: %s", error, exc_info=True)
+            QMessageBox.warning(self, "清理缓存失败", str(error))
+            return
+        logging.getLogger("screensnap").info("设置页清理可重建缓存: %s", result)
+        QMessageBox.information(
+            self, "缓存清理完成",
+            "剪贴板历史：{clipboard_entries} 条；剪贴板图片：{clipboard_images} 张；"
+            "孤儿贴图缓存：{orphan_sticker_images} 张；Toast 缩略图：{toast_images} 张。"
+            .format(**result))

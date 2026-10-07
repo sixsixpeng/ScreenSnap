@@ -88,7 +88,7 @@ class StickerSelectionPreview(QWidget):
         area = QRectF(self.rect()).adjusted(1, 1, -1, -1)
         painter.fillRect(area, QColor("#edf2f4"))
         sticker = QRectF(area.center().x() - 54, area.center().y() - 23, 108, 46)
-        if self.config.data.get("sticker_shadow_enabled", True):
+        if self.config.data.get("sticker_shadow_enabled", False):
             shadow_strength = self.config.data.get("sticker_shadow_strength", 35)
             base = QColor(self.config.data.get("sticker_shadow_color", "#000000"))
             blur = max(2, round(shadow_strength * 0.4))

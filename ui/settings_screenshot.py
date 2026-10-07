@@ -126,7 +126,7 @@ class ScreenshotEffectPreview(QWidget):
             selected = area.adjusted(area.width() * 0.23, area.height() * 0.2,
                                      -area.width() * 0.23, -area.height() * 0.2)
             mask = QColor(self.config.data.get("mask_color", "#000000"))
-            mask.setAlpha(round(self.config.data.get("mask_opacity", 60) * 2.55))
+            mask.setAlpha(round(self.config.data.get("mask_opacity", 70) * 2.55))
             painter.fillRect(area, mask)
             painter.save()
             painter.setClipRect(selected)
@@ -379,15 +379,30 @@ class ScreenshotPage(SettingsPage):
         delay.setSingleStep(100)
         self.group("截图内容")
         self.check("cursor", "捕获鼠标", "把鼠标指针画进截图原图；系统光标无法读取时，开关前后结果可能相同")
+        self.choice("capture_gap_fill", "显示器间隙填充",
+                [("透明", "transparent"), ("纯黑", "black"), ("纯白", "white")],
+                "多显示器拼接时，虚拟桌面矩形中不属于任何显示器的区域如何填充；默认透明")
         self.group("截图后")
         self.check("inline_edit", "原地编辑",
                    rich_tooltip("原地编辑", "仅单屏单选区在截图位置编辑；多选区、跨屏选区或关闭此项时使用独立编辑器。"))
         self.choice("capture_after_selection", "截图确认后",
                     [("仅保存，不打开编辑器", "save"), ("进入编辑器", "edit"),
                      ("仅复制到剪贴板", "copy")],
-                    rich_tooltip("截图确认后", "Enter、左键双击或确认选区后执行的默认动作；\n"
-                                 "右键双击和快速保存始终直接保存，窗口编辑按钮始终可手动打开编辑器；\n"
-                                 "选择“仅复制到剪贴板”时不会落盘，也不进入编辑器，确认后直接把选区图片写入剪贴板。"))
+                    rich_tooltip("截图选区后的动作", "普通左键手绘区域松开后执行；UIA/悬停候选左键点击直接进入编辑；\n"
+                                 "右键拖拽进入收集态后可继续添加区域，按 Enter 或双击确认并进入编辑；\n"
+                                 "已有选区时普通右键双击始终直接保存；\n"
+                                 "单区域按原地编辑设置处理，多区域/跨屏进入独立编辑器。此右键流程不受本设置影响；\n"
+                                 "快速保存按键始终直接保存，窗口编辑按钮始终可手动打开编辑器；\n"
+                                 "选择“仅复制到剪贴板”时不会落盘，也不进入编辑器；全屏、当前显示器和上次区域动作可在下面分别配置。"))
+        self.choice("capture_fullscreen_action", "全屏截图后",
+                [("进入编辑器", "edit"), ("直接保存", "save")],
+                "全屏热键截取后自动进入编辑或保存，不再需要确认整屏选区")
+        self.choice("capture_monitor_action", "当前显示器截图后",
+                [("进入编辑器", "edit"), ("直接保存", "save")],
+                "当前显示器热键截取后自动进入编辑或保存，不再需要确认整屏选区")
+        self.choice("capture_repeat_action", "上次区域截图后",
+                [("进入编辑器", "edit"), ("直接保存", "save")],
+                "上次区域热键截取后自动进入编辑或保存；直接保存沿用原有输出、剪贴板和通知逻辑")
         self.group("截图快捷操作")
         self.check("capture_quick_sticker_enabled", "启用快速贴图快捷键",
                    "选好截图区域后按指定按键立即贴图，不进入编辑")
@@ -403,6 +418,11 @@ class ScreenshotPage(SettingsPage):
                        "放弃当前冻结画面，回到同一显示器重新框选（不保留当前标注）")
         self._shortcut("capture_window_edit_shortcut", "窗口编辑按键", "E",
                        "把当前选区送进独立编辑器窗口，使用完整工具栏编辑")
+        self._shortcut("capture_multi_select_shortcut", "多选编辑模式按键", "Alt+M",
+                   "选区阶段进入多选收集；原地编辑中按下会先按下方策略处理当前编辑，再继续选择")
+        self.choice("capture_multi_edit_action", "切换多选时处理编辑",
+                [("保存当前编辑", "save"), ("丢弃当前编辑", "discard")],
+                "原地编辑内容有修改时，无弹窗地按此设置保存或丢弃；未修改则直接继续")
         self._shortcut("capture_copy_shortcut", "仅复制按键", "Y",
                        "把整屏截图（有选区时取选区）写入剪贴板并关闭遮罩，不落盘、不进入编辑器")
         self._shortcut("capture_toolbar_hide_shortcut", "隐藏工具栏按键", "`",
@@ -545,7 +565,19 @@ class ScreenshotPage(SettingsPage):
                     "供 Tab 逐层切换；最内层的小控件（按钮、列表项）始终会保留，不受此值影响。\n"
                     "数值越大，Tab 能切换到的外层容器越多；1 只保留最内层控件本身，\n"
                 "32 为上限。默认 12 层；提高后可遍历更深的祖先链，但可能增加 Tab 切换候选。\n"
-                "UIA 命中后还会向下查找最多 24 层以寻找具体控件；此设置只控制向上保留的祖先层数")
+                "UIA 命中后还会向下查找最多 24 层以寻找具体控件；此设置只控制向上保留的祖先层数。\n"
+                "悬停高亮只取最内层元素，不读祖先链，因此不受此值影响")
+        self.number("window_hover_reuse_radius", "悬停结果复用半径 (px)", 0, 20,
+                    "光标仍停在上次识别出的元素内、且移动不超过这个距离时直接沿用高亮，不重复查询；\n"
+                    "0 表示每次都重新识别（更灵敏但查询更频繁）")
+        self.number("uia_read_budget", "UIA 读取预算", 60, 600,
+                    "单次悬停查询最多读取多少个控件的属性；网页或虚拟化列表子控件很多时，\n"
+                    "调小更顺滑、调大识别更准（更慢）")
+        self.number("uia_children_limit", "UIA 单层子控件上限", 32, 512,
+                    "一层最多枚举多少个子控件；越大越不容易漏掉靠后的列表项，但更慢")
+        self.number("uia_slow_seconds", "UIA 熔断阈值 (秒)", 0.1, 2.0,
+                    "单次查询超过这个秒数就暂停一会儿并退回窗口句柄识别；\n"
+                    "慢机器或复杂无障碍树可适当放宽")
         self.check("uia_debug_tree", "记录 UIA 结构诊断",
                    "开启后，每次 UIA 命中会在应用日志中记录目标控件的祖先链及父级下的组件子树（最多 60 个节点、向下 8 层，命中分支优先）。\n"
                "只记录名称、控件类型和屏幕矩形，不读取控件值；控件名称仍可能包含应用标题或文件名，请分享日志前先检查并在诊断后关闭。")
@@ -718,6 +750,7 @@ class ScreenshotPage(SettingsPage):
         sequence = QKeySequenceEdit(QKeySequence(self.config.data.get(key, default)))
         sequence.setMaximumSequenceLength(1)
         sequence.setToolTip(help_text)
+        sequence.setProperty("help_text", help_text)
         self.controls[key] = sequence
         self.form.addRow(label, sequence)
         sequence.keySequenceChanged.connect(
@@ -738,9 +771,33 @@ class ScreenshotPage(SettingsPage):
                 validate({key: text})
             except ValueError:
                 text = ""
+        if text:
+            from config.config_manager import CAPTURE_SHORTCUT_KEYS
+
+            candidate = QKeySequence(text).toString(QKeySequence.PortableText).casefold()
+            conflicts = [
+                other_key for other_key in CAPTURE_SHORTCUT_KEYS
+                if other_key != key
+                and self.config.data.get(other_key)
+                and QKeySequence(self.config.data[other_key]).toString(
+                    QKeySequence.PortableText).casefold() == candidate
+            ]
+            if conflicts:
+                fallback = self.config.data.get(key) or default
+                with QSignalBlocker(self.controls[key]):
+                    self.controls[key].setKeySequence(QKeySequence(fallback))
+                logging.getLogger("screensnap").info(
+                    "截图快捷键 %s 与 %s 冲突，已回滚为 %s",
+                    key, conflicts[0], fallback)
+                self.controls[key].setToolTip(
+                    f"{self.controls[key].property('help_text')}\n"
+                    f"此快捷键已由“{conflicts[0]}”使用；请输入未占用的按键")
+                return
         if not text:
             fallback = self.config.data.get(key) or default
-            self.controls[key].setKeySequence(QKeySequence(fallback))
+            with QSignalBlocker(self.controls[key]):
+                self.controls[key].setKeySequence(QKeySequence(fallback))
             logging.getLogger("screensnap").info("快捷键 %s 非法或为空，回滚为 %s", key, fallback)
             return
+        self.controls[key].setToolTip(self.controls[key].property("help_text"))
         self.update_value(key, text)

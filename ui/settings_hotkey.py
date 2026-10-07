@@ -3,9 +3,11 @@
 from PySide6.QtWidgets import QMessageBox, QWidget, QHBoxLayout, QPushButton, QStyle
 
 from core.constants import HOTKEY_LABELS
-from config.config_manager import DEFAULTS, canonical_hotkey
+from config.config_manager import CAPTURE_SHORTCUT_KEYS, DEFAULTS, canonical_hotkey
 from ui.widgets.hotkey_edit import HotkeyEdit
 from ui.widgets.tooltip import SettingsPage
+
+SCREENSHOT_HOTKEY_ACTIONS = CAPTURE_SHORTCUT_KEYS
 
 
 class HotkeyPage(SettingsPage):
