@@ -23,6 +23,7 @@ HINT_ITEMS = (
     ("drag_move", "拖动移动"),
     ("resize", "四角/边中点缩放"),
     ("select", "拖拽框选"),
+    ("element_cycle", "Tab 切换窗口/控件层级"),
     ("edit", "Enter/双击编辑"),
     ("nudge", "WASD/方向键微调"),
     ("cancel", "Esc 取消"),
@@ -32,9 +33,13 @@ HINT_ITEMS = (
     ("fixed_size", "自定义尺寸"),
     ("recapture", "重新截图"),
     ("window_edit", "窗口编辑"),
+    ("multi_select", "多选编辑模式"),
     ("copy", "仅复制"),
     ("toolbar_move", "移动原地编辑工具栏"),
     ("toolbar_hide", "隐藏/恢复原地编辑工具栏"),
+    ("inline_edit", "原地编辑：双击标注二次编辑/删除"),
+    ("inline_menu", "原地编辑：右键标注菜单"),
+    ("inline_history", "原地编辑：撤销/重做"),
 )
 HINT_ITEM_IDS = tuple(item_id for item_id, _label in HINT_ITEMS)
 HINT_LABELS = dict(HINT_ITEMS)
@@ -97,14 +102,14 @@ DEFAULTS = {
     "hotkeys_enabled": True,
     "start_on_boot": False,
     "hotkeys": {
-        "capture": "f1", "repeat": "ctrl+shift+f2", "fullscreen": "ctrl+shift+f1",
+        "capture": "f1", "repeat": "shift+f1", "fullscreen": "alt+f1",
         "monitor": "ctrl+f1", "paste": "f3",
-        "edit_clipboard": "ctrl+alt+v", "open_image": "ctrl+alt+o",
+        "edit_clipboard": "ctrl+alt+v", "open_image": "ctrl+alt+e",
         "previous": "ctrl+alt+left", "next": "ctrl+alt+right",
         "hide": "ctrl+shift+h", "close_all": "ctrl+shift+x",
         "touch": "ctrl+shift+t", "paste_clipboard": "ctrl+f3",
-        "open_sticker_file": "ctrl+alt+n",
-        "sticker_panel": "ctrl+alt+p",
+        "open_sticker_file": "shift+f3",
+        "sticker_panel": "alt+f3",
         "sticker_rotate_left": "ctrl+alt+shift+left",
         "sticker_rotate_right": "ctrl+alt+shift+right",
         "recycle_bin": "ctrl+alt+r",
@@ -114,23 +119,31 @@ DEFAULTS = {
     "theme": "system",
     "bubble": True, "notification_backend": "win11toast",
     "notification_timeout": 2,
-    "capture_notification": True, "save_notification": True,
-    "sticker_notification": True, "open_notification_file": True, "sound": False,
-    "auto_dir": "", "manual_dir": "",
+    "copy_notification": True,
+    "save_notification": True, "operation_notification": True,
+    "sticker_notification": True, "open_notification_file": True, "sound": True,
+    "save_dir": "",
     "archive_by_month": True, "archive_by_day": False,
+    # 缓存清理范围（逐类开关）与自动清理时机：off 只手动 / start 启动时 / exit 退出时。
+    "cache_clear_clipboard": True, "cache_clear_toast": True, "cache_clear_sticker": True,
+    "cache_cleanup_timing": "off",
     "inline_edit": True,
     "capture_after_selection": "edit",
+    "capture_fullscreen_action": "save",
+    "capture_monitor_action": "save",
+    "capture_repeat_action": "save",
+    "capture_gap_fill": "transparent",
     "filename": "ScreenSnap_%Y%m%d_%H%M%S", "open_dir": False,
     "copy_saved_image": True, "copy_saved_path": False,
     "save_format": "png", "save_quality": 90, "save_background": "#ffffff",
     "sticker_border_enabled": True, "sticker_border_color": "#168cff",
-    "sticker_border_width": 2, "sticker_shadow_enabled": True,
+    "sticker_border_width": 2, "sticker_shadow_enabled": False,
     "sticker_selection_effect_enabled": True,
     "sticker_selection_effect_strength": 30,
     "sticker_shadow_color": "#000000", "sticker_shadow_strength": 35,
     "sticker_background_mode": "transparent",
     "editor_image_round_corners": True, "editor_image_corner_radius": 16,
-    "rect_corner_enabled": False, "rect_corner_radius": 12,
+    "rect_corner_enabled": True, "rect_corner_radius": 12,
     "editor_image_border_enabled": False, "editor_image_border_width": 2,
     "editor_image_border_color": "#ffffff",
     "editor_image_shadow_enabled": False, "editor_image_shadow_size": 12,
@@ -138,11 +151,12 @@ DEFAULTS = {
     "capture_quick_sticker_enabled": True,
     "capture_quick_sticker_shortcut": "Space",
     "capture_save_shortcut": "S",
-    # 选区阶段的四个功能键：原先由遮罩上的按钮触发，按钮已移除，改为可配置快捷键。
-    # 都用单键（这几个功能只存在于主屏遮罩，不必用组合键，单键更快也不易漏按）。
+    # 截图遮罩操作键：改为可配置快捷键；多选模式默认 Alt+M。
     "capture_custom_size_shortcut": "F",
     "capture_recapture_shortcut": "R",
     "capture_window_edit_shortcut": "E",
+    "capture_multi_select_shortcut": "Alt+M",
+    "capture_multi_edit_action": "save",
     "capture_copy_shortcut": "Y",
     # 原地编辑工具栏的隐藏键：只靠快捷键触发，界面上不加隐藏/显示按钮。
     "capture_toolbar_hide_shortcut": "`",
@@ -157,11 +171,14 @@ DEFAULTS = {
     "sticker_snap_targets": "both", "sticker_follow_window": True,
     "sticker_follow_sticker": True,
     "sticker_follow_interval": 120,
-    "magnifier": True, "crosshair": True, "crosshair_color": "#000000", "crosshair_width": 1,
-    "mask_color": "#000000", "mask_opacity": 60,
-    "window_detection": True, "window_auto_select": False, "element_depth": 12,
+    "magnifier": True, "crosshair": True, "crosshair_color": "#ff0000", "crosshair_width": 1,
+    "mask_color": "#000000", "mask_opacity": 70,
+    "window_detection": True, "window_auto_select": False, "element_depth": 8,
     "window_hover_detect": True, "window_uia_detect": True,
     "uia_debug_tree": False,
+    # 悬停与 UIA 的性能参数：复用半径 0 表示每次都重新查询；预算/熔断给慢机器留出放宽空间。
+    "window_hover_reuse_radius": 4,
+    "uia_read_budget": 180, "uia_children_limit": 128, "uia_slow_seconds": 0.4,
     "window_hover_interval": 80, "window_hover_color": "#168cff",
     "window_hover_border_color": "#168cff",
     "window_hover_text_color": "#f4fffc",
@@ -169,7 +186,7 @@ DEFAULTS = {
     "window_hover_border_width": 2, "window_hover_font_size": 12,
     "window_hover_opacity": 35, "window_hover_fill_mode": "reveal",
     "anchor_style": "border", "selection_border_color": "#168cff",
-    "cursor": False, "history_limit": 100,
+    "cursor": False, "history_limit": 10,
     "last_capture_rect": [],
     "annotation_tool": "select", "text_alignment": "left", "arrow_style": "filled",
     "arrow_chain": False,
@@ -183,9 +200,23 @@ DEFAULTS = {
     "rect_fill_enabled": False, "rect_fill_opacity": 35, "rect_fill_color": "#ff0000",
     "ellipse_fill_enabled": False, "ellipse_fill_opacity": 35, "ellipse_fill_color": "#ff0000",
     "pen_width": 2, "rect_width": 2, "ellipse_width": 2, "arrow_width": 2,
-    "marker_width": 2, "eraser_width": 30, "pen_color": "#ff0000",
+    "marker_width": 4, "eraser_width": 30, "pen_color": "#ff0000",
+    "mosaic_cursor_color": "#00c853", "eraser_cursor_color": "#ff8c00",
     "crop_color": "#00ad91", "crop_width": 2,
     "editor_border_color": "#000000", "editor_border_width": 1,
+    # 编辑器透明像素（多屏间隙、擦除镂空、圆角外）的预览底色：只影响显示，不写入图片。
+    "editor_transparent_background": "theme",
+    # 编辑工具栏阴影光晕：小面积工具栏在接近底色的画面上会融进去，加一圈光晕便于定位。
+    "editor_toolbar_shadow_enabled": True,
+    "editor_toolbar_shadow_color": "#000000",
+    "editor_toolbar_shadow_strength": 60,
+    # 画布导航与标注交互的可调阈值（此前写死在 annotation_canvas 里）。
+    "editor_zoom_wheel_step": 10,
+    "editor_rotation_snap": 15,
+    "editor_overcanvas_mode": "clip",
+    "editor_rotation_handle": "center",
+    "editor_checker_tile_size": 8,
+    "editor_text_click_delay": 180,
     "marker_opacity": 38, "font": "", "font_size": 18,
     "line_spacing": 1.2, "mosaic_size": 10,
     "mosaic_mode": "blur", "mosaic_brush": True, "mosaic_width": 20,
@@ -217,10 +248,18 @@ DEFAULTS = {
     "sequence_shape": "circle", "sequence_text_color": "#ffffff",
     "sequence_fill_color": "#ff0000",     "sequence_preset": "custom",
     # 贴图：回收站
-    "sticker_recycle_enabled": True, "sticker_recycle_limit": 50,
+    "sticker_recycle_enabled": True, "sticker_recycle_limit": 10,
     "logging_enabled": True, "log_level": "INFO", "log_when": "midnight", "log_dir": "",
     "log_monthly_folder": True,
 }
+
+CAPTURE_SHORTCUT_KEYS = (
+    "capture_quick_sticker_shortcut", "capture_save_shortcut",
+    "capture_picker_shortcut", "capture_custom_size_shortcut",
+    "capture_recapture_shortcut", "capture_window_edit_shortcut",
+    "capture_multi_select_shortcut", "capture_copy_shortcut",
+    "capture_toolbar_hide_shortcut",
+)
 
 
 def _save_formats():
@@ -297,6 +336,9 @@ def validate(data):
         raise ValueError("配置必须是 JSON 对象")
     # 用默认值补齐旧版本配置，避免缺少新选项时界面访问失败。
     result = copy.deepcopy(DEFAULTS)
+    data = dict(data)
+    data.pop("auto_dir", None)
+    data.pop("manual_dir", None)
     if "archive_by_month" not in data and "archive_by_day" not in data:
         if "archive_images" in data:
             if type(data["archive_images"]) is not bool:
@@ -341,13 +383,52 @@ def validate(data):
             raise ValueError("编辑区边框颜色必须是六位十六进制颜色")
         elif key == "editor_border_width" and not 1 <= value <= 12:
             raise ValueError("编辑区边框宽度必须在 1 到 12 像素之间")
+        elif key == "editor_transparent_background" and value not in (
+                "theme", "transparent", "dark_checker", "light_checker"):
+            raise ValueError("未知的编辑器透明背景样式")
+        elif key == "editor_toolbar_shadow_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("工具栏阴影颜色必须是六位十六进制颜色")
+        elif key == "editor_toolbar_shadow_strength" and not 0 <= value <= 100:
+            raise ValueError("工具栏阴影强度必须在 0 到 100 之间")
+        # 数值键先判类型再比范围：repair/import_from 只捕获 ValueError，
+        # 直接拿字符串比范围会抛 TypeError 穿透逐键回退，导致整份配置加载失败。
+        elif key == "editor_zoom_wheel_step" and (
+                type(value) is not int or not 1 <= value <= 50):
+            raise ValueError("滚轮缩放步进必须是 1 到 50 之间的整数")
+        elif key == "editor_rotation_snap" and value not in (0, 5, 15, 45):
+            raise ValueError("旋转吸附角度只能是 0、5、15 或 45 度")
+        elif key == "editor_overcanvas_mode" and value not in ("clip", "block"):
+            raise ValueError("画布外标注处理只能是裁切或禁止移出")
+        elif key == "editor_rotation_handle" and value not in ("center", "top"):
+            raise ValueError("旋转按钮位置只能是标注中心或顶部外侧")
+        elif key == "editor_checker_tile_size" and (
+                type(value) is not int or not 4 <= value <= 32):
+            raise ValueError("透明棋盘格边长必须是 4 到 32 之间的整数")
+        elif key == "editor_text_click_delay" and (
+                type(value) is not int or not 60 <= value <= 400):
+            raise ValueError("文字单击等待必须是 60 到 400 之间的整数毫秒")
+        elif key == "window_hover_reuse_radius" and (
+                type(value) is not int or not 0 <= value <= 20):
+            raise ValueError("悬停结果复用半径必须是 0 到 20 之间的整数像素")
+        elif key == "uia_read_budget" and (
+                type(value) is not int or not 60 <= value <= 600):
+            raise ValueError("UIA 读取预算必须是 60 到 600 之间的整数")
+        elif key == "uia_children_limit" and (
+                type(value) is not int or not 32 <= value <= 512):
+            raise ValueError("UIA 单层子控件上限必须是 32 到 512 之间的整数")
+        elif key == "uia_slow_seconds" and (
+                type(value) not in (int, float) or not 0.1 <= value <= 2.0):
+            raise ValueError("UIA 熔断阈值必须是 0.1 到 2.0 之间的秒数")
+        elif key == "cache_cleanup_timing" and value not in ("off", "start", "exit"):
+            raise ValueError("自动清理缓存时机只能是关闭、启动时或退出时")
         elif key == "crop_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("裁剪框颜色必须是六位十六进制颜色")
         elif key == "crop_width" and not 1 <= value <= 12:
             raise ValueError("裁剪框线宽必须在 1 到 12 像素之间")
         elif key in ("capture_quick_sticker_shortcut", "capture_save_shortcut",
                      "capture_custom_size_shortcut", "capture_recapture_shortcut",
-                     "capture_window_edit_shortcut", "capture_copy_shortcut",
+                     "capture_window_edit_shortcut", "capture_multi_select_shortcut",
+                     "capture_copy_shortcut",
                      "capture_toolbar_hide_shortcut"):
             from PySide6.QtGui import QKeySequence
 
@@ -357,7 +438,7 @@ def validate(data):
             result[key] = sequence.toString(QKeySequence.PortableText)
         elif key in ("sticker_border_color", "sticker_shadow_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("贴图颜色必须是六位十六进制颜色")
-        elif key in ("pen_color", "rect_color", "ellipse_color", "arrow_color", "marker_color", "text_color", "text_background", "rect_fill_color", "ellipse_fill_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        elif key in ("pen_color", "rect_color", "ellipse_color", "arrow_color", "marker_color", "text_color", "text_background", "rect_fill_color", "ellipse_fill_color", "mosaic_cursor_color", "eraser_cursor_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("标注工具颜色必须是六位十六进制颜色")
         elif key in ("rect_fill_opacity", "ellipse_fill_opacity") and not 0 <= value <= 100:
             raise ValueError("形状填充不透明度必须在 0 到 100 之间")
@@ -458,8 +539,9 @@ def validate(data):
             continue
         elif key == "element_depth" and not 1 <= value <= 32:
             raise ValueError("窗口元素识别层级必须在 1 到 32 之间")
-        elif key in ("archive_by_month", "archive_by_day") and type(value) is not bool:
-            raise ValueError("图片归档开关必须是布尔值")
+        elif key in ("archive_by_month", "archive_by_day", "cache_clear_clipboard",
+                     "cache_clear_toast", "cache_clear_sticker") and type(value) is not bool:
+            raise ValueError("图片归档与缓存清理开关必须是布尔值")
         elif key == "window_hover_interval" and not 16 <= value <= 500:
             raise ValueError("悬停识别刷新间隔必须在 16 到 500 毫秒之间")
         elif key == "window_hover_opacity" and not 0 <= value <= 100:
@@ -495,6 +577,13 @@ def validate(data):
             raise ValueError("未知文字对齐方式")
         elif key == "capture_after_selection" and value not in ("save", "edit", "copy"):
             raise ValueError("截图选区后的行为必须是仅保存、进入编辑或仅复制")
+        elif key in ("capture_fullscreen_action", "capture_monitor_action",
+                     "capture_repeat_action") and value not in ("save", "edit"):
+            raise ValueError("全屏、显示器和上次截图的完成动作必须是保存或编辑")
+        elif key == "capture_gap_fill" and value not in ("transparent", "black", "white"):
+            raise ValueError("显示器间隙填充必须是透明、黑色或白色")
+        elif key == "capture_multi_edit_action" and value not in ("save", "discard"):
+            raise ValueError("进入多选前的编辑处理必须是保存或丢弃")
         elif key == "arrow_style" and value not in (
             "filled", "open", "dashed", "double_filled", "double_open", "double_dashed",
             "line", "dashed_line", "rect_filled", "rect_open", "rect_dashed",
@@ -529,6 +618,8 @@ def validate(data):
             raise ValueError("未知序号预设")
         elif key == "sequence_start" and not 0 <= value <= 999:
             raise ValueError("序号起始值必须在 0 到 999 之间")
+        elif key == "history_limit" and not 1 <= value <= 10000:
+            raise ValueError("历史图片数量必须在 1 到 10000 之间")
         elif key == "sticker_recycle_limit" and not 1 <= value <= 200:
             raise ValueError("贴图回收站上限必须在 1 到 200 之间")
         else:
@@ -536,6 +627,10 @@ def validate(data):
     bindings = [canonical_hotkey(binding) for binding in result["hotkeys"].values() if binding]
     if len(bindings) != len(set(bindings)):
         raise ValueError("快捷键冲突：不能为多个操作设置同一热键")
+    capture_bindings = [canonical_hotkey(result[key]) for key in CAPTURE_SHORTCUT_KEYS
+                        if result[key]]
+    if len(capture_bindings) != len(set(capture_bindings)):
+        raise ValueError("截图快捷键冲突：不能为多个截图操作设置同一按键")
     if result["archive_by_month"] and result["archive_by_day"]:
         raise ValueError("按月和按日归档不能同时开启")
     # 颜色值统一规范为小写，避免大小写不一致带来的比较/日志隐患（如 #168CFF 与 #168cff）。
@@ -563,15 +658,68 @@ def migrate_legacy_settings(data):
     if not isinstance(data, dict):
         return data
     migrated = dict(data)
+    old_auto_dir = migrated.pop("auto_dir", "")
+    old_manual_dir = migrated.pop("manual_dir", "")
+    if not migrated.get("save_dir"):
+        migrated["save_dir"] = old_auto_dir or old_manual_dir or ""
     for old_key, new_key in (
             ("capture_round_corners", "editor_image_round_corners"),
-            ("capture_corner_radius", "editor_image_corner_radius")):
+            ("capture_corner_radius", "editor_image_corner_radius"),
+            ("capture_notification", "copy_notification")):
         if old_key in migrated:
             migrated.setdefault(new_key, migrated[old_key])
             del migrated[old_key]
+    default_updates = {
+        "sound": (False, True),
+        "crosshair_color": ("#000000", "#ff0000"),
+        "element_depth": (12, 8),
+        "mask_opacity": (60, 70),
+        "history_limit": (100, 10),
+        "rect_corner_enabled": (False, True),
+        "sticker_shadow_enabled": (True, False),
+        "sticker_recycle_limit": (50, 10),
+        "marker_width": (2, 4),
+    }
+    for key, (old_default, new_default) in default_updates.items():
+        if migrated.get(key) == old_default:
+            migrated[key] = new_default
+    hotkeys = migrated.get("hotkeys")
+    if isinstance(hotkeys, dict):
+        hotkeys = dict(hotkeys)
+        for key, old_default, new_default in (
+                ("repeat", "ctrl+shift+f2", "shift+f1"),
+                ("fullscreen", "ctrl+shift+f1", "alt+f1"),
+                ("open_image", "ctrl+alt+o", "ctrl+alt+e"),
+                ("open_sticker_file", "ctrl+alt+n", "shift+f3"),
+                ("sticker_panel", "ctrl+alt+p", "alt+f3")):
+            if hotkeys.get(key) == old_default:
+                try:
+                    target = canonical_hotkey(new_default)
+                except ValueError:
+                    continue
+                occupied = set()
+                for name, binding in hotkeys.items():
+                    if name == key or not isinstance(binding, str) or not binding:
+                        continue
+                    try:
+                        occupied.add(canonical_hotkey(binding))
+                    except ValueError:
+                        continue
+                if target not in occupied:
+                    hotkeys[key] = new_default
+        migrated["hotkeys"] = hotkeys
     legacy = migrated.get("arrow_style")
     if legacy in ARROW_STYLE_LEGACY:
         migrated["arrow_style"] = ARROW_STYLE_LEGACY[legacy]
+    # 新加的原地编辑提示项：旧配置的 capture_hint_order 里没有它们。若列表仍是上一版
+    # 的完整默认（用户没自定义过），追加到末尾，升级后能直接看到；自定义过的列表不动，
+    # 也不会在用户取消勾选后再被追加回来。
+    order = migrated.get("capture_hint_order")
+    if isinstance(order, list):
+        new_items = ["inline_edit", "inline_menu", "inline_history"]
+        legacy_default = [item_id for item_id in HINT_ITEM_IDS if item_id not in new_items]
+        if order == legacy_default:
+            migrated["capture_hint_order"] = legacy_default + new_items
     return migrated
 
 
@@ -593,6 +741,12 @@ def repair(data):
             result["hotkeys"] = validate({"hotkeys": hotkeys})["hotkeys"]
         except ValueError:
             dropped.append("hotkeys")
+    try:
+        validate({key: result[key] for key in CAPTURE_SHORTCUT_KEYS})
+    except ValueError:
+        for key in CAPTURE_SHORTCUT_KEYS:
+            result[key] = DEFAULTS[key]
+        dropped.append("capture_shortcuts")
     return result, dropped
 
 
@@ -619,8 +773,10 @@ class ConfigManager:
             self.data = copy.deepcopy(DEFAULTS)
             return self.data
         loaded = None
+        raw = None
         try:
-            loaded = migrate_legacy_settings(json.loads(text))
+            raw = json.loads(text)
+            loaded = migrate_legacy_settings(raw)
             self.data = validate(loaded)
         except ValueError as error:
             backup = self.backup()
@@ -633,10 +789,14 @@ class ConfigManager:
                 logger.warning("配置文件无法解析，已备份到 %s 并全部回退默认值: %s", backup, error)
             self.save_safely()
             return self.data
-        if self.data != loaded:
+        migrated = loaded != raw
+        if self.data != loaded or migrated:
             missing = sorted(set(self.data) - set(loaded))
             self.save_safely()
-            logger.info("配置缺少 %d 项，已用默认值补齐: %s", len(missing), "、".join(missing[:5]))
+            if missing:
+                logger.info("配置缺少 %d 项，已用默认值补齐: %s", len(missing), "、".join(missing[:5]))
+            elif migrated:
+                logger.info("已迁移旧版配置并保存: %s", self.path)
         logger.debug("已加载配置: %s", self.path)
         return self.data
 
