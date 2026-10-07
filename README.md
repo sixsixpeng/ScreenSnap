@@ -592,7 +592,7 @@ Windows 图片提示优先使用带缩略图的原生图片 Toast；无法导入
 
 程序图标 `icon.ico` / `icon.png` 与 checkbox 勾号、radio 圆点 SVG 统一放在 `ui/assets`；`core/app_icon.py` 在源码模式按模块路径、PyInstaller 模式按 `sys._MEIPASS/ui/assets` 读取。打包时将整个 `ui/assets` 目录作为一项资源加入。Windows 下 `--add-data` 分隔符为 `;`，其他平台为 `:`。
 
-推荐在 PowerShell 中于项目根目录执行（先激活 `.venv`）：
+仓库根目录的 [`build.bat`](build.bat) 是自动脚本：检测 Python → 创建/修复 `.venv` → 安装 `requirements.txt` → 让你选择下面 4 种方式之一（已内置 `--clean --noconfirm`），与手写命令等价；构建完会打印产物位置并提示在目标环境验收。手动执行时推荐在 PowerShell 中于项目根目录进行（先激活 `.venv`）：
 
 ```powershell
 # 1) 带控制台 + 单文件：便于排错，启动慢、单一 exe 便于分发
@@ -618,6 +618,10 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 
 构建产物在 `dist/ScreenSnap`（目录模式）或 `dist/ScreenSnap.exe`（单文件模式）。增量构建建议加 `--clean` 避免旧缓存干扰。Windows 全局热键、原生 Toast 与混合 DPI 等仍应在目标 Windows 环境最终验收；源码测试通过不能代替真实桌面打包验收。
 
+打包不需要额外收集模块：`main.py` 对 `core` / `config` / `editor` / `screenshot` / `sticker` / `ui` / `app` 全部使用静态绝对导入，PyInstaller 能自动跟进（项目刻意不使用 `importlib` 动态导入）；除 `ui/assets` 外没有其它运行时数据文件，因此不需要 `--hidden-import` 或额外的 `--add-data`。
+
+`RELEASE_NOTES.md` 是**发布更新说明的来源**：按功能分节列出用户可见变更，只随发布一起附给用户，不打进安装包，也不提交进仓库（保持未跟踪）。
+
 ## 已知限制
 
 - 全局快捷键依赖 Windows 键盘钩子；前后台进程权限等级不一致时，热键可能无法生效。先检查"设置 > 快捷键"绑定和总开关，再让程序与目标窗口以相同权限运行。
@@ -632,6 +636,9 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
   - `uia_read_budget`（读取预算）**维持默认 180 未下调**：实测可降到 60–96 换取更顺滑，但与「悬停结果复用半径」同时下调到 8+96 时，`capture` 整批 58 条在单进程离屏运行下会原生崩溃（`window_hover_reuse_radius=8` 或 `uia_read_budget=96` 任一单独存在都通过，分块跑也全过），需另行定位后再改默认值；现阶段可在设置里手动调整。
   - 本轮新增的 14 个配置项补齐详细悬浮说明：写清作用、调大/调小各自的代价、风险与建议值，UIA 段直接写入实测数据，便于按机器自行取舍。
   - 新增限频 DEBUG 耗时日志（遮罩重绘、UIA 查询各一条，5 秒窗口的平均/峰值/次数）：仅 DEBUG 级别输出、每 5 秒最多一行，不影响正常使用与打包。
+- **打包文档**
+  - 打包章节补充 [`build.bat`](build.bat) 自动脚本说明（四种模式、内置 `--clean --noconfirm`、产物位置与验收提示）。
+  - 说明打包无需 `--hidden-import`／额外 `--add-data`（全部静态绝对导入、运行时数据只有 `ui/assets`），并明确 `RELEASE_NOTES.md` 只作发布说明、不入库也不打进包。
 ### 2026-10-07 UIA 识别性能优化（读取预算 + 增量取子控件 + 悬停结果复用）
 
 - **下钻读取预算**：`deepest_at` 之前对每层容器的**全部子控件**逐个读矩形，网页/虚拟化列表子控件上千时，一次悬停查询会卡几百毫秒。新增 `PROPERTY_READ_BUDGET=180` 的总读取预算，预算用尽立即返回当前最优候选，单次查询耗时上限可控。
