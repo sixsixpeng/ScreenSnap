@@ -61,14 +61,28 @@ def native_cursor():
             win32gui.DeleteObject(color_handle)
 
 
-def capture(cursor=False, alternatives=False):
-    """返回虚拟桌面像素、物理边界及显示器列表，可选光标反向版本。"""
+def capture(cursor=False, alternatives=False, gap_fill="transparent"):
+    """按显示器合成虚拟桌面；屏幕间隙可透明、纯黑或纯白。"""
     with mss.mss(with_cursor=False) as grabber:
-        # monitors[0] 包含整个虚拟桌面，包括负坐标和显示器间的空隙。
+        # monitors[0] 是虚拟桌面边界；逐屏抓取以避免 MSS 把屏幕间隙烘焙为实色。
         bounds = dict(grabber.monitors[0])
-        shot = grabber.grab(bounds)
-        image = Image.frombytes("RGB", shot.size, shot.rgb)
         monitors = [dict(monitor) for monitor in grabber.monitors[1:]]
+        # 显示器之间的虚拟桌面空隙不属于任何一块屏，按设置填透明/纯黑/纯白；
+        # 逐屏 alpha_composite 到同一张 RGBA 画布，避免 MSS 把空隙烘焙成实色。
+        gap_colors = {
+            "transparent": (0, 0, 0, 0),
+            "black": (0, 0, 0, 255),
+            "white": (255, 255, 255, 255),
+        }
+        fill = gap_colors.get(gap_fill, gap_colors["transparent"])
+        image = Image.new("RGBA", (bounds["width"], bounds["height"]), fill)
+        for monitor in monitors:
+            shot = grabber.grab(monitor)
+            screen = Image.frombytes("RGB", shot.size, shot.rgb).convert("RGBA")
+            image.alpha_composite(
+                screen,
+                (monitor["left"] - bounds["left"],
+                 monitor["top"] - bounds["top"]))
     logger = logging.getLogger("screensnap")
     logger.debug("捕获虚拟桌面: %sx%s，显示器 %d 个", image.width, image.height, len(monitors))
     with_pointer = image.copy()

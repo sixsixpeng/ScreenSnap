@@ -15,15 +15,15 @@ def captures_dir():
     return Path.home() / "Pictures" / "ScreenSnap"
 
 
-def configured_dir(config, key):
-    """返回未应用归档日期的自动或手动保存根目录。"""
-    default = captures_dir() / ("Auto" if key == "auto_dir" else "Manual")
-    return Path(config.get(key) or default).expanduser()
+def configured_dir(config):
+    """返回统一的图片保存根目录。"""
+    default = captures_dir()
+    return Path(config.get("save_dir") or default).expanduser()
 
 
-def resolved_dir(config, key, today=None):
-    """按设置返回自动或手动保存目录，并可追加年月/日期归档子目录。"""
-    directory = configured_dir(config, key)
+def resolved_dir(config, today=None):
+    """按统一目录与归档设置返回图片保存位置。"""
+    directory = configured_dir(config)
     archive_by_day = config.get("archive_by_day")
     archive_by_month = config.get("archive_by_month")
     if archive_by_day is None and archive_by_month is None:

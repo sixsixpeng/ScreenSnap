@@ -81,6 +81,21 @@ class SelectionRects:
         self.start = QPoint(point)
         self.active = QRect(point, point)
 
+    def begin_new(self, point):
+        """无论起点是否落在旧选区上，都开始创建一个新选区。"""
+        # 新建选区前清掉拖动/缩放/微调等旧交互状态，避免上一次的锚点继续参与运算。
+        self.dragging = None
+        self.drag_origin = None
+        self.resizing = None
+        self.resize_anchor = None
+        self.resize_point = None
+        self.resize_axis = None
+        self.resize_original = None
+        self.nudge_corner = None
+        self.nudge_index = None
+        self.start = QPoint(point)
+        self.active = QRect(point, point)
+
     def update(self, point, x_edges=(), y_edges=()):
         """根据当前交互状态修改已有选区，或吸附新建选区的末端。"""
         if self.resizing is not None:
