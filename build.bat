@@ -43,7 +43,7 @@ if errorlevel 1 goto failed
 
 python -m PyInstaller --version >nul 2>&1
 if errorlevel 1 goto no_pyinstaller
-echo [2/4] 依赖就绪，PyInstaller 版本：
+echo 依赖就绪，已安装 PyInstaller 版本：
 python -m PyInstaller --version
 
 :: ---------- 4. 选择打包方式 ----------
@@ -70,6 +70,7 @@ goto choose_mode
 :build_console_onefile
 echo.
 echo [3/4] 打包：带控制台 + 单文件（--console --onefile）
+call :clean_output
 python -m PyInstaller --name ScreenSnap --console --onefile --clean --noconfirm --icon ui/assets/icon.ico --add-data "ui/assets;ui/assets" main.py
 if errorlevel 1 goto failed
 set "RESULT=dist\ScreenSnap.exe"
@@ -78,6 +79,7 @@ goto build_done
 :build_console_onedir
 echo.
 echo [3/4] 打包：带控制台 + 目录（--console --onedir）
+call :clean_output
 python -m PyInstaller --name ScreenSnap --console --onedir --clean --noconfirm --icon ui/assets/icon.ico --add-data "ui/assets;ui/assets" main.py
 if errorlevel 1 goto failed
 set "RESULT=dist\ScreenSnap\ScreenSnap.exe"
@@ -86,6 +88,7 @@ goto build_done
 :build_windowed_onefile
 echo.
 echo [3/4] 打包：不带控制台 + 单文件（--windowed --onefile）
+call :clean_output
 python -m PyInstaller --name ScreenSnap --windowed --onefile --clean --noconfirm --icon ui/assets/icon.ico --add-data "ui/assets;ui/assets" main.py
 if errorlevel 1 goto failed
 set "RESULT=dist\ScreenSnap.exe"
@@ -94,10 +97,18 @@ goto build_done
 :build_windowed_onedir
 echo.
 echo [3/4] 打包：不带控制台 + 目录（--windowed --onedir）
+call :clean_output
 python -m PyInstaller --name ScreenSnap --windowed --onedir --clean --noconfirm --icon ui/assets/icon.ico --add-data "ui/assets;ui/assets" main.py
 if errorlevel 1 goto failed
 set "RESULT=dist\ScreenSnap\ScreenSnap.exe"
 goto build_done
+
+:: ---------- 打包前清理旧产物 ----------
+:clean_output
+echo [清理] 删除上一次的构建产物（避免目录模式与单文件模式互相残留）...
+if exist "dist\ScreenSnap.exe" del /q "dist\ScreenSnap.exe" >nul 2>&1
+if exist "dist\ScreenSnap\" rmdir /s /q "dist\ScreenSnap" >nul 2>&1
+goto :eof
 
 :: ---------- 完成 ----------
 :build_done
