@@ -31,6 +31,34 @@ SLOW_SECONDS = 0.4
 SLOW_COOLDOWN_SECONDS = 1.0
 # 可由设置覆盖的三项性能参数（下钻读取预算 / 单层子控件上限 / 熔断阈值）；
 # 进程内全局生效，遮罩打开时按当前设置刷新一次，见 mask_window._apply_uia_limits。
+# 查询耗时统计（累计秒、次数、峰值秒）与上次输出时刻，由 _record_query_cost 限频输出。
+_uia_cost_stats = [0.0, 0, 0.0]
+_last_cost_log_at = 0.0
+# 耗时日志的节流间隔（秒）：5 秒才输出一行，不属于高频刷屏。
+COST_LOG_INTERVAL = 5.0
+
+
+def _record_query_cost(cost, now, logger, deepest_only):
+    """限频 DEBUG 记录一次 UIA 查询耗时（窗口内平均/峰值/次数）。
+
+    刻意不在这里调用 time.monotonic：熔断用例会用固定序列打桩
+    core.window_uia.time.monotonic，而补丁打的是 time 模块对象本身，多一次调用
+    就会把序列消费歪。因此复用调用方算 cost 时的那个时刻（started + cost）做限频。
+    """
+    global _last_cost_log_at
+    stats = _uia_cost_stats
+    stats[0] += cost
+    stats[1] += 1
+    stats[2] = max(stats[2], cost)
+    if _last_cost_log_at and now - _last_cost_log_at < COST_LOG_INTERVAL:
+        return
+    _last_cost_log_at = now
+    logger.debug("UIA 查询耗时(%.0fs窗口): 平均=%.1fms 峰值=%.1fms 次数=%d 最内层=%s",
+                 COST_LOG_INTERVAL, stats[0] / stats[1] * 1000, stats[2] * 1000,
+                 stats[1], deepest_only)
+    stats[0], stats[1], stats[2] = 0.0, 0, 0.0
+
+
 _limits = {"read_budget": PROPERTY_READ_BUDGET,
            "children_limit": CHILDREN_FETCH_LIMIT,
            "slow_seconds": SLOW_SECONDS}
@@ -284,6 +312,7 @@ def element_chain(point, max_depth=3, exclude_hwnd=None, debug_tree=False,
                      deepest_only)
     finally:
         cost = time.monotonic() - started
+        _record_query_cost(cost, started + cost, logger, deepest_only)
         if cost > _limits["slow_seconds"]:
             _disabled_until = time.monotonic() + SLOW_COOLDOWN_SECONDS
             logger.warning("UIA 查询耗时 %.2f 秒，暂停 %.1f 秒后重试",

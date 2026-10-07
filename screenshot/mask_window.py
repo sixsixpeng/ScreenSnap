@@ -997,6 +997,9 @@ class MaskWindow(QWidget):
         self.resize_cursor = "nwse"
         # UIA 的读取预算/子控件上限/熔断阈值按当前设置生效（进程内全局，开遮罩时刷新一次）。
         self._apply_uia_limits()
+        # 重绘耗时统计（累计秒、次数、峰值秒）与上次输出时刻，由 _record_paint_cost 限频输出。
+        self.paint_cost_stats = [0.0, 0, 0.0]
+        self.paint_cost_log_at = 0.0
         # 鼠标悬停识别出的元素矩形（bounds 局部物理坐标）与上次检测时刻。
         self.hover_rect = None
         self.hover_stamp = 0.0
@@ -1824,8 +1827,28 @@ class MaskWindow(QWidget):
                   int(self.settings.get("mask_opacity", 70)))
         return pixmap
 
+    def _record_paint_cost(self, cost, now):
+        """限频 DEBUG 记录遮罩重绘耗时（5 秒窗口的平均/峰值/次数）。
+
+        用于在实机上确认「每次鼠标移动整窗重绘」的真实成本，作为是否做局部重绘的依据；
+        5 秒才输出一行，不属于高频刷屏。
+        """
+        stats = self.paint_cost_stats
+        stats[0] += cost
+        stats[1] += 1
+        stats[2] = max(stats[2], cost)
+        if self.paint_cost_log_at and now - self.paint_cost_log_at < 5.0:
+            return
+        self.paint_cost_log_at = now
+        logging.getLogger("screensnap").debug(
+            "遮罩重绘耗时(5s窗口): 平均=%.1fms 峰值=%.1fms 次数=%d 窗口=%dx%d 悬停=%s",
+            stats[0] / stats[1] * 1000, stats[2] * 1000, stats[1],
+            self.width(), self.height(), self.hover_rect is not None)
+        self.paint_cost_stats = [0.0, 0, 0.0]
+
     def paintEvent(self, event):
         """遮罩、锚点和 HUD 仅绘制在窗口表面，不写入原始截图。"""
+        started = time.perf_counter()
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.drawPixmap(0, 0, self.mask_background_pixmap())
@@ -1914,6 +1937,8 @@ class MaskWindow(QWidget):
                 painter.drawRect(self.to_logical_rect(clipped))
                 painter.setBrush(Qt.NoBrush)
         self._draw_ruler(painter)
+        ended = time.perf_counter()
+        self._record_paint_cost(ended - started, ended)
 
     def _draw_ruler(self, painter):
         """在遮罩边缘绘制像素标尺（顶部/右侧仅短线，底部/左侧带数值），帮助定位。"""
