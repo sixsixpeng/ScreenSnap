@@ -4,7 +4,7 @@ import logging
 import math
 
 from PIL import Image, ImageFilter
-from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, Signal
+from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, Signal, QTimer
 from PySide6.QtGui import (QBrush, QPainter, QPainterPath, QPen, QColor, QPixmap, QImage,
                              QPolygonF, QPainterPathStroker, QTextBlockFormat,
                              QTextCursor, QTransform, QCursor, QKeySequence)
@@ -12,6 +12,7 @@ from PySide6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, QGra
                                QGraphicsRectItem, QGraphicsEllipseItem,
                                QGraphicsTextItem, QDialog, QMenu, QToolTip)
 
+from core.constants import checker_tile_size
 from core.screen_capture import to_qimage
 from config.config_manager import TOOL_WIDTH_KEYS
 from editor.annotation_items import (shape, text_item, editable, RoundedRectItem,
@@ -23,6 +24,11 @@ from editor.annotation_items import (shape, text_item, editable, RoundedRectItem
 
 # 直线/折线模式下单段最短位移（像素），低于此值视为“未确定第二点”，不绘制。
 STRAIGHT_MIN_DISTANCE = 3
+
+# 文字工具单击后等多久才弹输入框（毫秒）。文字框是模态的、会吃掉双击第二拍，所以必须留出
+# 一段“可能还在双击”的窗口；但系统双击间隔（Windows 默认约 400ms）体感太长，这里取更短上限：
+# 比该窗口更快的双击会被判为“保存”，更慢的“双击”会先弹框、第二拍落到输入框里。
+TEXT_CLICK_COMMIT_MS = 180
 
 
 def shape_constraint_active(modifiers):
@@ -98,13 +104,11 @@ class AnnotationCanvas(QGraphicsView):
         self.scene_data.addItem(self.base)
         self.round_corner_preview = False
         self.corner_radius = settings.get("editor_image_corner_radius", 16)
-        checker = QPixmap(12, 12)
-        checker.fill(QColor("#ffffff"))
-        checker_painter = QPainter(checker)
-        checker_painter.fillRect(0, 0, 6, 6, QColor("#d8d8d8"))
-        checker_painter.fillRect(6, 6, 6, 6, QColor("#d8d8d8"))
-        checker_painter.end()
-        self.corner_preview_brush = QBrush(checker)
+        # 透明像素（多屏间隙、擦除镂空、圆角外）统一用棋盘格预览，样式跟随“透明图像背景”。
+        self.corner_preview_brush = self.transparent_checker_brush()
+        # theme 模式的棋盘格取自 QPalette.Base；记下生成笔刷时的底色，
+        # 调色板变化（换主题、宿主改调色板）后要在绘制时重建。
+        self._checker_palette_base = self.palette().base().color()
         self.refresh_image()
         self.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
@@ -113,6 +117,13 @@ class AnnotationCanvas(QGraphicsView):
         self.setAlignment(Qt.AlignCenter)
         self.setDragMode(QGraphicsView.RubberBandDrag)
         self.tool = "select"
+        # 文字工具的双击判定：输入框是模态的，先等一小段判定窗口再弹，双击才能改成保存。
+        self._pending_text_point = None
+        self._text_click_timer = QTimer(self)
+        self._text_click_timer.setSingleShot(True)
+        self._text_click_timer.timeout.connect(self._commit_text_click)
+        # 序号工具刚落下的那一颗：双击表示保存时要把它撤掉，避免留下多余序号。
+        self._last_number_click = None
         self._picker_cursor = self._create_picker_cursor()
         self._picker_pressed_cursor = self._create_picker_cursor(pressed=True)
         # 工具字形光标按 (工具, 颜色, 是否按下) 惰性构建并缓存；左键按下时切换按下态。
@@ -168,52 +179,68 @@ class AnnotationCanvas(QGraphicsView):
         self.history = [(self.image, self.alternate, self.cursor_enabled, [])]
         self.cursor_index = 0
         self.zoom_percent = 100
+        # Ctrl+滚轮缩放只在窗口编辑器启用（原地编辑画布太小、也没有缩放控件可复位）。
+        self.wheel_zoom_enabled = False
 
     @staticmethod
     def _create_picker_cursor(pressed=False):
-        """创建轮廓清晰的滴管光标；按下时在取样尖端显示反馈环。"""
+        """创建标准斜置滴管光标；球泡在左上，吸头朝右下。"""
         pixmap = QPixmap(32, 32)
         pixmap.fill(Qt.transparent)
         painter = QPainter(pixmap)
         painter.setRenderHint(QPainter.Antialiasing)
-        body = QPainterPath(QPointF(4, 29))
-        body.lineTo(8, 25)
-        body.lineTo(21, 12)
-        body.lineTo(26, 17)
-        body.lineTo(13, 30)
-        body.lineTo(7, 31)
+        body = QPainterPath()
+        body.moveTo(8, 8)
+        body.lineTo(11, 5)
+        body.lineTo(26, 20)
+        body.lineTo(23, 25)
         body.closeSubpath()
-        painter.setPen(QPen(QColor(CURSOR_OUTLINE_LIGHT), 4.5,
+        painter.setPen(QPen(QColor(CURSOR_OUTLINE_LIGHT), 4.6,
                             Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
         painter.setBrush(Qt.NoBrush)
         painter.drawPath(body)
         painter.setPen(QPen(QColor(CURSOR_OUTLINE_DARK), 1.8,
                             Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.setBrush(QColor("#e7eef0"))
+        painter.setBrush(QColor("#d8edf1"))
         painter.drawPath(body)
-        painter.setPen(QPen(QColor("#71858c"), 1.2, Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(QPointF(9, 25), QPointF(21, 13))
-        painter.setPen(QPen(QColor(CURSOR_OUTLINE_DARK), 1.6,
+        painter.setPen(QPen(QColor("#71858c"), 1.1, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(13, 9), QPointF(23, 19))
+        # The rubber bulb/cap makes the implement read as a dropper, not a blade.
+        cap = QPainterPath()
+        cap.addRoundedRect(QRectF(3.5, 3.5, 9, 8), 3.5, 3.5)
+        painter.setPen(QPen(QColor(CURSOR_OUTLINE_LIGHT), 4.0,
                             Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.setBrush(QColor("#31a98f"))
-        painter.drawRoundedRect(QRectF(21, 5, 7, 7), 2, 2)
-        painter.setPen(QPen(QColor(CURSOR_OUTLINE_LIGHT), 1.2,
-                            Qt.SolidLine, Qt.RoundCap))
-        painter.drawLine(QPointF(23, 8), QPointF(26, 8))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(cap)
+        painter.setPen(QPen(QColor(CURSOR_OUTLINE_DARK), 1.7,
+                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(QColor("#24b88a"))
+        painter.drawPath(cap)
+        painter.setPen(QPen(QColor("#e8fff6"), 1.0, Qt.SolidLine, Qt.RoundCap))
+        painter.drawLine(QPointF(6, 5.5), QPointF(9, 5.5))
+        tip = QPainterPath(QPointF(23, 23))
+        tip.lineTo(29, 29)
+        painter.setPen(QPen(QColor(CURSOR_OUTLINE_LIGHT), 4.0,
+                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(tip)
+        painter.setPen(QPen(QColor(CURSOR_OUTLINE_DARK), 1.8,
+                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(tip)
         if pressed:
             painter.setBrush(Qt.NoBrush)
             painter.setPen(QPen(QColor(CURSOR_OUTLINE_LIGHT), 3.4))
-            painter.drawEllipse(QPointF(5, 27), 3.8, 3.8)
+            painter.drawEllipse(QPointF(28, 28), 3.8, 3.8)
             painter.setPen(QPen(QColor("#087a68"), 1.6))
-            painter.drawEllipse(QPointF(5, 27), 3.8, 3.8)
+            painter.drawEllipse(QPointF(28, 28), 3.8, 3.8)
         painter.setPen(QPen(QColor(CURSOR_OUTLINE_DARK), 1.2))
         painter.setBrush(QColor("#31a98f"))
-        painter.drawEllipse(QPointF(5, 27), 1.8, 1.8)
+        painter.drawEllipse(QPointF(28, 28), 1.8, 1.8)
         painter.end()
-        return QCursor(pixmap, 5, 27)
+        return QCursor(pixmap, 28, 28)
 
     @staticmethod
-    def _create_tool_cursor(tool, color, pressed=False):
+    def _create_tool_cursor(tool, color, pressed=False, fill_color=None,
+                            fill_opacity=0):
         """绘制绘制类工具的字形光标。
 
         位图为 32×32 逻辑像素、透明底：先以浅色画粗描边作衬底，再以深青描边勾形，
@@ -289,7 +316,20 @@ class AnnotationCanvas(QGraphicsView):
                 body.addRoundedRect(QRectF(9, 6, 19, 19), 2.5, 2.5)
             else:
                 body.addEllipse(QRectF(9, 6, 19, 19))
-            stroke_and_fill(body, Qt.NoBrush)
+            fill = QColor(fill_color) if fill_color else QColor(ink)
+            fill.setAlpha(round(max(0, min(100, fill_opacity)) * 255 / 100)
+                           if fill_color else 0)
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(fill if fill.alpha() else Qt.NoBrush)
+            painter.drawPath(body)
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(light, 4.2, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(body)
+            painter.setPen(QPen(dark, 2.4, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.drawPath(body)
+            painter.setPen(QPen(ink, 1.35, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(body)
             painter.setBrush(light)
             painter.setPen(QPen(dark, 1.2))
             painter.drawEllipse(QPointF(6, 26), 1.8, 1.8)
@@ -329,10 +369,18 @@ class AnnotationCanvas(QGraphicsView):
 
     def _tool_cursor(self, tool, pressed=False):
         color = self._current_cursor_color()
-        key = (tool, color, bool(pressed))
+        fill_color = None
+        fill_opacity = 0
+        if tool in ("rect", "ellipse"):
+            if self.settings.get(f"{tool}_fill_enabled", False):
+                fill_color = QColor(self.settings.get(
+                    f"{tool}_fill_color", color)).name()
+                fill_opacity = int(self.settings.get(f"{tool}_fill_opacity", 35))
+        key = (tool, color, bool(pressed), fill_color, fill_opacity)
         cursor = self._tool_cursor_cache.get(key)
         if cursor is None:
-            cursor = self._create_tool_cursor(tool, color, pressed)
+            cursor = self._create_tool_cursor(tool, color, pressed,
+                                              fill_color, fill_opacity)
             if len(self._tool_cursor_cache) >= 64:
                 self._tool_cursor_cache.clear()
             self._tool_cursor_cache[key] = cursor
@@ -352,6 +400,19 @@ class AnnotationCanvas(QGraphicsView):
                 self.setCursor(self._picker_pressed_cursor if pressed
                                else self._picker_cursor)
             return
+        if self.tool in ("eraser", "mosaic"):
+            circle_color = self.settings.get(f"{self.tool}_cursor_color",
+                                             "#ff8c00" if self.tool == "eraser" else "#00c853")
+            key = (self.tool, circle_color,
+                   self.settings.get("eraser_width" if self.tool == "eraser" else "mosaic_width"),
+                   bool(self.settings.get("mosaic_brush", True)))
+            if key != self._applied_cursor_key:
+                self._applied_cursor_key = key
+                if self.tool == "eraser" or self.settings.get("mosaic_brush", True):
+                    self.setCursor(Qt.BlankCursor)
+                else:
+                    self.unsetCursor()
+            return
         if self.tool not in TOOL_CURSOR_TOOLS:
             return
         pressed = bool(self._left_button_down) and self.tool != "text"
@@ -362,7 +423,7 @@ class AnnotationCanvas(QGraphicsView):
 
     def refresh_tool_cursor(self):
         """标注颜色等设置变化后，作废当前工具的光标缓存并重建。"""
-        if self.tool not in TOOL_CURSOR_TOOLS:
+        if self.tool not in TOOL_CURSOR_TOOLS + ("eraser", "mosaic"):
             return
         for key in [item for item in self._tool_cursor_cache if item[0] == self.tool]:
             self._tool_cursor_cache.pop(key, None)
@@ -378,12 +439,17 @@ class AnnotationCanvas(QGraphicsView):
         if self.tool in TOOL_CURSOR_TOOLS or self.tool == "picker":
             self._applied_cursor_key = None
             self._apply_tool_cursor()
+        elif self.tool in ("eraser", "mosaic"):
+            self._applied_cursor_key = None
+            self._apply_tool_cursor()
         else:
             self.unsetCursor()
 
     def set_tool(self, tool):
         """切换标注工具并同步其专属光标。"""
         if tool != self.tool:
+            self._cancel_pending_text()
+            self._last_number_click = None
             self.chain_active = False
             self.start = None
             self.preview_end = None
@@ -392,7 +458,7 @@ class AnnotationCanvas(QGraphicsView):
         self.tool = tool
         self._left_button_down = False
         self._applied_cursor_key = None
-        if tool in TOOL_CURSOR_TOOLS or tool == "picker":
+        if tool in TOOL_CURSOR_TOOLS or tool in ("picker", "eraser", "mosaic"):
             self._apply_tool_cursor()
         else:
             self.unsetCursor()
@@ -404,6 +470,67 @@ class AnnotationCanvas(QGraphicsView):
         if self.tool in ("pen", "marker"):
             return bool(self.settings.get(f"{self.tool}_chain", False))
         return False
+
+    def _activate_click_tool(self, tool, point):
+        """吸管/文字/序号这类单击生效的工具：按下即执行，双击按“保存”处理。
+
+        序号立即落下，双击时撤销这一拍刚落的序号；文字输入框是模态的会挡住第二拍，
+        因此延后一小段判定窗口（TEXT_CLICK_COMMIT_MS）再弹出，双击时取消弹框并改为保存。
+        """
+        if tool == "picker":
+            x, y = int(point.x()), int(point.y())
+            if 0 <= x < self.image.width and 0 <= y < self.image.height:
+                self.color_picked.emit(
+                    "#%02x%02x%02x" % self.image.convert("RGB").getpixel((x, y)))
+            return
+        if tool == "text":
+            self._pending_text_point = QPointF(point)
+            # 等待窗口可配置，但仍不超过系统双击间隔，否则双击会被判成“已弹出输入框”。
+            self._text_click_timer.start(min(
+                QApplication.doubleClickInterval(),
+                int(self.settings.get("editor_text_click_delay", TEXT_CLICK_COMMIT_MS))))
+            return
+        if tool == "number":
+            item = AnnotationSequenceItem(
+                self.next_sequence_number(),
+                self.settings.get("sequence_fill_color", "#ff0000"),
+                self.settings.get("sequence_text_color", "#ffffff"),
+                self.settings.get("sequence_font_size", 14),
+                self.settings.get("sequence_shape", "circle"),
+                self.settings.get("font", ""), point)
+            self._add_annotation(item)
+            self.checkpoint()
+            self._last_number_click = item
+
+    def _commit_text_click(self):
+        """判定窗口内没有等到第二拍，才真正弹出文字输入框。"""
+        point = self._pending_text_point
+        self._pending_text_point = None
+        if point is None:
+            return
+        text, _changed, ok = self.input_text("文字标注")
+        if ok and text:
+            self._add_annotation(text_item(
+                point, text, self.settings, self.text_alignment))
+            self.checkpoint()
+        self._left_button_down = False
+        self._applied_cursor_key = None
+        self._apply_tool_cursor()
+
+    def _cancel_pending_text(self):
+        """放弃尚未弹出的文字输入框（换工具、失焦或按下被双击取代时调用）。"""
+        if self._text_click_timer.isActive():
+            self._text_click_timer.stop()
+        self._pending_text_point = None
+
+    def _revert_click_tool_once(self):
+        """双击时撤销这一拍刚产生的标注：取消待弹文字框、删掉刚落的序号。"""
+        self._cancel_pending_text()
+        item = self._last_number_click
+        self._last_number_click = None
+        if item is not None and item.scene() is self.scene_data:
+            self.scene_data.removeItem(item)
+            self.checkpoint()
 
     def _shape_constraint_active(self, event=None):
         modifiers = QApplication.keyboardModifiers()
@@ -537,6 +664,66 @@ class AnnotationCanvas(QGraphicsView):
         self.base.setPixmap(QPixmap.fromImage(to_qimage(self.image)))
         self.scene_data.setSceneRect(0, 0, self.image.width, self.image.height)
 
+    def transparent_checker_brush(self):
+        """按“设置 > 编辑器 > 透明背景”与当前主题生成预览笔刷。
+
+        theme 用主题感知的中性棋盘；dark/light_checker 用固定明暗棋盘；
+        transparent 返回主题纯色（不画棋盘）。只影响编辑显示，不写入导出图片。
+        """
+        mode = self.settings.get("editor_transparent_background", "theme")
+        dark_theme = self.palette().base().color().lightness() < 128
+        if mode == "dark_checker":
+            first, second = "#252525", "#3b3b3b"
+        elif mode == "light_checker":
+            first, second = "#f0f0f0", "#c8c8c8"
+        elif mode == "transparent":
+            # 纯透明：不画棋盘，透明处直接用主题底色，和画布留白一致。
+            return QBrush(self.palette().base().color())
+        elif dark_theme:
+            first, second = "#3b3f45", "#4c5158"
+        else:
+            first, second = "#e0e3e6", "#f1f3f5"
+        # 棋盘格边长可调（4–32px）；只在生成笔刷时读一次，设置变化后由 refresh 重建。
+        tile = max(4, min(32, int(self.settings.get("editor_checker_tile_size",
+                                                    checker_tile_size(1.0)))))
+        pixmap = QPixmap(tile * 2, tile * 2)
+        pixmap.fill(QColor(first))
+        painter = QPainter(pixmap)
+        painter.fillRect(0, 0, tile, tile, QColor(second))
+        painter.fillRect(tile, tile, tile, tile, QColor(second))
+        painter.end()
+        return QBrush(pixmap)
+
+    def refresh_transparency_preview(self):
+        """透明棋盘样式变化（设置/主题）后重建笔刷并重绘。"""
+        logging.getLogger("screensnap").debug(
+            "重建透明棋盘预览: 样式=%s", self.settings.get("editor_transparent_background", "theme"))
+        self.corner_preview_brush = self.transparent_checker_brush()
+        self._checker_palette_base = self.palette().base().color()
+        self.viewport().update()
+
+    def _sync_checker_brush_to_palette(self):
+        """调色板底色变了就重建棋盘格笔刷。
+
+        theme 模式和“纯透明”模式的笔刷直接取自 QPalette.Base，只在设置变化时重建的话，
+        宿主改调色板（换主题）后棋盘格会停在旧配色上。
+        """
+        base = self.palette().base().color()
+        if base != self._checker_palette_base:
+            self._checker_palette_base = base
+            self.corner_preview_brush = self.transparent_checker_brush()
+
+    def drawBackground(self, painter, rect):
+        """图片区域铺透明棋盘格，图片外沿用主题底色。
+
+        只覆盖 sceneRect，避免把图片周围的画布留白也画成“透明”，让用户误以为留白属于截图。
+        """
+        painter.fillRect(rect, self.palette().base())
+        self._sync_checker_brush_to_palette()
+        area = self.sceneRect().intersected(rect)
+        if not area.isEmpty():
+            painter.fillRect(area, self.corner_preview_brush)
+
     def set_round_corner_preview(self, enabled, radius=None):
         self.round_corner_preview = bool(enabled)
         if radius is not None:
@@ -547,18 +734,6 @@ class AnnotationCanvas(QGraphicsView):
         bounds = self.sceneRect()
         return QPointF(min(max(point.x(), bounds.left()), bounds.right()),
                        min(max(point.y(), bounds.top()), bounds.bottom()))
-
-    def constrain_item(self, item):
-        bounds = item.sceneBoundingRect()
-        image = self.sceneRect()
-        if bounds.width() > image.width() or bounds.height() > image.height():
-            factor = min(image.width() / max(bounds.width(), 1),
-                         image.height() / max(bounds.height(), 1))
-            item.setScale(item.scale() * factor)
-            bounds = item.sceneBoundingRect()
-        offset = QPointF(min(max(bounds.left(), image.left()), image.right() - bounds.width()) - bounds.left(),
-                         min(max(bounds.top(), image.top()), image.bottom() - bounds.height()) - bounds.top())
-        item.setPos(item.pos() + offset)
 
     def annotations(self):
         """返回标注图元（不含底图与擦除层），用于层级管理、选中与历史记录。"""
@@ -850,10 +1025,34 @@ class AnnotationCanvas(QGraphicsView):
             self.scene_data.addItem(item)
         self.changed.emit()
 
+    def constrain_selected_to_canvas(self):
+        """按「标注超出画布」设置处理：block 模式把选中标注平移回画布内。
+
+        clip（默认）不动几何，超出的部分在编辑视图与导出里直接裁掉；block 只做平移，
+        不做旧版那种「整体缩放再挤回」，避免贴边填充的矩形被挤掉半条线宽。
+        """
+        if self.settings.get("editor_overcanvas_mode", "clip") != "block":
+            return
+        bounds = self.sceneRect()
+        for item in self.scene_data.selectedItems():
+            if item is self.base:
+                continue
+            rect = item.sceneBoundingRect()
+            dx = dy = 0.0
+            if rect.left() < bounds.left():
+                dx = bounds.left() - rect.left()
+            elif rect.right() > bounds.right():
+                dx = bounds.right() - rect.right()
+            if rect.top() < bounds.top():
+                dy = bounds.top() - rect.top()
+            elif rect.bottom() > bounds.bottom():
+                dy = bounds.bottom() - rect.bottom()
+            if dx or dy:
+                item.setPos(item.pos() + QPointF(dx, dy))
+
     def checkpoint(self):
         """编辑后截断重做分支，记录两版图片、光标状态和全部标注。"""
-        for item in self.annotations():
-            self.constrain_item(item)
+        self.constrain_selected_to_canvas()
         self.history = self.history[:self.cursor_index + 1]
         self.history.append((self.image, self.alternate, self.cursor_enabled,
                              self.snapshot()))
@@ -1229,6 +1428,8 @@ class AnnotationCanvas(QGraphicsView):
         """擦除激活时跳过默认绘制，改由 drawForeground 合成底图与镂空标注层，
 
         使非破坏性橡皮擦在实时视图中可见；其余情况下保持原生矢量绘制。
+        标注超出画布的部分在此裁掉：编辑时只显示画布内的像素，和导出结果一致，
+        贴边填充也因此不会被“挤回画布内”。
         """
         if self._erase_live_active():
             return
@@ -1251,18 +1452,9 @@ class AnnotationCanvas(QGraphicsView):
         if w <= 0 or h <= 0:
             return
         # 先铺透明棋盘格；擦除底图留下的洞需明确显示为透明，而不是主题纯色。
-        dark_theme = self.palette().base().color().lightness() < 128
-        first = QColor("#3b3f45" if dark_theme else "#e0e3e6")
-        second = QColor("#4c5158" if dark_theme else "#f1f3f5")
-        checker = QImage(16, 16, QImage.Format_RGB32)
-        checker.fill(first)
-        checker_painter = QPainter(checker)
-        checker_painter.fillRect(0, 0, 8, 8, second)
-        checker_painter.fillRect(8, 8, 8, 8, second)
-        checker_painter.end()
         painter.save()
         painter.setBrushOrigin(QPointF(0, 0))
-        painter.fillRect(QRectF(visible), QBrush(checker))
+        painter.fillRect(QRectF(visible), self.corner_preview_brush)
         painter.restore()
         # 底图层：取可见区域的底图像素，开启 eraser_erase_base 时一并镂空。
         base_img = self.base.pixmap().toImage().convertToFormat(QImage.Format_ARGB32)
@@ -1291,6 +1483,20 @@ class AnnotationCanvas(QGraphicsView):
 
     def drawForeground(self, painter, rect):
         """只在视图预览正在绘制的标注和缩放手柄，导出不包含这些辅助线。"""
+        # 超出画布的标注在编辑视图里也截掉：把画布外区域盖回主题底色，和导出结果一致；
+        # 画布内的标注位置完全不动（不再像旧版那样被缩放/平移挤回画布内）。
+        image = self.sceneRect()
+        exposed = QRectF(rect)
+        if not image.contains(exposed):
+            outside = QPainterPath()
+            outside.setFillRule(Qt.OddEvenFill)
+            outside.addRect(exposed)
+            outside.addRect(image)
+            painter.save()
+            painter.setPen(Qt.NoPen)
+            painter.setBrush(self.palette().base())
+            painter.drawPath(outside)
+            painter.restore()
         # 非破坏性橡皮擦的实时镂空效果（绘制在选区框、手柄等辅助线之下）。
         if self._erase_live_active():
             self._paint_erased_composite(painter)
@@ -1324,14 +1530,16 @@ class AnnotationCanvas(QGraphicsView):
                 painter.fillRect(area, QColor(0, 173, 145, 35))
                 painter.drawRect(area)
         if self.tool == "eraser" and self.eraser_point is not None:
-            painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
+            color = QColor(self.settings.get("eraser_cursor_color", "#ff8c00"))
+            painter.setPen(QPen(color, 1.5, Qt.SolidLine))
             painter.setBrush(Qt.NoBrush)
             radius = self.settings.get("eraser_width", self.settings["pen_width"]) / 2
             painter.drawEllipse(self.eraser_point, radius, radius)
         # 马赛克涂抹模式：同样用虚线圆环表示笔刷宽度，便于对齐涂抹范围。
         if self.tool == "mosaic" and self.mosaic_point is not None \
             and self.settings.get("mosaic_brush", True):
-            painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
+            color = QColor(self.settings.get("mosaic_cursor_color", "#00c853"))
+            painter.setPen(QPen(color, 1.5, Qt.SolidLine))
             painter.setBrush(Qt.NoBrush)
             radius = max(2, self.settings.get("mosaic_width", 20) / 2)
             painter.drawEllipse(self.mosaic_point, radius, radius)
@@ -1383,16 +1591,13 @@ class AnnotationCanvas(QGraphicsView):
                 handle_rect = QRectF(handle.x() - 4, handle.y() - 4, 8, 8)
                 painter.fillRect(handle_rect, QColor("white"))
                 painter.drawRect(handle_rect)
-        # 单选时在其上方显示旋转手柄（绕中心旋转），手柄杆自顶边中点引出。
+        # 单选时在标注中心画旋转按钮（随图形移动/旋转，不会被放大挤出画面）。
         if len(selected) == 1:
             item = selected[0]
-            rect = item.sceneBoundingRect()
-            top = QPointF(rect.center().x(), rect.top())
             handle = self.rotation_handle_position(item)
-            painter.drawLine(top, handle)
-            painter.setBrush(QColor("white"))
-            painter.drawEllipse(handle, 5, 5)
-            painter.setBrush(Qt.NoBrush)
+            pixmap = self.rotation_cursor.pixmap()
+            painter.drawPixmap(QPointF(handle.x() - pixmap.width() / 2,
+                                       handle.y() - pixmap.height() / 2), pixmap)
         # 拖动选中标注时显示对齐参考虚线（导出不含）。
         if self.alignment_guides:
             painter.save()
@@ -1424,12 +1629,46 @@ class AnnotationCanvas(QGraphicsView):
         }
         return {name: item.mapToScene(point) for name, point in local.items()}
 
-    ROTATION_HANDLE_DISTANCE = 24
+    # top 模式下旋转按钮离顶边的距离（center 模式用不到）。
+    ROTATION_HANDLE_GAP = 24
+
+    # 8 个控制点在标注自身坐标里的朝外方向（y 轴向下），用于旋转后换算光标方向。
+    HANDLE_DIRECTIONS = {"nw": (-1, -1), "n": (0, -1), "ne": (1, -1), "e": (1, 0),
+                         "se": (1, 1), "s": (0, 1), "sw": (-1, 1), "w": (-1, 0)}
+
+    def _rotated_handle_cursor(self, handle, item):
+        """按标注当前旋转角度给出该控制点的缩放光标方向。
+
+        水平/垂直/两条斜线四种光标只有固定方向，旋转后若仍按未旋转的映射，
+        光标会和手柄实际朝向对不上；这里把控制点朝外方向按图元变换旋转后再归类。
+        """
+        dx, dy = self.HANDLE_DIRECTIONS[handle]
+        # sceneTransform 才同时包含 setTransform、setRotation 与 setScale；
+        # item.transform() 只反映 setTransform，拿它算方向会永远按未旋转处理。
+        transform = item.sceneTransform()
+        origin = transform.map(QPointF(0, 0))
+        direction = transform.map(QPointF(dx, dy)) - origin
+        angle = math.degrees(math.atan2(direction.y(), direction.x())) % 180
+        if angle < 22.5 or angle >= 157.5:
+            return Qt.SizeHorCursor
+        if angle < 67.5:
+            return Qt.SizeFDiagCursor
+        if angle < 112.5:
+            return Qt.SizeVerCursor
+        return Qt.SizeBDiagCursor
 
     def rotation_handle_position(self, item):
-        """单选标注上方、固定在场景包围盒顶边之上的旋转手柄（不压住缩放手柄）。"""
-        rect = item.sceneBoundingRect()
-        return QPointF(rect.center().x(), rect.top() - self.ROTATION_HANDLE_DISTANCE)
+        """旋转按钮位置。
+
+        默认（center）画在标注自身包围盒中心：随图形移动/旋转、始终在图形内部，
+        放大或旋转后也不会被挤出画面；设为 top 时画在顶边外侧固定距离处（更接近常见习惯，
+        但标注靠近画布上缘时可能超出可视区）。
+        """
+        rect = item.boundingRect()
+        if self.settings.get("editor_rotation_handle", "center") == "top":
+            top = item.mapToScene(QPointF(rect.center().x(), rect.top()))
+            return QPointF(top.x(), top.y() - ROTATION_HANDLE_GAP)
+        return item.mapToScene(rect.center())
 
     def rotation_handle_at(self, item, point):
         """指针是否落在旋转手柄 8 像素（场景单位）内。"""
@@ -1461,21 +1700,34 @@ class AnnotationCanvas(QGraphicsView):
         self.setCursor(self.rotation_cursor)
         logging.getLogger("screensnap").debug("标注旋转开始")
         center_local = item.boundingRect().center()
+        # 改旋转支点会让「已带旋转的图元」整体平移一个常量（缩放过、或刚缩放过时支点并不是中心），
+        # 先记下同一局部点的场景位置，改完再把这段位移补回去，避免按下瞬间“闪”到别处。
+        before = item.mapToScene(center_local)
         item.setTransformOriginPoint(center_local)
+        after = item.mapToScene(center_local)
+        item.setPos(item.pos() + before - after)
         center = item.mapToScene(center_local)
         self.rotation_center = center
-        self.rotation_start_angle = math.atan2(point.y() - center.y(), point.x() - center.x())
         self.rotation_start_value = item.rotation()
+        # 旋转按钮就在中心：按下点几乎与支点重合，此时算不出有效方向；
+        # 起始角留到第一次移动再取，避免按下瞬间跳一个角度。
+        self.rotation_start_angle = None
         QToolTip.hideText()
 
     def _rotate_to(self, point, snap=False):
         """根据指针相对支点的角度增量更新旋转，snap=True 时吸附 15°。"""
         angle = math.atan2(point.y() - self.rotation_center.y(),
                            point.x() - self.rotation_center.x())
+        if self.rotation_start_angle is None:
+            # 第一次移动只用来确定起始方向，不产生跳变。
+            self.rotation_start_angle = angle
+            self.rotation_start_value = self.rotating.rotation()
+            return
         delta = math.degrees(angle - self.rotation_start_angle)
         new_value = self.rotation_start_value + delta
-        if snap:
-            new_value = round(new_value / 15) * 15
+        snap_step = int(self.settings.get("editor_rotation_snap", 15) or 0)
+        if snap and snap_step > 0:
+            new_value = round(new_value / snap_step) * snap_step
         self.rotating.setRotation(new_value)
         self.viewport().update()
 
@@ -1528,10 +1780,27 @@ class AnnotationCanvas(QGraphicsView):
         self._add_annotation(item)
         self.checkpoint()
 
+    def _space_press_targets_handle(self, event):
+        """空格+左键按在选中标注的控制点上时，应走「自由拉伸」而不是临时平移。
+
+        工具提示与回归用例都写明「按住 Ctrl / Alt / Shift / Space 任意键可自由拉伸变形」，
+        所以只在没按到控制点时才让空格接管平移。
+        """
+        if self.tool != "select":
+            return False
+        point = self.mapToScene(event.position().toPoint())
+        for item in self.scene_data.selectedItems():
+            if self.rotation_handle_at(item, point):
+                return True
+            if self.resize_handle_at(self.item_resize_handles(item), point):
+                return True
+        return False
+
     def mousePressEvent(self, event):
         if (self.space_pressed and self.start is None
                 and self.mosaic_drawing is None
-                and event.button() == Qt.LeftButton):
+                and event.button() == Qt.LeftButton
+                and not self._space_press_targets_handle(event)):
             self.space_pan_active = True
             self.space_pan_start = event.position().toPoint()
             event.accept()
@@ -1559,9 +1828,6 @@ class AnnotationCanvas(QGraphicsView):
             return
         point = self.mapToScene(event.position().toPoint())
         if self.tool == "select" and event.button() == Qt.LeftButton:
-            if not self.sceneRect().contains(point):
-                event.accept()
-                return
             self.selection_area = None
             self.rotating = None
             self.viewport().update()
@@ -1597,6 +1863,11 @@ class AnnotationCanvas(QGraphicsView):
                 self._begin_rotation(selected[0], point)
                 event.accept()
                 return
+            # 手柄/旋转手柄判定在前：标注超出画布时手柄可能落在 sceneRect 外，也要能抓到；
+            # 画布外的空白仍不参与框选，避免在灰色区域拖出整屏选区。
+            if not self.sceneRect().contains(point):
+                event.accept()
+                return
             if self.annotation_at(point) is None:
                 # 从底图空白处（含已被擦除的区域）拖动只画辅助选区，松开后保留框线并选中其中的标注。
                 self.scene_data.clearSelection()
@@ -1614,35 +1885,16 @@ class AnnotationCanvas(QGraphicsView):
                 self.viewport().update()
             return
         if self.tool == "picker":
-            x, y = int(point.x()), int(point.y())
-            if 0 <= x < self.image.width and 0 <= y < self.image.height:
-                self.color_picked.emit("#%02x%02x%02x" % self.image.convert("RGB").getpixel((x, y)))
+            self._activate_click_tool("picker", point)
             return
         if self.tool not in ("select", "hand") and not self.sceneRect().contains(point):
             event.accept()
             return
         if self.tool == "text":
-            text, _changed, ok = self.input_text("文字标注")
-            if ok and text:
-                self._add_annotation(
-                    text_item(point, text, self.settings, self.text_alignment))
-                self.checkpoint()
-            # 对话框是模态的，关闭后按当前状态重新校准字形光标，避免残留按下态或箭头。
-            self._left_button_down = False
-            self._applied_cursor_key = None
-            self._apply_tool_cursor()
+            self._activate_click_tool("text", point)
             return
         if self.tool == "number":
-            number = self.next_sequence_number()
-            item = AnnotationSequenceItem(
-                number,
-                self.settings.get("sequence_fill_color", "#ff0000"),
-                self.settings.get("sequence_text_color", "#ffffff"),
-                self.settings.get("sequence_font_size", 14),
-                self.settings.get("sequence_shape", "circle"),
-                self.settings.get("font", ""), point)
-            self._add_annotation(item)
-            self.checkpoint()
+            self._activate_click_tool("number", point)
             return
         if self.tool == "mosaic" and self.settings.get("mosaic_brush", True) \
                 and event.button() == Qt.LeftButton:
@@ -1730,7 +1982,8 @@ class AnnotationCanvas(QGraphicsView):
             self.viewport().update()
             return
         if self.resizing is not None:
-            point = self.image_point(self.mapToScene(event.position().toPoint()))
+            # 缩放不把鼠标点夹回画布内：允许标注超出画布，超出部分绘制时裁掉。
+            point = self.mapToScene(event.position().toPoint())
             handle = self.resize_handle
             # 旋转项：把场景位移换算到项自身未旋转的坐标轴上，拖动手感才与视觉一致。
             angle = math.radians(-self.resizing.rotation())
@@ -1746,7 +1999,6 @@ class AnnotationCanvas(QGraphicsView):
             # 四角仍是等比/自由缩放。仅文字走此分支，其它标注类型行为不变。
             if len(handle) == 1 and isinstance(self.resizing, QGraphicsTextItem):
                 self._resize_text_box(self.resizing, handle, point)
-                self.constrain_item(self.resizing)
                 self.viewport().update()
                 event.accept()
                 return
@@ -1764,7 +2016,6 @@ class AnnotationCanvas(QGraphicsView):
             self.resizing.setTransform(QTransform().scale(scale_x, scale_y), True)
             current_anchor = self.resizing.mapToScene(self.resize_anchor_local)
             self.resizing.setPos(self.resizing.pos() + self.resize_anchor - current_anchor)
-            self.constrain_item(self.resizing)
             self.viewport().update()
             event.accept()
             return
@@ -1787,8 +2038,6 @@ class AnnotationCanvas(QGraphicsView):
         if self.start is None:
             super().mouseMoveEvent(event)
             if self.tool == "select":
-                for item in self.scene_data.selectedItems():
-                    self.constrain_item(item)
                 self._update_alignment_guides()
                 self._update_resize_cursor(event.position().toPoint())
 
@@ -1870,27 +2119,24 @@ class AnnotationCanvas(QGraphicsView):
                 QToolTip.hideText()
                 return
             handle = self.resize_handle_at(self.item_resize_handles(item), point)
-            cursors = {"nw": Qt.SizeFDiagCursor, "se": Qt.SizeFDiagCursor,
-                       "ne": Qt.SizeBDiagCursor, "sw": Qt.SizeBDiagCursor,
-                       "n": Qt.SizeVerCursor, "s": Qt.SizeVerCursor,
-                       "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor}
             if handle:
+                cursor = self._rotated_handle_cursor(handle, item)
                 if len(handle) == 1 and isinstance(item, QGraphicsTextItem):
                     # 文字标注：左右边中点调整文本框宽度、上下边中点调整高度。
                     if handle in ("e", "w"):
-                        self.setCursor(Qt.SizeHorCursor)
+                        self.setCursor(cursor)
                         QToolTip.showText(
                             self.viewport().mapToGlobal(position),
                             "拖动左右边中点调整文本框宽度（文字自动换行）；四角仍是缩放",
                             self)
                     else:
-                        self.setCursor(Qt.SizeVerCursor)
+                        self.setCursor(cursor)
                         QToolTip.showText(
                             self.viewport().mapToGlobal(position),
                             "拖动上下边中点调整文本框高度（超出部分裁剪）；四角仍是缩放",
                             self)
                 else:
-                    self.setCursor(cursors[handle])
+                    self.setCursor(cursor)
                     QToolTip.showText(
                         self.viewport().mapToGlobal(position),
                         "拖动控制点等比缩放；按住 Ctrl / Alt / Shift / Space 任意键可自由拉伸变形",
@@ -2235,12 +2481,18 @@ class AnnotationCanvas(QGraphicsView):
                 self.start = None
                 return
             else:
+                if not dragged:
+                    # 单击（无拖动）不落零尺寸图形：与画笔/记号笔的孤立单击不绘制保持一致。
+                    self.start = None
+                    self.chain_active = False
+                    self.viewport().update()
+                    return
                 style = self.settings.get(f"{self.tool}_style", "solid") if self.tool in ("rect", "ellipse") else \
                     (self.settings.get("arrow_style", "filled") if self.tool == "arrow" else "filled")
                 item = shape(self.tool, self.start, end,
                              self.tool_color(), self.tool_width(), style,
                              self.settings.get("rect_corner_radius", 0)
-                             if self.tool == "rect" and self.settings.get("rect_corner_enabled", False)
+                             if self.tool == "rect" and self.settings.get("rect_corner_enabled", True)
                              else 0,
                              self.settings.get(f"{self.tool}_fill_enabled", False),
                              self.settings.get(f"{self.tool}_fill_opacity", 35),
@@ -2262,6 +2514,26 @@ class AnnotationCanvas(QGraphicsView):
             self.checkpoint()
 
     def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton and self.tool in ("picker", "text", "number"):
+            # 单击生效的工具：双击表示“保存”。撤销第一拍刚落下的序号或待弹文字框，
+            # 再发确认信号，交给编辑器执行与“选择工具双击空白”一致的保存。
+            self._revert_click_tool_once()
+            self.confirmed.emit()
+            event.accept()
+            return
+        if event.button() == Qt.LeftButton and self.tool == "eraser":
+            # 橡皮擦的单击（无拖动）会留下一个擦除点；双击表示“保存”，
+            # 先把这一点撤销掉，否则双击位置会残留一块擦除白点。
+            self.undo()
+            self.confirmed.emit()
+            event.accept()
+            return
+        if (event.button() == Qt.LeftButton and self.tool == "mosaic"
+                and self.settings.get("mosaic_brush", True)):
+            # 涂抹马赛克单击是零长度笔迹、本来就不落点，也没有历史可撤，直接保存即可。
+            self.confirmed.emit()
+            event.accept()
+            return
         # 其他工具先切到选择；选择工具中双击非文字标注可直接删除，双击文字标注则就地编辑。
         if event.button() != Qt.LeftButton:
             event.accept()
@@ -2327,6 +2599,7 @@ class AnnotationCanvas(QGraphicsView):
 
     def focusOutEvent(self, event):
         # 焦点丢失时清空空格状态，避免拖拽判定残留；并作废光标应用键以便重新校准。
+        self._cancel_pending_text()
         self.space_pressed = False
         self.space_pan_active = False
         self.space_pan_start = None
@@ -2337,10 +2610,38 @@ class AnnotationCanvas(QGraphicsView):
         self._apply_tool_cursor()
         super().focusOutEvent(event)
 
+    def _zoom_at(self, viewport_position, percent):
+        """缩放并尽量让光标下的场景点保持在原处（滚轮缩放用）。"""
+        before = self.mapToScene(viewport_position)
+        previous = self.zoom_percent
+        self.set_zoom(percent)
+        if self.zoom_percent != previous:
+            # 只在比例真的变化时记一行；滚轮连滚不会刷屏。
+            logging.getLogger("screensnap").debug("Ctrl+滚轮缩放显示比例: %d%% -> %d%%",
+                                                  previous, self.zoom_percent)
+        after = self.mapToScene(viewport_position)
+        shift = after - before
+        scale = self.transform().m11()
+        self.horizontalScrollBar().setValue(
+            round(self.horizontalScrollBar().value() - shift.x() * scale))
+        self.verticalScrollBar().setValue(
+            round(self.verticalScrollBar().value() - shift.y() * scale))
+
     def wheelEvent(self, event):
-        """默认纵向滚动；Ctrl 或 Alt 将滚轮映射为横向移动。"""
+        """默认纵向滚动；启用滚轮缩放时 Ctrl+滚轮缩放；Alt+滚轮横向移动。"""
         modifiers = event.modifiers() | QApplication.keyboardModifiers()
-        horizontal_scroll = bool(modifiers & (Qt.ControlModifier | Qt.AltModifier))
+        if self.wheel_zoom_enabled and (modifiers & Qt.ControlModifier):
+            angle = event.angleDelta().y()
+            pixel = event.pixelDelta().y()
+            delta = angle or pixel
+            if delta:
+                base = max(1, int(self.settings.get("editor_zoom_wheel_step", 10)))
+                step = (base * max(1, abs(angle) // 120)) if angle else base
+                self._zoom_at(event.position().toPoint(),
+                              self.zoom_percent + (step if delta > 0 else -step))
+            event.accept()
+            return
+        horizontal_scroll = bool(modifiers & Qt.AltModifier)
         scrollbar = self.horizontalScrollBar() if horizontal_scroll else self.verticalScrollBar()
         pixel_delta = event.pixelDelta()
         delta = pixel_delta.x() if horizontal_scroll and pixel_delta.x() else pixel_delta.y()
