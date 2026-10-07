@@ -629,6 +629,46 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 - 多显示器混合 DPI、跨屏选区、原生 Toast 点击回调和系统窗口吸附受 Windows 桌面状态影响，自动化离屏测试不能覆盖所有驱动、通知设置及权限组合。
 - 贴图会话引用统一保存目录中的图像；若源文件被移动、删除或无法读取，重启时会跳过该贴图，不会创建空白窗口。
 
+### 待排查问题（已定位触发条件、默认配置下不影响使用）
+
+以下两条已经查清触发条件并已规避，但**根因尚未定位**；改动相关代码前请先读完本节。
+
+#### 1. `uia_read_budget=96` 与 `window_hover_reuse_radius=8` 同时生效时，`capture` 整批单进程离屏运行会原生崩溃
+
+- **现象**：名字含 `capture` 的 58 条用例在**同一个进程**里跑时，输出到约 74 行处中断，**没有 `Ran`/`OK` 摘要、没有 Traceback**；加 `-v` 可见最后开始的是
+  `test_preset_capture_modes_use_independent_edit_or_save_actions`，且它永远打不出 `ok` —— 属于进程级原生崩溃（离屏 Qt）。
+- **触发条件**（单进程 `-k capture` 的决定性二分）：
+
+  | `window_hover_reuse_radius` / `uia_read_budget` | 结果 |
+  | --- | --- |
+  | 4 / 180（原默认） | OK（连续 3 次） |
+  | 8 / 96 | **崩溃**（连续 3 次） |
+  | 8 / 180 | OK |
+  | 4 / 96 | OK |
+  | 分块跑（6 块 ×≤10 条，任意组合） | 全部 OK |
+  | 上表两条用例单独跑 / 成对跑 | OK |
+
+  结论：只与**数值组合**有关，与代码结构无关（`tests/test_core.py` 中那一行改动根本不在 `capture` 的选择范围内）。
+- **当前规避**：`uia_read_budget` 保持默认 `180`，且**没有**为它加旧值迁移，因此默认配置与升级路径都不会进入该组合；
+  只有手动同时设成 8 / 96 才会遇到（目前仅在离屏测试进程里观察到，实机运行未见）。
+- **排查提示**：
+  - 重定向输出时**必须加 `-u`**：原生崩溃发生在 stdout 刷新缓冲区之前，否则 `Ran/OK` 摘要会整段丢失，容易误判成"没跑"。
+  - 建议下一步：把崩溃前约 30 条用例与该用例放进同一进程缩小范围；用 `faulthandler` / Windows 错误报告抓原生栈；
+    怀疑方向是 UIA 下钻深度改变后 COM 分配与时序敏感，或 `core/window_uia` 的模块级 `set_limits` 状态在用例间泄漏。
+
+#### 2. 日志自我放大：每条日志会额外产生 1–3 条 `screen_mapping` 记录
+
+- **机制**：`logger/log_context.py` 为每条日志收集现场信息（鼠标位置、前台窗口）时会调用 `core/screen_mapping.py` 的
+  `screen_mappings()` 与 `physical_rect_to_logical()`，而这两个函数**每次调用都打日志**
+  （`screen_mapping:162 枚举到 N 块物理显示器`、`screen_mapping:220 物理矩形 → 逻辑矩形`）；
+  `log_context` 的 `_busy` 只挡住无限递归，挡不住这种放大。`warm()` 会在启动时预热映射，但没有覆盖后续调用。
+- **现象**：同一条消息在日志里出现两次 —— 一次上下文是 `[]`（收集现场信息时触发的内层记录），一次是 `[鼠标(…)…]`（真正的业务记录）；
+  TRACE 级别下再叠加逐次坐标转换记录，日志体积成倍增长，DEBUG/TRACE 实际不可用。
+- **修法方向**（AGENTS 第 14 条：高频路径只记录状态变化）：
+  1. `screen_mapping` 的显示器枚举只在**映射真正变化**时记录一次，不要每次调用都打；
+  2. 删掉 `screen_mapping:220` 这类逐次坐标转换的 TRACE；
+  3. 让现场信息收集走"静默模式"（例如传 `quiet=True`，或用 contextvar 在收集期间抑制 `screen_mapping` 的日志）。
+- **涉及位置**：`logger/log_context.py`（`warm` / `mouse_text`）、`core/screen_mapping.py`（约第 162、220 行）。
 ## 调整记录
 
 - **无障碍识别与设置项**
@@ -639,6 +679,9 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 - **打包文档**
   - 打包章节补充 [`build.bat`](build.bat) 自动脚本说明（四种模式、内置 `--clean --noconfirm`、产物位置与验收提示）。
   - 说明打包无需 `--hidden-import`／额外 `--add-data`（全部静态绝对导入、运行时数据只有 `ui/assets`），并明确 `RELEASE_NOTES.md` 只作发布说明、不入库也不打进包。
+- **待排查问题归档**
+  - README「已知限制」新增「待排查问题」小节：把 `uia_read_budget=96` + `window_hover_reuse_radius=8` 组合触发的离屏原生崩溃
+    （含二分证据表、`-u` 缓冲陷阱）与日志自我放大（每条日志多 1–3 行、修法方向）写成可复现、可接手的说明。
 ### 2026-10-07 UIA 识别性能优化（读取预算 + 增量取子控件 + 悬停结果复用）
 
 - **下钻读取预算**：`deepest_at` 之前对每层容器的**全部子控件**逐个读矩形，网页/虚拟化列表子控件上千时，一次悬停查询会卡几百毫秒。新增 `PROPERTY_READ_BUDGET=180` 的总读取预算，预算用尽立即返回当前最优候选，单次查询耗时上限可控。
