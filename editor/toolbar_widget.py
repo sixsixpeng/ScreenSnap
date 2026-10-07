@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, Q
                                QCheckBox, QToolButton, QMenu, QStyle, QButtonGroup,
                                QSlider, QFontComboBox, QWidgetAction, QSizePolicy,
                                QRadioButton, QSpinBox, QScrollArea, QFrame,
-                               QApplication, QComboBox)
+                               QApplication, QComboBox, QGraphicsDropShadowEffect)
 from editor.annotation_items import SEQUENCE_PRESETS
 from ui.widgets.color_button import ColorButton
 from ui.window_bounds import anchored_popup_geometry
@@ -188,6 +188,8 @@ class ToolbarWidget(QWidget):
         self.height_timer = None
         # 选择工具下选中的标注类型，用于「更多设置」展示对应参数（None 表示无/未识别）。
         self.selected_tool = None
+        # 阴影光晕效果对象；关闭或未启用时为 None。
+        self.shadow_effect = None
 
         self._apply_hover_style()
         QApplication.instance().paletteChanged.connect(self._apply_hover_style)
@@ -423,7 +425,7 @@ class ToolbarWidget(QWidget):
             settings.get("rect_style", "solid"), "设置新矩形的边框线型")
         self.rect_style.setToolTip("设置新矩形使用实线或虚线边框")
         self.rect_corner_enabled = QCheckBox("圆角矩形")
-        self.rect_corner_enabled.setChecked(settings.get("rect_corner_enabled", False))
+        self.rect_corner_enabled.setChecked(settings.get("rect_corner_enabled", True))
         self.rect_corner_enabled.toggled.connect(
             lambda value: self.setting_changed.emit("rect_corner_enabled", value))
         self.rect_corner_radius = QSlider(Qt.Horizontal)
@@ -852,12 +854,43 @@ class ToolbarWidget(QWidget):
         self.edit_image_layout.setSpacing(self.section_layout.horizontalSpacing())
         self.edit_image_layout.addStretch()
         self.reflow(1100)
+        self.apply_toolbar_shadow()
 
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() in (QEvent.PaletteChange, QEvent.ApplicationPaletteChange):
             self._apply_hover_style()
             self.sync_theme_icons()
+
+    def apply_toolbar_shadow(self):
+        """按设置给工具栏加/去阴影光晕。
+
+        工具栏两排、面积小，且编辑大图时常常整片浅色/深色，工具栏边界会融进画面；
+        加一圈与底色相反的柔和光晕（offset 0）后，任何底色下都能一眼找到它。
+        """
+        enabled = bool(self.settings.get("editor_toolbar_shadow_enabled", True))
+        if not enabled:
+            if self.shadow_effect is not None:
+                self.setGraphicsEffect(None)
+                self.shadow_effect = None
+                logging.getLogger("screensnap").debug("编辑工具栏阴影光晕已关闭")
+            return
+        strength = max(0, min(100, int(self.settings.get("editor_toolbar_shadow_strength", 60))))
+        color = QColor(self.settings.get("editor_toolbar_shadow_color", "#000000"))
+        if not color.isValid():
+            color = QColor("#000000")
+        color.setAlpha(round(255 * strength / 100))
+        effect = self.shadow_effect
+        if effect is None:
+            effect = QGraphicsDropShadowEffect(self)
+            effect.setOffset(0, 0)
+            self.shadow_effect = effect
+            self.setGraphicsEffect(effect)
+        effect.setBlurRadius(max(4, round(strength * 0.4)))
+        effect.setColor(color)
+        logging.getLogger("screensnap").debug(
+            "编辑工具栏阴影光晕: 强度=%d 模糊=%.0f 颜色=%s",
+            strength, effect.blurRadius(), color.name())
 
     def sync_theme_icons(self):
         number_button = getattr(self, "tool_buttons", {}).get("number")
@@ -1402,15 +1435,27 @@ class ToolbarWidget(QWidget):
         checkbox = {"text_bold": self.text_bold, "text_italic": self.text_italic,
                     "text_underline": self.text_underline,
                     "text_strikethrough": self.text_strikethrough,
-                    "text_background_enabled": self.text_background_enabled}.get(key)
+                    "text_background_enabled": self.text_background_enabled,
+                    "rect_fill_enabled": self.rect_fill_enabled,
+                    "ellipse_fill_enabled": self.ellipse_fill_enabled,
+                    "mosaic_brush": self.mosaic_brush}.get(key)
         if checkbox is not None:
             with QSignalBlocker(checkbox):
                 checkbox.setChecked(bool(value))
+            if key == "mosaic_brush":
+                self._refresh_option_rows()
         elif key == "text_background":
             self.text_background.set_color(value)
         elif key == "mosaic_width":
             with QSignalBlocker(self.mosaic_width):
                 self.mosaic_width.setValue(int(value))
+            self.mosaic_width_label.setText(f"{int(value)} px")
+        elif key in ("rect_fill_opacity", "ellipse_fill_opacity"):
+            slider = self.rect_fill_opacity if key == "rect_fill_opacity" else self.ellipse_fill_opacity
+            label = self.rect_fill_opacity_label if key == "rect_fill_opacity" else self.ellipse_fill_opacity_label
+            with QSignalBlocker(slider):
+                slider.setValue(int(value))
+            label.setText(f"{int(value)}%")
         elif key == "rect_fill_color":
             self.rect_fill_color.set_color(value)
         elif key == "ellipse_fill_color":

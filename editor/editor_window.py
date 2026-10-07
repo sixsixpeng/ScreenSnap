@@ -50,6 +50,8 @@ class EditorWindow(QMainWindow):
         self.toolbar = ToolbarWidget(settings["pen_color"], settings,
                          show_capture_actions=False)
         self.canvas = AnnotationCanvas(image, settings, alternate)
+        # 窗口编辑器支持 Ctrl+滚轮缩放（原地编辑画布太小、没有缩放控件，不启用）。
+        self.canvas.wheel_zoom_enabled = True
         self.canvas.set_round_corner_preview(
             self.round_corners, settings.get("editor_image_corner_radius", 16))
         self.canvas.set_tool(next((key for key, button in self.toolbar.tool_buttons.items()
@@ -71,7 +73,7 @@ class EditorWindow(QMainWindow):
         layout.addWidget(self.canvas, 1)
         self.operation_tips = QLabel(
             "拖动绘制标注 | 选择工具可快速选中、移动或调整标注 | "
-            "双击空白处保存并退出 | 滚轮上下滚动，Ctrl/Alt+滚轮横向移动 | "
+            "双击空白处保存并退出 | 滚轮上下滚动，Ctrl+滚轮缩放，Alt+滚轮横向移动 | "
             "用滑块或数值调整缩放 | 右键/中键拖动或空格拖动平移 | Esc 放弃编辑"
         )
         self.operation_tips.setObjectName("editorOperationTips")
@@ -163,6 +165,17 @@ class EditorWindow(QMainWindow):
             self.toolbar.sync_setting(fill_key, fill_value)
         self.settings[key] = value
         self.canvas.settings[key] = value
+        if key in ("rect_fill_enabled", "rect_fill_opacity", "rect_fill_color",
+                   "ellipse_fill_enabled", "ellipse_fill_opacity", "ellipse_fill_color",
+                   "mosaic_cursor_color", "eraser_cursor_color", "mosaic_width",
+                   "eraser_width", "mosaic_brush"):
+            self.canvas.refresh_tool_cursor()
+            self.canvas.viewport().update()
+        if key == "editor_transparent_background":
+            self.canvas.refresh_transparency_preview()
+        if key in ("editor_toolbar_shadow_enabled", "editor_toolbar_shadow_color",
+                   "editor_toolbar_shadow_strength"):
+            self.toolbar.apply_toolbar_shadow()
         if key in self.toolbar.tool_color_buttons:
             self.toolbar.sync_tool_color(key, value)
             tool = (self.canvas.selected_annotation_tool() if self.canvas.tool == "select"
@@ -235,7 +248,7 @@ class EditorWindow(QMainWindow):
 
     def allocate_path(self, automatic=False):
         """首次保存时分配唯一文件名；之后保存复用 last_path 覆盖。"""
-        directory = resolved_dir(self.settings, "auto_dir" if automatic else "manual_dir")
+        directory = resolved_dir(self.settings)
         directory.mkdir(parents=True, exist_ok=True)
         prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", datetime.now().strftime(self.settings["filename"])).strip(" .") or "Capture"
         extension = saved_extension(self.settings)
