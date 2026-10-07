@@ -27,6 +27,9 @@
 17. Keep UIA queries on the thread that calls them. Never move them to a worker thread: `set_click_through` calls `SetWindowLong` on the Qt-owned screenshot mask, and doing that off-thread deadlocks the UI — the mask covers the whole screen, so the freeze looks system-wide. Keep the `SLOW_SECONDS` breaker, the read budget and `deepest_only` hover path instead.
 18. Keep the screenshot mask responsive: cache the composed mask background as a pixmap, and never run the hover query inside `mouseMoveEvent` (defer it to the next event-loop turn), otherwise the crosshair lags behind the pointer.
 19. A test that genuinely cannot run without a real Windows desktop (window handles or focus state, a screen wider than the editor) is left as an **empty placeholder**: a one-line comment naming what needs manual verification, `@unittest.skip` with a short reason, and an empty body. Do not keep a long body, a docstring essay, or assertions against mocked substitutes.
+20. Whenever a user-visible feature or behaviour is **added, changed or removed**, record it in `RELEASE_NOTES.md` in the same round, under the **matching feature section**: numbering is per section (`3.5` = section 3, entry 5), so append the section's next number — never renumber existing entries — and add a new section when the change does not fit an existing one. Record removals the same way. `RELEASE_NOTES.md` is a packaging/release aid and must **not** be committed — never `git add` it, keep it untracked.
+
+21. **Never commit on your own initiative.** Finish the work, verify it, then tell the user it is ready and suggest the commit message(s); run `git add`/`git commit` only after they explicitly ask. Reminding them that uncommitted work exists is expected and welcome.
 
 ## Validation
 
