@@ -250,6 +250,7 @@ class StickerManager(QObject):
             if not image.save(str(source), "PNG"):
                 raise OSError(f"无法保存贴图缓存: {source}")
         item = StickerItem(image, str(source), self.settings, origin)
+        image_anchor = QPoint(position) if position is not None else None
         if position is None:
             # 没有记录位置的贴图（首次贴出、剪贴板/文件/文字贴图等）：放到**光标所在显示器**的
             # 可用区域正中，而不是贴着鼠标坐标 —— 贴图通常不小，跟着鼠标容易一半在屏外、
@@ -258,13 +259,22 @@ class StickerManager(QObject):
             screen = (QGuiApplication.screenAt(QCursor.pos())
                       or QGuiApplication.primaryScreen())
             area = screen.availableGeometry()
-            width = item.pixmap.width() + item.padding() * 2
-            height = item.pixmap.height() + item.padding() * 2
+            # 必须用 Qt 逻辑尺寸（源图像素 ÷ 当前屏 dpr）与 availableGeometry 对齐；
+            # 直接用 pixmap.width() 是物理像素，缩放屏上居中会偏。
+            window = item.window_size()
+            width, height = window.width(), window.height()
             position = QPoint(area.x() + (area.width() - width) // 2,
                               area.y() + (area.height() - height) // 2)
         else:
             position = position - QPoint(item.padding(), item.padding())
         item.move(position)
+        if image_anchor is not None:
+            image_origin = item.pos() + QPoint(item.padding(), item.padding())
+            logging.getLogger("screensnap").debug(
+                "贴图锚点应用: 请求Qt屏幕点=(%d,%d) 窗口原点=(%d,%d) 图像原点=(%d,%d) "
+                "尺寸=(%dx%d) padding=%d",
+                image_anchor.x(), image_anchor.y(), item.x(), item.y(),
+                image_origin.x(), image_origin.y(), item.width(), item.height(), item.padding())
         item.edit_requested.connect(self.edit_requested)
         item.open_file_replace = lambda: self.open_file(item)
         item.open_file_new = self.open_file
@@ -352,7 +362,7 @@ class StickerManager(QObject):
         item.scale_factor = state["scale"]
         item.resize(item.window_size())
         if type(state.get("width")) is int and type(state.get("height")) is int:
-            item.resize(state["width"], state["height"])
+            item.apply_style()  # 尺寸由 scale_factor 与当前屏 dpr 推导，忽略可能过期的历史尺寸
 
     def rotate_active(self, degrees):
         """旋转最近操作的贴图；未选中时使用最新创建且仍打开的贴图。"""
@@ -782,6 +792,11 @@ class StickerManager(QObject):
         self._persist_timer.stop()
         self.changed.emit()
 
+    def stop_pending_persistence(self):
+        """取消排队中的会话与剪贴板写入，用于明确丢弃数据的完整重置流程。"""
+        self._persist_timer.stop()
+        self._clipboard_persist_timer.stop()
+
     def persist(self):
         """保存所有窗口的可序列化状态；无源贴图在创建时已写入私有缓存。"""
         try:
@@ -890,7 +905,7 @@ class StickerManager(QObject):
                                               item.settings.get("sticker_background_mode", "transparent")))
             item.resize(item.window_size())
             if "width" in state and "height" in state:
-                item.resize(state["width"], state["height"])
+                item.apply_style()  # 尺寸由 scale_factor 与当前屏 dpr 推导，忽略可能过期的历史尺寸
             item.setWindowOpacity(state["opacity"])
             item.locked = state["locked"]
             item.always_on_top = bool(state.get("top", True))

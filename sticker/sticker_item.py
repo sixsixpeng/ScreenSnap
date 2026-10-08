@@ -68,6 +68,10 @@ class StickerItem(QWidget):
         self.snap_windows = None
         self.setWindowFlags(Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint | Qt.Tool)
         self.setAttribute(Qt.WA_TranslucentBackground)
+        # 贴图像素是源图的物理像素；窗口尺寸必须按屏幕 dpr 折算成 Qt 逻辑尺寸，
+        # 否则在 125%/150% 屏上窗口与图片会被整体放大 dpr 倍。
+        self._pixmap_ratio = None
+        self._apply_pixmap_ratio()
         self.resize(self.window_size())
         self.update_input_mask()
         self.setFocusPolicy(Qt.StrongFocus)
@@ -100,7 +104,7 @@ class StickerItem(QWidget):
 
     def border_corner_radius(self, rect):
         """描边圆角半径（窗口像素）：跟随贴图圆角，直角贴图为 0。"""
-        radius = self.image_corner_radius() * self.scale_factor
+        radius = self.image_corner_radius() * self.scale_factor / self.device_pixel_ratio()
         return max(0.0, min(radius, rect.width() / 2.0, rect.height() / 2.0))
 
     def shadow_blur(self):
@@ -124,13 +128,46 @@ class StickerItem(QWidget):
         pad = self.padding()
         return QRect(pad, pad, max(1, self.width() - pad * 2), max(1, self.height() - pad * 2))
 
+    def device_pixel_ratio(self):
+        """当前所在屏幕的像素比；拿不到屏幕时按 1.0 处理。"""
+        screen = self.screen()
+        if screen is None:
+            return 1.0
+        return max(1.0, float(screen.devicePixelRatio()) or 1.0)
+
+    def _apply_pixmap_ratio(self):
+        """把屏幕像素比写到 Pixmap 上，让 Qt 按物理像素 1:1 绘制。"""
+        ratio = self.device_pixel_ratio()
+        previous = getattr(self, "_pixmap_ratio", None)
+        if previous == ratio:
+            return
+        self._pixmap_ratio = ratio
+        self.original_pixmap.setDevicePixelRatio(ratio)
+        self.pixmap.setDevicePixelRatio(ratio)
+        # 只在比例真的变化时记录（典型是拖到不同缩放的屏）——这正是「贴图窗口或图片
+        # 变大/变小」的现场；每帧调用不会产生日志（第 14 条）。
+        logging.getLogger('screensnap').debug(
+            '贴图像素比变化: %s → %.2f，物理 %dx%d，逻辑 %dx%d',
+            previous, ratio, self.pixmap.width(), self.pixmap.height(),
+            max(1, round(self.pixmap.width() / ratio)),
+            max(1, round(self.pixmap.height() / ratio)))
+
+    def image_logical_size(self):
+        """图像在窗口里的逻辑尺寸（物理像素 ÷ 屏幕 dpr）。"""
+        ratio = self.device_pixel_ratio()
+        return QSize(max(1, round(self.pixmap.width() / ratio)),
+                     max(1, round(self.pixmap.height() / ratio)))
+
     def window_size(self):
         pad = self.padding()
-        image_size = self.pixmap.size() * self.scale_factor
+        image_size = self.image_logical_size() * self.scale_factor
         return QSize(image_size.width() + pad * 2, image_size.height() + pad * 2)
 
     def moveEvent(self, event):
         super().moveEvent(event)
+        # 跨屏拖动后像素比会变，重新对齐 Pixmap 比例与窗口尺寸，保证图片始终 1:1。
+        if self._pixmap_ratio != self.device_pixel_ratio():
+            self.apply_style()
         self.state_changed.emit()
 
     def resizeEvent(self, event):
@@ -139,6 +176,7 @@ class StickerItem(QWidget):
         self.state_changed.emit()
 
     def apply_style(self):
+        self._apply_pixmap_ratio()
         self.resize(self.window_size())
         self.update()
 
