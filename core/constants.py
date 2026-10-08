@@ -33,3 +33,6 @@ def shortcut_label(bindings, action):
 def shortcut_suffix(bindings, action):
     shortcut = shortcut_label(bindings, action)
     return f" ({shortcut})" if shortcut else ""
+
+# 应用身份标识：toast 通知与 Windows 应用条目都用它，避免两处硬编码不一致。
+APP_USER_MODEL_ID = "ScreenSnap.Desktop"

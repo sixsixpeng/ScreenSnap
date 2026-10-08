@@ -9,6 +9,7 @@ from uuid import uuid4
 from PySide6.QtGui import QImage
 from PIL import Image as PillowImage
 
+from core.constants import APP_USER_MODEL_ID
 from core.path_utils import data_dir
 from core.screen_capture import to_qimage
 
@@ -53,7 +54,8 @@ def show_native_toast(title, body="", image_path=None, on_click=None,
         logger.info("win11toast is unavailable; using Qt notification: %s", error)
         return False
 
-    kwargs = {}
+    # 用 ScreenSnap 自己的应用身份发通知：设置里能单独授权、也能看到自己的条目。
+    kwargs = {"app_id": APP_USER_MODEL_ID}
     if duration in ("short", "long"):
         kwargs["duration"] = duration
     if image_path is not None:
@@ -78,6 +80,15 @@ def show_native_toast(title, body="", image_path=None, on_click=None,
     def post():
         try:
             toast(title, body, **kwargs)
+            return
+        except Exception as error:
+            # 自定义应用身份要求系统里存在带该 AUMID 的快捷方式；缺失时会抛异常。
+            # 这里退回默认身份重发一次，避免“换了身份反而彻底不响”。
+            logger.info("以 %s 身份发送通知失败（%s），改用默认身份重试",
+                        APP_USER_MODEL_ID, error)
+        fallback = {key: value for key, value in kwargs.items() if key != "app_id"}
+        try:
+            toast(title, body, **fallback)
         except OSError as error:
             logger.debug("native Windows toast unavailable; using local notification: %s",
                          error)

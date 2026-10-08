@@ -41,18 +41,23 @@ class NotificationMixin:
             return
         if (self.config.data.get("bubble", True)
                 and self.config.data.get("copy_notification", True)):
-            # 复制反馈的核心是“看到复制了什么”，强制本地预览以保证缩略图一定可见；
-            # 不依赖系统 Toast 是否能可靠附带图片（Win11 Toast 的 hero 图有时不显示）。
-            notice = CaptureNotification(image, title="已复制到剪贴板", backend="legacy",
-                                      close_after=self.config.data.get("notification_timeout", 2))
-            notice.file_activated.connect(self.open_notification_target)
-            if self.capture_notice is not None:
-                self.capture_notice.close()
-            self.capture_notice = notice
-            notice.show_preview()
+            # 与「图片已保存」走同一条路径：按「通知方式」设置选后端（默认 Win11 Toast）。
+            # 老通知（本地预览）只在两种情况下出现：设置为老通知，或 Toast 发送失败时
+            # CaptureNotification 的 native_failed → 本地预览自动回退。
+            self.show_image_notice(image, "已复制到剪贴板")
         else:
             self.notify("已复制到剪贴板", "copy_notification")
 
+
+    def remember_save_as_dir(self, directory):
+        """记住「另存为」选择的目录，供下次打开对话框时默认定位。"""
+        if not directory:
+            return
+        self.config.data["save_as_dir"] = str(directory)
+        try:
+            self.config.save()
+        except OSError as error:
+            self.logger.error("保存「另存为」目录失败: %s", error, exc_info=True)
 
     def notify_color_picked(self, color):
         """取色模式：色值已复制到剪贴板，发一次轻量提示。"""
