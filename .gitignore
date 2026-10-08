@@ -7,3 +7,11 @@ dist/
 .idea/
 .codebuddy/
 pyvenv.cfg
+/RELEASE_NOTES.md
+
+# 启动脚本生成的快捷方式（start up.bat 自动创建，不入库）
+*.lnk
+
+# 会话临时脚本与输出（仅本地使用）
+/_*.py
+/_*.txt
