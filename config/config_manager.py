@@ -98,6 +98,45 @@ HINT_BAR_FILL_ALPHA = 220
 HINT_BAR_WARNING_FILL_ALPHA = 232
 
 
+# 版本变化重置用户数据时**保留**的键。
+#
+# 判据：保留 = 「环境 / 使用习惯」，即用户显式选过一次、且与数据格式无关的偏好；
+#       重置 = 「外观样式 / 工具默认态 / 瞬时状态」，这些正是新版本要重新决定的。
+# 每加一个键都要想清楚：新版语义变了还保留会不会出问题（路径与开关通常安全，外观与数据语义要谨慎）。
+# validate() 会忽略未知键，所以即使新版本删掉了某个保留键，也只是被丢弃而不会让启动失败。
+PRESERVED_ON_VERSION_RESET = (
+    # 环境与路径：用户选的存放位置，跟着版本重置会让图片散落或找不到
+    "save_dir", "save_as_dir", "log_dir", "file_sticker_path",
+    # 开机与系统注册：开机自启在系统里已注册，配置重置但注册还在会造成状态不一致
+    "start_on_boot",
+    # 按键习惯：键盘流用户最在意的部分，且与数据格式无关
+    "hotkeys", "hotkeys_enabled",
+    "capture_quick_sticker_shortcut", "capture_save_shortcut", "capture_custom_size_shortcut",
+    "capture_recapture_shortcut", "capture_window_edit_shortcut", "capture_multi_select_shortcut",
+    "capture_copy_shortcut", "capture_toolbar_hide_shortcut", "capture_picker_shortcut",
+    # 输出组织习惯：与 save_dir 配套，重置会让归档方式突变
+    "filename", "save_format", "archive_by_month", "archive_by_day", "image_archive_period",
+    # 打扰程度：通知开关是"被烦过才关"的偏好，不该被升级重新打开
+    "bubble", "notification_timeout", "copy_notification", "save_notification",
+    "sticker_notification",
+    # 功能开关：用户显式关掉过的能力（识别、放大镜、标尺、诊断、回收站等）必须记住
+    "window_detection", "window_hover_detect", "magnifier", "magnifier_size", "magnifier_grid",
+    "cursor", "ruler_enabled", "uia_debug_tree", "sticker_recycle_enabled",
+    "intruder_warning_enabled", "capture_delay", "capture_hotkey_suppress",
+    "logging_enabled", "log_monthly_folder",
+    # 明暗主题：属于个人偏好而非版本语义（值不合法时 validate/repair 会兜底）
+    "theme",
+)
+# 明确**不保留**（走 DEFAULTS，让新版本的观感与语义生效）：
+#   * 样式类：sticker_*、editor_*、rect_*、arrow_*、pen_*、marker_*、mosaic_*、hint_bar_*、
+#     capture_hint_*、sequence_*、window_hover_* 的颜色/宽度/透明度/圆角/阴影；
+#   * 工具默认态：annotation_tool、arrow_chain、pen_chain、rect_style、rect_fill_enabled、
+#     ellipse_fill_enabled、mosaic_mode、editor_overcanvas_mode、editor_rotation_*、
+#     editor_zoom_wheel_step、editor_checker_tile_size、editor_text_click_delay；
+#   * 瞬时状态：last_capture_rect、color_sticker_value、clipboard_color_detection、
+#     capture_multi_edit_action、capture_fullscreen_action（与当前屏幕/上次操作有关）；
+#   * app_version 本身（重置后写回内置版本）。
+
 DEFAULTS = {
     "hotkeys_enabled": True,
     "start_on_boot": False,
@@ -123,6 +162,7 @@ DEFAULTS = {
     "save_notification": True, "operation_notification": True,
     "sticker_notification": True, "open_notification_file": True, "sound": True,
     "save_dir": "",
+    "save_as_dir": "",  # 「另存为」上次选择的目录（内部记忆值，不占设置页控件）
     "archive_by_month": True, "archive_by_day": False,
     # 缓存清理范围（逐类开关）与自动清理时机：off 只手动 / start 启动时 / exit 退出时。
     "cache_clear_clipboard": True, "cache_clear_toast": True, "cache_clear_sticker": True,
@@ -177,6 +217,8 @@ DEFAULTS = {
     "window_hover_detect": True, "window_uia_detect": True,
     "uia_debug_tree": False,
     # 悬停与 UIA 的性能参数：复用半径 0 表示每次都重新查询；预算/熔断给慢机器留出放宽空间。
+    # 上次成功启动的版本；与内置版本不一致时启动阶段会重置用户数据（见 core/version.py）。
+    "app_version": "",
     "window_hover_reuse_radius": 8,
     "uia_read_budget": 180, "uia_children_limit": 128, "uia_slow_seconds": 0.4,
     "window_hover_interval": 80, "window_hover_color": "#168cff",
@@ -419,6 +461,10 @@ def validate(data):
         elif key == "uia_slow_seconds" and (
                 type(value) not in (int, float) or not 0.1 <= value <= 2.0):
             raise ValueError("UIA 熔断阈值必须是 0.1 到 2.0 之间的秒数")
+        elif key == "save_as_dir" and not isinstance(value, str):
+            raise ValueError("「另存为」目录必须是字符串")
+        elif key == "app_version" and not isinstance(value, str):
+            raise ValueError("程序版本号必须是字符串")
         elif key == "cache_cleanup_timing" and value not in ("off", "start", "exit"):
             raise ValueError("自动清理缓存时机只能是关闭、启动时或退出时")
         elif key == "crop_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):

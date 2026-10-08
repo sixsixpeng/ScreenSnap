@@ -8,6 +8,12 @@ class GeneralPage(SettingsPage):
 
     def __init__(self, config, changed):
         super().__init__(config, changed)
+        self.group("版本与数据")
+        self.text("app_version", "程序版本号",
+                  "内置版本号会记录在这里（可在设置里修改）。启动时如果记录的版本与内置版本不一致，\n"
+                  "会先清空整个用户数据目录（配置、贴图会话、剪贴板历史、缓存）再启动，并给出提示 ——\n"
+                  "因此改动此值等同于主动触发一次数据重置；留空表示首次运行，会直接写入内置版本。\n"
+                  "当前内置版本见 core/version.py 的 APP_VERSION。")
         self.group("启动与通知")
         self.check("start_on_boot", "开机自动启动", "登录 Windows 后自动运行 ScreenSnap")
         self.check("bubble", "通知总开关", "关闭后不显示应用内预览、托盘提示和 Windows Toast；完成音效仍由独立开关控制")

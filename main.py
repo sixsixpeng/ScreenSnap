@@ -3,7 +3,6 @@
 import ctypes
 import logging
 import os
-import subprocess
 import sys
 import threading
 from pathlib import Path
@@ -36,7 +35,7 @@ def enable_windows_app_id():
     if os.name != "nt":
         return
     try:
-        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID("ScreenSnap.Desktop")
+        ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
     except (AttributeError, OSError) as error:
         logging.getLogger("screensnap").warning("无法设置任务栏应用标识: %s", error)
 
@@ -45,12 +44,15 @@ enable_windows_dpi_awareness()
 
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer, QSignalBlocker, QObject, Signal, Slot, QLockFile
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen, QGuiApplication, QFont, QCursor
-from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QGraphicsView, QFileDialog
+from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QGraphicsView, QFileDialog, QMessageBox
 
 from config import ConfigManager
 from config.config_manager import TOOL_WIDTH_KEYS
 from core import app_icon, data_dir, capture, qimage_to_pillow
+from core.constants import APP_USER_MODEL_ID
+from core.version import APP_VERSION
 from core.dpi import DisplayMapper
+from core.path_utils import clear_data_directory
 from core.startup import set_start_on_boot
 from editor import EditorWindow
 from hotkey import HotkeyManager
@@ -89,8 +91,17 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         # 没有默认主窗口；关闭设置或编辑器时必须继续保持托盘常驻。
         self.qt.setQuitOnLastWindowClosed(False)
         self.config = ConfigManager(data_dir() / "settings.json")
-        apply_theme(self.qt, self.config.data["theme"])
+        # 先装日志、再做版本闸门：闸门要写「跳过被占用文件」「已清空数据目录」这类 WARNING/INFO，
+        # 若日志尚未配置，它们只会走 logging 的兜底 handler（仅 stderr、无格式、且不进日志文件）。
         configure_logging(self.config.data)
+        # 版本闸门：配置里记录的版本与内置版本不一致时，先清空用户数据再启动。
+        self.version_reset_from = ""
+        if self.apply_version_gate():
+            # 重置后配置已回到默认（保留项除外），日志开关/等级/目录可能变化，重新应用一次。
+            configure_logging(self.config.data)
+        # 显示器分辨率/缩放/增减变化时刷新坐标缓存与贴图（中间屏被改动的情形）。
+        self.watch_screens()
+        apply_theme(self.qt, self.config.data["theme"])
         if self.config.data["start_on_boot"]:
             try:
                 set_start_on_boot(True)
@@ -101,12 +112,14 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         self.hotkeys.triggered.connect(self.dispatch)
         self.hotkeys.failed.connect(self.hotkey_error)
         self.stickers = StickerManager(self.config.data)
+        self.reset_user_data_requested = False
         # 「自动清理时机」设为启动时的话，等事件循环起来再清理，别拖慢启动。
         QTimer.singleShot(0, lambda: self.cleanup_cache_if_scheduled("start"))
         self.stickers.edit_requested.connect(self.edit_sticker)
         self.settings_window = SettingsWindow(
             self.config, self.stickers.clear_clipboard_history,
-            self.stickers.clear_rebuildable_cache)
+            self.stickers.clear_rebuildable_cache,
+            reset_all_user_data=self.request_full_user_data_reset)
         self.settings_window.changed.connect(self.refresh)
         self.settings_window.recording.connect(self.pause_hotkeys)
         self.hotkey_recording = False
@@ -141,9 +154,123 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         QTimer.singleShot(0, self.announce_startup)
 
 
+    def desktop_available_rect(self):
+        """所有显示器可用区域的并集（Qt 原生坐标）：用于判断贴图是否落在已拔掉的屏上。"""
+        application = QGuiApplication.instance()
+        if application is None:
+            return QRect()
+        rect = QRect()
+        for screen in application.screens():
+            rect = rect.united(screen.availableGeometry())
+        return rect
+
+    def watch_screens(self):
+        """给每块显示器挂上分辨率/缩放变化信号（新接入的屏也要挂，否则收不到后续变化）。"""
+        application = QGuiApplication.instance()
+        if application is None:
+            return
+        watched = getattr(self, "_watched_screens", None)
+        if watched is None:
+            watched = self._watched_screens = set()
+            application.screenAdded.connect(self.handle_screen_change)
+            application.screenRemoved.connect(self.handle_screen_change)
+        for screen in application.screens():
+            if id(screen) in watched:
+                continue
+            watched.add(id(screen))
+            screen.geometryChanged.connect(self.handle_screen_change)
+            screen.logicalDotsPerInchChanged.connect(self.handle_screen_change)
+            screen.availableGeometryChanged.connect(self.handle_screen_change)
+
+    def handle_screen_change(self, *args):
+        """显示器分辨率/缩放/增减变化后刷新坐标缓存与贴图尺寸。
+
+        中间某块屏改了分辨率或缩放时，屏幕映射缓存与贴图的 dpr 都可能失效：这里清掉映射缓存、
+        让每张贴图按新 dpr 重新对齐窗口尺寸与绘制比例，并给新接入的屏补挂信号。
+        进行中的截图遮罩不做迁移（选区与预览都是按当时分辨率抓的），由用户重新截图。
+        """
+        from core.screen_mapping import clear_cache as clear_mapping_cache
+
+        clear_mapping_cache()
+        desktop = self.desktop_available_rect()
+        refreshed = 0
+        rescued = 0
+        for item in list(self.stickers.items):
+            try:
+                item.apply_style()
+                refreshed += 1
+                # 显示器被拔掉后，原来落在它上面的贴图坐标已不存在：搬回剩余桌面，
+                # 否则贴图还在会话里却永远看不见（用户会以为丢了）。
+                frame = item.frameGeometry()
+                if not desktop.isNull() and not desktop.intersects(frame):
+                    item.move(min(max(frame.left(), desktop.left()),
+                                   desktop.right() - frame.width() + 1),
+                              min(max(frame.top(), desktop.top()),
+                                  desktop.bottom() - frame.height() + 1))
+                    rescued += 1
+            except RuntimeError:  # 贴图对象可能已被 Qt 回收
+                continue
+        self.watch_screens()
+        self.logger.info("检测到显示器变化：已清空屏幕映射缓存、刷新 %d 张贴图、搬回 %d 张超出桌面的贴图",
+                         refreshed, rescued)
+
+    def apply_version_gate(self):
+        """版本变化时清空用户数据目录，返回这次是否发生了重置。
+
+        旧版本的配置、贴图会话、剪贴板历史与缓存可能和新版本不兼容，所以按「先删数据再启动」
+        处理：删除后立刻用 DEFAULTS 重建配置并写入内置版本号，重置结果由 announce_startup 通知用户。
+        记录为空表示首次运行（或刚重置过），只写入内置版本、不删数据。
+        """
+        stored = str(self.config.data.get("app_version") or "")
+        if not stored:
+            # 首次运行：把内置版本写进配置，之后版本一致就正常启动。
+            self.config.data["app_version"] = APP_VERSION
+            try:
+                self.config.save()
+            except OSError as error:
+                self.logger.error("首次运行写入版本号失败: %s", error, exc_info=True)
+            return False
+        if stored == APP_VERSION:
+            return False
+        import copy
+
+        from config.config_manager import DEFAULTS, PRESERVED_ON_VERSION_RESET
+        from core.path_utils import clear_data_directory
+
+        removed = None
+        try:
+            removed = clear_data_directory()
+        except (OSError, ValueError) as error:
+            # 目录整体删不掉（权限/被杀软锁定）时不能直接返回：那样版本号永远对不上，
+            # 每次启动都会重试并报错。这里继续重建配置，残留文件由用户手动清理。
+            self.logger.error("版本变化后清理用户数据目录失败，仍继续重建配置: %s", error, exc_info=True)
+        kept = {key: copy.deepcopy(self.config.data[key])
+                for key in PRESERVED_ON_VERSION_RESET if key in self.config.data}
+        if removed is None:
+            self.logger.warning("检测到版本变化 %s → %s，用户数据目录未能完全清理，"
+                                "已按新版本重建配置并保留 %d 项设置", stored, APP_VERSION, len(kept))
+        else:
+            self.logger.warning("检测到版本变化 %s → %s，已清空用户数据目录 %s（保留 %d 项设置）",
+                                stored, APP_VERSION, removed, len(kept))
+        self.config.data.clear()
+        self.config.data.update(copy.deepcopy(DEFAULTS))
+        self.config.data.update(kept)
+        self.config.data["app_version"] = APP_VERSION
+        try:
+            self.config.save()
+        except OSError as error:
+            # 写盘失败不能让启动崩掉：数据目录可能不可写（只读盘/权限/杀软）。
+            self.logger.error("版本重置后写入配置失败: %s", error, exc_info=True)
+        self.version_reset_from = stored
+        return True
+
     def announce_startup(self):
         """事件循环开始后提示就绪，沿用托盘气泡总开关。"""
         self.logger.info("ScreenSnap 已启动")
+        if getattr(self, "version_reset_from", ""):
+            # 版本变化导致数据被清空时必须明确告知，避免用户以为设置/贴图丢了。
+            self.notify(f"版本已更新（{self.version_reset_from} → {APP_VERSION}），用户数据已重置")
+            return
         self.notify("已启动，可使用快捷键截图或右键托盘打开设置")
 
 
@@ -158,6 +285,23 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         self.settings_window.show()
         self.settings_window.raise_()
         self.settings_window.activateWindow()
+
+
+    def request_full_user_data_reset(self):
+        """停止当前实例，待持久化任务结束后由入口删除用户数据。"""
+        if self.reset_user_data_requested:
+            return True
+        try:
+            set_start_on_boot(False)
+        except OSError as error:
+            self.logger.error("彻底重置时无法关闭开机启动: %s", error, exc_info=True)
+            QMessageBox.warning(self.settings_window, "无法清空全部数据",
+                                f"关闭 Windows 开机启动项失败，未执行清理：\n{error}")
+            return False
+        self.reset_user_data_requested = True
+        self.logger.warning("用户请求清空全部数据并退出: %s", data_dir())
+        self.qt.quit()
+        return True
 
 
     def refresh(self):
@@ -323,6 +467,12 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
 
     def shutdown(self):
         """退出前保存贴图会话并释放全局热键和托盘。"""
+        if self.reset_user_data_requested:
+            self.logger.info("清空全部数据：跳过贴图会话和剪贴板历史写回")
+            self.stickers.stop_pending_persistence()
+            self.hotkeys.stop()
+            self.tray.hide()
+            return
         # 退出前先保存贴图状态并注销系统热键，避免残留钩子和悬浮窗口。
         self.logger.info("正在退出，保存 %d 张贴图的会话", len(self.stickers.items))
         try:
@@ -337,6 +487,25 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         self.logger.info("已退出")
 
 
+def delete_user_data_after_shutdown(instance_lock):
+    """释放当前实例后删除用户数据目录，不重建配置或启动新进程。"""
+    instance_lock.unlock()
+    logging.shutdown()
+    try:
+        clear_data_directory()
+    except Exception as error:
+        message = f"ScreenSnap 用户数据删除失败：\n{error}"
+        if os.name == "nt":
+            try:
+                ctypes.windll.user32.MessageBoxW(None, message, "ScreenSnap 删除失败", 0x10)
+            except (AttributeError, OSError):
+                print(message, file=sys.stderr)
+        else:
+            print(message, file=sys.stderr)
+        return False
+    return True
+
+
 
 if __name__ == "__main__":
     instance_lock = acquire_single_instance_lock()
@@ -345,4 +514,9 @@ if __name__ == "__main__":
         sys.exit(0)
     install_exception_hooks()
     program = Application()
-    sys.exit(program.qt.exec())
+    exit_code = program.qt.exec()
+    if program.reset_user_data_requested:
+        if not delete_user_data_after_shutdown(instance_lock):
+            sys.exit(1)
+        sys.exit(0)
+    sys.exit(exit_code)
