@@ -15,8 +15,6 @@ from core.window_snap import ignored_mask_window
 
 # 自绘界面里过小的控件没有识别价值；4 像素仍能选中图标这类小控件。
 MIN_SIZE = 4
-# 兜底下钻时的上限：网页的 UIA 树动辄上万个节点，不设上限会拖垮查询。
-VISIT_BUDGET = 60
 DESCEND_LIMIT = 24
 # 沿父链上溯或下钻时最多走多少层，防止异常树结构把查询拖住。
 PARENT_LIMIT = 32
@@ -522,7 +520,7 @@ def deepest_at(control, x, y, logger, limit=DESCEND_LIMIT, cache=None,
         reads[0] -= 1
         return _rect_of(target, cache)
 
-    while pending and len(visited) < VISIT_BUDGET and reads[0] > 0:
+    while pending and reads[0] > 0:
         current, depth = pending.pop()
         identity = id(current)
         if identity in visited:
@@ -548,8 +546,6 @@ def deepest_at(control, x, y, logger, limit=DESCEND_LIMIT, cache=None,
 
     if pending and reads[0] <= 0:
         logger.debug("UIA 下钻达到读取预算 %d，未检查剩余分支", read_budget)
-    elif pending:
-        logger.debug("UIA 下钻达到节点预算 %d，未检查剩余分支", VISIT_BUDGET)
     if not candidates:
         return control
     # 与原先按 (面积, 是否容器, 有无名称, 层级) 取最小等价：先选出面积/容器/深度的

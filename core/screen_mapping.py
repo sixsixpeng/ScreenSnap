@@ -42,9 +42,12 @@ def screen_mappings():
         return _cache["mappings"]
     mappings = build_mappings()
     _cache["stamp"] = now
-    # 内容没变就不重复记录，避免每次刷新缓存都刷一条日志。
-    if mappings != _cache["mappings"]:
-        _cache["mappings"] = mappings
+    # 先落缓存再打日志：build_mappings() 内部会打日志，而每条日志的现场收集（ContextFilter.warm）
+    # 又会调用 screen_mappings()。若此刻缓存仍为空，就会在"构建中"再构建一次——显示器被枚举两遍，
+    # 同一行日志出现两次（内层还只能带空/旧现场）。先赋值即可让嵌套调用直接命中缓存。
+    changed = mappings != _cache["mappings"]
+    _cache["mappings"] = mappings
+    if changed:
         logging.getLogger("screensnap").debug(
             "屏幕映射 %d 块: %s", len(mappings),
             " | ".join(describe(mapping) for mapping in mappings) or "无 Qt 屏幕")
