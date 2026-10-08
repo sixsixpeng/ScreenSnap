@@ -29,10 +29,12 @@ class SettingsWindow(QWidget):
     changed = Signal()
     recording = Signal(bool)
 
-    def __init__(self, config, clear_clipboard_history=None, clear_cache=None):
+    def __init__(self, config, clear_clipboard_history=None, clear_cache=None,
+                 reset_all_user_data=None):
         super().__init__()
         self.config = config
         self.clear_clipboard_history_callback = clear_clipboard_history
+        self.reset_all_user_data_callback = reset_all_user_data
         # 缓存清理由 main 注入：设置窗口不直接依赖贴图管理器，避免 ui 反向依赖 sticker。
         self.clear_cache_callback = clear_cache
         self._saved_start_on_boot = config.data["start_on_boot"]
@@ -65,6 +67,16 @@ class SettingsWindow(QWidget):
             "清理贴图会话": "删除贴图会话文件 stickers.json 与贴图私有缓存，下次启动不再恢复贴图；\n"
                             "当前已打开的贴图不受影响，退出时仍会重新保存会话",
             "清空剪贴板历史": "清空本次运行期间捕获的剪贴板内容；已创建的贴图不会受影响",
+            "清空全部数据": (
+                "不可撤销：退出 ScreenSnap，删除整个用户数据目录及所有子目录：\n"
+                f"{data_dir()}\n"
+                "包括 settings.json、settings.bak/损坏配置备份、贴图会话与回收站、"
+                "贴图私有缓存、剪贴板历史及图片、"
+                "Toast 缩略图，以及保存在此目录中的日志。\n"
+                "若自定义截图保存目录位于此目录内，其中的截图也会被删除；目录外文件不受影响。\n"
+                "同时关闭 Windows 开机自动启动项。不创建备份，也不会自动重启；下次手动启动时会生成默认 settings.json。"
+                "请只在确实需要完整清空时使用。"
+            ),
         }
         for label, icon, method in [("导入配置", QStyle.SP_DialogOpenButton, self.import_settings),
                                     ("恢复全部默认", QStyle.SP_DialogResetButton, self.reset_defaults),
@@ -81,6 +93,12 @@ class SettingsWindow(QWidget):
         clipboard_history_button.setEnabled(clear_clipboard_history is not None)
         clipboard_history_button.clicked.connect(self.clear_clipboard_history)
         buttons.addWidget(clipboard_history_button)
+        self.reset_all_data_button = QPushButton("清空全部数据")
+        self.reset_all_data_button.setIcon(self.style().standardIcon(QStyle.SP_DialogDiscardButton))
+        self.reset_all_data_button.setToolTip(hints["清空全部数据"])
+        self.reset_all_data_button.setEnabled(reset_all_user_data is not None)
+        self.reset_all_data_button.clicked.connect(self.reset_all_user_data)
+        buttons.addWidget(self.reset_all_data_button)
         buttons.addStretch()
         outer.addLayout(buttons)
 
@@ -272,6 +290,34 @@ class SettingsWindow(QWidget):
             return
         logging.getLogger("screensnap").info("清理贴图会话: 删除 %d 个文件", removed)
         QMessageBox.information(self, "已清理贴图会话", f"共删除 {removed} 个文件。")
+
+    def reset_all_user_data(self):
+        """经明确确认后请求应用退出并删除整个用户数据目录。"""
+        callback = self.reset_all_user_data_callback
+        if callback is None:
+            return
+        directory = data_dir()
+        confirmation = (
+            f"即将退出 ScreenSnap 并永久删除以下目录的全部内容：\n{directory}\n\n"
+            "包括设置与备份、贴图/回收站会话、剪贴板历史、缓存及目录内日志；"
+            "若自定义截图保存目录位于此目录内，截图也会被删除。\n"
+            "目录外的截图不会删除；Windows 开机自动启动项也会关闭。\n"
+            "程序不会自动重启；下次手动启动时会生成默认设置。\n"
+            "此操作不可撤销且不创建备份。是否继续？"
+        )
+        if yes_no_dialog(self, "清空全部 ScreenSnap 数据", confirmation).exec() != QMessageBox.Yes:
+            logging.getLogger("screensnap").info("已取消清空全部用户数据")
+            return
+        try:
+            accepted = callback()
+        except (OSError, RuntimeError, ValueError) as error:
+            logging.getLogger("screensnap").error("无法启动彻底重置流程: %s", error, exc_info=True)
+            QMessageBox.warning(self, "无法清空用户数据", str(error))
+            return
+        if accepted is False:
+            return
+        self._persist_timer.stop()
+        logging.getLogger("screensnap").warning("用户确认清空全部数据目录并退出: %s", directory)
 
     def clear_clipboard_history(self):
         """确认后清空 StickerManager 持有的内存剪贴板历史。"""
