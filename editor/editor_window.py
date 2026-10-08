@@ -4,18 +4,20 @@ import os
 import re
 import logging
 from datetime import datetime
+from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QSignalBlocker, QMimeData
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout,
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QFileDialog,
                                QDialog, QDialogButtonBox, QDial, QDoubleSpinBox, QHBoxLayout, QLabel,
                                QStyle, QSlider, QSpinBox, QGraphicsView)
 
-from core.image_io import matches_saved_format, save_image, saved_extension
-from core.path_utils import resolved_dir
+from core.image_io import (matches_saved_format, normalize_save_as_path, save_as_filter,
+                           save_image, saved_extension)
+from core.path_utils import resolved_dir, save_as_directory
 from config.config_manager import TOOL_WIDTH_KEYS, fill_colors_following_stroke
 from editor.annotation_canvas import AnnotationCanvas
-from editor.image_effects import apply_output_effects
+from editor.image_effects import apply_output_effects, copy_saved_to_clipboard
 from core.screen_capture import qimage_to_pillow
 from editor.image_transform import transform
 from editor.toolbar_widget import ToolbarWidget
@@ -31,6 +33,8 @@ class EditorWindow(QMainWindow):
     recapture_requested = Signal()
     close_all_requested = Signal()
     status = Signal(str)
+    copy_done = Signal(object)
+    save_as_dir_chosen = Signal(str)
     pen_color_changed = Signal(str)
     tool_color_changed = Signal(str, str)
     setting_changed = Signal(str, object)
@@ -246,9 +250,12 @@ class EditorWindow(QMainWindow):
                                     self.round_corners,
                                     self.settings.get("editor_image_corner_radius", 16))
 
-    def allocate_path(self, automatic=False):
-        """首次保存时分配唯一文件名；之后保存复用 last_path 覆盖。"""
-        directory = resolved_dir(self.settings)
+    def allocate_path(self, automatic=False, directory=None):
+        """首次保存时分配唯一文件名；之后保存复用 last_path 覆盖。
+
+        directory 非空时使用该目录（「另存为」），否则使用设置里的保存目录。
+        """
+        directory = Path(directory) if directory else resolved_dir(self.settings)
         directory.mkdir(parents=True, exist_ok=True)
         prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", datetime.now().strftime(self.settings["filename"])).strip(" .") or "Capture"
         extension = saved_extension(self.settings)
@@ -273,14 +280,11 @@ class EditorWindow(QMainWindow):
                     self.settings["save_format"])
         self.last_path = path
         self.image_saved.emit(str(path), result)
-        if (copy_to_clipboard and (self.settings["copy_saved_image"] or self.settings["copy_saved_path"])) or force_copy_image:
-            payload = QMimeData()
-            if self.settings["copy_saved_path"]:
-                payload.setText(str(path))
-            if self.settings["copy_saved_image"] or force_copy_image:
-                payload.setImageData(result)
-            QGuiApplication.clipboard().setMimeData(payload)
-            self.status.emit("已复制保存内容")
+        # 复制只静默写入剪贴板：保存已经发过一条带图通知，这里再 status.emit 会被应用的
+        # editor.status → notify 变成第二条纯文字通知（窗口编辑保存曾因此收到两条）。
+        if copy_to_clipboard:
+            copy_saved_to_clipboard(path, result, self.settings,
+                                    force_image=force_copy_image)
         if self.settings["open_dir"] and os.name == "nt":
             try:
                 os.startfile(str(path.parent))
@@ -289,14 +293,40 @@ class EditorWindow(QMainWindow):
         return path
 
     def copy_to_clipboard_only(self):
-        """仅把当前合成图复制到剪贴板，不落盘、不退出编辑。"""
+        """仅把当前合成图复制到剪贴板，不落盘并退出编辑。"""
         logger = logging.getLogger("screensnap")
         result = self.output_image()
         payload = QMimeData()
         payload.setImageData(result)
         QGuiApplication.clipboard().setMimeData(payload)
-        self.status.emit("已复制到剪贴板")
         logger.info("仅复制图片到剪贴板: %dx%d", result.width(), result.height())
+        # 通知只发一次：走 copy_done（带图）。这里不要再 status.emit —— 应用的
+        # editor.status → notify 会把它变成第二条纯文字通知（窗口编辑曾因此收到两条）。
+        self.copy_done.emit(result)
+        self.close()
+
+    def save_as(self):
+        """另存为：可选目录与文件名（默认定位上次目录、预填当前命名），并记住该目录。"""
+        # 另存为对话框允许同时改目录与文件名：默认定位上次用过的目录，并预填当前命名规则。
+        suggested = self.allocate_path(directory=save_as_directory(self.settings))
+        chosen, _ = QFileDialog.getSaveFileName(self, "另存为", str(suggested),
+                                               save_as_filter(self.settings))
+        if not chosen:
+            return None
+        path, save_settings = normalize_save_as_path(chosen, self.settings)
+        result = self.output_image()
+        if not save_image(result, path, save_settings):
+            raise OSError(f"图片保存失败：{path}")
+        logging.getLogger("screensnap").info(
+            "另存为图片: %s（%sx%s，%s）", path, result.width(), result.height(),
+            self.settings["save_format"])
+        self.image_saved.emit(str(path), result)          # 触发既有保存通知
+        # 「设置优先」：复制路径/图像由 copy_saved_path / copy_saved_image 控制，两者都关则不动剪贴板。
+        copy_saved_to_clipboard(path, result, self.settings)
+        self.save_as_dir_chosen.emit(str(path.parent))
+        # 与「保存」一致：另存为写盘成功、通知与记忆目录都发出后退出编辑。
+        self.close()
+        return path
 
     def invalidate_rotation_reset(self):
         self.rotation_reset_state = None
@@ -419,15 +449,30 @@ class EditorWindow(QMainWindow):
         elif action == "recapture":
             self.recapture_requested.emit()
         elif action == "save":
-            self.save(copy_to_clipboard=True)
+            try:
+                self.save(copy_to_clipboard=True)
+            except OSError as error:
+                # 保存失败必须让用户看到：status 会被应用转成一条通知，编辑器保持打开以便重试。
+                self.status.emit(f"保存失败: {error}")
+                return
             self.close()
         elif action == "copy":
             self.save(copy_to_clipboard=True, force_copy_image=True)
         elif action == "copy_only":
             self.copy_to_clipboard_only()
+        elif action == "save_as":
+            self.save_as()
         elif action == "path":
             if not self.last_path:
-                self.save()
+                # 这里只是为了让"复制路径"有内容：静默保存，避免与下面的路径提示重复通知。
+                self.suppress_save_notification = True
+                try:
+                    self.save()
+                except OSError as error:
+                    self.status.emit(f"保存失败: {error}")
+                    return
+                finally:
+                    self.suppress_save_notification = False
             QGuiApplication.clipboard().setText(str(self.last_path))
             self.status.emit("文件路径已复制")
         elif action == "close_all_editors":

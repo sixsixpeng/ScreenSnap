@@ -3,6 +3,27 @@
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
 
+def copy_saved_to_clipboard(path, image, settings, force_image=False):
+    """保存后按设置把结果复制到剪贴板：路径与图像各自受开关控制。
+
+    两个开关都关时不动剪贴板（设置优先）；force_image 用于「复制图像」这类显式命令。
+    """
+    copy_path = bool(settings.get("copy_saved_path"))
+    copy_image = bool(settings.get("copy_saved_image")) or bool(force_image)
+    if not (copy_path or copy_image):
+        return False
+    from PySide6.QtCore import QMimeData
+    from PySide6.QtGui import QGuiApplication
+
+    payload = QMimeData()
+    if copy_path:
+        payload.setText(str(path))
+    if copy_image:
+        payload.setImageData(image)
+    QGuiApplication.clipboard().setMimeData(payload)
+    return True
+
+
 def apply_output_effects(image, settings, round_corners=False, corner_radius=None):
     """在最终导出图像上应用非破坏性装饰，不改动编辑画布和撤销历史。"""
     is_qimage = not isinstance(image, Image.Image)

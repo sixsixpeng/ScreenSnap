@@ -813,6 +813,7 @@ class ToolbarWidget(QWidget):
         self.output_buttons = [self.button(self.output_grid, label, action, icon)
                                for label, action, icon in [("贴图", "paste", QStyle.SP_DesktopIcon),
                                                            ("保存", "save", QStyle.SP_DialogSaveButton),
+                                                           ("另存为", "save_as", QStyle.SP_FileDialogNewFolder),
                                                            ("仅复制", "copy_only", action_icon("clipboard_image")),
                                                            ("放弃", "discard", QStyle.SP_DialogCancelButton),
                                                            ("关闭全部", "close_all_editors", QStyle.SP_DialogCloseButton)]]
@@ -1316,7 +1317,8 @@ class ToolbarWidget(QWidget):
             "delete": "删除选中的标注", "reset": "重置当前标注参数",
             "paste": "将当前合成图像作为独立贴图打开",
             "save": "保存为 PNG，复制图像和路径，然后退出编辑",
-            "copy_only": "仅把当前合成图像复制到剪贴板，不保存文件、不退出编辑",
+            "save_as": "选择保存目录后另存一份并退出编辑（默认定位上次另存为的目录，未用过则用设置的保存目录）",
+            "copy_only": "仅把当前合成图像复制到剪贴板，不保存文件，并关闭当前编辑器",
             "discard": "放弃编辑并关闭窗口，不保存当前更改",
             "close_all_editors": "关闭当前已打开的全部截图编辑窗口",
             "left": "向左旋转 90°", "right": "向右旋转 90°",

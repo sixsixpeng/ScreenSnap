@@ -25,6 +25,37 @@ def saved_extension(settings):
     return SAVE_FORMATS.get(str(settings.get("save_format", "png")).lower(), SAVE_FORMATS["png"])[1]
 
 
+SAVE_FORMAT_LABELS = {"png": "PNG 图片", "jpg": "JPEG 图片", "jpeg": "JPEG 图片",
+                      "bmp": "BMP 图片", "webp": "WebP 图片", "gif": "GIF 图片",
+                      "tif": "TIFF 图片", "tiff": "TIFF 图片"}
+
+
+def save_as_filter(settings):
+    """「另存为」对话框的文件类型过滤器（按当前保存格式）。"""
+    key = str(settings.get("save_format", "png")).lower()
+    extension = SAVE_FORMATS.get(key, SAVE_FORMATS["png"])[1]
+    label = SAVE_FORMAT_LABELS.get(key, f"{key.upper()} 图片")
+    return f"{label} (*.{extension});;所有文件 (*.*)"
+
+
+def normalize_save_as_path(path, settings):
+    """规整「另存为」选择：补扩展名，并让编码格式与后缀一致。
+
+    save_image() 按 settings['save_format'] 编码而不管后缀，所以用户把名字改成 .jpg
+    时必须同步改格式，否则会出现「后缀 jpg、内容 png」的文件。返回 (路径, 生效设置)。
+    """
+    path = Path(path)
+    suffix = path.suffix.casefold().lstrip(".")
+    current = str(settings.get("save_format", "png")).lower()
+    if not suffix:
+        extension = SAVE_FORMATS.get(current, SAVE_FORMATS["png"])[1]
+        return path.with_suffix("." + extension), settings
+    matched = next((key for key, value in SAVE_FORMATS.items() if value[1] == suffix), None)
+    if matched is None or matched == current:
+        return path, settings
+    return path, {**settings, "save_format": matched}
+
+
 def matches_saved_format(path, settings):
     """Return whether an existing path matches the configured encoder format."""
     return (path is not None and
