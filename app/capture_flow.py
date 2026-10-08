@@ -65,7 +65,7 @@ class CaptureFlowMixin:
                 target = QPoint(preferred_monitor["left"] + preferred_monitor["width"] // 2,
                                 preferred_monitor["top"] + preferred_monitor["height"] // 2)
             else:
-                target = mapper.logical_global_to_physical_global(QCursor.pos())
+                target = mapper.native_global_to_physical_global(QCursor.pos())
             monitor = next((screen for screen in monitors if
                             screen["left"] <= target.x() < screen["left"] + screen["width"] and
                             screen["top"] <= target.y() < screen["top"] + screen["height"]),
@@ -77,7 +77,7 @@ class CaptureFlowMixin:
         local = region.translated(-bounds["left"], -bounds["top"])
         area = (local.x(), local.y(), local.x() + local.width(), local.y() + local.height())
         images = [(image.crop(area), alternate.crop(area) if alternate else None)]
-        position = mapper.physical_local_rect_to_logical_global_rect(local).toRect().topLeft()
+        position = mapper.physical_local_to_native_global(local.topLeft())
         self.logger.info("预设截图直接完成: mode=%s 区域=%s", mode, tuple(region.getRect()))
         self.handle_capture_selection(images, [position], mode=mode)
 
@@ -153,6 +153,8 @@ class CaptureFlowMixin:
             view.edit_requested.connect(self.edit_images)
             view.save_requested.connect(self.save_capture_images)
             view.copy_done.connect(self.notify_capture_copied)
+            view.save_failed.connect(self.initial_save_failed)
+            view.save_as_dir_chosen.connect(self.remember_save_as_dir)
             view.picker_copied.connect(self.notify_color_picked)
             view.image_saved.connect(self.saved)
             view.image_saved_silently.connect(
@@ -200,6 +202,8 @@ class CaptureFlowMixin:
             editor = EditorWindow(image, self.config.data, alternate,
                                   from_capture=from_capture)
             editor.sticker_position = positions[index] if positions and index < len(positions) else None
+            editor.copy_done.connect(self.notify_capture_copied)
+            editor.save_as_dir_chosen.connect(self.remember_save_as_dir)
             editor.image_saved.connect(
                 lambda path, saved_image, current=editor:
                 self.editor_saved(current, path, saved_image))
@@ -261,6 +265,8 @@ class CaptureFlowMixin:
         """直接保存选区图片，但沿用编辑器最终效果与手动保存配置。"""
         for image, alternate in images:
             editor = EditorWindow(image, self.config.data, alternate, from_capture=True)
+            editor.copy_done.connect(self.notify_capture_copied)
+            editor.save_as_dir_chosen.connect(self.remember_save_as_dir)
             editor.image_saved.connect(self.saved)
             try:
                 editor.save(automatic=True, copy_to_clipboard=True)
