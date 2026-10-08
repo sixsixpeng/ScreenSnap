@@ -24,8 +24,37 @@ if errorlevel 1 goto failed
 python -m pip install -r "requirements.txt"
 if errorlevel 1 goto failed
 if not exist ".venv\Scripts\pythonw.exe" goto failed
-start "" ".venv\Scripts\pythonw.exe" "main.py"
+
+rem ---- 项目根目录（去掉结尾反斜杠）、启动器、入口脚本与图标 ----
+set "PROJECT=%~dp0"
+if "%PROJECT:~-1%"=="\" set "PROJECT=%PROJECT:~0,-1%"
+set "PYTHONW=%PROJECT%\.venv\Scripts\pythonw.exe"
+set "MAIN=%PROJECT%\main.py"
+set "ICON=%PROJECT%\ui\assets\icon.ico"
+
+echo.
+echo [1/2] 正在创建快捷方式（项目目录 + 桌面各一个）...
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$ws = New-Object -ComObject WScript.Shell; $desktop = [Environment]::GetFolderPath('Desktop'); $paths = @('%PROJECT%\ScreenSnap.lnk', (Join-Path $desktop 'ScreenSnap.lnk')); foreach ($path in $paths) { $lnk = $ws.CreateShortcut($path); $lnk.TargetPath = '%PYTHONW%'; $lnk.Arguments = [char]34 + '%MAIN%' + [char]34; $lnk.WorkingDirectory = '%PROJECT%'; $lnk.IconLocation = '%ICON%,0'; $lnk.Description = 'ScreenSnap 截图工具'; $lnk.Save(); Write-Host ('      已创建: ' + $path) }"
+if errorlevel 1 echo [警告] 快捷方式创建失败，可参照下面的参数手动创建。
+
+echo.
+echo       快捷方式参数（两个快捷方式相同）：
+echo         目标     : %PYTHONW%
+echo         参数     : "%MAIN%"
+echo         起始位置 : %PROJECT%
+echo         图标     : %ICON%
+echo         位置     : %PROJECT%\ScreenSnap.lnk
+echo                    桌面\ScreenSnap.lnk
+echo       用 pythonw.exe 启动不会弹出黑色控制台窗口；以后直接双击快捷方式即可。
+
+echo.
+echo [2/2] 正在启动 ScreenSnap...
+start "" "%PYTHONW%" "%MAIN%"
 if errorlevel 1 goto failed
+
+echo.
+echo [完成] 快捷方式已就绪、程序已启动。按任意键关闭此窗口 ...
+pause >nul
 exit /b 0
 
 :no_python
