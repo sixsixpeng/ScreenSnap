@@ -528,6 +528,21 @@ class ToolsTests(CoreTests):
                 self.assertLessEqual(panel.minimumWidth(), 520)
         panel.close()
 
+    def test_toolbar_tooltips_show_editor_fixed_shortcuts(self):
+        """编辑器工具栏的撤销/重做/删除提示必须带快捷键（与画布实际绑定的键同源）。"""
+        from config.config_manager import DEFAULTS
+        from editor.toolbar_widget import ToolbarWidget
+
+        toolbar = ToolbarWidget(DEFAULTS["pen_color"], dict(DEFAULTS))
+        try:
+            tips = {action: button.toolTip() for button, action in toolbar.command_buttons}
+            self.assertIn("Ctrl+Z", tips["undo"])
+            self.assertIn("Ctrl+Y", tips["redo"])
+            self.assertIn("Del", tips["delete"])
+            self.assertIn("快捷键", tips["undo"])
+        finally:
+            toolbar.deleteLater()
+
 
 if __name__ == "__main__":
     unittest.main()

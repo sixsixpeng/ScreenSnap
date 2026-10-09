@@ -25,8 +25,22 @@ HOTKEY_LABELS = {
 }
 
 
+# 编辑器里由画布 keyPressEvent 直接处理的固定快捷键（不是用户可配置的全局热键）。
+# 用 Qt 标准键推导文案，保证与 event.matches(QKeySequence.Undo/Redo) 永远一致。
+# 只存枚举，QKeySequence 在 shortcut_label() 里按需构造：模块导入期还没有
+# QGuiApplication，此时构造 Qt 对象会直接原生崩溃（0xC0000005，无任何输出）。
+EDITOR_FIXED_KEYS = {
+    "undo": QKeySequence.Undo,
+    "redo": QKeySequence.Redo,
+    "delete": QKeySequence.Delete,
+}
+
+
 def shortcut_label(bindings, action):
+    """优先取用户配置的绑定，其次回落到编辑器内建固定键；都没有则返回空串。"""
     binding = (bindings or {}).get(action, "")
+    if not binding:
+        binding = EDITOR_FIXED_KEYS.get(action, "")
     return QKeySequence(binding).toString(QKeySequence.NativeText) if binding else ""
 
 
