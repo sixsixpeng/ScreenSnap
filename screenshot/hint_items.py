@@ -13,7 +13,7 @@ from config.config_manager import HINT_ITEM_IDS
 # 按钮已移除，统一改为可配置快捷键（含多选），并在提示条里按**当前设置**展示。
 CAPTURE_ACTION_KEYS = (
     ("custom_size", "capture_custom_size_shortcut", "F", "尺寸"),
-    ("recapture", "capture_recapture_shortcut", "R", "重新截图"),
+    ("recapture", "capture_recapture_shortcut", "R", "清除选择"),
     ("window_edit", "capture_window_edit_shortcut", "E", "窗口编辑"),
     ("multi_select", "capture_multi_select_shortcut", "Alt+M", "多选"),
     ("copy", "capture_copy_shortcut", "Y", "仅复制"),
@@ -66,7 +66,8 @@ def hint_texts(settings, position, selection, inline=False, picker=False,
               f"右键双击直存 | {save_key}快速保存") if not inline else ""),
         # 快速贴图快捷键在原地编辑里被禁用（trigger_quick_sticker 直接返回），不要提示。
         "quick_sticker": f"{quick} 贴图" if quick and not inline else "",
-        "picker": f"{picker_key} 取色" if not inline else "",
+        # 取色在未选择 / 原地编辑 / 多选下都可用，提示语相应地在三种界面都显示。
+        "picker": f"{picker_key} 取色",
         "fixed_size": f"{fixed_key} 固定尺寸" if selection is None else "",
         "recapture": (f"{action_keys['recapture']} 重新截图"
                       if selection and not inline else ""),
