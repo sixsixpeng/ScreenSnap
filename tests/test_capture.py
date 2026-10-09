@@ -302,14 +302,20 @@ class CaptureTests(CoreTests):
             QTest.mouseRelease(mask, Qt.LeftButton, pos=target)
             self.assertEqual(len(mask.selection.rects), 1)
             self.assertNotEqual(mask.selection.rects[0], original, corner)
+            # 新语义：微调要求"握着控制点"（按住左键，或抓住过留下 nudge_corner）
+            mask._grip_down = True
             for key, dx, dy in ((Qt.Key_Left, -1, 0), (Qt.Key_D, 1, 0),
                                 (Qt.Key_Up, 0, -1), (Qt.Key_S, 0, 1),
                                 (Qt.Key_A, -1, 0), (Qt.Key_Right, 1, 0),
                                 (Qt.Key_W, 0, -1), (Qt.Key_Down, 0, 1)):
                 before = mask.selection.nudge_corner[2]
-                QTest.keyClick(mask, key)
+                if key == Qt.Key_S:
+                    mask.save_selection()      # S 走快捷保存通道；按住时等于下移微调
+                else:
+                    QTest.keyClick(mask, key)
                 self.assertEqual(mask.selection.nudge_corner[2], before + QPoint(dx, dy))
             self.assertEqual(mask.selection.rects[0], QRect(mask.selection.nudge_corner[1], target).normalized())
+            mask._grip_down = False
         mask.close()
 
     def test_mask_drag_resizes_from_each_edge_midpoint(self):
@@ -358,13 +364,21 @@ class CaptureTests(CoreTests):
             QTest.mousePress(mask, Qt.LeftButton, pos=QPoint(40, 40))
             QTest.mouseMove(mask, QPoint(45, 43))
             QTest.mouseRelease(mask, Qt.LeftButton, pos=QPoint(45, 43))
+            # 新规则：必须抓住手柄/边线才允许微调 —— 把指针放到选区左上角的手柄上
+            # （nudge_corner 仍为 None，因此走"位移累计"分支，断言 position+delta）。
+            mask.position = QPoint(20, 20)
+            mask._grip_down = True          # 新语义：按住左键期间才允许微调
+            mask.selection.nudge_corner = None   # 走"位移累计"分支，断言 position+delta
             for key, delta in ((Qt.Key_D, QPoint(1, 0)), (Qt.Key_Left, QPoint(-1, 0)),
                                (Qt.Key_W, QPoint(0, -1)), (Qt.Key_Down, QPoint(0, 1)),
                                (Qt.Key_A, QPoint(-1, 0)), (Qt.Key_Right, QPoint(1, 0)),
                                (Qt.Key_S, QPoint(0, 1)), (Qt.Key_Up, QPoint(0, -1))):
                 before_position = QPoint(mask.position)
                 before_rect = QRect(mask.selection.rects[0])
-                QTest.keyClick(mask, key)
+                if key == Qt.Key_S:
+                    mask.save_selection()      # S 走快捷保存通道；按住时等于下移微调
+                else:
+                    QTest.keyClick(mask, key)
                 self.assertEqual(mask.position, before_position + delta)
                 self.assertEqual(mask.selection.rects[0], before_rect.translated(delta))
                 move_pointer.assert_called_with(mask.mapToGlobal(mask.position))
@@ -2894,3 +2908,42 @@ if __name__ == "__main__":
 
 if __name__ == "__main__":
     unittest.main()
+
+
+    def test_quick_save_is_nudge_within_window(self):
+        """0.3 秒内刚微调过（或正按住左键）时，按 S = 下移微调，不保存。"""
+        import time as _time
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 150}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (200, 150)), bounds, [bounds], DEFAULTS)
+        try:
+            mask.selection.rects.append(QRect(20, 20, 60, 40))
+            mask.selection.nudge_corner = (0, QPoint(20, 20), QPoint(20, 20), "both", QRect(20, 20, 60, 40))
+            mask._nudge_at = _time.monotonic()
+            mask._grip_down = True
+            with patch.object(mask, "complete") as complete:
+                mask.save_selection()
+            complete.assert_not_called()
+        finally:
+            mask.close()
+
+    def test_quick_save_saves_after_window_expires(self):
+        """超过 0.3 秒且未按住左键时，按 S = 快捷保存。"""
+        import time as _time
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 150}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (200, 150)), bounds, [bounds], DEFAULTS)
+        try:
+            mask.selection.rects.append(QRect(20, 20, 60, 40))
+            mask.selection.nudge_corner = None
+            mask._grip_down = False
+            mask._nudge_at = _time.monotonic() - 1.0
+            with patch.object(mask, "complete") as complete:
+                mask.save_selection()
+            complete.assert_called_once()
+        finally:
+            mask.close()

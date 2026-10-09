@@ -610,6 +610,27 @@ Windows 图片提示优先使用带缩略图的原生图片 Toast；无法导入
 - **修复（撤销/重做/删除按钮提示不显示快捷键）**：工具栏用 `shortcut_label()` 取按键，而它只查 `settings["hotkeys"]`（全局热键），编辑器动作不在其中，于是所有按钮的提示都没有按键信息。现在 `core/constants.py` 新增内建固定键映射 `EDITOR_FIXED_KEYS`（撤销=QKeySequence.Undo、重做=QKeySequence.Redo、删除=QKeySequence.Delete，由 Qt 标准键推导，与画布 `keyPressEvent` 的 `event.matches(...)` 同源），`shortcut_label()` 在配置缺省时回落到它；两个编辑器共用同一份工具栏，一处修复同时生效。
 - **验证**：`tests/editor/test_tools.py::test_toolbar_tooltips_show_editor_fixed_shortcuts` 断言撤销提示含 Ctrl+Z、重做含 Ctrl+Y、删除含 Del。
 
+### 2026-10-09 取色通知独立开关、跨屏选区动作委派
+
+- **新增（取色通知独立开关）**：`config/config_manager.py` 新增 `picker_notification`（默认开，布尔校验，列入 `PRESERVED_ON_VERSION_RESET`），设置 > 通知 新增「取色通知」；`app/notification_flow.py::notify_color_picked()` 由原来共用 `copy_notification` 改为用该开关，取色提示从此可单独关闭。
+- **修复（快捷键只在一块屏有效）**：选区阶段的 F/R/E/多选/Y/S/C 快捷键建在主遮罩视图上，而动作读的是**该视图自己**的 selection/position —— 在另一块屏框选后按键会落到没有选区的视图（E 表现为「进不去」、R 无反应、F 对话框出现在起始屏、C 无法触发）。新增 `MaskWindow._owner_view()`（有选区的视图 → 鼠标所在屏的视图 → 自己）与 `_delegate_to_owner()`，7 个动作槽开头委派；`picker_mode`/`picker_color` 改为按 session 共享。
+- **验证**：`tests.test_capture` 89 条 OK（含新增 `test_capture_action_delegates_to_the_view_that_owns_the_selection`）、`tests.test_uia` 50 条 OK、`tests.test_config` 106 条 OK、`tests.test_app` 9 条 OK。
+### 2026-10-09 S 快速保存：直接保存不进入编辑
+
+- **修复（右键选区按 S 反而进入编辑）**：`screenshot/mask_window.py::complete()` 里 `right_capture_mode/uia_selection` 分支无视 `save_direct`，按 S（`save_direct=True`）仍 `edit_requested` —— 现在该分支加 `and not save_direct`，单选/多选都直接保存。
+- **修复（左键快速编辑下按 S 无响应）**：原地编辑激活时 S 快捷键被 `setEnabled(not self.inline_active()...)` 主动禁用（因为 W/A/S/D 也是选区微调键），`save_selection()` 也直接 return。现在原地编辑激活时 S 等价于该编辑器的「保存」按钮（保存并关闭），两处启用条件统一为 `self.selection.nudge_index is None`（微调中 S 仍为「控制点下移」，微调结束才保存；首版写成 `inline_active() or ...` 被既有微调用例抓出冲突）。
+- **验证**：`tests.test_capture` 93 条 OK，含新增 `test_quick_save_shortcut_saves_right_button_selection_without_editor`（右键选区按 S：不进编辑器、恰好一次保存）与 `test_quick_save_shortcut_saves_inline_editor`（原地编辑按 S：真的写盘）。
+### 2026-10-09 取色（C）在未选择 / 原地编辑 / 多选下都可用
+
+- **修复（原地编辑里 C 被禁用、无法取色）**：三处拦路 —— ① `sync_capture_picker_shortcut` 用 `setEnabled(not inline_active)` 原地编辑时禁用快捷键；② `toggle_picker_mode()` 里 `if self.inline_active(): return` 直接拒绝；③ `hint_items.py` 的 `"picker"` 文案带 `if not inline`，原地编辑界面不提示。现在三处放开：快捷键在所有状态启用、`toggle_picker_mode` 只在 `session.closing` 时拒绝、提示语在未选择/原地编辑/多选三种界面都显示。
+- **边界（需知）**：原地编辑时编辑器窗口会盖住选区那块画面，在**编辑器之外**的区域取色有效，编辑器内部点击仍归编辑器（画布交互优先）。取色只复制色值并发通知，**不退出编辑器**。
+- **验证**：`tests.test_capture` 95 条 OK，含新增 `test_picker_mode_available_while_inline_editing`（未选择/多选/原地编辑三态都能开启取色，且原地编辑器不被关闭）。
+### 2026-10-09 F 固定尺寸：对话框定位 / 左键改尺寸 / 不碰右键区域
+
+- **修复（输入框不在鼠标所在屏、被遮罩压住）**：`select_fixed_size()` 原来用无定位、无置顶的 `QDialog(self)` —— 遮罩是置顶全屏窗（70% 黑）会把它压住，且默认出现在父窗口那块屏。现在 `setWindowFlag(Qt.WindowStaysOnTopHint, True)` + 以 `QCursor.pos()` 为锚点、`screenAt(anchor)` 取所在屏并按 `availableGeometry` 夹紧 + `raise_()/activateWindow()`，并预填当前区域宽高。
+- **修复（左键选完再按 F 会多出一块区域）**：落区域逻辑抽成 `apply_fixed_size(width, height)`：有可重置区域时**按中心改尺寸**（数量不变），无区域时才在鼠标处新建。旧实现是无条件 `selection.rects.clear()` 后 append。
+- **调整（右键区域不被 F 改动）**：新增 `_fixed_size_target()` —— 处于右键/元素选区时返回 None，按 F 只**新建**固定尺寸区域、**不 clear**，右键已选区域保持原样；上次 F 建的区域与左键拖出的区域才会被重置。`session.fixed_size_rect` 记录 F 区域，`clear_selection()`（R）会复位它。
+- **验证**：`tests.test_capture` 95 条 OK，含 `test_fixed_size_creates_resizes_and_keeps_right_selection`（未选→新建 1 块；左键已选→改尺寸仍 1 块；右键模式→新增 1 块且原块宽高不变）。
 ## 技术指南
 
 ### 屏幕坐标空间约定（多屏 + 混合 DPI）

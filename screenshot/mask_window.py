@@ -9,6 +9,7 @@ from pathlib import Path
 
 from PySide6.QtCore import (Qt, Signal, QPoint, QPointF, QRect, QRectF, QEvent, QMimeData,
                             QTimer, QSize)
+from PySide6.QtGui import QKeyEvent
 from PySide6.QtGui import (QColor, QCursor, QPainter, QPainterPath, QPen, QGuiApplication,
                            QMouseEvent, QPixmap, QShortcut, QKeySequence)
 from PySide6.QtWidgets import (QWidget, QApplication, QDialog, QFileDialog, QDialogButtonBox, QFormLayout, QSpinBox,
@@ -1378,11 +1379,13 @@ class MaskWindow(QWidget):
         super().closeEvent(event)
 
     def update_all(self):
-        # 选区微调（键位包含 S）与快捷保存快捷键 S 冲突：选区处于可微调状态时不响应保存，
-        # 交由 keyPressEvent 处理方向微调；无活动选区时才允许 S 直接保存。
+        # 这里曾经按 selection.nudge_index 关闭 S：那是"上次微调"留下的记忆值，
+        # 而 update_all() 每次鼠标移动都会跑，于是刚设成启用的 S 立刻又被关掉
+        # （日志实证：S 快捷键就绪 启用=True，按 S 却毫无反应）。
+        # 现在 S 恒定可用作快捷保存，微调交由方向键承担。
         if self.capture_save_shortcut is not None:
-            self.capture_save_shortcut.setEnabled(
-                self.selection.nudge_index is None)
+            # S 不参与微调：任何状态下都是快捷保存（避免"按住时按键被吞/误保存"的判定问题）
+            self.capture_save_shortcut.setEnabled(True)
         self.session.position = QPoint(self.position)
         for view in self.session.views:
             view.position = QPoint(self.session.position)
@@ -1442,7 +1445,7 @@ class MaskWindow(QWidget):
         if getattr(self.session, "editor_opened", False):
             # 每个遮罩视图都会收到这次按键（日志里能看到相隔 1ms 的两条记录）：第二次若继续走
             # complete()，它自己没有选区 → 收摊关闭遮罩 → 连带把刚打开的编辑器关掉。
-            logger.info("E 重复触发，忽略（本轮截图已打开过编辑器 editor_opened=%s）",
+            logger.debug("E 重复触发，忽略（本轮截图已打开过编辑器 editor_opened=%s）",
                         getattr(self.session, "editor_opened", None))
             return
         logger.info(
@@ -1476,7 +1479,7 @@ class MaskWindow(QWidget):
             editor.cleanup()
         except Exception as error:
             logger.warning("转交独立编辑器时清理原地编辑失败: %s", error)
-        logger.info("E（原地编辑）→ 转交独立编辑器：区域=%s 锚点=(%d,%d)",
+        logger.debug("E（原地编辑）→ 转交独立编辑器：区域=%s 锚点=(%d,%d)",
                     rect.getRect(), position.x(), position.y())
         self.edit_requested.emit([(image, alternate)], [position])
         self.close()
@@ -1533,14 +1536,34 @@ class MaskWindow(QWidget):
 
     def sync_capture_save_shortcut(self, settings):
         if self.capture_save_shortcut is None:
+            if not getattr(self, "_save_shortcut_missing_logged", False):
+                self._save_shortcut_missing_logged = True
+                logging.getLogger("screensnap").debug(
+                    "S 快捷键未创建：视图=%s（只有主遮罩视图创建快捷键）",
+                    self.monitor_rect.getRect())
             return
         sequence = QKeySequence(settings.get("capture_save_shortcut", "S"))
         if sequence.isEmpty():
             sequence = QKeySequence("S")
         self.capture_save_shortcut.setKey(sequence)
-        # 原地编辑激活时 S 用来保存该编辑器；否则仅在没有选区微调时保存选区。
-        self.capture_save_shortcut.setEnabled(
-            self.selection.nudge_index is None)
+        # S 始终可用来保存：以前这里依赖 selection.nudge_index —— 那是"上次微调"留下的记忆值，
+        # 一旦残留就把 S 永久禁用（日志实证：nudge_index=0 → 按 S 无反应）。
+        # 微调仍由方向键承担（Down 为下移），S 保留为快捷保存。
+        # S 不参与微调：任何状态下都是快捷保存
+        enabled = True
+        if not enabled and getattr(self, "_save_shortcut_last", None) is not False:
+            # 只在"由可用变为禁用"时记一条：这正是"按 S 没反应"的成因
+            logging.getLogger("screensnap").debug(
+                "S 快捷保存被禁用：存在选区微调记忆 nudge_index=%s（视图=%s）",
+                self.selection.nudge_index, self.monitor_rect.getRect())
+        self._save_shortcut_last = enabled
+        self.capture_save_shortcut.setEnabled(enabled)
+        if not getattr(self, "_save_shortcut_state_logged", False):
+            # 每次截图只记一次：确认 S 快捷键确实存在、键位与启用状态
+            self._save_shortcut_state_logged = True
+            logging.getLogger("screensnap").debug(
+                "S 快捷键就绪：视图=%s 键=%s 启用=%s",
+                self.monitor_rect.getRect(), sequence.toString(), enabled)
 
     def sync_capture_action_shortcuts(self, settings):
         """改键后同步选区功能键、内联多选键与工具栏隐藏键。"""
@@ -1936,6 +1959,26 @@ class MaskWindow(QWidget):
 
     def save_selection(self):
         """用当前输出规则保存选区，不进入标注编辑器。"""
+        # 规则：最近一次微调（抓住控制点按方向键）在 0.3 秒内 → S 当作"下移"；否则 S 是快捷保存。
+        # 依据实测：按住鼠标时 resizing 有时为真有时为假，唯有"最近微调时间"稳定可判。
+        recently_nudged = (time.monotonic() - getattr(self, "_nudge_at", 0.0)) <= 0.3
+        if (getattr(self, "_grip_down", False)
+                or self.selection.resizing is not None or self.selection.dragging is not None
+                or (self.selection.nudge_corner is not None and recently_nudged)):
+            # 在按键当刻判断（日志实证：此时 resizing=True），不依赖快捷键启用状态的刷新时机。
+            logging.getLogger("screensnap").debug(
+                "S 视为下移微调：视图=%s resizing=%s dragging=%s",
+                self.monitor_rect.getRect(), self.selection.resizing is not None,
+                self.selection.dragging is not None)
+            self.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Down, Qt.NoModifier))
+            return
+        logging.getLogger("screensnap").debug(
+            "S 快速保存：视图=%s 选区=%d 块 inline=%s resizing=%s dragging=%s "
+            "nudge_index=%s nudge_corner=%s",
+            self.monitor_rect.getRect(), len(self.selection.rects),
+            self.inline_active(), self.selection.resizing is not None,
+            self.selection.dragging is not None, self.selection.nudge_index,
+            self.selection.nudge_corner)
         if self._delegate_to_owner("save_selection"):
             return
         if self.inline_active():
@@ -2186,6 +2229,9 @@ class MaskWindow(QWidget):
 
     def mousePressEvent(self, event):
         """左键开始创建选区，已有选区的命中由选区对象判定。"""
+        # 自己记录左键是否按下：selection.resizing/dragging 在部分路径下不可靠，
+        # 而"S 该微调还是该保存"必须只看"手是否还按着"。
+        self._grip_down = event.button() == Qt.LeftButton
         if self.inline_active():
             if event.button() == Qt.LeftButton:
                 self.position = self.to_physical_point(event.position().toPoint())
@@ -2286,6 +2332,7 @@ class MaskWindow(QWidget):
         self.update_all()
 
     def mouseReleaseEvent(self, event):
+        self._grip_down = False
         """结束当前选区的创建、拖动或缩放。"""
         if self.inline_active():
             if event.button() == Qt.LeftButton and (self.selection.resizing is not None or
@@ -2358,13 +2405,22 @@ class MaskWindow(QWidget):
                 self.close()
             elif event.modifiers() == Qt.NoModifier:
                 dx = (-1 if key in (Qt.Key_A, Qt.Key_Left) else 1 if key in (Qt.Key_D, Qt.Key_Right) else 0)
-                dy = (-1 if key in (Qt.Key_W, Qt.Key_Up) else 1 if key in (Qt.Key_S, Qt.Key_Down) else 0)
+                dy = (-1 if key in (Qt.Key_W, Qt.Key_Up) else 1 if key == Qt.Key_Down else 0)
                 if (dx or dy) and self.selection.rects:
+                    # 只有指针正压在手柄/边线上，或此前真正抓住过（nudge_corner 记忆）才微调：
+                    # 从未抓过时方向键既不移动、也不写下微调记忆（记忆会顺带把 S 快捷保存禁用掉）。
+                    if (not getattr(self, "_grip_down", False)
+                            and self.selection.resizing is None
+                            and self.selection.dragging is None
+                            and self.selection.nudge_corner is None):
+                        event.accept()
+                        return
                     if self.selection.handle_at(self.position) is None:
                         self.selection.nudge_corner = None
                     if self.selection.resizing is not None or self.selection.dragging is not None:
                         self.releaseMouse()
                     self.selection.move_last(dx, dy)
+                    self._nudge_at = time.monotonic()      # 供"0.3 秒内 S = 下移"判定
                     self.position = (QPoint(self.selection.nudge_corner[2]) if self.selection.nudge_corner
                                      else self.position + QPoint(dx, dy))
                     self.update_inline_region()
@@ -2381,11 +2437,20 @@ class MaskWindow(QWidget):
             self.complete()
         else:
             dx = (-1 if key in (Qt.Key_A, Qt.Key_Left) else 1 if key in (Qt.Key_D, Qt.Key_Right) else 0)
-            dy = (-1 if key in (Qt.Key_W, Qt.Key_Up) else 1 if key in (Qt.Key_S, Qt.Key_Down) else 0)
+            dy = (-1 if key in (Qt.Key_W, Qt.Key_Up) else 1 if key == Qt.Key_Down else 0)
             if dx or dy:
+                # 只有指针正压在手柄/边线上，或此前真正抓住过（nudge_corner 记忆）才微调：
+                # 从未抓过时方向键既不移动、也不写下微调记忆（记忆会顺带把 S 快捷保存禁用掉）。
+                if (not getattr(self, "_grip_down", False)
+                        and self.selection.resizing is None
+                        and self.selection.dragging is None
+                        and self.selection.nudge_corner is None):
+                    event.accept()
+                    return
                 if self.selection.rects and self.selection.handle_at(self.position) is None:
                     self.selection.nudge_corner = None
                 self.selection.move_last(dx, dy)
+                self._nudge_at = time.monotonic()          # 供"0.3 秒内 S = 下移"判定
                 if self.selection.rects:
                     self.position = (QPoint(self.selection.nudge_corner[2]) if self.selection.nudge_corner
                                      else self.position + QPoint(dx, dy))
