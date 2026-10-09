@@ -2704,6 +2704,99 @@ class CaptureTests(CoreTests):
             mask.session.inline_editor = None
             mask.close()
 
+    def test_copy_shortcut_is_enabled_while_inline_editing(self):
+        """Y（仅复制）在原地编辑里必须可用，并复制带标注的成品图、不落盘。
+
+        回归：左键划选会直接进入原地编辑，而 sync_capture_action_shortcuts 只放行 E/F/R，
+        Y 被禁用 —— 副屏按 Y 没有任何反应。
+        """
+        from config.config_manager import DEFAULTS
+        from PySide6.QtGui import QImage
+        from screenshot.mask_window import MaskWindow
+        from types import SimpleNamespace
+        from unittest.mock import patch as patcher
+
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False}
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+        try:
+            dismissed, copied, saved, closed = [], [], [], []
+            output = QImage(40, 30, QImage.Format_ARGB32)
+            output.fill(Qt.red)
+            stub = SimpleNamespace(
+                multi_select_shortcut=SimpleNamespace(setKey=lambda *a, **k: None),
+                output_image=lambda: output,
+                save=lambda *a, **k: saved.append(True),
+                cleanup=lambda: dismissed.append("cleanup"),
+                hide=lambda: dismissed.append("hide"),
+                setParent=lambda *a: None,
+                deleteLater=lambda: dismissed.append("deleteLater"),
+                canvas=SimpleNamespace(cursor_index=0, hide=lambda: dismissed.append("canvas")),
+                toolbar=SimpleNamespace(hide=lambda: dismissed.append("toolbar")),
+                toolbar_handle=None,
+            )
+            mask.session.inline_editor = stub
+            mask.sync_capture_action_shortcuts(settings)
+            shortcut = mask.capture_action_shortcuts.get("copy")
+            self.assertIsNotNone(shortcut)
+            self.assertTrue(shortcut.isEnabled())                    # Y 在原地编辑里可用
+            mask.copy_done.connect(lambda image: copied.append(image))
+            mask.close = lambda *args, **kwargs: closed.append(True)
+
+            mask.copy_selection_to_clipboard()
+
+            self.assertEqual([image.size() for image in copied], [output.size()])  # 复制的是成品图
+            self.assertEqual(saved, [])                              # 不落盘
+            self.assertIsNone(mask.session.inline_editor)            # 原地编辑退出
+            self.assertEqual(closed, [True])                         # 关遮罩（与工具栏「仅复制」一致）
+        finally:
+            mask.session.inline_editor = None
+            mask.close()
+
+    def test_copy_shortcut_keeps_the_last_region_only(self):
+        """多选区复制语义（用户确认）：只复制**最后划选**的那一块，单张位图。
+
+        曾经的两种尝试都回退了：竖直拼接会"叠加"；文件列表/HTML 在只认位图的目标里
+        既没有预览也无法处理 —— Windows 剪贴板每种格式只有一个句柄，多张位图不存在。
+        """
+        import os
+        from config.config_manager import DEFAULTS
+        from PIL import Image
+        from screenshot.mask_window import MaskWindow
+        from types import SimpleNamespace
+        from unittest.mock import patch as patcher
+
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False}
+        source = Image.new("RGB", (120, 80), "blue")
+        source.putpixel((0, 0), (255, 0, 0))            # 第一个区域左上角
+        source.putpixel((10, 30), (0, 255, 0))          # 第二个区域左上角
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(source, bounds, [bounds], settings)
+        try:
+            mask.selection.rects.append(QRect(0, 0, 40, 20))
+            mask.selection.rects.append(QRect(10, 30, 50, 10))
+            copied = []
+            mask.copy_done.connect(lambda image: copied.append(image))
+            mask.close = lambda *args, **kwargs: None
+            payloads = []
+            with patcher("screenshot.mask_window.QGuiApplication.clipboard",
+                         return_value=SimpleNamespace(setMimeData=payloads.append)):
+                mask.copy_selection_to_clipboard()
+
+            self.assertEqual(len(payloads), 1)
+            self.assertTrue(payloads[0].hasImage())                  # 单张位图
+            self.assertFalse(payloads[0].hasUrls())                  # 不再放文件列表
+            image = payloads[0].imageData()
+            self.assertEqual((image.width(), image.height()), (50, 10))   # 最后划选的那一块
+            self.assertEqual(image.pixelColor(0, 0).name(), "#00ff00")    # 与源图 (10,30) 一致
+            self.assertEqual(len(copied), 1)
+            self.assertEqual(copied[0].size, (50, 10))               # 通知用的也是最后一块
+            self.assertEqual(copied[0].getpixel((0, 0)), (0, 255, 0))
+        finally:
+            mask.close()
+
     def test_quick_save_shortcut_saves_right_button_selection_without_editor(self):
         """S（快速保存）：右键元素选区也必须直接保存，不进入编辑器。
 

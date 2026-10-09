@@ -1471,7 +1471,20 @@ class MaskWindow(QWidget):
         if self._delegate_to_owner("copy_selection_to_clipboard"):
             return
         logger = logging.getLogger("screensnap")
+        if self.inline_active():
+            # 原地编辑里按 Y ＝ 编辑器工具栏的「仅复制」：带标注的成品图进剪贴板，不落盘（规则 11）。
+            editor = self.session.inline_editor
+            image = editor.output_image()
+            payload = QMimeData()
+            payload.setImageData(image)
+            QGuiApplication.clipboard().setMimeData(payload)
+            logger.info("仅复制（原地编辑）到剪贴板: %dx%d", image.width(), image.height())
+            self.copy_done.emit(image)
+            self._dismiss_inline_editor()
+            self.close()
+            return
         if self.selection.rects:
+            # 多选收集了多块时只复制**最后划选**的那一块（用户确认的语义，2026-10-10）。
             region = self.selection.rects[-1].normalized()
             area = (region.x(), region.y(), region.right() + 1, region.bottom() + 1)
             image = self.image.crop(area)
@@ -1649,8 +1662,11 @@ class MaskWindow(QWidget):
             # F 用来给"快速编辑"里的区域改尺寸（实测：原地编辑一打开 F 就被禁用 → 按 F 无反应）。
             # R（清除选择）同样必须可用：左键划选会直接进入原地编辑，此时按 R 没有任何反应
             # （实测主副屏一致）—— R 的语义就是"取消这块选区"，在原地编辑里等价于"退出并清除"。
-            # 其余功能键（多选/Y）仍按原语义在原地编辑里禁用。
-            shortcut.setEnabled(name in ("window_edit", "custom_size", "recapture") or not inline_active)
+            # Y（仅复制）也必须可用：左键划选后按 Y 同样被禁用（实测副屏无反应），
+            # 在原地编辑里它等价于编辑器工具栏的「仅复制」：复制带标注的成品图、不落盘、关遮罩。
+            # 其余功能键（多选）仍按原语义在原地编辑里禁用。
+            shortcut.setEnabled(
+                name in ("window_edit", "custom_size", "recapture", "copy") or not inline_active)
 
     def toggle_picker_mode(self):
         if self._delegate_to_owner("toggle_picker_mode"):
@@ -1981,10 +1997,13 @@ class MaskWindow(QWidget):
         if action == "copy" and not (save_direct or force_window):
             from PySide6.QtGui import QGuiApplication
             from PySide6.QtCore import QMimeData
+            # 多选收集了多块时只复制最后划选的那一块（与 Y 同一语义）。
             payload = QMimeData()
-            payload.setImageData(to_qimage(images[0][0]))
+            payload.setImageData(to_qimage(images[-1][0]))
             QGuiApplication.clipboard().setMimeData(payload)
-            self.copy_done.emit(images[0][0])
+            logging.getLogger("screensnap").info("仅复制最后一个选区到剪贴板: %dx%d",
+                                                 images[-1][0].width, images[-1][0].height)
+            self.copy_done.emit(images[-1][0])
             self.close()
             return
         if save_direct or (action == "save" and not force_window):
