@@ -45,7 +45,15 @@
 
 27. **Consider the blast radius of shared code, not just the module you were asked to change.** ScreenSnap reuses a small set of primitives across many entry points — save_image / normalize_save_as_path, copy_saved_to_clipboard, the editor status to notify channel, the mask's per-view state, MaskWindow vs InlineEditor, the app/*_flow.py mixins, and the test stubs — so a change that is correct in the named place regularly breaks a sibling caller. Before editing shared code, list every caller (grep the symbol, the signal and the settings key it touches); after editing, re-verify each of them explicitly, because a fix that only covers the reported entry point is not finished. Two failure modes already seen here: an anchor-based edit that landed in the wrong sibling function because two functions contained the same line, and a notification fix that repaired the copy action while the save action kept double-notifying through the same channel. Report which other callers and modules you checked, and which you did not.
 
-28. **Commit rhythm: the guide first, the round aggregated at the end.** Commit AGENTS.md changes on their own as the round's first commit — this file is explicitly exempt from rule 21, the user has authorised it — so the conventions are in place before the code that follows them. Keep the rest of the round uncommitted while you work and commit it at the end, aggregated into one summary commit; split it into finer feature commits when the user asks for that. RELEASE_NOTES.md is never staged.
+28. **AGENTS.md is committed only on a separate, explicit request.** Changes to this guide are held back: never bundle them into another commit, and never commit them on your own initiative — rule 21 applies to this file like any other. Commit it (alone, or aggregated with the round, if the user says so) only when the user separately asks for it. This does not change how other code files are handled: they keep following rule 21, split into feature commits when the user asks for that.
+
+29. **Expand the user's shorthand into its full scenario set before investigating.** When the user names an area, treat it as the whole area, not the single instance they happened to hit — and troubleshoot every member of the set, not only the one they pointed at.
+
+    - **编辑 / 窗口编辑** means **both** editor windows: the standalone `EditorWindow` and the capture-local `InlineEditor`. They differ in ownership, sizing, capture source, close semantics and in which signals the application wires up, so a finding about one is not evidence about the other. Inspect both, and when a fix applies to shared behaviour, make it cover both (rule 7).
+    - **截图** means every capture scenario, at minimum: **未选择** (the mask is open and nothing is selected — hover highlight, hint bar, magnifier, Escape), **左键拖动选择** then following `capture_after_selection` into the editor or a direct save, **右键选择单个** (right-click a single element/window), **右键选择多个** (right-click collecting several regions), plus the paths that bypass the mask — fullscreen / current monitor / repeat-last-region presets, the quick-sticker gesture (hold the quick-sticker key), 取色 picker mode, the configured quick-save shortcut, and multi-monitor variants where the selection spans or starts on another screen.
+    - Apply the same expansion to any other shorthand: **通知** means every notification trigger; **贴图** means create, restore, drag, panel and recycle-bin paths; **设置** means the whole configuration lifecycle; **另存为/保存** means both editors and both write paths.
+
+    State in the report which scenarios you actually checked and which you did not, instead of implying that the named one stands for all of them.
 
 ## 经验与常见错误
 
@@ -120,6 +128,11 @@
   - 现象：功能在副屏正常，切到主屏就错位或失效（同类问题已被多次发现）。
   - 排查：复现只在单屏或副屏做过；主屏位于 Qt 原点、缩放常与副屏不同，坐标与尺寸走的是另一条分支。
   - 避免：每个功能都在主屏与副屏各验一次（含混合缩放与负原点排布）；报告里写明验证过的屏幕，未验证的标注未验证。
+
+- **C6 模块导入期构造 Qt 对象，进程原生崩溃且无任何输出**
+  - 现象：`import core.constants` 直接崩溃，`exit=-1073741819`（0xC0000005 访问违规），**一个字符都不打印**；跑测试模块时只有 exit 码、连 `Ran N` 摘要都没有，极易被当成"已知的离屏偶发崩溃"放过。
+  - 排查：用**独立的单行导入自检**（单独脚本文件，不要依赖 shell 里的嵌套引号）确认崩溃发生在导入阶段；看退出码是否为 -1073741819；并确认改动前该模块能否被导入。
+  - 避免：模块级只放纯数据与枚举（例如 `QKeySequence.Undo` 枚举值）；`QKeySequence(...)`、QIcon、QPixmap 等 Qt 对象一律在函数内构造，或在 QApplication 建立之后构造。
 
 ### D. 判断与流程
 
