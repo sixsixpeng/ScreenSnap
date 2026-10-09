@@ -1543,11 +1543,40 @@ class MaskWindow(QWidget):
                     rect.getRect(), position.x(), position.y())
         self.edit_requested.emit([(image, alternate)], [position])
         self.close()
-    def toggle_multi_select_mode(self):
-        """切换到多选收集；原地编辑有改动时按配置静默保存或丢弃。"""
-        if self._delegate_to_owner("toggle_multi_select_mode"):
+    def toggle_multi_select_mode(self, _forwarded=False):
+        """切换到多选收集；原地编辑有改动时按配置静默保存或丢弃。
+
+        原地编辑自带的 Alt+M 会把请求交回遮罩（mask_window.py 的 multi_select_shortcut），
+        而归属判定可能把它转给**非主**视图 —— 多选状态只在主视图维护，旧代码在那边直接
+        return，于是主屏按 Alt+M 两头空转、毫无反应（副屏恰好经归属转交到主视图，看着正常）。
+        现在：非主视图收到的请求**转交主视图**，_forwarded 防止来回递归。
+        """
+        logger = logging.getLogger("screensnap")
+        # 同一按键会被两条快捷键各触发一次：原地编辑的 multi_select_shortcut（WidgetWithChildren）
+        # 与遮罩的选区功能键 multi_select（ApplicationShortcut，只建在主屏）—— 两次切换会互相抵消，
+        # 表现为"主屏按 Alt+M 毫无反应"。这里按会话记时间戳，短时间内的重复触发一律忽略。
+        now = time.monotonic()
+        last = getattr(self.session, "_multi_select_at", 0.0)
+        # 只对**非转交**调用去抖：转交是同一毫秒内发生的，若也判重复，主视图那一跳会被自己拦掉
+        # （日志实证：01:44:01 转交后紧跟一条 "忽略 0.000s 内的重复触发" → 主屏永远进不去）。
+        if not _forwarded and now - last < 0.25:
+            logger.debug("多选切换：忽略 %.3fs 内的重复触发（视图=%s primary=%s）",
+                         now - last, self.monitor_rect.getRect(), self.primary)
+            return
+        self.session._multi_select_at = now
+        logger.debug("多选切换：视图=%s primary=%s inline=%s _forwarded=%s",
+                     self.monitor_rect.getRect(), self.primary, self.inline_active(), _forwarded)
+        if not _forwarded and self._delegate_to_owner("toggle_multi_select_mode"):
             return
         if not self.primary or self.session.closing:
+            primary = next((view for view in (self.session.views or [])
+                            if getattr(view, "primary", False)), None)
+            if (not self.session.closing and primary is not None and primary is not self
+                    and not _forwarded):
+                logging.getLogger("screensnap").debug(
+                    "多选：非主视图收到切换请求，转交主视图 %s",
+                    primary.monitor_rect.getRect())
+                primary.toggle_multi_select_mode(_forwarded=True)
             return
         if self.inline_active():
             editor = self.session.inline_editor
@@ -1840,6 +1869,32 @@ class MaskWindow(QWidget):
         return next((view for view in self.session.views
                      if view.monitor_rect.contains(rect)), None)
 
+    def _region_owner_view(self, rect):
+        """区域属于哪块屏：优先完全包含它的视图，否则取相交面积最大的那个。"""
+        best, best_area = None, 0
+        # 只接受真正的遮罩视图：测试桩/Mock 的 monitor_rect.contains() 会返回真值，
+        # 让归属落到错的视图上（曾把 test_mask_creates_one_window_per_monitor 跑红）。
+        candidates = [self] + [view for view in (self.session.views or [])
+                               if view is not None and view is not self
+                               and isinstance(getattr(view, "monitor_rect", None), QRect)
+                               and hasattr(view, "image")]
+        for view in candidates:
+            monitor = view.monitor_rect
+            if monitor.contains(rect):
+                return view
+            clipped = monitor.intersected(rect)
+            area = clipped.width() * clipped.height()
+            if area > best_area:
+                best, best_area = view, area
+        return best
+
+    def _region_in_view_local(self, rect, view):
+        """把本视图局部坐标的区域换算到目标视图的局部坐标（物理全局＝局部＋显示器原点）。"""
+        if view is self:
+            return rect
+        return rect.translated(self.bounds["left"] - view.bounds["left"],
+                               self.bounds["top"] - view.bounds["top"])
+
     def _trim_region_to_monitor(self, rect):
         """选区几乎完整落在某块显示器内、只多出少量边框时收边到该显示器。
 
@@ -1875,10 +1930,22 @@ class MaskWindow(QWidget):
         self.selection.finish()
 
         bounds = self.mapper.full_physical_local_rect()
-        regions = [rect.normalized().intersected(bounds)
-                   for rect in self.selection.rects]
-        regions = [self._trim_region_to_monitor(rect) for rect in regions]
-        regions = [rect for rect in regions if not rect.isEmpty()]
+        # 多选可以跨屏收集：只按"本视图这块屏"裁剪会把别屏的块丢成空矩形（保存/复制/编辑器全少块）。
+        # 每块按**屏归属**登记它的视图，后面用那个视图自己的 image 与 mapper 裁剪和定位。
+        regions, owners = [], []
+        for rect in self.selection.rects:
+            candidate = self._trim_region_to_monitor(rect.normalized())
+            owner = self._region_owner_view(candidate)
+            if owner is None:
+                clipped = candidate.intersected(bounds)
+                if clipped.isEmpty():
+                    continue
+                candidate, owner = clipped, self
+            regions.append(candidate)
+            owners.append(owner)
+        logging.getLogger("screensnap").debug(
+            "提交选区: %d 块 → 归属 %s", len(regions),
+            [owner.monitor_rect.getRect() for owner in owners])
         if not regions:
             # 本视图没有可选区域：选区在别的显示器上时转交那个视图完成。
             # 这是"在副屏划选后按 E 没反应"的兜底路径 —— 无论归属启发式算得对不对，
@@ -1976,13 +2043,15 @@ class MaskWindow(QWidget):
                 return
 
         images = []
-        for region in regions:
-            area = (region.x(), region.y(), region.right() + 1, region.bottom() + 1)
-            image = self.image.crop(area)
-            alternate = self.alternate.crop(area) if self.alternate else None
+        for region, owner in zip(regions, owners):
+            local = self._region_in_view_local(region, owner)
+            area = (local.x(), local.y(), local.right() + 1, local.bottom() + 1)
+            image = owner.image.crop(area)
+            alternate = owner.alternate.crop(area) if owner.alternate else None
             images.append((image, alternate))
-        positions = [self.mapper.physical_local_to_native_global(region.topLeft())
-                     for region in regions]
+        positions = [owner.mapper.physical_local_to_native_global(
+            self._region_in_view_local(region, owner).topLeft())
+            for region, owner in zip(regions, owners)]
         # S（快速保存）传 save_direct=True：右键/UIA 选区同样要直接保存，不得进编辑器。
         if (self.session.right_capture_mode or uia_selection) and not save_direct:
             self.session.editor_opened = True

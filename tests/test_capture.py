@@ -2797,6 +2797,71 @@ class CaptureTests(CoreTests):
         finally:
             mask.close()
 
+    def test_cross_screen_multi_select_keeps_every_region(self):
+        """跨屏多选不能丢块：每块按屏归属裁剪与定位（保存/复制/编辑器共用）。"""
+        from config.config_manager import DEFAULTS
+        from PIL import Image
+        from PySide6.QtCore import QPoint
+        from screenshot.mask_window import MaskWindow
+        from types import SimpleNamespace
+        from unittest.mock import patch as patcher
+
+        primary = {"left": 0, "top": 0, "width": 100, "height": 60}
+        secondary = {"left": 100, "top": 0, "width": 100, "height": 60}
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False}
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (100, 60), "blue"), primary,
+                              [primary, secondary], settings)
+        try:
+            other = SimpleNamespace(
+                monitor_rect=QRect(100, 0, 100, 60),
+                bounds=secondary,
+                image=Image.new("RGB", (100, 60), "red"),
+                alternate=None,
+                close=lambda *args, **kwargs: None,
+                mapper=SimpleNamespace(
+                    physical_local_to_native_global=lambda point: QPoint(point.x() + 100, point.y())),
+            )
+            mask.session.views = [mask, other]
+
+            here = QRect(10, 10, 20, 20)                       # 本屏
+            there = QRect(150, 20, 30, 30)                     # 另一块屏（本视图局部坐标）
+            self.assertIs(mask._region_owner_view(here), mask)
+            self.assertIs(mask._region_owner_view(there), other)
+            self.assertEqual(mask._region_in_view_local(there, other).topLeft(), QPoint(50, 20))
+            self.assertEqual(mask._region_in_view_local(here, mask), here)
+        finally:
+            mask.session.views = []
+            mask.close()
+
+    def test_multi_select_toggle_from_non_primary_view_forwards_to_primary(self):
+        """主屏 Alt+M 无反应的回归：非主视图收到切换请求必须转交主视图（多选状态只在主视图维护）。"""
+        from config.config_manager import DEFAULTS
+        from PIL import Image
+        from screenshot.mask_window import MaskWindow
+        from types import SimpleNamespace
+        from unittest.mock import patch as patcher
+
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False}
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            secondary = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds],
+                                   settings, primary=False)
+        try:
+            forwarded = []
+            primary = SimpleNamespace(
+                primary=True,
+                monitor_rect=QRect(0, 0, 120, 80),
+                toggle_multi_select_mode=lambda _forwarded=False: forwarded.append(_forwarded),
+            )
+            secondary.session.views = [primary, secondary]
+            secondary._delegate_to_owner = lambda *args, **kwargs: False   # 隔离：只验证转交分支
+            secondary.toggle_multi_select_mode()
+            self.assertEqual(forwarded, [True])                  # 转交主视图且标记为已转发（防递归）
+        finally:
+            secondary.session.views = []
+            secondary.close()
+
     def test_quick_save_shortcut_saves_right_button_selection_without_editor(self):
         """S（快速保存）：右键元素选区也必须直接保存，不进入编辑器。
 
