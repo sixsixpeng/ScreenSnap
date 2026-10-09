@@ -202,6 +202,21 @@ class CaptureFlowMixin:
             editor = EditorWindow(image, self.config.data, alternate,
                                   from_capture=from_capture)
             editor.sticker_position = positions[index] if positions and index < len(positions) else None
+            # 编辑器必须出现在"被截取区域所在的那块屏"：Qt 默认把新窗口放在主屏居中，
+            # 于是副屏划选、鼠标留在主屏时编辑器开在主屏，用户看到的就是"按 E 没反应"。
+            anchor = editor.sticker_position
+            if anchor is not None:
+                screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
+                if screen is not None:
+                    area = screen.availableGeometry()
+                    frame = editor.frameGeometry()
+                    frame.moveCenter(anchor)
+                    editor.move(
+                        min(max(frame.left(), area.left()), area.right() - frame.width() + 1),
+                        min(max(frame.top(), area.top()), area.bottom() - frame.height() + 1))
+                    logging.getLogger("screensnap").info(
+                        "编辑器定位到选区所在屏: 锚点=(%d,%d) 屏幕=%s 窗口=%s",
+                        anchor.x(), anchor.y(), area.getRect(), editor.geometry().getRect())
             editor.copy_done.connect(self.notify_capture_copied)
             editor.save_as_dir_chosen.connect(self.remember_save_as_dir)
             editor.image_saved.connect(

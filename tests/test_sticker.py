@@ -904,7 +904,7 @@ class StickerTests(CoreTests):
         self.assertEqual([section.findChild(QLabel).text() for section in toolbar.sections],
                         ["标注", "编辑", "图像旋转", "输出"])
         self.assertEqual([button.text() for button in toolbar.output_buttons],
-                     ["贴图", "外观", "保存", "仅复制", "放弃", "关闭全部"])
+                     ["贴图", "外观", "保存", "另存为", "仅复制", "放弃", "关闭全部"])
         commands = []
         toolbar.command.connect(commands.append)
         buttons = toolbar.findChildren(QToolButton)

@@ -19,6 +19,7 @@ from core.image_io import (matches_saved_format, normalize_save_as_path, save_as
                            save_image, saved_extension)
 from core.path_utils import resolved_dir, save_as_directory
 from core.screen_capture import to_qimage
+from core import qimage_to_pillow
 from core.window_boundaries import visible_windows
 from core.window_elements import element_chain
 from core.window_uia import forget_click_through
@@ -1116,7 +1117,8 @@ class MaskWindow(QWidget):
         self.toolbar_hide_shortcut = None
         if primary:
             slots = {"custom_size": self.select_fixed_size,
-                     "recapture": self.request_recapture,
+                     # R 快捷键＝清除选择（不刷新画面）；工具栏「重新截图」另有入口。
+                     "recapture": self.clear_selection,
                      "window_edit": self.complete_in_window_editor,
                      "multi_select": self.toggle_multi_select_mode,
                      "copy": self.copy_selection_to_clipboard}
@@ -1380,7 +1382,7 @@ class MaskWindow(QWidget):
         # 交由 keyPressEvent 处理方向微调；无活动选区时才允许 S 直接保存。
         if self.capture_save_shortcut is not None:
             self.capture_save_shortcut.setEnabled(
-                not self.inline_active() and self.selection.nudge_index is None)
+                self.selection.nudge_index is None)
         self.session.position = QPoint(self.position)
         for view in self.session.views:
             view.position = QPoint(self.session.position)
@@ -1389,13 +1391,35 @@ class MaskWindow(QWidget):
             # 提示条是子控件：位置与内容都跟着光标变，每帧同步一次并抬到画布之上。
             view.info_bar.sync()
 
+    def clear_selection(self):
+        """清除当前选择，回到"未选择"状态：不重新抓屏、不移动鼠标。
+
+        R 快捷键走这里；工具栏的「重新截图」仍走 request_recapture（重新取最新画面）。
+        """
+        had = len(self.selection.rects)
+        self.selection.rects.clear()
+        self.selection.active = None
+        self.selection.dragging = None
+        self.selection.resizing = None
+        self.session.multi_select_mode = False
+        self.session.right_capture_mode = False
+        self.session.element_selected = False
+        self.session.fixed_size_rect = None
+        self.press_position = None
+        self.update_all()
+        logging.getLogger("screensnap").debug("清除选区：回到未选择状态（原有 %d 个区域）", had)
+
     def request_recapture(self):
+        if self._delegate_to_owner("request_recapture"):
+            return
         context = {"monitor": dict(self.monitor)}
         self.recapture_requested.emit(context)
         self.close()
 
     def copy_selection_to_clipboard(self):
         """把整屏截图（或当前选区）写入剪贴板并关闭遮罩，不落盘、不进编辑器。"""
+        if self._delegate_to_owner("copy_selection_to_clipboard"):
+            return
         logger = logging.getLogger("screensnap")
         if self.selection.rects:
             region = self.selection.rects[-1].normalized()
@@ -1413,10 +1437,53 @@ class MaskWindow(QWidget):
         self.close()
 
     def complete_in_window_editor(self):
+        """E：用独立编辑器打开当前选区。同一轮截图里只允许成功打开一次。"""
+        logger = logging.getLogger("screensnap")
+        if getattr(self.session, "editor_opened", False):
+            # 每个遮罩视图都会收到这次按键（日志里能看到相隔 1ms 的两条记录）：第二次若继续走
+            # complete()，它自己没有选区 → 收摊关闭遮罩 → 连带把刚打开的编辑器关掉。
+            logger.info("E 重复触发，忽略（本轮截图已打开过编辑器 editor_opened=%s）",
+                        getattr(self.session, "editor_opened", None))
+            return
+        logger.info(
+            "E窗口编辑：视图=%s 选区=%s 共 %d 个视图",
+            self.monitor_rect.getRect(),
+            [r.getRect() for r in self.selection.rects], len(self.session.views or []))
+        if self._delegate_to_owner("complete_in_window_editor"):
+            return
+        if self.inline_active():
+            self._promote_inline_editor_to_window()
+            return
         self.complete(force_window=True)
 
+
+    def _promote_inline_editor_to_window(self):
+        """把原地编辑当前的区域与合成图交给独立编辑器，保留已画好的标注。"""
+        logger = logging.getLogger("screensnap")
+        editor = self.session.inline_editor
+        if editor is None:
+            self.complete(force_window=True)
+            return
+        rect = QRect(editor.rect)
+        image = editor.output_image()
+        if not hasattr(image, "mode"):       # PIL 图有 .mode；QImage 没有 → 转成 PIL
+            image = qimage_to_pillow(image)
+        alternate = getattr(editor, "alternate", None)
+        position = self.mapper.physical_local_to_native_global(rect.topLeft())
+        self.session.editor_opened = True
+        self.session.inline_editor = None
+        try:
+            editor.cleanup()
+        except Exception as error:
+            logger.warning("转交独立编辑器时清理原地编辑失败: %s", error)
+        logger.info("E（原地编辑）→ 转交独立编辑器：区域=%s 锚点=(%d,%d)",
+                    rect.getRect(), position.x(), position.y())
+        self.edit_requested.emit([(image, alternate)], [position])
+        self.close()
     def toggle_multi_select_mode(self):
         """切换到多选收集；原地编辑有改动时按配置静默保存或丢弃。"""
+        if self._delegate_to_owner("toggle_multi_select_mode"):
+            return
         if not self.primary or self.session.closing:
             return
         if self.inline_active():
@@ -1471,8 +1538,9 @@ class MaskWindow(QWidget):
         if sequence.isEmpty():
             sequence = QKeySequence("S")
         self.capture_save_shortcut.setKey(sequence)
+        # 原地编辑激活时 S 用来保存该编辑器；否则仅在没有选区微调时保存选区。
         self.capture_save_shortcut.setEnabled(
-            not self.inline_active() and self.selection.nudge_index is None)
+            self.selection.nudge_index is None)
 
     def sync_capture_action_shortcuts(self, settings):
         """改键后同步选区功能键、内联多选键与工具栏隐藏键。"""
@@ -1482,7 +1550,8 @@ class MaskWindow(QWidget):
             if sequence.isEmpty():
                 sequence = QKeySequence("C")
             self.capture_picker_shortcut.setKey(sequence)
-            self.capture_picker_shortcut.setEnabled(not inline_active)
+            # 取色在未选择 / 原地编辑 / 多选下都能用：原地编辑只遮挡选区那块，遮挡外仍可取样。
+            self.capture_picker_shortcut.setEnabled(True)
         if self.toolbar_hide_shortcut is not None:
             key, default = TOOLBAR_HIDE_KEY
             sequence = QKeySequence(settings.get(key, default))
@@ -1506,14 +1575,21 @@ class MaskWindow(QWidget):
             if sequence.isEmpty():
                 sequence = QKeySequence(default)
             shortcut.setKey(sequence)
-            shortcut.setEnabled(not inline_active)
+            # E 在原地编辑里必须保持可用：它是「升级为独立编辑器」的入口；
+            # 其它功能键（F/R/多选/Y）仍按原语义在原地编辑里禁用。
+            shortcut.setEnabled(name == "window_edit" or not inline_active)
 
     def toggle_picker_mode(self):
-        if self.inline_active() or self.session.closing:
+        if self._delegate_to_owner("toggle_picker_mode"):
+            return
+        if self.session.closing:
             return
         self.picker_mode = not self.picker_mode
         self.picker_color = None
         self.update_all()
+        logging.getLogger("screensnap").debug(
+            "取色模式 %s（原地编辑=%s 多选=%s）", "开启" if self.picker_mode else "关闭",
+            self.inline_active(), self.session.multi_select_mode)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -1715,6 +1791,31 @@ class MaskWindow(QWidget):
         regions = [self._trim_region_to_monitor(rect) for rect in regions]
         regions = [rect for rect in regions if not rect.isEmpty()]
         if not regions:
+            # 本视图没有可选区域：选区在别的显示器上时转交那个视图完成。
+            # 这是"在副屏划选后按 E 没反应"的兜底路径 —— 无论归属启发式算得对不对，
+            # 只要共享选区里还有落在别的视图上的区域，就由那个视图完成这次提交。
+            for other in list(self.session.views or []):
+                if other is None or other is self:
+                    continue
+                try:
+                    other_bounds = other.mapper.full_physical_local_rect()
+                except RuntimeError:
+                    continue
+                fallback = [rect.normalized().intersected(other_bounds)
+                            for rect in self.selection.rects]
+                fallback = [rect for rect in fallback if not rect.isEmpty()]
+                if not fallback:
+                    continue
+                logging.getLogger("screensnap").info(
+                    "本视图无区域，转交选区所在视图完成：from=%s to=%s force_window=%s 区域=%d",
+                    self.monitor_rect.getRect(), other.monitor_rect.getRect(),
+                    force_window, len(fallback))
+                self.session.completing = False
+                other.complete(force_window=force_window, save_direct=save_direct)
+                return
+            logging.getLogger("screensnap").debug(
+                "提交时没有任何区域（视图=%s 选区=%d 块），关闭遮罩",
+                self.monitor_rect.getRect(), len(self.selection.rects))
             self.session.completing = False
             self.close()
             return
@@ -1793,11 +1894,14 @@ class MaskWindow(QWidget):
             images.append((image, alternate))
         positions = [self.mapper.physical_local_to_native_global(region.topLeft())
                      for region in regions]
-        if self.session.right_capture_mode or uia_selection:
+        # S（快速保存）传 save_direct=True：右键/UIA 选区同样要直接保存，不得进编辑器。
+        if (self.session.right_capture_mode or uia_selection) and not save_direct:
+            self.session.editor_opened = True
             self.edit_requested.emit(images, positions)
             self.close()
             return
         if self.session.multi_select_mode and not save_direct:
+            self.session.editor_opened = True
             self.edit_requested.emit(images, positions)
             self.close()
             return
@@ -1813,6 +1917,7 @@ class MaskWindow(QWidget):
         if save_direct or (action == "save" and not force_window):
             self.save_requested.emit(images, positions)
         elif force_window:
+            self.session.editor_opened = True
             self.edit_requested.emit(images, positions)
         else:
             self.selected.emit(images, positions)
@@ -1831,7 +1936,16 @@ class MaskWindow(QWidget):
 
     def save_selection(self):
         """用当前输出规则保存选区，不进入标注编辑器。"""
-        if not self.inline_active() and self.selection.rects:
+        if self._delegate_to_owner("save_selection"):
+            return
+        if self.inline_active():
+            # 原地编辑已打开：S 等价于它的「保存」按钮（保存并关闭），不再"无响应"。
+            editor = self.session.inline_editor
+            if editor is not None:
+                logging.getLogger("screensnap").info("快速保存：保存原地编辑器")
+                editor.execute("save")
+            return
+        if self.selection.rects:
             self.complete(save_direct=True)
 
     def focus_view_for_position(self, point):
@@ -2328,6 +2442,95 @@ class MaskWindow(QWidget):
     def quick_sticker_consumed(self, value):
         self._set_quick_sticker_state("quick_sticker_consumed", bool(value))
 
+    def _owner_view(self):
+        """返回执行选区动作的视图：选区所在的显示器 → 鼠标所在显示器 → 自己。
+
+        注意 selection 是 session 共享的一份（各视图的 rects 永远相同），所以不能用
+        "谁的 rects 非空"来判断归属 —— 那会永远返回列表里第一个视图，导致在别的屏上
+        框选后按 E/S/F/Y 时动作落到错误的屏（对话框弹错屏、进不去编辑器等）。
+        这里改用选区与各视图 monitor_rect 的相交面积判定，跨屏选区取相交最大的那个。
+        """
+        views = [v for v in (getattr(self.session, "views", None) or []) if v is not None]
+        if not views:
+            return self
+        selection = getattr(self, "selection", None)
+        rect = None
+        if selection is not None:
+            rect = selection.active or (selection.rects[-1] if selection.rects else None)
+        if rect is not None:
+            best, best_area = None, 0
+            for view in views:
+                monitor = getattr(view, "monitor_rect", None)
+                if monitor is None:
+                    continue
+                overlap = rect.intersected(monitor)
+                area = overlap.width() * overlap.height()
+                if area > best_area:
+                    best, best_area = view, area
+            if best is not None:
+                logging.getLogger("screensnap").debug(
+                    "归属判定：选区 %s → 视图 %s（相交面积 %d，共 %d 个视图）",
+                    rect.getRect(), best.monitor_rect.getRect(), best_area, len(views))
+                return best
+            logging.getLogger("screensnap").debug(
+                "归属判定：选区 %s 不与任何视图相交，改用鼠标所在屏（共 %d 个视图，"
+                "monitor_rects=%s）", rect.getRect(), len(views),
+                [v.monitor_rect.getRect() for v in views
+                 if getattr(v, "monitor_rect", None) is not None])
+        point = QCursor.pos()
+        for view in views:
+            try:
+                if view.geometry().contains(point):
+                    return view
+            except RuntimeError:
+                continue
+        return self if self in views else views[0]
+
+    def _delegate_to_owner(self, method_name):
+        """把选区动作交给拥有选区（或鼠标所在）的视图执行；已在本视图则不处理。"""
+        owner = self._owner_view()
+        if owner is None or owner is self:
+            return False
+        handler = getattr(owner, method_name, None)
+        if handler is None:
+            return False
+        logging.getLogger("screensnap").debug(
+            "选区动作 %s 交给选区/鼠标所在视图执行：from=%s to=%s",
+            method_name, getattr(self, "monitor_rect", None) and self.monitor_rect.getRect(),
+            getattr(owner, "monitor_rect", None) and owner.monitor_rect.getRect())
+        handler()
+        return True
+
+    def _picker_state(self, name, default=None):
+        """取色模式与色值按 session 共享：快捷键可能落在另一块屏的视图上。"""
+        session = getattr(self, "session", None)
+        if session is None:
+            return getattr(self, "_" + name, default)
+        return getattr(session, name, default)
+
+    def _set_picker_state(self, name, value):
+        session = getattr(self, "session", None)
+        if session is None:
+            setattr(self, "_" + name, value)
+        else:
+            setattr(session, name, value)
+
+    @property
+    def picker_mode(self):
+        return bool(self._picker_state("picker_mode", False))
+
+    @picker_mode.setter
+    def picker_mode(self, value):
+        self._set_picker_state("picker_mode", bool(value))
+
+    @property
+    def picker_color(self):
+        return self._picker_state("picker_color", None)
+
+    @picker_color.setter
+    def picker_color(self, value):
+        self._set_picker_state("picker_color", value)
+
     def trigger_quick_sticker(self):
         if (self.quick_sticker_consumed or not self.quick_sticker_enabled or
                 self.inline_active()):
@@ -2563,34 +2766,85 @@ class MaskWindow(QWidget):
             "切换到第 %d/%d 层窗口元素", self.element_index + 1,
             len(self.element_chain))
 
-    def select_fixed_size(self):
-        """在鼠标附近创建指定尺寸的选区。"""
+    def _fixed_size_target(self):
+        """返回 F 应当重置尺寸的区域：优先上次 F 建的区域，其次左键拖出的区域。
+
+        右键（元素）选出的区域不参与：按 F 只在它们之外新建一个固定尺寸区域，互不干扰。
+        """
+        if self.session.right_capture_mode or self.session.element_selected:
+            return None
+        target = getattr(self.session, "fixed_size_rect", None)
+        if target is not None and any(target == rect for rect in self.selection.rects):
+            return target
+        return self.selection.rects[-1] if self.selection.rects else None
+
+    def apply_fixed_size(self, width, height):
+        """按 F 的结果落区域：有可重置的区域则按中心改尺寸，否则在鼠标处新建。"""
         bounds = self.mapper.full_physical_local_rect()
+        width = max(1, min(int(width), bounds.width()))
+        height = max(1, min(int(height), bounds.height()))
+        target = self._fixed_size_target()
+        if target is not None:
+            center = target.center()
+            rect = QRect(center.x() - width // 2, center.y() - height // 2, width, height)
+            rect = rect.intersected(bounds)
+            target.setRect(rect.x(), rect.y(), rect.width(), rect.height())
+            self.session.fixed_size_rect = target
+            logging.getLogger("screensnap").debug(
+                "固定尺寸：按中心重置已有区域为 %dx%d", width, height)
+        else:
+            left = max(bounds.left(), min(self.position.x(), bounds.right() - width + 1))
+            top = max(bounds.top(), min(self.position.y(), bounds.bottom() - height + 1))
+            rect = QRect(left, top, width, height)
+            self.selection.rects.append(rect)
+            self.session.fixed_size_rect = rect
+            logging.getLogger("screensnap").debug(
+                "固定尺寸：在鼠标处新建 %dx%d 区域（保留已有 %d 个区域）",
+                width, height, len(self.selection.rects) - 1)
+        self.selection.active = None
+        self.element_index = -1
+        self.update_all()
+
+    def select_fixed_size(self):
+        """在鼠标附近创建或重置指定尺寸的选区。"""
+        if self._delegate_to_owner("select_fixed_size"):
+            return
+        bounds = self.mapper.full_physical_local_rect()
+        target = self._fixed_size_target()
         dialog = QDialog(self)
         dialog.setWindowTitle("固定尺寸选区")
+        # 遮罩是 Tool + WindowStaysOnTopHint 的置顶全屏窗：普通对话框会被压在它下面，
+        # 且默认出现在父窗口所在屏。这里置顶并定位到鼠标所在屏幕的鼠标位置。
+        dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
         layout = QFormLayout(dialog)
         width_input = QSpinBox(dialog)
         width_input.setRange(1, max(1, bounds.width()))
-        width_input.setValue(max(1, bounds.width()))
+        width_input.setValue(target.width() if target is not None else max(1, bounds.width()))
         height_input = QSpinBox(dialog)
         height_input.setRange(1, max(1, bounds.height()))
-        height_input.setValue(max(1, bounds.height()))
+        height_input.setValue(target.height() if target is not None else max(1, bounds.height()))
         layout.addRow("宽度", width_input)
         layout.addRow("高度", height_input)
         buttons = QDialogButtonBox(QDialogButtonBox.Ok | QDialogButtonBox.Cancel,
                                    parent=dialog)
+        # Qt 内置翻译未加载，OK/Cancel 默认是英文；项目其它对话框也统一用中文按钮。
+        buttons.button(QDialogButtonBox.Ok).setText("确定")
+        buttons.button(QDialogButtonBox.Cancel).setText("取消")
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         layout.addRow(buttons)
+        dialog.adjustSize()
+        anchor = QCursor.pos()
+        screen = QGuiApplication.screenAt(anchor) or QGuiApplication.primaryScreen()
+        if screen is not None:
+            area = screen.availableGeometry()
+            frame = dialog.frameGeometry()
+            frame.moveCenter(anchor)
+            dialog.move(min(max(frame.left(), area.left()), area.right() - frame.width() + 1),
+                        min(max(frame.top(), area.top()), area.bottom() - frame.height() + 1))
+        dialog.raise_()
+        dialog.activateWindow()
         if dialog.exec() != QDialog.Accepted:
             return
-
-        width, height = width_input.value(), height_input.value()
-        left = max(bounds.left(), min(self.position.x(), bounds.right() - width + 1))
-        top = max(bounds.top(), min(self.position.y(), bounds.bottom() - height + 1))
-        self.selection.rects.clear()
-        self.selection.rects.append(QRect(left, top, width, height))
-        self.selection.active = None
-        self.element_index = -1
-        self.update_all()
+        self.apply_fixed_size(width_input.value(), height_input.value())
 

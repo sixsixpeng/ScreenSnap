@@ -287,7 +287,7 @@ class UiaTests(CoreTests):
         # 按钮连容器一起移除，遮罩上不再有任何操作按钮。
         self.assertFalse(hasattr(mask, "capture_actions"))
         self.assertEqual(mask.findChildren(QPushButton), [])
-           # 检查尺寸、重新截图、窗口编辑、多选和仅复制快捷键。
+           # 检查尺寸、清除选择、窗口编辑、多选和仅复制快捷键。
         self.assertEqual(
             {name: shortcut.key().toString(QKeySequence.PortableText)
              for name, shortcut in mask.capture_action_shortcuts.items()},
@@ -299,14 +299,14 @@ class UiaTests(CoreTests):
         mask.selection.rects.append(QRect(30, 40, 80, 60))
         mask.update_all()
         self.assertEqual(mask.capture_action_hints(),
-                         [("F", "尺寸"), ("R", "重新截图"),
+                         [("F", "尺寸"), ("R", "清除选择"),
                           ("E", "窗口编辑"), ("Alt+M", "多选"),
                           ("Y", "仅复制")])
         # 遮罩与配置共用同一个 dict：改设置后提示与快捷键一起变，不是写死文案。
         settings["capture_recapture_shortcut"] = "Alt+R"
         settings["capture_window_edit_shortcut"] = "Ctrl+E"
         mask.sync_capture_action_shortcuts(settings)
-        self.assertEqual(mask.capture_action_hints()[1], ("Alt+R", "重新截图"))
+        self.assertEqual(mask.capture_action_hints()[1], ("Alt+R", "清除选择"))
         self.assertEqual(mask.capture_action_shortcuts["window_edit"].key().toString(
             QKeySequence.PortableText), "Ctrl+E")
 
@@ -320,7 +320,7 @@ class UiaTests(CoreTests):
         self.assertEqual(copied[0].size, (80, 60))
         self.assertFalse(mask.isVisible())
 
-        # 改键后立即生效：新的 Alt+R（重新截图）放弃当前画面并请求重截。
+        # 改键后立即生效：新的 Alt+R（清除选择）只清空选区，不重截、不关遮罩。
         with patch("screenshot.mask_window.visible_windows", return_value=[]):
             second = MaskWindow(Image.new("RGB", (1200, 800), "blue"), bounds,
                                 [bounds], settings)
@@ -330,9 +330,11 @@ class UiaTests(CoreTests):
         second.show()
         self.app.processEvents()
         QTest.keyClick(second, Qt.Key_R, Qt.AltModifier)
-        self.assertEqual(len(recaptured), 1)
-        self.assertFalse(second.isVisible())
+        self.assertEqual(recaptured, [])                 # 不请求重截（不刷新画面）
+        self.assertEqual(second.selection.rects, [])     # 选区被清空
+        self.assertTrue(second.isVisible())              # 遮罩不关闭（不动鼠标）
         self.assertFalse(mask.isVisible())
+        second.close()                                   # 新语义下 R 不再关遮罩，手动关掉以免抢后续用例的活动窗口
 
         settings["inline_edit"] = True
         with patch("screenshot.mask_window.visible_windows", return_value=[]):
@@ -357,9 +359,12 @@ class UiaTests(CoreTests):
         fourth.recapture_requested.connect(default_recaptures.append)
         fourth.show()
         self.app.processEvents()
+        # 注意：R 现在是「清除选择」（不重截、不关遮罩），见下方断言。
         QTest.keyClick(fourth, Qt.Key_R)
-        self.assertEqual(len(default_recaptures), 1)
-        self.assertFalse(fourth.isVisible())
+        self.assertEqual(default_recaptures, [])          # R 不再重截（不刷新画面）
+        self.assertEqual(fourth.selection.rects, [])      # 只清空选区
+        self.assertTrue(fourth.isVisible())               # 不关遮罩（不动鼠标）
+        fourth.close()
 
         settings["capture_window_edit_shortcut"] = "E"
         with patch("screenshot.mask_window.visible_windows", return_value=[]):

@@ -2580,6 +2580,304 @@ class CaptureTests(CoreTests):
         finally:
             mask.close()
 
+    def test_capture_action_delegates_to_the_view_that_owns_the_selection(self):
+        """选区阶段的快捷键只在主遮罩上创建，动作必须委派给拥有选区的视图。
+
+        回归：E/R/S/F/C 等快捷键挂在主遮罩视图上，动作却读该视图自己的 selection —— 在
+        另一块屏框选后按键会落到没有选区的视图上（表现为只有一块屏有效）。
+        """
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import Mock, patch as patcher
+
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False}
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+        try:
+            # 造一个"另一块屏"的视图：同一 session，monitor_rect 覆盖选区所在位置。
+            # selection 是 session 共享的一份，归属由"选区与哪个视图的 monitor_rect 相交"决定。
+            other = MaskWindow.__new__(MaskWindow)
+            other.session = mask.session
+            other.monitor_rect = QRect(200, 0, 120, 80)
+            mask.session.views.append(other)
+            mask.selection.rects.append(QRect(210, 5, 30, 20))
+            owner = mask._owner_view()
+            self.assertIs(owner, other)                      # 选区所在的视图优先
+
+            calls = []
+            other.request_recapture = lambda: calls.append("recapture")
+            mask.request_recapture()                          # 在主遮罩上触发
+            self.assertEqual(calls, ["recapture"])            # 已委派给拥有选区的视图
+        finally:
+            mask.session.views = [v for v in mask.session.views if v is not other]
+            mask.close()
+
+    def test_clear_selection_resets_without_recapturing(self):
+        """R（清除选择）：清空选区并回到未选择状态，不重新抓屏、不移动鼠标。
+
+        回归：R 原来发 recapture_requested 并关闭遮罩 —— 等于重新取最新画面并把鼠标带回
+        起始屏；现在只清空选区。
+        """
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import patch as patcher
+
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False}
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+        try:
+            mask.selection.rects.append(QRect(10, 10, 40, 30))
+            mask.session.multi_select_mode = True
+            mask.session.right_capture_mode = True
+            recaptured, closed = [], []
+            mask.recapture_requested.connect(lambda ctx: recaptured.append(ctx))
+            mask.close = lambda *args, **kwargs: closed.append(True)
+
+            mask.clear_selection()
+
+            self.assertEqual(mask.selection.rects, [])          # 选区清空
+            self.assertFalse(mask.session.multi_select_mode)     # 多选状态复位
+            self.assertFalse(mask.session.right_capture_mode)
+            self.assertEqual(recaptured, [])                     # 不重新抓屏
+            self.assertEqual(closed, [])                         # 不关闭遮罩/不动鼠标
+        finally:
+            mask.close()
+
+    def test_quick_save_shortcut_saves_right_button_selection_without_editor(self):
+        """S（快速保存）：右键元素选区也必须直接保存，不进入编辑器。
+
+        回归：complete() 里 right_capture_mode/uia_selection 分支无视 save_direct，
+        按 S（save_direct=True）仍然 edit_requested → 表现为「右键选区后按 S 进了窗口编辑」。
+        """
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import patch as patcher
+
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False,
+                    "capture_after_selection": "edit", "inline_edit": True}
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+        try:
+            mask.selection.rects.append(QRect(10, 10, 40, 30))
+            mask.session.right_capture_mode = True
+            edits, saves = [], []
+            mask.edit_requested.connect(lambda images, positions: edits.append(images))
+            mask.save_requested.connect(lambda images, positions=None: saves.append(images))
+            mask.save_selection()
+            self.assertEqual(edits, [])            # 不进编辑器
+            self.assertEqual(len(saves), 1)        # 直接保存
+        finally:
+            mask.close()
+
+    def test_quick_save_shortcut_saves_inline_editor(self):
+        """S（快速保存）：原地编辑已打开时保存该编辑器，而不是毫无响应。"""
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import patch as patcher
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+            settings = {**DEFAULTS, "save_dir": folder, "magnifier": False, "inline_edit": True,
+                        "capture_after_selection": "edit", "filename": "quick_save"}
+            with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+            try:
+                mask.selection.rects.append(QRect(10, 10, 60, 40))
+                mask.complete()
+                self.app.processEvents()
+                self.assertIsNotNone(mask.session.inline_editor)      # 已进入原地编辑
+                saved = []
+                mask.image_saved.connect(lambda path, image: saved.append(path))
+                mask.save_selection()                                  # 等价于按 S
+                self.assertEqual(len(saved), 1)                        # 真的保存了
+                self.assertTrue(Path(saved[0]).exists())
+            finally:
+                mask.close()
+
+    def test_fixed_size_creates_resizes_and_keeps_right_selection(self):
+        """F（固定尺寸）：未选则新建；左键已选则按中心改尺寸；右键已选则不动它们。"""
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import patch as patcher
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 100}
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False}
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (200, 100), "blue"), bounds, [bounds], settings)
+        try:
+            mask.position = QPoint(50, 40)
+            mask.apply_fixed_size(60, 30)                     # ① 未选择 → 新建
+            self.assertEqual(len(mask.selection.rects), 1)
+            first = mask.selection.rects[0]
+            self.assertEqual((first.width(), first.height()), (60, 30))
+
+            mask.apply_fixed_size(80, 20)                     # ② 左键已选 → 改尺寸不新增
+            self.assertEqual(len(mask.selection.rects), 1)
+            self.assertEqual((first.width(), first.height()), (80, 20))
+
+            mask.session.right_capture_mode = True            # ③ 右键模式 → 不动已有区域
+            mask.apply_fixed_size(40, 25)
+            self.assertEqual(len(mask.selection.rects), 2)
+            self.assertEqual((first.width(), first.height()), (80, 20))   # 原区域未被改动
+            self.assertEqual((mask.selection.rects[1].width(),
+                              mask.selection.rects[1].height()), (40, 25))
+        finally:
+            mask.close()
+
+    def test_picker_mode_available_while_inline_editing(self):
+        """C（取色）在原地编辑下也能开启，且不退出编辑器；提示语在三种界面都提示。"""
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import patch as patcher
+
+        with tempfile.TemporaryDirectory() as folder:
+            bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+            settings = {**DEFAULTS, "save_dir": folder, "magnifier": False, "inline_edit": True,
+                        "capture_after_selection": "edit", "filename": "picker"}
+            with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+            try:
+                # 未选择状态：取色可用
+                self.assertTrue(mask.capture_picker_shortcut.isEnabled())
+                mask.toggle_picker_mode()
+                self.assertTrue(mask.picker_mode)
+                mask.toggle_picker_mode()
+                self.assertFalse(mask.picker_mode)
+
+                # 多选状态：取色仍可用
+                mask.session.multi_select_mode = True
+                mask.toggle_picker_mode()
+                self.assertTrue(mask.picker_mode)
+                mask.toggle_picker_mode()
+                mask.session.multi_select_mode = False
+
+                # 原地编辑：快捷键仍启用、能开启取色，且编辑器不被关闭
+                mask.selection.rects.append(QRect(10, 10, 60, 40))
+                mask.complete()
+                self.app.processEvents()
+                self.assertIsNotNone(mask.session.inline_editor)
+                self.assertTrue(mask.capture_picker_shortcut.isEnabled())
+                mask.toggle_picker_mode()
+                self.assertTrue(mask.picker_mode)                       # 取色已开启
+                self.assertIsNotNone(mask.session.inline_editor)        # 编辑器仍在（不退出）
+            finally:
+                mask.close()
+
+    def test_capture_action_targets_the_view_that_owns_the_selection(self):
+        """两屏：选区在副屏时，主屏视图上的快捷键动作必须落到副屏视图（回归 E/S/F 跑错屏）。
+
+        selection 是 session 共享的一份，各视图 rects 相同 —— 用"谁的 rects 非空"判定归属
+        会永远选中列表里第一个视图，于是主屏划选后按 F 弹到副屏、副屏划选后按 E 进不去。
+        """
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import patch as patcher
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 100}
+        monitors = [{"left": 0, "top": 0, "width": 100, "height": 100},
+                    {"left": 100, "top": 0, "width": 100, "height": 100}]
+        screen_infos = [{"geometry": QRect(0, 0, 100, 100), "dpr": 1.0},
+                        {"geometry": QRect(100, 0, 100, 100), "dpr": 1.0}]
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False,
+                    "inline_edit": True, "capture_after_selection": "save"}
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]), \
+                patcher("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos):
+            mask = MaskWindow(Image.new("RGB", (200, 100), "blue"), bounds, monitors, settings)
+        try:
+            views = [v for v in mask.session.views if v is not None]
+            self.assertGreaterEqual(len(views), 2)                    # 两块屏各一个视图
+            left_view = next(v for v in views if v.monitor_rect.center().x() < 100)
+            right_view = next(v for v in views if v.monitor_rect.center().x() >= 100)
+
+            # 选区落在副屏（右半）：owner 必须是副屏视图，而不是列表第一个
+            mask.selection.rects.append(QRect(120, 10, 40, 30))
+            self.assertIs(mask._owner_view(), right_view)
+
+            routed = []
+            right_view.complete_in_window_editor = lambda: routed.append("right")
+            mask.complete_in_window_editor()
+            self.assertEqual(routed, ["right"])                        # 动作落到副屏视图
+
+            # 选区换到主屏（左半）：owner 必须跟着回到主屏视图
+            mask.selection.rects[:] = [QRect(10, 10, 40, 30)]
+            self.assertIs(mask._owner_view(), left_view)
+        finally:
+            mask.close()
+
+    def test_owner_view_across_screen_layouts_resolutions_and_dpi(self):
+        """跨屏归属组合验证：屏数 × 排布 × 分辨率 × DPI × 跨屏选区（规则 22/26）。
+
+        每个布局都把选区分别放进每一块屏，断言 _owner_view() 选中该屏的视图；
+        再放一个跨屏选区，断言选中相交面积更大的那块屏的视图。
+        回归：selection 是 session 共享的一份，用"谁的 rects 非空"判定会永远选第一个视图。
+        """
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import patch as patcher
+
+        # (名称, 物理显示器矩形, 每屏 dpr)
+        layouts = [
+            ("双屏并排", [(0, 0, 800, 600), (800, 0, 800, 600)], (1.0, 1.0)),
+            ("双屏上下", [(0, 0, 800, 600), (0, 600, 800, 600)], (1.0, 1.0)),
+            ("双屏负原点", [(-800, 0, 800, 600), (0, 0, 800, 600)], (1.0, 1.0)),
+            ("双屏混合 DPI", [(0, 0, 800, 600), (800, 0, 960, 540)], (1.0, 1.5)),
+            ("三屏并排", [(0, 0, 800, 600), (800, 0, 800, 600), (1600, 0, 800, 600)],
+             (1.0, 1.0, 1.0)),
+            ("四屏 2x2", [(0, 0, 800, 600), (800, 0, 800, 600),
+                          (0, 600, 800, 600), (800, 600, 800, 600)],
+             (1.0, 1.25, 1.5, 1.0)),
+        ]
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False}
+        for name, monitors, scales in layouts:
+            # 物理总范围与各屏物理局部矩形（遮罩用物理局部坐标）
+            left = min(m[0] for m in monitors)
+            top = min(m[1] for m in monitors)
+            right = max(m[0] + m[2] for m in monitors)
+            bottom = max(m[1] + m[3] for m in monitors)
+            bounds = {"left": left, "top": top, "width": right - left, "height": bottom - top}
+            monitor_dicts = [{"left": m[0], "top": m[1], "width": m[2], "height": m[3]}
+                             for m in monitors]
+            # Qt 逻辑布局 = 物理 / dpr，按物理顺序紧凑排列（与真实混合 DPI 一致）
+            screen_infos, x = [], 0
+            for (mx, my, mw, mh), scale in zip(monitors, scales):
+                screen_infos.append({"geometry": QRect(x, 0, int(mw / scale), int(mh / scale)),
+                                     "dpr": float(scale)})
+                x += int(mw / scale)
+            with patcher("screenshot.mask_window.visible_windows", return_value=[]), \
+                    patcher("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos):
+                mask = MaskWindow(Image.new("RGB", (bounds["width"], bounds["height"]), "blue"),
+                                  bounds, monitor_dicts, settings)
+            try:
+                views = [v for v in mask.session.views if v is not None]
+                self.assertGreaterEqual(len(views), len(monitors), name)
+                # ① 选区分别放进每一块屏 → 归属必须是那块屏的视图
+                for index, (mx, my, mw, mh) in enumerate(monitors):
+                    local = QRect(mx - left + 20, my - top + 20, 100, 80)
+                    mask.selection.rects[:] = [local]
+                    owner = mask._owner_view()
+                    self.assertTrue(owner.monitor_rect.contains(local.center()),
+                                    "%s：第 %d 块屏的选区归属错了" % (name, index + 1))
+                # ② 跨屏选区 → 归属相交面积更大的那块屏
+                first, second = monitors[0], monitors[1]
+                cross = QRect(first[0] - left + first[2] - 30, first[1] - top + 20, 60, 80)
+                mask.selection.rects[:] = [cross]
+                owner = mask._owner_view()
+                overlap_first = cross.intersected(
+                    QRect(first[0] - left, first[1] - top, first[2], first[3]))
+                overlap_second = cross.intersected(
+                    QRect(second[0] - left, second[1] - top, second[2], second[3]))
+                expected = first if (overlap_first.width() * overlap_first.height() >=
+                                     overlap_second.width() * overlap_second.height()) else second
+                self.assertTrue(
+                    owner.monitor_rect.contains(QRect(expected[0] - left + 5,
+                                                      expected[1] - top + 5, 1, 1).center()),
+                    "%s：跨屏选区归属错了" % name)
+            finally:
+                mask.close()
+
 
 
 if __name__ == "__main__":
