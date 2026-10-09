@@ -10,6 +10,7 @@ from pathlib import Path
 from PySide6.QtCore import (Qt, Signal, QPoint, QPointF, QRect, QRectF, QEvent, QMimeData,
                             QTimer, QSize)
 from PySide6.QtGui import QKeyEvent
+from PySide6.QtGui import QMouseEvent
 from PySide6.QtGui import (QColor, QCursor, QPainter, QPainterPath, QPen, QGuiApplication,
                            QMouseEvent, QPixmap, QShortcut, QKeySequence)
 from PySide6.QtWidgets import (QWidget, QApplication, QDialog, QFileDialog, QDialogButtonBox, QFormLayout, QSpinBox,
@@ -433,6 +434,26 @@ class InlineEditor(QWidget):
         mapped = QMouseEvent(event_type, QPointF(local), QPointF(view.mapToGlobal(local)),
                              event.button(), event.buttons(), event.modifiers())
         point = view.to_physical_point(local)
+        if (event_type == QEvent.MouseButtonPress and event.button() == Qt.LeftButton
+                and view.picker_mode
+                and QGuiApplication.keyboardModifiers() & (Qt.AltModifier | Qt.ControlModifier)):
+            # 取色必须优先于"手柄/边线"判断：否则 Alt+左键会落回画布，遮罩的取色分支收不到事件
+            # （日志实证：取色模式已开启，但遮罩里没有 取色取样 记录）。
+            # 同一次点击会被画布与视口各转发一次：按"位置 + 时间"去重，避免取样两次（两声提示音）。
+            key = (local.x(), local.y())
+            now = time.monotonic()
+            if (getattr(view, "_picker_forward_key", None) == key
+                    and now - getattr(view, "_picker_forward_at", 0.0) < 0.2):
+                logging.getLogger("screensnap").debug(
+                    "取色转发去重：忽略重复点击 (%d,%d)", local.x(), local.y())
+                return True
+            view._picker_forward_key = key
+            view._picker_forward_at = now
+            logging.getLogger("screensnap").debug(
+                "取色转发：控件=%s 映射局部点=(%d,%d)",
+                type(watched).__name__, local.x(), local.y())
+            view.mousePressEvent(mapped)
+            return True
         if event_type == QEvent.MouseMove:
             view.mouseMoveEvent(mapped)
             return view.selection.resizing is not None or view.selection.dragging is not None
@@ -2230,6 +2251,25 @@ class MaskWindow(QWidget):
 
     def mousePressEvent(self, event):
         """左键开始创建选区，已有选区的命中由选区对象判定。"""
+        # 取色优先于"原地编辑分支"：原地编辑打开时下面的 inline 分支会直接 return，
+        # 取色分支（Alt/Ctrl+左键取样）永远走不到 —— 这正是"划选后无法取色"的原因。
+        if (self.picker_mode and event.button() == Qt.LeftButton
+                and QGuiApplication.keyboardModifiers() & (Qt.AltModifier | Qt.ControlModifier)):
+            point = self.to_physical_point(event.position().toPoint())
+            x = point.x() + self.bounds["left"]
+            y = point.y() + self.bounds["top"]
+            logging.getLogger("screensnap").debug(
+                "取色取样：视图=%s 鼠标物理点=(%d,%d) 取样点=(%d,%d) inline=%s",
+                self.monitor_rect.getRect(), point.x(), point.y(), x, y, self.inline_active())
+            if 0 <= x < self.image.width and 0 <= y < self.image.height:
+                r, g, b = self.image.convert("RGB").getpixel((x, y))
+                color = "#%02x%02x%02x" % (r, g, b)
+                QGuiApplication.clipboard().setText(color)
+                self.picker_color = color
+                self.picker_copied.emit(color)
+            self.update_all()
+            event.accept()
+            return
         # 自己记录左键是否按下：selection.resizing/dragging 在部分路径下不可靠，
         # 而"S 该微调还是该保存"必须只看"手是否还按着"。
         self._grip_down = event.button() == Qt.LeftButton
