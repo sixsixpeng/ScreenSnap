@@ -2659,6 +2659,51 @@ class CaptureTests(CoreTests):
         finally:
             mask.close()
 
+    def test_clear_selection_shortcut_is_enabled_while_inline_editing(self):
+        """R（清除选择）在原地编辑里必须可用，并先退出原地编辑再清空选区。
+
+        回归：左键划选会直接进入原地编辑，而 sync_capture_action_shortcuts 在原地编辑里
+        只放行 E/F —— R 被禁用，主副屏按 R 都没有任何反应。
+        """
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from types import SimpleNamespace
+        from unittest.mock import patch as patcher
+
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False}
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+        try:
+            dismissed = []
+            stub = SimpleNamespace(
+                multi_select_shortcut=SimpleNamespace(setKey=lambda *a, **k: None),
+                cleanup=lambda: dismissed.append("cleanup"),
+                hide=lambda: dismissed.append("hide"),
+                setParent=lambda *a: None,
+                deleteLater=lambda: dismissed.append("deleteLater"),
+                canvas=SimpleNamespace(cursor_index=0, hide=lambda: dismissed.append("canvas")),
+                toolbar=SimpleNamespace(hide=lambda: dismissed.append("toolbar")),
+                toolbar_handle=None,
+            )
+            mask.session.inline_editor = stub
+            mask.sync_capture_action_shortcuts(settings)
+            shortcut = mask.capture_action_shortcuts.get("recapture")
+            self.assertIsNotNone(shortcut)
+            self.assertTrue(shortcut.isEnabled())                    # R 在原地编辑里可用
+            self.assertFalse(mask.capture_action_shortcuts["multi_select"].isEnabled())
+
+            mask.selection.rects.append(QRect(10, 10, 40, 30))
+            mask.clear_selection()
+
+            self.assertIsNone(mask.session.inline_editor)            # 原地编辑已退出
+            self.assertIn("deleteLater", dismissed)
+            self.assertEqual(mask.selection.rects, [])               # 选区清空
+            self.assertTrue(mask.capture_action_shortcuts["recapture"].isEnabled())
+        finally:
+            mask.session.inline_editor = None
+            mask.close()
+
     def test_quick_save_shortcut_saves_right_button_selection_without_editor(self):
         """S（快速保存）：右键元素选区也必须直接保存，不进入编辑器。
 

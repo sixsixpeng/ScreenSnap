@@ -1415,11 +1415,37 @@ class MaskWindow(QWidget):
             # 提示条是子控件：位置与内容都跟着光标变，每帧同步一次并抬到画布之上。
             view.info_bar.sync()
 
+    def _dismiss_inline_editor(self):
+        """关掉原地编辑器并归还快捷键（沿用 toggle_multi_select_mode 的收尾顺序）。"""
+        editor = self.session.inline_editor
+        if editor is None:
+            return False
+        dirty = editor.canvas.cursor_index > 0
+        logging.getLogger("screensnap").debug(
+            "R（清除选择）：退出原地编辑（画布标注数=%d，按清除语义丢弃）", editor.canvas.cursor_index)
+        editor.canvas.hide()
+        editor.toolbar.hide()
+        if editor.toolbar_handle is not None:
+            editor.toolbar_handle.hide()
+        editor.cleanup()
+        editor.hide()
+        editor.setParent(None)
+        editor.deleteLater()
+        self.session.inline_editor = None
+        self.sync_quick_sticker_shortcut(self.settings)
+        self.sync_capture_save_shortcut(self.settings)
+        self.sync_capture_action_shortcuts(self.settings)
+        return dirty
+
     def clear_selection(self):
         """清除当前选择，回到"未选择"状态：不重新抓屏、不移动鼠标。
 
         R 快捷键走这里；工具栏的「重新截图」仍走 request_recapture（重新取最新画面）。
+        原地编辑激活时（左键划选之后就是这个状态）R 同样生效：先退出原地编辑，再清空选区。
         """
+        if self.inline_active():
+            self._dismiss_inline_editor()
+            self.picker_mode = False
         had = len(self.selection.rects)
         self.selection.rects.clear()
         self.selection.active = None
@@ -1621,8 +1647,10 @@ class MaskWindow(QWidget):
             shortcut.setKey(sequence)
             # E 与 F（尺寸）在原地编辑里必须保持可用：E 是「升级为独立编辑器」的入口，
             # F 用来给"快速编辑"里的区域改尺寸（实测：原地编辑一打开 F 就被禁用 → 按 F 无反应）。
-            # 其余功能键（R/多选/Y）仍按原语义在原地编辑里禁用。
-            shortcut.setEnabled(name in ("window_edit", "custom_size") or not inline_active)
+            # R（清除选择）同样必须可用：左键划选会直接进入原地编辑，此时按 R 没有任何反应
+            # （实测主副屏一致）—— R 的语义就是"取消这块选区"，在原地编辑里等价于"退出并清除"。
+            # 其余功能键（多选/Y）仍按原语义在原地编辑里禁用。
+            shortcut.setEnabled(name in ("window_edit", "custom_size", "recapture") or not inline_active)
 
     def toggle_picker_mode(self):
         if self._delegate_to_owner("toggle_picker_mode"):
