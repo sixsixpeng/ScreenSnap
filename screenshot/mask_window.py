@@ -2286,6 +2286,48 @@ class MaskWindow(QWidget):
                 self.quick_sticker_armed = False
         super().keyReleaseEvent(event)
 
+    def _quick_sticker_state(self, name, default=False):
+        """快速贴图的按住/待发/已消费状态按 session 共享。
+
+        每个视图都有同键的 ApplicationShortcut，Qt 只会激活其中一个视图，而左键可能落在
+        另一个视图上 —— 状态若各视图各存一份，就会表现为“只有一个屏幕能快速贴图”。
+        """
+        session = getattr(self, "session", None)
+        if session is None:
+            return getattr(self, "_" + name, default)
+        return getattr(session, name, default)
+
+    def _set_quick_sticker_state(self, name, value):
+        session = getattr(self, "session", None)
+        if session is None:
+            setattr(self, "_" + name, value)
+        else:
+            setattr(session, name, value)
+
+    @property
+    def quick_sticker_armed(self):
+        return self._quick_sticker_state("quick_sticker_armed")
+
+    @quick_sticker_armed.setter
+    def quick_sticker_armed(self, value):
+        self._set_quick_sticker_state("quick_sticker_armed", bool(value))
+
+    @property
+    def quick_sticker_pending(self):
+        return self._quick_sticker_state("quick_sticker_pending")
+
+    @quick_sticker_pending.setter
+    def quick_sticker_pending(self, value):
+        self._set_quick_sticker_state("quick_sticker_pending", bool(value))
+
+    @property
+    def quick_sticker_consumed(self):
+        return self._quick_sticker_state("quick_sticker_consumed")
+
+    @quick_sticker_consumed.setter
+    def quick_sticker_consumed(self, value):
+        self._set_quick_sticker_state("quick_sticker_consumed", bool(value))
+
     def trigger_quick_sticker(self):
         if (self.quick_sticker_consumed or not self.quick_sticker_enabled or
                 self.inline_active()):

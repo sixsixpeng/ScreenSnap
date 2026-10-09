@@ -2546,6 +2546,42 @@ class CaptureTests(CoreTests):
                 self.app.setPalette(original_palette)
                 self.app.processEvents()
 
+    def test_quick_sticker_state_is_shared_between_views(self):
+        """快速贴图的按住/待发/已消费状态必须按 session 共享。
+
+        回归：每个视图各存一份时，空格只会武装被激活的那个视图，左键落在另一个屏幕
+        的视图上就不进入快速贴图（表现为“只有一个屏幕能按住空格快速贴图”）。
+        """
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import patch as patcher
+
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False,
+                    "capture_quick_sticker_enabled": True}
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+        try:
+            # 一个视图武装 → 同一 session 的另一个视图也必须看到
+            mask.quick_sticker_armed = True
+            self.assertTrue(mask.session.quick_sticker_armed)
+            other = MaskWindow.__new__(MaskWindow)      # 模拟同 session 的另一个视图
+            other.session = mask.session
+            self.assertTrue(other.quick_sticker_armed)
+
+            # 已消费标记共享：第二个视图不会再触发第二次
+            mask.selection.rects.append(QRect(10, 10, 40, 30))
+            requests = []
+            mask.quick_sticker_requested.connect(lambda image, pos: requests.append(pos))
+            mask.trigger_quick_sticker()
+            mask.trigger_quick_sticker()
+            self.assertEqual(len(requests), 1)
+            self.assertTrue(mask.session.quick_sticker_consumed)
+        finally:
+            mask.close()
+
+
+
 if __name__ == "__main__":
     unittest.main()
 
