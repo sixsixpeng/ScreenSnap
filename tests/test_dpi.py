@@ -140,6 +140,7 @@ class DpiTests(CoreTests):
             callbacks = toast.call_args.kwargs
             toast.assert_called_once_with(
                 "截图", "1 张", image={"src": str(path.resolve()), "placement": "hero"},
+                app_id="ScreenSnap.Desktop",       # 调用侧会显式带 app_id，旧期望漏了它
                 on_click=callbacks["on_click"],
                 on_dismissed=callbacks["on_dismissed"],
                 on_failed=callbacks["on_failed"], duration="short")
@@ -665,7 +666,7 @@ class DpiTests(CoreTests):
         mask.show()
         self.app.processEvents()
         self.assertEqual(len(mask.session.views), 2)
-        expected = [("F", "尺寸"), ("F2", "重新截图"),
+        expected = [("F", "尺寸"), ("F2", "清除选择"),
                     ("E", "窗口编辑"), ("Alt+M", "多选"), ("Y", "仅复制")]
         for view in mask.session.views:
             self.assertEqual(view.capture_action_hints(), expected)
