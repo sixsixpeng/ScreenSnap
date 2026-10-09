@@ -605,6 +605,11 @@ Windows 图片提示优先使用带缩略图的原生图片 Toast；无法导入
 - **修复（按住空格快速贴图只在部分屏幕生效）**：每个遮罩视图在 __init__ 里各建一个同键的 Space 快捷键（Qt.ApplicationShortcut），而 armed（已按住）/pending（等选区结束）/consumed（已消费）三个状态是**每个视图各存一份** —— Qt 只激活其中一个视图的快捷键，左键落在另一个屏幕的视图上时它自己的 armed 是 False，于是不进快速贴图分支、退化成普通确认；右键不依赖该状态，所以主副屏都正常（表现为「左键主屏不行、副屏可以，右键都行」）。现在三个状态改为按 session 共享（mask_window.py 新增 _quick_sticker_state/_set_quick_sticker_state 与三个 property），任一视图按空格即武装全部视图，consumed 共享后多视图同时激活也只出一次贴图；session 尚未建立时退回实例属性，不影响构造顺序。
 - **验证**：tests.test_capture 整模块 88 条 OK（改造未破坏既有用例）；test_quick_sticker_state_is_shared_between_views 1 条 OK（跨视图读到 armed、连续触发只发一次 quick_sticker_requested、consumed 落在 session）。真机双屏实测：主屏与副屏按住空格左键均可出贴图。
 
+### 2026-10-09 编辑器工具栏提示补上快捷键
+
+- **修复（撤销/重做/删除按钮提示不显示快捷键）**：工具栏用 `shortcut_label()` 取按键，而它只查 `settings["hotkeys"]`（全局热键），编辑器动作不在其中，于是所有按钮的提示都没有按键信息。现在 `core/constants.py` 新增内建固定键映射 `EDITOR_FIXED_KEYS`（撤销=QKeySequence.Undo、重做=QKeySequence.Redo、删除=QKeySequence.Delete，由 Qt 标准键推导，与画布 `keyPressEvent` 的 `event.matches(...)` 同源），`shortcut_label()` 在配置缺省时回落到它；两个编辑器共用同一份工具栏，一处修复同时生效。
+- **验证**：`tests/editor/test_tools.py::test_toolbar_tooltips_show_editor_fixed_shortcuts` 断言撤销提示含 Ctrl+Z、重做含 Ctrl+Y、删除含 Del。
+
 ## 技术指南
 
 ### 屏幕坐标空间约定（多屏 + 混合 DPI）
