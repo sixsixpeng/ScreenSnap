@@ -89,6 +89,15 @@ class AppTests(CoreTests):
             preview.assert_not_called()
             app.config.data["bubble"] = True
 
+            # 取色通知有独立开关（设置 > 通知 > 取色通知）
+            app.config.data["picker_notification"] = False
+            app.tray.reset_mock()
+            app.notify_color_picked("#abcdef")
+            app.tray.showMessage.assert_not_called()
+            app.config.data["picker_notification"] = True
+            app.notify_color_picked("#abcdef")
+            self.assertIn("#abcdef", app.tray.showMessage.call_args.args[1])
+            app.tray.reset_mock()
             app.config.data["operation_notification"] = False
             app.notify("status")
             app.tray.showMessage.assert_not_called()

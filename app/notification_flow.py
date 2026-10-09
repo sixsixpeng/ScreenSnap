@@ -61,7 +61,7 @@ class NotificationMixin:
 
     def notify_color_picked(self, color):
         """取色模式：色值已复制到剪贴板，发一次轻量提示。"""
-        self.notify(f"已复制颜色 {color}", "copy_notification")
+        self.notify(f"已复制颜色 {color}", "picker_notification")
 
 
     def saved(self, path, image=None, notify=True, notification_setting="save_notification"):

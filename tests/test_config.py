@@ -2872,8 +2872,10 @@ class ConfigTests(CoreTests):
                 page = settings.pages.widget(index)
                 keys.update(page.controls)
                 keys.update(page.color_buttons)
-            # 热键与上次区域由专用控件或程序内部维护，不需要普通设置项入口。
-            self.assertEqual(set(DEFAULTS) - keys, {"hotkeys", "last_capture_rect"})
+            # 热键、上次区域与「另存为」目录由专用控件或程序内部维护，不需要普通设置项入口。
+            # save_as_dir 是「另存为」上次选择的目录（内部记忆值），按规则 4 刻意不做设置页控件。
+            self.assertEqual(set(DEFAULTS) - keys,
+                             {"hotkeys", "last_capture_rect", "save_as_dir"})
             self.assertIn("save_dir", keys)
             self.assertNotIn("auto_dir", keys)
             self.assertNotIn("manual_dir", keys)

@@ -117,7 +117,7 @@ PRESERVED_ON_VERSION_RESET = (
     # 输出组织习惯：与 save_dir 配套，重置会让归档方式突变
     "filename", "save_format", "archive_by_month", "archive_by_day", "image_archive_period",
     # 打扰程度：通知开关是"被烦过才关"的偏好，不该被升级重新打开
-    "bubble", "notification_timeout", "copy_notification", "save_notification",
+    "bubble", "notification_timeout", "copy_notification", "picker_notification", "save_notification",
     "sticker_notification",
     # 功能开关：用户显式关掉过的能力（识别、放大镜、标尺、诊断、回收站等）必须记住
     "window_detection", "window_hover_detect", "magnifier", "magnifier_size", "magnifier_grid",
@@ -159,6 +159,7 @@ DEFAULTS = {
     "bubble": True, "notification_backend": "win11toast",
     "notification_timeout": 2,
     "copy_notification": True,
+    "picker_notification": True,
     "save_notification": True, "operation_notification": True,
     "sticker_notification": True, "open_notification_file": True, "sound": True,
     "save_dir": "",
@@ -461,6 +462,8 @@ def validate(data):
         elif key == "uia_slow_seconds" and (
                 type(value) not in (int, float) or not 0.1 <= value <= 2.0):
             raise ValueError("UIA 熔断阈值必须是 0.1 到 2.0 之间的秒数")
+        elif key == "picker_notification" and not isinstance(value, bool):
+            raise ValueError("「取色通知」必须是布尔值")
         elif key == "save_as_dir" and not isinstance(value, str):
             raise ValueError("「另存为」目录必须是字符串")
         elif key == "app_version" and not isinstance(value, str):

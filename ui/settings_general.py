@@ -22,6 +22,7 @@ class GeneralPage(SettingsPage):
                 "默认使用 Windows 11 原生通知；选择旧版时使用应用内图片预览和系统托盘文字通知。\n"
                 "Windows 11 原生通知不可用或发送失败时会自动回退到旧版通知。")
         self.check("copy_notification", "复制完成通知", "截图复制、复制颜色等操作完成后显示提示")
+        self.check("picker_notification", "取色通知", "取色复制色值后显示提示")
         self.number("notification_timeout", "通知自动关闭时长 (秒)", 0, 60,
                 "应用内图片预览按秒数关闭，托盘提示使用毫秒；Win11 原生通知仅支持系统 short/long 时长，无法精确到秒。0 表示应用内预览不自动关闭，Win11 通知使用 long")
         self.check("save_notification", "保存成功通知", "图片保存成功后显示托盘提示")
