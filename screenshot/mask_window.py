@@ -1598,9 +1598,10 @@ class MaskWindow(QWidget):
             if sequence.isEmpty():
                 sequence = QKeySequence(default)
             shortcut.setKey(sequence)
-            # E 在原地编辑里必须保持可用：它是「升级为独立编辑器」的入口；
-            # 其它功能键（F/R/多选/Y）仍按原语义在原地编辑里禁用。
-            shortcut.setEnabled(name == "window_edit" or not inline_active)
+            # E 与 F（尺寸）在原地编辑里必须保持可用：E 是「升级为独立编辑器」的入口，
+            # F 用来给"快速编辑"里的区域改尺寸（实测：原地编辑一打开 F 就被禁用 → 按 F 无反应）。
+            # 其余功能键（R/多选/Y）仍按原语义在原地编辑里禁用。
+            shortcut.setEnabled(name in ("window_edit", "custom_size") or not inline_active)
 
     def toggle_picker_mode(self):
         if self._delegate_to_owner("toggle_picker_mode"):
@@ -2869,6 +2870,12 @@ class MaskWindow(QWidget):
         self.selection.active = None
         self.element_index = -1
         self.update_all()
+        if self.inline_active():
+            # 方案 A：在原地编辑里按 F 改完尺寸后，让原地编辑器跟随新区域
+            # （由内联编辑器自己的边框负责调整；遮罩手柄在内联状态下被它盖住）。
+            self.update_inline_region()
+            logging.getLogger("screensnap").debug(
+                "固定尺寸：原地编辑器跟随新区域 %s", rect.getRect())
 
     def select_fixed_size(self):
         """在鼠标附近创建或重置指定尺寸的选区。"""
