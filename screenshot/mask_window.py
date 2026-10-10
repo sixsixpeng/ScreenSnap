@@ -988,6 +988,26 @@ class InlineEditor(QWidget):
         self.settings = None
 
 
+# 交接槽（2026-10-11）：原地编辑器按 E 转交时，把标注**对象**快照暂存在模块级变量里。
+# 为什么不挂在遮罩实例上：多屏时按键可能落在非属主视图、而 Application.edit_images() 读的是
+# 它自己保存的那个遮罩实例，两者可能不是同一个对象 —— 那样 restore 就静默不执行、标注全丢（真机实测）。
+_PENDING_EDITOR_ANNOTATIONS = None
+
+
+def stash_pending_editor_annotations(records):
+    """暂存原地编辑器的标注快照，供独立编辑器打开时恢复。"""
+    global _PENDING_EDITOR_ANNOTATIONS
+    _PENDING_EDITOR_ANNOTATIONS = list(records or [])
+
+
+def take_pending_editor_annotations():
+    """取出并清空暂存的标注快照（取一次即失效）。"""
+    global _PENDING_EDITOR_ANNOTATIONS
+    records = _PENDING_EDITOR_ANNOTATIONS or []
+    _PENDING_EDITOR_ANNOTATIONS = None
+    return records
+
+
 class MaskWindow(QWidget):
     """覆盖虚拟桌面的交互窗口；原始像素始终保存在 Pillow 图像中。"""
 
@@ -1581,10 +1601,34 @@ class MaskWindow(QWidget):
             self.complete(force_window=True)
             return
         rect = QRect(editor.rect)
-        image = editor.output_image()
+        # 交**底图**而不是合成图（2026-10-11 用户反馈：按 E 后带过去的是已烘焙标注的图片，
+        # 那些标注变成像素、无法再编辑）。标注与擦除层用 canvas.snapshot() 以**对象**形式交接，
+        # 由 edit_images() 在新编辑器里 restore() 回去。
+        image = getattr(editor.canvas, "image", None)
+        if image is None:
+            image = editor.output_image()
         if not hasattr(image, "mode"):       # PIL 图有 .mode；QImage 没有 → 转成 PIL
             image = qimage_to_pillow(image)
-        alternate = getattr(editor, "alternate", None)
+        try:
+            # 暂存在遮罩上，等 Application.edit_images() 建好新编辑器后再 restore 回去。
+            records = editor.canvas.snapshot()
+            stash_pending_editor_annotations(records)
+            # 无条件留痕（2026-10-11 诊断）：把「画布上有几个标注」与「快照拿到几条」一起打出来，
+            # 用来区分是「本来就没有标注」还是「快照拿不到」—— 两者都会让新编辑器看起来是空的。
+            logger.info("转交前核对：画布标注=%d 个 快照=%d 条",
+                        len(editor.canvas.annotations()), len(records))
+        except Exception as error:  # noqa: BLE001 快照失败就退回旧行为（图片已带标注）
+            logger.warning("转交独立编辑器时导出标注快照失败: %s", error)
+            stash_pending_editor_annotations([])
+            image = editor.output_image()
+            if not hasattr(image, "mode"):
+                image = qimage_to_pillow(image)
+        alternate = getattr(editor.canvas, "alternate", None)   # 光标图在画布上，不在 InlineEditor 上（2026-10-11 修复）
+        logger.info("转交光标图核对：alternate=%s 尺寸=%s 原地开关=%s 设置[cursor]=%s",
+                    "有" if alternate is not None else "无（该开关将不可用）",
+                    getattr(alternate, "size", None),
+                    editor.toolbar.cursor_switch.isChecked(),
+                    self.settings.get("cursor"))
         position = self.mapper.physical_local_to_native_global(rect.topLeft())
         self.session.editor_opened = True
         self.session.inline_editor = None
@@ -1592,8 +1636,9 @@ class MaskWindow(QWidget):
             editor.cleanup()
         except Exception as error:
             logger.warning("转交独立编辑器时清理原地编辑失败: %s", error)
-        logger.debug("E（原地编辑）→ 转交独立编辑器：区域=%s 锚点=(%d,%d)",
-                    rect.getRect(), position.x(), position.y())
+        logger.info("E（原地编辑）→ 转交独立编辑器：区域=%s 锚点=(%d,%d) 标注=%d 项",
+                    rect.getRect(), position.x(), position.y(),
+                    len(_PENDING_EDITOR_ANNOTATIONS or []))
         self.edit_requested.emit([(image, alternate)], [position])
         self.close()
     def toggle_multi_select_mode(self, _forwarded=False):

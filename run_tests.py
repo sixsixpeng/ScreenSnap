@@ -69,7 +69,8 @@ def run_module(module: str, retries: int):
         if match or attempt > retries:
             break
     if not match:
-        hint = "建议分块跑：" + module + " -k <关键字>"
+        hint = ("已重试仍无摘要（多半是 C4 收尾崩溃吃掉摘要，可再跑一次）；"
+                "必要时分块跑：" + module + " -k <关键字>")
         return (0, "NO-SUMMARY", [], duration, hint)
     ran = int(match.group(1))
     failed = [f"{kind}: {name}" for kind, name in FAIL_RE.findall(output)]

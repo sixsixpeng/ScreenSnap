@@ -199,8 +199,31 @@ class CaptureFlowMixin:
         """为每个选区打开独立编辑器，并连接保存与贴图输出。"""
         # 每个选区对应独立编辑器，保持多选区之间的编辑状态互不影响。
         for index, (image, alternate) in enumerate(images):
+            # 先取交接槽，再做留痕 —— 先前留痕写在取槽之前，pending 还没赋值就被引用，
+            # 一按 E 就抛 UnboundLocalError、编辑器根本打不开（2026-10-11 真机日志定位）。
+            from screenshot.mask_window import take_pending_editor_annotations
+
+            pending = take_pending_editor_annotations()
+            logging.getLogger("screensnap").info(
+                "新建编辑器：光标图=%s 尺寸=%s 说明=%s",
+                "有" if alternate is not None else "无",
+                getattr(alternate, "size", None),
+                "来自原地编辑转交" if pending else "本次截图")
+            logging.getLogger("screensnap").info(
+                "edit_images 收到交接快照：%d 条（index=%d）", len(pending), index)
             editor = EditorWindow(image, self.config.data, alternate,
                                   from_capture=from_capture)
+            # 从原地编辑器按 E 转交过来的标注：以对象形式恢复，保证在窗口编辑里仍可选中/编辑
+            # （2026-10-11 用户反馈：以前只交合成图，标注变成像素后无法再编辑）。
+            if pending and index == 0:
+                try:
+                    editor.canvas.restore(pending)
+                except Exception as error:  # noqa: BLE001 恢复失败不影响打开编辑器
+                    logging.getLogger("screensnap").warning(
+                        "恢复转交过来的标注失败: %s", error)
+                else:
+                    logging.getLogger("screensnap").info(
+                        "已从原地编辑器恢复 %d 个标注对象", len(pending))
             editor.sticker_position = positions[index] if positions and index < len(positions) else None
             # 编辑器必须出现在"被截取区域所在的那块屏"：Qt 默认把新窗口放在主屏居中，
             # 于是副屏划选、鼠标留在主屏时编辑器开在主屏，用户看到的就是"按 E 没反应"。
