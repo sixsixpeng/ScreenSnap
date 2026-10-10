@@ -411,7 +411,7 @@ class ScreenshotPage(SettingsPage):
         self._shortcut("capture_save_shortcut", "快速保存按键", "S",
                        "选区存在时直接保存；沿用输出外观、保存格式、剪贴板和成功通知设置")
         self._shortcut("capture_picker_shortcut", "取色按键", "C",
-                       "选区确认前按此键进入/退出取色模式；取色态下左键取样会把色值复制到剪贴板")
+                       "选区确认前按此键在光标处取色一次；取色态下左键取样会把色值复制到剪贴板")
         self._shortcut("capture_custom_size_shortcut", "自定义尺寸按键", "F",
                        "选区存在时按此键打开“自定义尺寸”对话框，按指定宽高重建选区")
         self._shortcut("capture_recapture_shortcut", "重新截图按键", "R",

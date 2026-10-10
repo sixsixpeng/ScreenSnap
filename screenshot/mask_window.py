@@ -453,7 +453,7 @@ class InlineEditor(QWidget):
                              event.button(), event.buttons(), event.modifiers())
         point = view.to_physical_point(local)
         if (event_type == QEvent.MouseButtonPress and event.button() == Qt.LeftButton
-                and view.picker_mode
+
                 and QGuiApplication.keyboardModifiers() & (Qt.AltModifier | Qt.ControlModifier)):
             # 取色必须优先于"手柄/边线"判断：否则 Alt+左键会落回画布，遮罩的取色分支收不到事件
             # （日志实证：取色模式已开启，但遮罩里没有 取色取样 记录）。
@@ -1124,7 +1124,7 @@ class MaskWindow(QWidget):
             self.capture_picker_shortcut = QShortcut(
                 QKeySequence(settings.get("capture_picker_shortcut", "C")), self)
             self.capture_picker_shortcut.setContext(Qt.ApplicationShortcut)
-            self.capture_picker_shortcut.activated.connect(self.toggle_picker_mode)
+            self.capture_picker_shortcut.activated.connect(self.sample_color_at_cursor)
         else:
             self.capture_save_shortcut = None
         self.magnifier_overlay = MagnifierOverlay(self)
@@ -1238,7 +1238,7 @@ class MaskWindow(QWidget):
         return hint_items(
             self.settings, (self.position.x(), self.position.y()),
             (selection.width(), selection.height()) if selection else None,
-            inline=self.inline_active(), picker=self.picker_mode,
+            inline=self.inline_active(), picker=False,
             picker_color=self.picker_color,
             toolbar_hidden=bool(editor is not None and editor.toolbar_hidden),
             multi_select=self.session.multi_select_mode,
@@ -1251,7 +1251,7 @@ class MaskWindow(QWidget):
         return hint_texts(
             self.settings, (self.position.x(), self.position.y()),
             (selection.width(), selection.height()) if selection else None,
-            inline=inline, picker=self.picker_mode, picker_color=self.picker_color,
+            inline=inline, picker=False, picker_color=self.picker_color,
             multi_select=self.session.multi_select_mode,
             right_capture=self.session.right_capture_mode,
             toolbar_hidden=bool(editor is not None and editor.toolbar_hidden),
@@ -1259,7 +1259,7 @@ class MaskWindow(QWidget):
 
     def capture_action_hints(self):
         """兼容旧调用：返回选区功能键的 (键, 名称) 列表（供用例复用）。"""
-        if self.picker_mode or self.inline_active():
+        if self.inline_active():
             return None
         selection = self.selection.active or (
             self.selection.rects[-1] if self.selection.rects else None)
@@ -1771,17 +1771,6 @@ class MaskWindow(QWidget):
             shortcut.setEnabled(
                 name in ("window_edit", "custom_size", "recapture", "copy") or not inline_active)
 
-    def toggle_picker_mode(self):
-        if self._delegate_to_owner("toggle_picker_mode"):
-            return
-        if self.session.closing:
-            return
-        self.picker_mode = not self.picker_mode
-        self.picker_color = None
-        self.update_all()
-        logging.getLogger("screensnap").debug(
-            "取色模式 %s（原地编辑=%s 多选=%s）", "开启" if self.picker_mode else "关闭",
-            self.inline_active(), self.session.multi_select_mode)
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
@@ -2444,25 +2433,39 @@ class MaskWindow(QWidget):
     def wheelEvent(self, event):
         super().wheelEvent(event)
 
+    def sample_color_at(self, point):
+        """在给定的**局部物理点**取样（从 mousePressEvent 原样抽出，逻辑未改）。"""
+        x = point.x() + self.bounds["left"]
+        y = point.y() + self.bounds["top"]
+        logging.getLogger("screensnap").debug(
+            "取色取样：视图=%s 鼠标物理点=(%d,%d) 取样点=(%d,%d) inline=%s",
+            self.monitor_rect.getRect(), point.x(), point.y(), x, y, self.inline_active())
+        if 0 <= x < self.image.width and 0 <= y < self.image.height:
+            r, g, b = self.image.convert("RGB").getpixel((x, y))
+            color = "#%02x%02x%02x" % (r, g, b)
+            QGuiApplication.clipboard().setText(color)
+            self.picker_color = color
+            self.picker_copied.emit(color)
+        self.update_all()
+
+    def sample_color_at_cursor(self):
+        """C：在光标处取一次色（一次性动作，不再有取色模式）。"""
+        global_point = QCursor.pos()
+        target = self.focus_view_for_position(global_point) or self
+        local = target.mapFromGlobal(global_point)
+        local_point = target.to_physical_point(local)
+        logging.getLogger("screensnap").debug(
+            "取色（快捷键一次取样）：目标视图=%s 光标全局点=%s 局部物理点=%s",
+            target.monitor_rect.getRect(), global_point, local_point)
+        target.sample_color_at(local_point)
+
     def mousePressEvent(self, event):
         """左键开始创建选区，已有选区的命中由选区对象判定。"""
         # 取色优先于"原地编辑分支"：原地编辑打开时下面的 inline 分支会直接 return，
         # 取色分支（Alt/Ctrl+左键取样）永远走不到 —— 这正是"划选后无法取色"的原因。
-        if (self.picker_mode and event.button() == Qt.LeftButton
+        if (event.button() == Qt.LeftButton
                 and QGuiApplication.keyboardModifiers() & (Qt.AltModifier | Qt.ControlModifier)):
-            point = self.to_physical_point(event.position().toPoint())
-            x = point.x() + self.bounds["left"]
-            y = point.y() + self.bounds["top"]
-            logging.getLogger("screensnap").debug(
-                "取色取样：视图=%s 鼠标物理点=(%d,%d) 取样点=(%d,%d) inline=%s",
-                self.monitor_rect.getRect(), point.x(), point.y(), x, y, self.inline_active())
-            if 0 <= x < self.image.width and 0 <= y < self.image.height:
-                r, g, b = self.image.convert("RGB").getpixel((x, y))
-                color = "#%02x%02x%02x" % (r, g, b)
-                QGuiApplication.clipboard().setText(color)
-                self.picker_color = color
-                self.picker_copied.emit(color)
-            self.update_all()
+            self.sample_color_at(self.to_physical_point(event.position().toPoint()))
             event.accept()
             return
         # 自己记录左键是否按下：selection.resizing/dragging 在部分路径下不可靠，
@@ -2627,12 +2630,6 @@ class MaskWindow(QWidget):
         """处理取消、提交、固定尺寸创建与最后选区的像素微调。"""
         key = event.key()
         if key == Qt.Key_Escape and not self.inline_active():
-            if self.picker_mode:
-                self.picker_mode = False
-                self.picker_color = None
-                self.update_all()
-                event.accept()
-                return
             if self.primary:
                 self.close()
             event.accept()

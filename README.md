@@ -422,7 +422,7 @@ Win11 Toast 模式下，截图图片提示缓存本地 PNG 作为 hero 图片，
 | `crosshair` | `true` | 是否显示全屏定位十字线。 |
 | `crosshair_color` | `#ff0000` | 定位十字线颜色；可在"设置 > 截图 > 定位辅助"改色。 |
 | `crosshair_width` | `1` px | 定位十字线宽度，范围 1–8 px。 |
-| `capture_picker_shortcut` | `C` | 选区确认前进入/退出取色模式的按键，支持单键、修饰键组合或功能键（如 `Alt+C` / `F2`）；取色态下 `Alt`/`Ctrl` + 左键取样复制十六进制色值到剪贴板并设为当前标注颜色（避免与左键框选 / UIA 自动识别选择冲突）。 |
+| `capture_picker_shortcut` | `C` | 在光标处取色一次的按键（一次性动作，无取色模式），支持单键、修饰键组合或功能键（如 `Alt+C` / `F2`）；取色态下 `Alt`/`Ctrl` + 左键取样复制十六进制色值到剪贴板并设为当前标注颜色（避免与左键框选 / UIA 自动识别选择冲突）。 |
 | `magnifier_size` | `140` | 放大镜边长（像素），范围 100–320；采样区域按同一缩放倍率等比换算，调大即看到更大范围。 |
 | `magnifier_grid` | `true` | 放大镜内是否叠加像素网格线，便于 1px 级对齐。 |
 | `magnifier_grid_color` | `#cccccc` | 放大镜像素网格颜色。 |
@@ -546,6 +546,8 @@ Win11 Toast 模式下，截图图片提示缓存本地 PNG 作为 hero 图片，
 | `log_when` | `midnight` | 日志文件在每天午夜或每小时轮转。 |
 | `log_monthly_folder` | `true` | 是否按 `YYYY-MM` 创建日志子目录；跨月写入自动切换到新目录。 |
 | `log_dir` | `""` | 自定义日志根目录；留空使用程序目录下 `logs`。 |
+
+> **原生崩溃看 `crash.log`**：访问违规（0xC0000005）、堆损坏（0xC0000374）这类**原生崩溃**不会走 `sys.excepthook`，`app.log` 最后一行往往停在正常业务日志上，看起来像「崩溃却没有日志」。程序启动时已通过 `faulthandler` 把致命错误发生时**所有线程的 Python 栈**写入日志目录下同级的 `crash.log`（`logger/log_setup.py` 的 `enable_crash_dumps`）。排查顺序：① 看 `app.log` 最后一行定位最后动作 → ② 若没有任何 Python 异常栈，打开 `logs/YYYY-MM/crash.log` → ③ 按栈定位；手工复现时也可用 `python -X faulthandler -m unittest tests.<模块> -k <关键词>` 直接拿到崩溃栈。
 
 ### 贴图会话与吸附设置
 
@@ -1523,3 +1525,5 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 - 2026-10-10：快速编辑工具栏隐藏键（反引号）在副屏无效。现象：主动作发生在副屏（T2752Q）时，无论先点不点屏幕、无论画布是否有焦点，该键都无反应；主屏同一操作正常。排查：逐层加观测（QShortcut 已创建/就绪/触发 → 编辑器事件过滤器 → 遮罩 keyPressEvent → 应用级 eventFilter），前三层与应用级均为 0 行，而日志同时显示该窗口「前台=python(2560,0,…)[本进程]」、`isActiveWindow()=True`；用 `SCREENSNAP_NO_ESC_HOOK=1` 关掉自家 Esc 全局钩子复测仍无变化 → 结论是该窗口**收不到键盘事件**，与快捷键路由、判定、焦点判定都无关。改动（`screenshot/mask_window.py`）：该键改为**全局热键**（`_install_toolbar_hide_hotkey` 在截图开始时按配置注册、`closeEvent` 释放，`toolbar_hide_requested` 信号在 Qt 线程执行 `toggle_inline_toolbar`），不再依赖窗口/画布焦点；同时保留遮罩快捷键、编辑器过滤器与遮罩 keyPressEvent 三个入口作为常规路径，并新增应用级按键探针（`程序收到按键`）与 `SCREENSNAP_NO_TOOLBAR_HOTKEY=1` / `SCREENSNAP_NO_ESC_HOOK=1` 两个诊断开关。验证：`tests.test_uia` 50 条 OK（skipped=1）、`tests.test_dpi` 47 条 OK（skipped=2）、`tests.test_sticker` 64 条 OK、`tests.test_capture` 102 条 OK；真机主屏与副屏各验一次通过。
 
 - 2026-10-10（二）：副屏微调键失效 + 主副屏一动微调就原生崩溃。现象：副屏按 W/A/S/D/方向键无反应；随后在任一屏拖手柄（握住控制点）后微调即崩溃，日志无异常栈、最后一行停在「原地编辑就绪」。排查：入口日志「遮罩收到按键」为 0（按键没进程序）；`python -X faulthandler -m unittest tests.test_capture -k mask_drag_resizes` 把原生崩溃钉在 `QTest.keyClick`；逐段删除定位到上一版加在遮罩 `keyPressEvent` 的工具栏隐藏键分支（`QKeySequence(event.keyCombination())` 在合成按键上原生崩溃）。改动：删除该冗余分支（隐藏键由全局热键 + 编辑器侧 `WindowShortcut` 覆盖）；`keyPressEvent` 内 `view → self`（两处，原为别的类的自由变量，跨屏命中已销毁对象）；`QCursor.setPos` 前加类型与可见性守卫；补微调日志。验证：`test_capture` 102 条 OK、`test_config` 106 条 OK（4 条被跳过的用例全部恢复）。
+
+- 2026-10-10（三）：取色改为一次性动作（去掉取色模式）。现象：旧流程要按 C 进模式、移动鼠标取样、再按 C 或 Esc 退出，期间 F/E/R/Y/Alt+M 与工具栏隐藏键被门控禁用，Esc 还要先退模式才取消截图。改动（screenshot/mask_window.py）：capture_picker_shortcut（默认 C）改为"在光标处直接取样一次"（复制色值并按 picker_notification 通知）；新增 sample_color_at_cursor 与 sample_color_at，Alt 或 Ctrl 加左键取样随时可用；删除 toggle_picker_mode 与提示条模式文案；Esc 恢复取消整轮的唯一语义。验证：-k picker / -k hint / -k mask 全绿，另加两条用例覆盖无模式取样与光标映射。\n

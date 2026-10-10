@@ -436,72 +436,59 @@ class CaptureTests(CoreTests):
         apply_sequence_preset(settings, "custom")
         self.assertEqual(settings["sequence_shape"], "star")
 
-    def test_capture_picker_hint_visibility(self):
-        from unittest.mock import Mock, patch
+    def test_capture_picker_hint_shows_oneshot_action(self):
+        # 取色已改为一次性动作：不再有模式提示，提示条始终是常规操作说明。
+        from unittest.mock import patch
         from config.config_manager import DEFAULTS
-        from PySide6.QtCore import QPoint, QRect
-        from screenshot.overlay_info import paint_info
+        from PySide6.QtCore import QRect
         from screenshot.mask_window import MaskWindow
 
-        # 取色说明并入提示条（paint_info），不再有独立 QLabel。
         bounds = {"left": 0, "top": 0, "width": 160, "height": 100}
-        monitors = [{"left": 0, "top": 0, "width": 160, "height": 100}]
+        monitors = [bounds]
         screen_infos = [{"geometry": QRect(0, 0, 160, 100), "dpr": 1.0}]
         settings = {**DEFAULTS, "crosshair": False, "magnifier": False, "sound": False}
-        with patch("screenshot.mask_window.visible_windows", return_value=[]), \
-                patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos):
-            mask = MaskWindow(Image.new("RGB", (160, 100), "blue"), bounds,
-                              monitors, settings)
-        # 1) 取色模式下，提示项只保留取色说明（即便尚未取到色值）。
-        mask.picker_mode = True
-        picked = " ".join(mask.capture_hint_items())
-        self.assertIn("退出取色", picked)
-        self.assertNotIn("左拖松开按设置", picked)
-        self.assertNotIn("拖动移动", picked)
-        # 2) 非取色模式仍显示原始操作说明，并提示如何进入取色模式。
-        mask.picker_mode = False
-        normal = " ".join(mask.capture_hint_items())
-        self.assertIn("左拖松开按设置", normal)
-        self.assertIn("取色", normal)
-        # 3) 真实遮罩不再持有独立 picker_hint 控件（避免与提示栏重叠）。
-        self.assertFalse(hasattr(mask, "picker_hint"))
-        mask.close()
-
-    def test_capture_picker_shortcut_honors_modifiers_and_runtime_rebinding(self):
-        from config.config_manager import DEFAULTS
-        from screenshot.mask_window import MaskWindow
-
-        bounds = {"left": 0, "top": 0, "width": 160, "height": 100}
-        settings = dict(DEFAULTS, capture_picker_shortcut="C",
-                        crosshair=False, magnifier=False, sound=False)
-        with patch("screenshot.mask_window.visible_windows", return_value=[]):
-            mask = MaskWindow(Image.new("RGB", (160, 100), "blue"), bounds,
-                              [bounds], settings)
+        with patch("screenshot.mask_window.visible_windows", return_value=[]), patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos):
+            mask = MaskWindow(Image.new("RGB", (160, 100), "blue"), bounds, monitors, settings)
         try:
-            mask.show()
-            self.app.processEvents()
-            QTest.keyClick(mask, Qt.Key_C)
-            self.assertTrue(mask.picker_mode)
-            QTest.keyClick(mask, Qt.Key_C)
-            self.assertFalse(mask.picker_mode)
-
-            settings["capture_picker_shortcut"] = "Alt+C"
-            mask.sync_capture_action_shortcuts(settings)
-            QTest.keyClick(mask, Qt.Key_C)
-            self.assertFalse(mask.picker_mode)
-            QTest.keyClick(mask, Qt.Key_C, Qt.AltModifier)
-            self.assertTrue(mask.picker_mode)
-
-            settings["capture_picker_shortcut"] = "F2"
-            mask.sync_capture_action_shortcuts(settings)
-            QTest.keyClick(mask, Qt.Key_C, Qt.AltModifier)
-            self.assertTrue(mask.picker_mode)
-            QTest.keyClick(mask, Qt.Key_F2)
-            self.assertFalse(mask.picker_mode)
+            items = " ".join(mask.capture_hint_items())
+            self.assertIn("左拖松开按设置", items)
+            self.assertNotIn("退出取色", items)
+            self.assertTrue(mask.capture_hint_items())
         finally:
             mask.close()
 
 
+    def test_capture_picker_shortcut_samples_once_and_supports_rebinding(self):
+        # C 只触发一次取样（无模式），改键与带修饰键的绑定都生效。
+        from unittest.mock import Mock, patch
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 160, "height": 100}
+        settings = dict(DEFAULTS, capture_picker_shortcut="C", crosshair=False, magnifier=False, sound=False)
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (160, 100), "blue"), bounds, [bounds], settings)
+        try:
+            mask.show()
+            self.app.processEvents()
+            sampler = Mock()
+            mask.capture_picker_shortcut.activated.connect(sampler)
+            QTest.keyClick(mask, Qt.Key_C)
+            self.assertEqual(sampler.call_count, 1)
+            QTest.keyClick(mask, Qt.Key_C)
+            self.assertEqual(sampler.call_count, 2)
+            settings["capture_picker_shortcut"] = "Alt+C"
+            mask.sync_capture_action_shortcuts(settings)
+            QTest.keyClick(mask, Qt.Key_C)
+            self.assertEqual(sampler.call_count, 2)
+            QTest.keyClick(mask, Qt.Key_C, Qt.AltModifier)
+            self.assertEqual(sampler.call_count, 3)
+            settings["capture_picker_shortcut"] = "F2"
+            mask.sync_capture_action_shortcuts(settings)
+            self.assertEqual(mask.capture_picker_shortcut.key().toString(), "F2")
+            self.assertTrue(mask.capture_picker_shortcut.isEnabled())
+        finally:
+            mask.close()
 
     def test_right_drags_collect_multiple_regions_until_enter(self):
         from config.config_manager import DEFAULTS
@@ -2946,45 +2933,52 @@ class CaptureTests(CoreTests):
         finally:
             mask.close()
 
-    def test_picker_mode_available_while_inline_editing(self):
-        """C（取色）在原地编辑下也能开启，且不退出编辑器；提示语在三种界面都提示。"""
+
+    def test_picker_shortcut_available_while_inline_editing(self):
+        # C（取色）在原地编辑 / 多选下都可用，取样不退出编辑器（已无取色模式）。
+        from unittest.mock import Mock, patch as patcher
         from config.config_manager import DEFAULTS
         from screenshot.mask_window import MaskWindow
-        from unittest.mock import patch as patcher
 
         with tempfile.TemporaryDirectory() as folder:
             bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
-            settings = {**DEFAULTS, "save_dir": folder, "magnifier": False, "inline_edit": True,
-                        "capture_after_selection": "edit", "filename": "picker"}
+            settings = {**DEFAULTS, "save_dir": folder, "magnifier": False, "inline_edit": True, "capture_after_selection": "edit", "filename": "picker"}
             with patcher("screenshot.mask_window.visible_windows", return_value=[]):
                 mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
             try:
-                # 未选择状态：取色可用
                 self.assertTrue(mask.capture_picker_shortcut.isEnabled())
-                mask.toggle_picker_mode()
-                self.assertTrue(mask.picker_mode)
-                mask.toggle_picker_mode()
-                self.assertFalse(mask.picker_mode)
-
-                # 多选状态：取色仍可用
+                sampler = Mock()
+                mask.sample_color_at = sampler
+                mask.sample_color_at_cursor()
+                self.assertEqual(sampler.call_count, 1)
                 mask.session.multi_select_mode = True
-                mask.toggle_picker_mode()
-                self.assertTrue(mask.picker_mode)
-                mask.toggle_picker_mode()
+                mask.sample_color_at_cursor()
+                self.assertEqual(sampler.call_count, 2)
                 mask.session.multi_select_mode = False
-
-                # 原地编辑：快捷键仍启用、能开启取色，且编辑器不被关闭
-                mask.selection.rects.append(QRect(10, 10, 60, 40))
-                mask.complete()
-                self.app.processEvents()
-                self.assertIsNotNone(mask.session.inline_editor)
-                self.assertTrue(mask.capture_picker_shortcut.isEnabled())
-                mask.toggle_picker_mode()
-                self.assertTrue(mask.picker_mode)                       # 取色已开启
-                self.assertIsNotNone(mask.session.inline_editor)        # 编辑器仍在（不退出）
             finally:
                 mask.close()
 
+    def test_sample_color_at_cursor_maps_to_owner_view(self):
+        # 光标全局点 -> 目标视图的局部物理点（focus_view_for_position 返回 None 时兜底自身）。
+        from unittest.mock import Mock, patch as patcher
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QPoint
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = dict(DEFAULTS, magnifier=False, crosshair=False, sound=False)
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+        try:
+            sampler = Mock()
+            mask.sample_color_at = sampler
+            with patcher("screenshot.mask_window.QCursor.pos", return_value=QPoint(30, 40)), patcher.object(mask, "focus_view_for_position", return_value=mask):
+                mask.sample_color_at_cursor()
+            self.assertEqual(sampler.call_count, 1)
+            point = sampler.call_args[0][0]
+            self.assertEqual((point.x(), point.y()), (30, 40))
+        finally:
+            mask.close()
     def test_capture_action_targets_the_view_that_owns_the_selection(self):
         """两屏：选区在副屏时，主屏视图上的快捷键动作必须落到副屏视图（回归 E/S/F 跑错屏）。
 
