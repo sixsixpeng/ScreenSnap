@@ -43,6 +43,17 @@ def log(message):
 
 
 def default_command(argv):
+    '''子进程命令行。
+
+    打包（PyInstaller/Nuitka）后 `sys.executable` 就是 exe 本身，**不能**再拼 main.py ——
+    那会变成 `ScreenSnap.exe main.py …`，多出一个无意义的位置参数（onefile 下 ROOT 还是
+    临时解包目录，该路径并不存在）。判定复用 `core.startup.is_frozen()`（它同时兼容
+    PyInstaller 的 sys.frozen 与 Nuitka 的 __compiled__），与开机自启那条路径保持一致。
+    '''
+    from core.startup import is_frozen
+
+    if is_frozen():
+        return [sys.executable, *argv]
     return [sys.executable, str(ROOT / 'main.py'), *argv]
 
 
@@ -61,6 +72,9 @@ def main(argv=None, command=None, limit=LIMIT, window=WINDOW, backoff=BACKOFF):
             # 崩溃复现开关只对首次启动生效，重启出来的进程不再自崩。
             env.pop("SCREENSNAP_CRASH_TEST", None)
             env[chr(83) + chr(67) + chr(82) + chr(69) + chr(69) + chr(78) + chr(83) + chr(78) + chr(65) + chr(80) + chr(95) + chr(82) + chr(69) + chr(83) + chr(84) + chr(65) + chr(82) + chr(84) + chr(69) + chr(68)] = str(restarted_from)
+        # 留痕（2026-10-11）：把真正拉起的命令行写进 supervisor.log —— 打包后这是唯一能
+        # 确认「子进程命令是否正确」（有没有多拼 main.py）的证据，见 default_command 的说明。
+        log('子进程命令: ' + subprocess.list2cmdline(command))
         code = subprocess.run(command, env=env).returncode
         if not should_restart(code):
             log('子进程正常退出（code=0），看护结束')

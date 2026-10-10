@@ -10,6 +10,24 @@ import supervisor
 
 
 class SupervisorTests(unittest.TestCase):
+    def test_default_command_is_frozen_aware(self):
+        """回归（2026-10-11 用户提问“打包成 exe 后崩溃自动重启还能用吗”）：打包后
+        `sys.executable` 就是 exe 本身，不能再拼 main.py —— 否则子进程会多一个无意义的位置参数
+        （onefile 下 ROOT 还是临时解包目录，该路径并不存在），且以后一旦按 argv 位置解析参数就会错位。"""
+        import sys
+        from unittest.mock import patch
+        import supervisor
+
+        with patch("core.startup.is_frozen", return_value=False):
+            command = supervisor.default_command(["--crash-test"])
+            self.assertEqual(command[0], sys.executable)
+            self.assertTrue(command[1].endswith("main.py"), "源码模式要显式跑 main.py")
+            self.assertEqual(command[2:], ["--crash-test"])
+        with patch("core.startup.is_frozen", return_value=True):
+            command = supervisor.default_command(["--crash-test"])
+            self.assertEqual(command, [sys.executable, "--crash-test"],
+                             "打包后不应再拼 main.py")
+
     def test_should_restart_only_on_abnormal_exit(self):
         self.assertFalse(supervisor.should_restart(0))
         self.assertTrue(supervisor.should_restart(1))

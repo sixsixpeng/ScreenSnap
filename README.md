@@ -724,6 +724,15 @@ Pixmap 用 `setDevicePixelRatio(当前屏 dpr)` 按物理像素 1:1 绘制，跨
 
 回归用例按功能拆分在 `tests/` 下：共享夹具与公共导入在 `tests/base.py`（`CoreTests`），功能模块为 `test_config` / `test_capture`/ `test_sticker` / `test_uia` / `test_dpi` / `test_ui` / `test_app` / `test_misc`，编辑器另有 `tests/editor/` 子包（`test_canvas` / `test_tools` / `test_text` / `test_erase` / `test_zoom`）；逐模块运行 `python -m unittest tests.test_dpi`（各自独立进程，规避单进程离屏崩溃）。原先（配置、截图遮罩、选区、编辑器、标注、贴图、剪贴板、设置页、打包相关等）。用例名即验收点，读名字就能知道覆盖了什么（例如 `test_capture_operation_tips_are_centered_on_each_monitor`）。命令都在**项目根目录**执行：
 
+回归用例可以一条命令跑完：`python run_tests.py` —— 它按本项目的口径**分模块独立进程**执行，并把离屏收尾的原生崩溃（「摘要有 `OK`、退出码却是 `-1073741819`/`-1073740940`」）正确判为**通过**；没有摘要的模块自动重试，重试后仍无摘要则记为 `NO-SUMMARY` 并以非零码退出（不会被悄悄放过）。
+
+```
+python run_tests.py                      # 全部模块（14 个）
+python run_tests.py test_sticker misc    # 只跑名字含这些子串的模块
+python run_tests.py --retries 2          # 无摘要时的重试次数（默认 1）
+python run_tests.py --list               # 列出模块
+```
+
 ```powershell
 # 全部用例（建议先看末尾的 Ran N tests / OK 或 FAILED 行）
 .\.venv\Scripts\python -m unittest tests.test_core
@@ -800,6 +809,29 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 构建产物在 `dist/ScreenSnap`（目录模式）或 `dist/ScreenSnap.exe`（单文件模式）。增量构建建议加 `--clean` 避免旧缓存干扰。Windows 全局热键、原生 Toast 与混合 DPI 等仍应在目标 Windows 环境最终验收；源码测试通过不能代替真实桌面打包验收。
 
 打包不需要额外收集模块：`main.py` 对 `core` / `config` / `editor` / `screenshot` / `sticker` / `ui` / `app` 全部使用静态绝对导入，PyInstaller 自动跟进（项目刻意不使用 `importlib` 动态导入）；除 `ui/assets` 外没有其它运行时数据文件，因此不需要 `--hidden-import` 或额外的 `--add-data`。根目录的 `build.bat` 会自动检测 Python、创建/修复 `.venv`、安装依赖并让你选择四种打包方式（内置 `--clean --noconfirm`，打包前会清理上次的 `dist` 产物，结束后保留窗口）。
+
+#### 打包后的崩溃自动重启（看护）与验证
+
+看护（`supervisor.py`）在打包后**同样工作**：它不是另起 `python main.py`，而是在本进程内 `import supervisor` 后循环拉起子进程，子进程用 `sys.executable` —— 打包后这就是 **exe 自身**。
+
+`default_command()` 用 `core.startup.is_frozen()` 判定（兼容 PyInstaller 的 `sys.frozen` 与 Nuitka 的 `__compiled__`，与开机自启同一条路径）：**打包时不再拼 `main.py`**，否则命令会变成 `ScreenSnap.exe main.py …`，多出一个无意义的位置参数；而 `--onefile` 下那个路径还是临时解包目录（`_MEIxxxx`），并不存在。
+
+真机验证步骤：
+
+1. 用 `build.bat` 打包，建议选**窗口模式 + 免安装（`--onedir`）**：启动快、便于反复验证（`--onefile` 也能用，只是每次重启要重新解包几秒）。
+2. 先退出正在运行的开发实例 —— 单实例锁会拦住 exe。
+3. 带崩溃复现开关启动：`dist\ScreenSnap\ScreenSnap.exe --crash-test 8`。
+4. 期望现象：程序正常启动 ⇒ **8 秒后真崩一次** ⇒ 托盘通知「上次异常退出（code=…），已自动重启」⇒ **程序自己重新起来**；同时 `logs\supervisor.log` 出现两行：
+
+   ```
+   子进程命令: "…\dist\ScreenSnap\ScreenSnap.exe" --crash-test 8    ← 打包后不应再有 main.py
+   子进程异常退出（code=…，运行 8.x 秒），1.0 秒后第 1 次重启
+   ```
+
+   第一行就是「打包后命令行是否正确」的直接证据（本轮为此新增的留痕）。
+5. 验正常退出不重启：托盘 → 退出 ⇒ 日志出现 `子进程正常退出（code=0），看护结束`，且不会再自动起。
+6. 验防崩溃循环：300 秒内连续异常退出 3 次后停止自动重启，日志出现 `…停止自动重启`。
+7. `--windowed` 没有控制台属正常：`print` 在 `sys.stdout is None` 时**静默无效且不抛异常**，排查看 `logs\supervisor.log`（看护）与 `logs\YYYY-MM\app.log`（应用）。
 
 ## 已知限制
 
@@ -1561,3 +1593,4 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 - 2026-10-11（十一）：崩溃转储句柄的测试隔离修复。现象：`tests.test_config::test_reset_messages_reach_configured_log_file` 与 `tests.editor.test_tools::test_logging_uses_existing_directory_or_startup_fallback` 稳定失败 ✓（`PermissionError [WinError 32]`，临时目录里的 `crash.log` 删不掉）。排查：两条用例的 `finally` 都只调 `configure_logging(logging_enabled=False)`，而该分支在 `logger/log_setup.py` 里**提前 return**、走不到 `enable_crash_dumps()`；`_CRASH_STREAM` 又是模块级全局、进程内只开一次（按设计要留住崩溃现场），于是临时目录一直被占。改动：① `logger/log_setup.py` 新增 `close_crash_dumps()`（`faulthandler.disable()` + 关流 + 清全局；产品运行期不调用）；② `enable_crash_dumps()` 改为**比较目标路径**：目录没变复用已打开的流，变了先关旧流再重开到新目录（原先只开一次 ⇒ 改 `log_dir` 后 crash.log 仍写在旧目录）；③ 两条用例的收尾显式调用 `close_crash_dumps()`（不是 skip、不是放宽断言）。验证：两条用例由 ERROR 转 **OK**；`tests.editor.test_tools` 17 条 OK、`tests.test_config` 107 条 OK（skipped=1）。
 - 2026-10-11（十二）：找回 2 条**从未被运行过**的用例（`tests/test_capture.py`）。现象（全量审计 D 线发现）：静态 `def test_` 有 106 条、实际只收集到 104 条 —— `test_quick_save_is_nudge_within_window` 与 `test_quick_save_saves_after_window_expires` 虽然缩进 4 空格，却被挡在**连续 4 个** `if __name__ == "__main__": unittest.main()` 之后（典型脚本插入事故，A4/A6 类），HEAD 与工作树同样如此 ⇒ 这两条覆盖的「S 双语义（0.3 秒内/按住左键 = 下移微调，否则快捷保存）」长期处于**无人验证**状态。改动：删掉 4 个重复守卫，在文件末尾保留唯一守卫，两条用例回到 `CaptureTests` 类体内。验证：`-k quick_save_is_nudge` Ran 1 / OK、`-k quick_save_saves_after` Ran 1 / OK（此前按全名运行是 `unittest.loader._FailedTest` ERROR）、`-k nudge` 4 条 OK；`tests.test_capture` 收集数由 104 → **106**。
 - 2026-10-11（十三）：修复「设置 → 截图」页的快捷键**录不进去**（用户真机反馈：反引号/截图快捷键都能用，但设置页里编辑不了）。排查：不是组件接错，而是该页自己实现了一套 `_shortcut()`，用的是**裸 `QKeySequenceEdit`**，缺了 `HotkeyEdit` 的两项能力 —— ① **录制时不暂停全局热键**（按 Space/S/F1 会同时真的触发截图、遮罩抢焦点 ⇒ 录制中断）；② **不做键名规范化**（`meta→windows`/`return→enter`/`del→delete` + 统一小写），直接把 PortableText 落盘 ⇒ 值与 keyboard 库格式不符时「界面上有、实际按不出来」。改动：`settings_screenshot.py` 的 `_shortcut()` 改用与「快捷键」页**同一个** `HotkeyEdit`（规则 12），`ScreenshotPage.__init__` 增加 `recording=None` 并转发 `recording` 信号（与 `settings_hotkey.py:36` 同一接线 ⇒ 录制时走 `main.pause_hotkeys`）；冲突/非法/清空的回滚逻辑原样保留（改收规范化后的字符串）；顺手把过期标签「重新截图按键」改为「清除设置选择按键」。契约同步（C8）：两条既有用例由「改值即时落盘」改为「录制结束（editingFinished）提交」，并新增断言**截图页控件必须是 `HotkeyEdit`**（防再次分叉）。验证：`tests.test_config -k shortcut` 5 条 OK、全量 107 条 OK（skipped=1）；`test_uia` 51 条 OK；`test_ui` 15 条 OK；`test_capture -k mask` 22 条 OK。真机复验待用户确认（录制不再触发截图、重启后仍生效、冲突自动回滚）。
+- 2026-10-11（十四）：打包后的崩溃自动重启（看护）与测试入口。① 修复 `supervisor.default_command()` —— 它原先无条件拼 `[sys.executable, ROOT/'main.py', *argv]`，打包后 `sys.executable` 就是 exe 本身，命令会变成 `ScreenSnap.exe main.py …`（`--onefile` 下 `ROOT` 还是临时解包目录，该路径并不存在），多出一个无意义的位置参数；目前只因参数一律用 `in sys.argv`/`index()` 查找才侥幸没坏，一旦以后按位置解析就会错位。改为复用 `core.startup.is_frozen()`（兼容 PyInstaller 的 `sys.frozen` 与 Nuitka 的 `__compiled__`，与开机自启同一条路径）：打包时返回 `[sys.executable, *argv]`。同时给看护加一行留痕 `子进程命令: …`（`subprocess.list2cmdline`）—— 打包后这是唯一能确认「子进程命令对不对」的证据。② 新增 `run_tests.py`：把测试口径固化成一条命令（分模块独立进程、按 `Ran N` 摘要判定、把「摘要有 OK、退出码非 0」的离屏收尾崩溃判为通过、无摘要自动重试、仍无摘要则非零退出），支持子串过滤与 `--retries/--list`。验证：`tests/test_supervisor.py` 新增 `test_default_command_is_frozen_aware` ⇒ 6 条 OK；`python run_tests.py` 全量 14 个模块 595 条通过；实测源码模式命令为 `[…python.exe, …\main.py, --crash-test]`、打包模式为 `[…python.exe, --crash-test]`；`--windowed` 下 `print` 在 `sys.stdout is None` 时静默无效且不抛异常（已实测）。 2026-10-10 21:46 真机验证（打包后的 exe，`dist\ScreenSnap\ScreenSnap.exe --crash-test 4`）：21:46:16 首次启动（`崩溃转储已启用: …\dist\ScreenSnap\logs\crash.log` ⇒ 印证 frozen 时日志目录取 exe 目录），21:46:20 崩溃复现开关触发访问违规，21:46:22 看护拉起第二个实例，21:46:23 `main:277 崩溃后自动重启（上次退出码=3221225477）` 且新实例 `已注册全局热键: 18 个`；随后热键截图、双屏 UIA 悬停均正常；21:49:22 托盘退出 ⇒ `已退出` 且不再自动拉起（正常退出不重启）。
