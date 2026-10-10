@@ -176,8 +176,20 @@ class StickerItem(QWidget):
         self.state_changed.emit()
 
     def apply_style(self):
+        # 描边/阴影开关会改变 padding，而图像是按 padding 内缩绘制的：
+        # 只 resize 不补偿位置，内容就会跟着内缩量漂移（关描边时实测漂 5px）。
+        # 这里保持“图像锚点”不变：窗口位置按 padding 的变化量反向补偿。
+        pad_before = getattr(self, "_pad_cache", None)
         self._apply_pixmap_ratio()
         self.resize(self.window_size())
+        pad_after = self.padding()
+        if pad_before is not None and pad_before != pad_after:
+            delta = pad_before - pad_after
+            self.move(self.x() + delta, self.y() + delta)
+            logging.getLogger("screensnap").debug(
+                "贴图样式变化补偿: padding %d→%d 位置(%d,%d)→(%d,%d)",
+                pad_before, pad_after, self.x() - delta, self.y() - delta, self.x(), self.y())
+        self._pad_cache = pad_after
         self.update()
 
     def paintEvent(self, event):

@@ -250,6 +250,9 @@ class StickerManager(QObject):
             if not image.save(str(source), "PNG"):
                 raise OSError(f"无法保存贴图缓存: {source}")
         item = StickerItem(image, str(source), self.settings, origin)
+        # 先套用一次样式：apply_style 会记录当前 padding（描边/阴影决定），
+        # 否则首次切换描边时缓存还是 None，补偿被跳过 —— 表现为只漂一次。
+        item.apply_style()
         image_anchor = QPoint(position) if position is not None else None
         if position is None:
             # 没有记录位置的贴图（首次贴出、剪贴板/文件/文字贴图等）：放到**光标所在显示器**的
@@ -887,6 +890,17 @@ class StickerManager(QObject):
             if not (isinstance(origin, dict) and origin.get("kind") in ORIGIN_KINDS):
                 origin = None
             item = self.add(image, source, origin, show=False)
+            # 恢复端现场（与 add() 里的 image_anchor 日志成对）：存储值 vs 应用几何 + 屏幕 dpr/padding，
+            # 用来判定偏移属于取整（不可避）还是 padding/frame 失配（可修）；state 键名也一并打印，避免猜错。
+            try:
+                _dpr = item.screen().devicePixelRatio() if item.screen() else None
+            except (AttributeError, RuntimeError):
+                _dpr = None
+            logger.debug(
+                "贴图恢复定位：存储键=%s 存储 x=%s y=%s w=%s h=%s scale=%s | 屏幕dpr=%s padding=%s 应用几何=%s",
+                list(state.keys())[:12], state.get("x"), state.get("y"),
+                state.get("width"), state.get("height"), state.get("scale"),
+                _dpr, item.padding(), item.geometry().getRect())
             session_id = state.get("id")
             if not isinstance(session_id, str) or not session_id or session_id in restored_items:
                 session_id = item.session_id
