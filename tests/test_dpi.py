@@ -113,6 +113,7 @@ class DpiTests(CoreTests):
             self.assertEqual(app.config.data["notification_backend"], "win11toast")
 
     def test_native_toast_caches_image_and_dispatches_async_click(self):
+        from core.constants import APP_USER_MODEL_ID
         from types import SimpleNamespace
         from PySide6.QtGui import QImage
         from ui.native_toast import cache_toast_image, show_native_toast
@@ -140,7 +141,7 @@ class DpiTests(CoreTests):
             callbacks = toast.call_args.kwargs
             toast.assert_called_once_with(
                 "截图", "1 张", image={"src": str(path.resolve()), "placement": "hero"},
-                app_id="ScreenSnap.Desktop",       # 调用侧会显式带 app_id，旧期望漏了它
+                app_id=APP_USER_MODEL_ID,       # 调用侧会显式带 app_id，旧期望漏了它   # 契约变更（2026-10-11）：身份改为 ScreenSnap，这里读常量而不是写死字符串
                 on_click=callbacks["on_click"],
                 on_dismissed=callbacks["on_dismissed"],
                 on_failed=callbacks["on_failed"], duration="short")

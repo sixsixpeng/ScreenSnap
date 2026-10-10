@@ -574,6 +574,14 @@ if __name__ == "__main__":
         sys.exit(0)
     install_exception_hooks()
     program = Application()
+    # 首次运行创建、之后每次启动幂等检查：Windows 只在存在带 ScreenSnap AUMID 的开始菜单
+    # 快捷方式时，才允许原生通知使用该身份、并在「设置 → 通知」里给出独立开关。
+    # 必须放在 Application() **之后** —— 日志要到那时才配置好，否则「已注册通知身份」
+    # 这行留痕会写进还没接 handler 的 logger 里直接消失（2026-10-11 实测踩到）。
+    # 失败只记日志（通知照旧回退到默认身份），绝不影响启动。
+    from core.app_identity import ensure_registered as _ensure_notification_identity
+
+    _ensure_notification_identity()
     if "--crash-test" in sys.argv:
         # 例：python main.py --crash-test 8  —— 8 秒后制造一次真实原生崩溃。
         _index = sys.argv.index("--crash-test")

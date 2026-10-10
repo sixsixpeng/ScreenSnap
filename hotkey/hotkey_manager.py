@@ -5,6 +5,25 @@ import queue
 import threading
 import time
 
+# 进程级屏蔽 keyboard 包的 DeprecationWarning，而且必须**在 import keyboard 之前**装好：
+# 那条警告由 keyboard/mouse.py 在**导入期**抛出，谁先导入谁触发；局部 catch_warnings() 只在
+# 当前上下文生效，真机上（keyboard 被更早导入）仍会漏到控制台（2026-10-11 实测）。
+# 只忽略来自 keyboard 包的 DeprecationWarning，不影响其它库的警告。
+#
+# 为什么要写两处（2026-10-11 真机二次复现后加固）：warnings.filterwarnings 只是往 filters
+# 里插一条，而**任何**库调用 warnings.resetwarnings() 都会把 filters 重置回 sys.warnoptions
+# 派生值 —— 那一下就把这条抹掉了（真机上正是这么漏出来的，本地单独导入复现不出）。所以同时
+# 写进 sys.warnoptions：此后无论谁再 resetwarnings()，这条 ignore 都会被重新装上。
+# 关键点（2026-10-11 真机多次复现后定的）：按消息内容过滤，不要只按 module 名 —— 该警告带
+# stacklevel 抛出，模块名可能被算成导入方（也就是我们自己），module=keyboard 就匹配不上。
+import sys as _sys
+import warnings as _warnings
+
+if "ignore::DeprecationWarning:keyboard" not in _sys.warnoptions:
+    _sys.warnoptions.append("ignore::DeprecationWarning:keyboard")
+_warnings.resetwarnings()
+_warnings.filterwarnings("ignore", message=r"The mouse sub-library is deprecated")
+_warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"keyboard")
 import keyboard
 from PySide6.QtCore import QObject, QTimer, Signal
 
@@ -114,17 +133,20 @@ class HotkeyManager(QObject):
         except Exception:  # noqa: BLE001 未安装独立包
             pass
         try:
+            import importlib
             import warnings
 
-            with warnings.catch_warnings():
-                warnings.resetwarnings()
-                warnings.simplefilter("ignore")
-                import keyboard.mouse as legacy_mouse
-
+            # record=True 是关键：警告被收进列表、**不经过 showwarning**，因此无论运行期谁重置过
+            # 过滤器，控制台都不可能再看到它（真机前几版过滤都漏出的收口做法，2026-10-11）。
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                legacy_mouse = importlib.import_module("keyboard.mouse")
+            for item in caught:
+                logging.getLogger("screensnap").debug(
+                    "鼠标钩子导入期警告已捕获并忽略: %s: %s", item.category.__name__, item.message)
             return legacy_mouse, "keyboard.mouse(已废弃)"
         except Exception:  # noqa: BLE001
             return None, ""
-
     def _ensure_input_hooks(self):
         """挂上键盘与鼠标的通用钩子，用于「系统有输入但自家钩子没收到」的判定。"""
         if self._input_hooks or getattr(self, "_stopping", False):

@@ -16,6 +16,32 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class AppTests(CoreTests):
+    def test_notification_identity_registration_is_idempotent(self):
+        """回归（2026-10-11 用户反馈「Windows 通知设置里没有独立的 ScreenSnap 入口」）：
+        Windows 只在系统里存在「带 ScreenSnap AUMID 的开始菜单快捷方式」时，才允许原生通知使用
+        该身份，并在「设置 → 系统 → 通知」里列出独立条目。验证 ① 首次注册写出 AUMID、
+        ② 重复调用幂等（不重建）、③ 身份不对时重建、④ 注册失败不抛异常（通知照旧回退）。"""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+
+        from core import app_identity
+
+        with tempfile.TemporaryDirectory() as folder:
+            link = Path(folder) / "ScreenSnap.lnk"
+            self.assertEqual(app_identity.ensure_registered(link), "created")
+            self.assertEqual(app_identity.read_app_id(link), app_identity.APP_USER_MODEL_ID,
+                             "注册后 .lnk 必须带上 ScreenSnap 的 AppUserModelID")
+            self.assertEqual(app_identity.ensure_registered(link), "exists",
+                             "重复调用必须幂等（不重建快捷方式）")
+            link.write_bytes(b"broken link")
+            self.assertEqual(app_identity.ensure_registered(link), "created",
+                             "已存在但身份不对时必须重建")
+        elsewhere = Path(tempfile.mkdtemp()) / "ScreenSnap.lnk"
+        with patch.object(app_identity, "_create_shortcut", side_effect=OSError("no shell")):
+            self.assertEqual(app_identity.ensure_registered(elsewhere), "unavailable",
+                             "注册失败只返回状态，不能抛异常")
+
     def test_notification_switches_gate_only_matching_messages(self):
         from types import SimpleNamespace
         from config.config_manager import DEFAULTS
