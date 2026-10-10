@@ -3,6 +3,7 @@
 import logging
 import sys
 from datetime import datetime
+import faulthandler
 from logging.handlers import TimedRotatingFileHandler
 from pathlib import Path
 
@@ -83,3 +84,25 @@ def configure_logging(settings):
             "%(asctime)s %(levelname)s %(module)s:%(lineno)d [%(context)s] %(message)s"))
         logger.addHandler(console)
     return logger
+
+    enable_crash_dumps(directory)
+
+
+# 原生崩溃（访问违规/堆损坏）不会走 sys.excepthook，日志里什么都留不下。faulthandler 会在
+# 致命信号时把所有线程的 Python 栈写进 crash.log —— 这是「日志无输出却崩溃」的唯一现场证据。
+_CRASH_STREAM = None
+
+
+def enable_crash_dumps(directory):
+    """把致命错误（访问违规等）的 Python 栈写入日志目录下的 crash.log。"""
+    global _CRASH_STREAM
+    if _CRASH_STREAM is not None:
+        return
+    try:
+        path = (directory / "crash.log") if hasattr(directory, "__truediv__") \
+            else (str(directory) + "/crash.log")
+        stream = open(path, "a", encoding="utf-8")
+        faulthandler.enable(file=stream, all_threads=True)
+        _CRASH_STREAM = stream
+    except (OSError, ValueError, RuntimeError):
+        pass
