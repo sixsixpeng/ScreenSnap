@@ -11,7 +11,8 @@ from PySide6.QtCore import (Qt, Signal, QPoint, QPointF, QRect, QRectF, QEvent, 
                             QTimer, QSize)
 from PySide6.QtGui import QKeyEvent
 from PySide6.QtGui import QMouseEvent
-from PySide6.QtGui import (QColor, QCursor, QPainter, QPainterPath, QPen, QGuiApplication,
+from PySide6.QtGui import (
+    QKeyEvent,QColor, QCursor, QPainter, QPainterPath, QPen, QGuiApplication,
                            QMouseEvent, QPixmap, QShortcut, QKeySequence)
 from PySide6.QtWidgets import (QWidget, QApplication, QDialog, QFileDialog, QDialogButtonBox, QFormLayout, QSpinBox,
                                QFrame, QGraphicsView, QMenu, QToolButton, QLabel)
@@ -319,6 +320,12 @@ class InlineEditor(QWidget):
         self.multi_select_shortcut.setContext(Qt.WidgetWithChildrenShortcut)
         self.multi_select_shortcut.activated.connect(
             lambda: QTimer.singleShot(0, view.toggle_multi_select_mode))
+        # 画布会用 ShortcutOverride 抢走可打印字符，故在编辑器侧再建一份窗口级快捷键。
+        self.toolbar_hide_shortcut = QShortcut(
+            QKeySequence(self.settings.get(*TOOLBAR_HIDE_KEY)), self.canvas)
+        self.toolbar_hide_shortcut.setContext(Qt.WindowShortcut)
+        self.toolbar_hide_shortcut.activated.connect(
+            lambda: QTimer.singleShot(0, view.toggle_inline_toolbar))
         self.canvas.set_round_corner_preview(
             self.round_corners, self.corner_radius)
         self.canvas.setParent(view)
@@ -393,6 +400,17 @@ class InlineEditor(QWidget):
         if watched is menu or menu.isAncestorOf(watched):
             return super().eventFilter(watched, event)
         event_type = event.type()
+        if event_type == QEvent.KeyPress and isinstance(event, QKeyEvent):
+            hide_key, hide_default = TOOLBAR_HIDE_KEY
+            hide_sequence = QKeySequence(view.settings.get(hide_key, hide_default))
+            if hide_sequence.isEmpty():
+                hide_sequence = QKeySequence(hide_default)
+            if QKeySequence(event.keyCombination()) == hide_sequence:
+                logging.getLogger("screensnap").debug(
+                    "工具栏隐藏键（编辑器过滤器）触发：视图=%s",
+                    view.monitor_rect.getRect())
+                QTimer.singleShot(0, view.toggle_inline_toolbar)
+                return True
         # 工具栏整体拖动：抓手、工具栏空白处与中间挡片都能按住拖走。
         # 只有拖过之后才把双击当"复位"，免得抢掉"双击空白=确认截图"的既有行为。
         if (watched is self.toolbar_handle or watched is self.toolbar or
@@ -1008,6 +1026,7 @@ class MaskWindow(QWidget):
     pen_color_changed = Signal(str)
     tool_color_changed = Signal(str, str)
     cancel_requested = Signal()
+    toolbar_hide_requested = Signal()
 
     def __init__(self, image, bounds, monitors, settings, mode="capture", alternate=None,
                  session=None, monitor=None, primary=True, initial_rect=None,
@@ -1280,6 +1299,7 @@ class MaskWindow(QWidget):
             self.info_bar.sync()
             self.activateWindow()
             self.setFocus(Qt.ActiveWindowFocusReason)
+        self._install_toolbar_hide_hotkey()
         self._sync_escape_fallback()
 
     def _focus_capture(self):
@@ -1288,6 +1308,57 @@ class MaskWindow(QWidget):
             activate_window(self)
             self.setFocus(Qt.ActiveWindowFocusReason)
             self._sync_escape_fallback()
+
+    def _install_toolbar_hide_hotkey(self):
+        """用系统级热键处理工具栏隐藏键：不依赖"哪块遮罩拿到键盘输入"。
+
+        真机日志证明副屏那块遮罩即使被系统报为前台窗口，按键也进不了 Qt 事件循环
+        （应用级 eventFilter 一行都没有，且与自家 Esc 钩子无关），所以这个键必须走
+        与全局截图热键同一套机制。安装成功的那一个视图负责连接信号（避免多视图重复连接）。
+        """
+        if getattr(self.session, "toolbar_hide_hotkey", None) is not None:
+            return
+        from core.window_focus import offscreen
+
+        if offscreen():
+            logging.getLogger("screensnap").debug("离屏环境，跳过工具栏隐藏键全局热键")
+            return
+        hide_key, hide_default = TOOLBAR_HIDE_KEY
+        sequence = QKeySequence(self.settings.get(hide_key, hide_default))
+        if sequence.isEmpty():
+            sequence = QKeySequence(hide_default)
+        binding = sequence.toString()
+        if not binding or os.environ.get("SCREENSNAP_NO_TOOLBAR_HOTKEY") == "1":
+            return
+        try:
+            import keyboard
+
+            self.session.toolbar_hide_hotkey = keyboard.add_hotkey(
+                binding, self._global_toolbar_hide, suppress=True)
+            self.toolbar_hide_requested.connect(self.toggle_inline_toolbar)
+            logging.getLogger("screensnap").debug(
+                "工具栏隐藏键全局热键已注册：键=%r 句柄=%s", binding,
+                bool(self.session.toolbar_hide_hotkey))
+        except (ImportError, ValueError, OSError, RuntimeError) as error:
+            logging.getLogger("screensnap").debug("注册工具栏隐藏键全局热键失败: %s", error)
+
+    def _release_toolbar_hide_hotkey(self):
+        handle = getattr(self.session, "toolbar_hide_hotkey", None)
+        if handle is None:
+            return
+        self.session.toolbar_hide_hotkey = None
+        try:
+            import keyboard
+
+            keyboard.remove_hotkey(handle)
+            logging.getLogger("screensnap").debug("工具栏隐藏键全局热键已释放")
+        except (ImportError, ValueError, OSError, RuntimeError) as error:
+            logging.getLogger("screensnap").debug("释放工具栏隐藏键全局热键失败: %s", error)
+
+    def _global_toolbar_hide(self):
+        """钩子线程回调：只发信号，切换在 Qt 线程执行。"""
+        logging.getLogger("screensnap").debug("工具栏隐藏键全局热键触发（钩子线程）")
+        self.toolbar_hide_requested.emit()
 
     def _install_escape_fallback(self):
         """注册全局 Esc 热键；由全局钩子线程回调，只发信号不直接关窗口。"""
@@ -1398,6 +1469,8 @@ class MaskWindow(QWidget):
             self.session.selection.rects.clear()
             self.session.selection.active = None
         super().closeEvent(event)
+
+        self._release_toolbar_hide_hotkey()
 
     def update_all(self):
         # 这里曾经按 selection.nudge_index 关闭 S：那是"上次微调"留下的记忆值，
@@ -2038,6 +2111,11 @@ class MaskWindow(QWidget):
                 editor.reset_region(rect, image, alternate,
                                     self.capture_cursor_enabled)
                 self.session.completing = False
+                # 让编辑器所在那块遮罩成为活动窗口（另一块屏的输入依赖它）。
+                activate_window(self)
+                logging.getLogger("screensnap").debug(
+                    "原地编辑就绪：视图=%s 是否前台=%s", self.monitor_rect.getRect(),
+                    self.isActiveWindow())
                 self.update_all()
                 editor.canvas.setFocus(Qt.ActiveWindowFocusReason)
                 return
@@ -2544,6 +2622,23 @@ class MaskWindow(QWidget):
             self.complete(save_direct=not self.session.right_capture_mode)
 
     def keyPressEvent(self, event):
+        # 只处理真正的 Qt 按键事件：Mock 事件喂给 QKeySequence 会在转换阶段原生崩溃。
+        if (isinstance(event, QKeyEvent) and event.type() == QEvent.KeyPress
+                and not event.isAutoRepeat() and self.session.inline_editor is not None):
+            logging.getLogger("screensnap").debug(
+                "遮罩收到按键(快速编辑中)：视图=%s key=%s mods=%s",
+                self.monitor_rect.getRect(), event.key(), int(event.modifiers()))
+            hide_key, hide_default = TOOLBAR_HIDE_KEY
+            hide_sequence = QKeySequence(self.settings.get(hide_key, hide_default))
+            if hide_sequence.isEmpty():
+                hide_sequence = QKeySequence(hide_default)
+            if QKeySequence(event.keyCombination()) == hide_sequence:
+                logging.getLogger("screensnap").debug(
+                    "工具栏隐藏键（遮罩按键）触发：视图=%s", self.monitor_rect.getRect())
+                self.toggle_inline_toolbar()
+                event.accept()
+                return
+
         """处理取消、提交、固定尺寸创建与最后选区的像素微调。"""
         key = event.key()
         if key == Qt.Key_Escape and not self.inline_active():
