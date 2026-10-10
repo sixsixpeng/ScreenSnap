@@ -229,10 +229,15 @@ class AppTests(CoreTests):
         opaque = sum(1 for x in range(picture.width()) for y in range(picture.height())
                      if picture.pixelColor(x, y).alpha() > 0)
         self.assertGreater(opaque, 50)
-        # 图标文件中心留空；内置绘制图标中心有实心圆点，可借此确认用的是文件图标。
-        self.assertEqual(picture.pixelColor(picture.width() // 2, picture.height() // 2).alpha(), 0)
+        # 判据不能绑定某个具体图标的设计（2026-10-11：换新图标后中心不再是透明的，
+        # 旧断言 pixelColor(中心).alpha() == 0 直接失败）。这里改为验证**真正的不变量**：
+        # 托盘图标必须来自图标文件，而不是内置绘制的兜底图 —— 用"等于 app_icon 且不同于 drawn_icon"表达。
+        self.assertEqual(picture.constBits().tobytes(),
+                         app_icon().pixmap(64, 64).toImage().constBits().tobytes(),
+                         "托盘图标必须来自 ui/assets 的图标文件")
         drawn = drawn_icon().pixmap(64, 64).toImage()
-        self.assertGreater(drawn.pixelColor(drawn.width() // 2, drawn.height() // 2).alpha(), 0)
+        self.assertNotEqual(picture.constBits().tobytes(), drawn.constBits().tobytes(),
+                            "托盘图标不得退化成内置绘制的兜底图标")
 
         with tempfile.TemporaryDirectory() as bundle:
             bundled_icon_dir = Path(bundle) / "ui" / "assets"

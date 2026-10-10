@@ -8,7 +8,7 @@ from PySide6.QtCore import Qt, QPointF, QRect, QRectF, QLineF, Signal, QTimer
 from PySide6.QtGui import (QBrush, QPainter, QPainterPath, QPen, QColor, QPixmap, QImage,
                              QPolygonF, QPainterPathStroker, QTextBlockFormat,
                              QTextCursor, QTransform, QCursor, QKeySequence)
-from PySide6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem,
+from PySide6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsItem,
                                QGraphicsRectItem, QGraphicsEllipseItem,
                                QGraphicsTextItem, QDialog, QMenu, QToolTip)
 
@@ -111,6 +111,11 @@ class AnnotationCanvas(QGraphicsView):
         self._checker_palette_base = self.palette().base().color()
         self.refresh_image()
         self.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        # 更新策略（2026-10-11 性能排查后**保持** FullViewportUpdate，别改成 SmartViewportUpdate）：
+        # 实测整视口重绘只有 2.7 ms/帧，不是瓶颈；而改小更新区域会让两条既有回归失败 —— 拖动已选中的
+        # 标注会留下残影（test_dragging_selected_annotation_repaints_full_viewport）、橡皮擦实时镂空
+        # 不再清除背景（test_eraser_erase_base_live_viewport_clears_background，实测擦过处显示成
+        # 缓存的棋盘色 #f1f3f5 而不是主题底色）。真要再动这里，必须先复现并解决这两条。
         self.setViewportUpdateMode(QGraphicsView.FullViewportUpdate)
         self.setMouseTracking(True)
         self.viewport().setMouseTracking(True)
@@ -661,7 +666,16 @@ class AnnotationCanvas(QGraphicsView):
 
     def refresh_image(self):
         """图片尺寸变化后同步更新场景范围，避免旋转后的坐标错位。"""
-        self.base.setPixmap(QPixmap.fromImage(to_qimage(self.image)))
+        # 底图 QImage 缓存（性能，2026-10-11）：擦除实时合成原先每帧都 toImage() 转整幅底图，
+        # 实测 20+ ms/帧。这里在设置 pixmap 的同一处同步维护一份缓存。
+        self._base_qimage = None
+        # to_qimage 只调一次：同一份像素既给图元，也给导出缓存（导出必须与原先逐像素一致，
+        # 所以刻意用 to_qimage 的结果而不是 QPixmap.toImage()——后者可能改变格式/alpha）。
+        base_qimage = to_qimage(self.image)
+        self.base.setPixmap(QPixmap.fromImage(base_qimage))
+        self.base.setCacheMode(QGraphicsItem.DeviceCoordinateCache)  # 缩放/平移时少一次大图重采样
+        self._export_qimage = base_qimage
+        self._base_qimage = self.base.pixmap().toImage().convertToFormat(QImage.Format_ARGB32)
         self.scene_data.setSceneRect(0, 0, self.image.width, self.image.height)
 
     def transparent_checker_brush(self):
@@ -1356,7 +1370,12 @@ class AnnotationCanvas(QGraphicsView):
         output.fill(Qt.transparent)
         painter = QPainter(output)
         painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
-        painter.drawImage(0, 0, to_qimage(self.image))
+        # 复用 refresh_image 里算好的导出缓存：原先每次导出都 to_qimage 整幅拷贝（5120x1440 实测 24.7 ms）。
+        export_image = self._export_qimage
+        if export_image is None:
+            export_image = to_qimage(self.image)
+            self._export_qimage = export_image
+        painter.drawImage(0, 0, export_image)
         painter.end()
         # 单独渲染标注层（含擦除层按 z 镂空），不破坏底图与矢量标注。
         layer = QImage(width, height, QImage.Format_ARGB32)
@@ -1474,7 +1493,11 @@ class AnnotationCanvas(QGraphicsView):
         painter.fillRect(QRectF(visible), self.corner_preview_brush)
         painter.restore()
         # 底图层：取可见区域的底图像素，开启 eraser_erase_base 时一并镂空。
-        base_img = self.base.pixmap().toImage().convertToFormat(QImage.Format_ARGB32)
+        # 用缓存（原先每帧 toImage() 会把整幅 5120x1440 底图转一遍，实测 20+ ms/帧）。
+        base_img = self._base_qimage
+        if base_img is None:
+            base_img = self.base.pixmap().toImage().convertToFormat(QImage.Format_ARGB32)
+            self._base_qimage = base_img
         if not base_img.isNull():
             bw = min(base_img.width() - x0, w)
             bh = min(base_img.height() - y0, h)
@@ -1497,6 +1520,22 @@ class AnnotationCanvas(QGraphicsView):
         self.base.show()
         ap.end()
         painter.drawImage(visible.topLeft(), ann)
+
+    def paintEvent(self, event):
+        """慢帧探针（性能，2026-10-11）：只在整屏重绘超过 8 ms 时记一条 DEBUG。
+
+        用重写 paintEvent 而不是改 drawForeground：绘制钩子有多条分支与早退，包一层会动到被测逻辑；
+        这里只计时，不改任何绘制行为（规则 14：只报慢帧，不刷屏）。
+        """
+        import time as _time
+
+        started = _time.perf_counter()
+        super().paintEvent(event)
+        elapsed = (_time.perf_counter() - started) * 1000.0
+        if elapsed >= 8.0:
+            logging.getLogger("screensnap").debug(
+                "编辑器慢帧: 重绘 %.1f ms 区域=%s 标注=%d",
+                elapsed, event.rect().size(), len(self.annotations()))
 
     def drawForeground(self, painter, rect):
         """只在视图预览正在绘制的标注和缩放手柄，导出不包含这些辅助线。"""

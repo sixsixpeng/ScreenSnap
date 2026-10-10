@@ -19,6 +19,30 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class CanvasTests(CoreTests):
+    def test_export_cache_matches_source_pixels_and_refreshes_after_crop(self):
+        """回归（2026-10-11 性能优化，防误伤）：render_image() 复用底图导出缓存后必须
+
+        ① **逐像素等于**原始 to_qimage 转换（导出结果不得因缓存而改变）；
+        ② 底图变化（裁剪/重置/还原）后缓存必须重建，否则导出会拿到旧图。
+        """
+        from config.config_manager import DEFAULTS
+        from core.screen_capture import to_qimage
+
+        editor = EditorWindow(Image.new("RGB", (60, 40), "#123456"), dict(DEFAULTS))
+        canvas = editor.canvas
+        expected = to_qimage(canvas.image)
+        rendered = canvas.render_image()
+        self.assertEqual(rendered.size(), expected.size(), "导出尺寸必须与底图一致")
+        for point in ((0, 0), (30, 20), (59, 39)):
+            self.assertEqual(rendered.pixelColor(*point).rgb(),
+                             expected.pixelColor(*point).rgb(),
+                             "导出缓存不得改变像素 %s" % (point,))
+        canvas.image = canvas.image.crop((5, 5, 35, 25))
+        canvas.refresh_image()
+        self.assertEqual(canvas.render_image().size(), to_qimage(canvas.image).size(),
+                         "裁剪后导出缓存必须重建")
+        editor.close()
+
     def test_promoting_inline_editor_carries_annotation_objects(self):
         """回归（2026-10-11 用户反馈）：快速编辑里画了标注后按 E 进窗口编辑，标注必须以**对象**交接，
 
