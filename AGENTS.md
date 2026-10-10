@@ -254,6 +254,11 @@
   - 现象：为处理可打印字符，我在遮罩 `keyPressEvent` 里加了 `QKeySequence(event.keyCombination()) == 序列` 判定；随后 `QTest.keyClick`（以及真机投递）触发**原生访问违规**，崩溃点在 Qt 事件派发内部，连该分支的入口日志都没来得及写。
   - 排查：删掉该判定后，原先崩溃的用例立即转绿（`Ran 2 tests / OK`）；`faulthandler` 的栈指向 `QTest.keyClick` 那一行 —— 说明崩在事件被投递/处理的过程中，而不是我们后续的业务代码。
   - 避免：可打印字符的快捷键**不要**在 `keyPressEvent` 里做 `keyCombination()` 比较；改用 QShortcut（挂 canvas、context 用 `Qt.WindowShortcut`）或全局热键覆盖；确实要在事件里比较时，先 `isinstance(event, QKeyEvent)`，并只用 `event.key()` / `event.modifiers()` 这类稳定 API，**绝不**对事件对象做序列化转换。
+- **D17 “看似冗余”的守卫不能删——理顺后必须在代码位置留主注释**
+  - 现象：原地编辑的微调门槛里有 `resizing is None / dragging is None` 两项，我判断它们多余（理由是下面已有 `releaseMouse()` 兜底）并删除 → 用户按住左键拖动标注时按方向键，**画布上的标注全部消失**。
+  - 排查：关键就在同一段代码 —— 那两项挡住的是“按住左键拖动/缩放过程中按方向键”这条路径；下方的 `releaseMouse()` 不是等价兜底，而是**强行结束拖动**。回滚（`git checkout -- screenshot/mask_window.py`）后不再丢标注，据此确认是本次改动引入。
+  - 避免：① 删除任何守卫前，先写出它拦住的**具体操作序列**（按住什么、按了什么、处于什么状态），写不出来就不许删；② 结论理顺后必须写成**代码位置的主注释**（含“移除后会怎样”与实测日期），只记进 AGENTS 不够 —— 下一轮没人会先读 AGENTS 再动那一行；③ 涉及拖动/缩放/事件中断这类状态机的改动，改前改后都要在**真机**跑一遍操作序列（离屏用例覆盖不到）。
+
 ## Validation
 
 - Use the project environment's `python` executable. On the expected Windows setup, `py -3` may resolve to a different interpreter without project dependencies.
