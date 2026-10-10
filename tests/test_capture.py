@@ -1301,7 +1301,7 @@ class CaptureTests(CoreTests):
         right = {"left": 10, "top": 0, "width": 10, "height": 20}
         left_shot = Mock(size=(10, 20), rgb=Image.new("RGB", (10, 20), "red").tobytes())
         right_shot = Mock(size=(10, 20), rgb=Image.new("RGB", (10, 20), "blue").tobytes())
-        with patch("core.screen_capture.mss.mss") as factory, patch(
+        with patch("core.screen_capture._mss_factory") as factory, patch(
             "core.screen_capture.native_cursor", return_value=(
                 Image.new("RGBA", (2, 2), (0, 255, 0, 255)), -5, 5)):
             grabber = factory.return_value.__enter__.return_value

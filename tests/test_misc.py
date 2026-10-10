@@ -25,9 +25,9 @@ class MiscTests(CoreTests):
         from config.config_manager import DEFAULTS, validate
         from hotkey import hotkey_manager as hm
 
-        self.assertEqual(DEFAULTS["hotkey_health_interval"], 60)
-        self.assertEqual(validate({})["hotkey_health_interval"], 60)
-        for bad in (0, 2, 14, 601, 9999):
+        self.assertEqual(DEFAULTS["hotkey_health_interval"], 4)
+        self.assertEqual(validate({})["hotkey_health_interval"], 4)
+        for bad in (0, 1, 601, 9999):
             with self.assertRaises(ValueError, msg=f"{bad} 应被拒绝"):
                 validate({"hotkey_health_interval": bad})
 
@@ -60,21 +60,24 @@ class MiscTests(CoreTests):
                 self.assertEqual(manager.health_timer.interval(), hm.MAX_HEALTH_SECONDS * 1000)
                 manager.set_health_interval("坏值")
                 self.assertEqual(manager.health_timer.interval(), hm.DEFAULT_HEALTH_SECONDS * 1000)
-                # ③ 健康时的一跳必须做一次预防性重装（合并定时器的真正意义）
+                # ③ 健康且系统没有新输入 ⇒ 什么都不做（不重装、不刷日志）
                 manager._last_request = {"enabled": True,
                                          "bindings": {"capture": "ctrl+alt+a"},
                                          "suppress_capture": False}
                 self.assertTrue(manager.listener_alive())
-                manager.check_health()
-                deadline = _time.monotonic() + 3
-                while manager.preventive_reinstalls == 0 and _time.monotonic() < deadline:
-                    _time.sleep(0.02)
-                self.assertEqual(manager.preventive_reinstalls, 1,
-                                 "健康时的一跳应做预防性重装（静默摘钩无法探测，只能定期刷新）")
+                with _patch.object(hm, "last_input_seconds", lambda: 5.0):
+                    manager.check_health()
+                self.assertEqual(manager.reinstall_count, 0, "健康且系统空闲时不应重装")
+                self.assertEqual(manager.checks, 1)
+                # ④ 系统刚刚有输入、自家钩子却很久没收到 ⇒ 判定失效并重装
+                manager._observed_input = _time.monotonic() - 10.0
+                with _patch.object(hm, "last_input_seconds", lambda: 0.2):
+                    manager.check_health()
+                self.assertEqual(manager.reinstall_count, 1, "判定失效后必须重装")
                 deadline = _time.monotonic() + 3
                 while not manager.handles and _time.monotonic() < deadline:
                     _time.sleep(0.02)
-                self.assertTrue(manager.handles, "预防性重装后热键句柄必须重建")
+                self.assertTrue(manager.handles, "重装后热键句柄必须重建")
             finally:
                 manager.stop()
 

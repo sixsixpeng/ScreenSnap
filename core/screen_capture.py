@@ -8,6 +8,12 @@ import mss
 from PIL import Image
 from PySide6.QtGui import QImage
 
+# `mss.mss(...)` 已被上游标记废弃（会往 stderr 打 DeprecationWarning，用户实测可见），
+# 新版本提供 `mss.MSS` 类；用 getattr 兜住旧版本。模块级别名同时便于测试替换。
+# 注意：旧的 `with_cursor` 参数只在 Linux 有效（Windows 上一向被忽略），
+# 光标由本模块的 native_cursor() 另行合成，因此这里不再传该参数，行为不变。
+_mss_factory = getattr(mss, "MSS", mss.mss)
+
 
 def native_cursor():
     if os.name != "nt":
@@ -63,7 +69,7 @@ def native_cursor():
 
 def capture(cursor=False, alternatives=False, gap_fill="transparent"):
     """按显示器合成虚拟桌面；屏幕间隙可透明、纯黑或纯白。"""
-    with mss.mss(with_cursor=False) as grabber:
+    with _mss_factory() as grabber:
         # monitors[0] 是虚拟桌面边界；逐屏抓取以避免 MSS 把屏幕间隙烘焙为实色。
         bounds = dict(grabber.monitors[0])
         monitors = [dict(monitor) for monitor in grabber.monitors[1:]]

@@ -8,22 +8,43 @@ import time
 import keyboard
 from PySide6.QtCore import QObject, QTimer, Signal
 
-# 体检周期（设置项 hotkey_health_interval，15–600 秒）与重装限速。
-# 规则 14：只在重装与每 10 分钟汇总时记录，不刷屏。
+# 体检周期（设置项 hotkey_health_interval，2–600 秒）与重装限速。
+# 规则 14：健康时既不重装也不打日志，只在**判定失效**并重装时记录。
 #
-# 为什么是「定期预防性重装」而不是「合成键探针」（2026-10-11 实测）：
-#   keyboard.send()/press_and_release() 合成的事件**不会触发该库自己的热键回调**
-#   （5 种组合全部 NO-RESPONSE，日志里探针正常 0 次、无响应每周期一次）⇒ 探针会把
-#   「钩子正常」误报成「已被摘掉」，每轮都白重装一次。既然无法低成本探测，就改为
-#   「不看症状、定期刷新钩子」：恢复时间即本周期，且不注入任何按键（无外泄风险）。
-DEFAULT_HEALTH_SECONDS = 60
-MIN_HEALTH_SECONDS = 15
+# 失效判据（2026-10-11 真机三轮迭代后的最终方案）：
+#   · Windows 的 GetLastInputInfo 给出全系统最后一次键鼠输入的时刻；
+#   · 我们额外挂一个键盘钩子与鼠标钩子，只记录「最后一次收到事件的时刻」；
+#   · 系统说刚刚有输入、而自家钩子两秒多没收到任何事件 ⇒ 钩子已被系统静默摘掉 ⇒ 重装。
+# 为什么不用合成键探针：keyboard.send()/press_and_release() 合成的事件不会触发该库自己的
+#   热键回调（实测 5 种组合全部 NO-RESPONSE）⇒ 会把「钩子正常」误报成「已被摘掉」。
+# 为什么不做无条件定期重装：健康时每周期白白清空并重建热键（约 4ms 空窗），日志里每周期
+#   一条「已注册全局热键」—— 用户实测反馈「已经能截图了还在打印重载」，故废弃。
+DEFAULT_HEALTH_SECONDS = 4
+MIN_HEALTH_SECONDS = 2
 MAX_HEALTH_SECONDS = 600
 HEARTBEAT_SECONDS = 600.0
 RETRY_MIN_SECONDS = 30.0
-# 主动探针：Windows 静默摘掉 WH_KEYBOARD_LL 钩子时，keyboard 的监听线程仍然存活，
-# 只看标志位永远发现不了（真机验证 2026-10-11）。唯一可靠的判据是「发一次合成键，
-# 看自家钩子有没有回调」——探针组合极冷门，且 suppress=True 让它在钩子正常时不外泄。
+# 系统输入距现在这么久以内，才算「刚刚有输入」（空闲时不作判断，避免误判）
+RECENT_INPUT_SECONDS = 1.5
+# 系统输入比自家钩子新这么多秒，判定钩子没有在工作
+MISSED_INPUT_SECONDS = 2.5
+
+
+def last_input_seconds():
+    """距系统最后一次键鼠输入的秒数；非 Windows 或调用失败时返回 None（调用方按无法判定处理）。"""
+    try:
+        import ctypes
+
+        class LASTINPUTINFO(ctypes.Structure):
+            _fields_ = [("cbSize", ctypes.c_uint), ("dwTime", ctypes.c_uint)]
+
+        info = LASTINPUTINFO()
+        info.cbSize = ctypes.sizeof(LASTINPUTINFO)
+        if not ctypes.windll.user32.GetLastInputInfo(ctypes.byref(info)):
+            return None
+        return max(0.0, (ctypes.windll.kernel32.GetTickCount() - info.dwTime) / 1000.0)
+    except Exception:  # noqa: BLE001 取不到就不下结论
+        return None
 
 
 class HotkeyManager(QObject):
@@ -50,12 +71,19 @@ class HotkeyManager(QObject):
         self.health_timer.setInterval(DEFAULT_HEALTH_SECONDS * 1000)
         self.health_timer.timeout.connect(self.check_health)
         self.health_timer.start()
-        # 预防性重装计数与每 10 分钟一条的汇总时间戳。
-        self.preventive_reinstalls = 0
+        # 失效检测状态：_observed_input 由通用键盘钩子与鼠标钩子的回调刷新（见 _note_input）。
+        self._observed_input = time.monotonic()
+        self._input_hooks = []
+        # 鼠标钩子模块**在主线程解析一次**：warnings.catch_warnings() 不是线程安全的，
+        # 在工作线程里临时屏蔽废弃警告会被主线程的其它警告活动提前还原（真机实测漏出过
+        # DeprecationWarning），而模块导入只需发生一次，之后工作线程直接用缓存即可。
+        self._mouse, self._mouse_source = self._mouse_module()
+        self.hook_reinstalls = 0
+        self.checks = 0
         self._heartbeat_at = time.monotonic()
 
     def set_health_interval(self, seconds):
-        """按设置调整体检周期（夹紧到 3–300 秒；只在真的变化时生效）。"""
+        """按设置调整体检周期（夹紧到 2–600 秒；只在真的变化时生效）。"""
         try:
             value = int(seconds)
         except (TypeError, ValueError):
@@ -66,6 +94,73 @@ class HotkeyManager(QObject):
         self.health_timer.setInterval(value * 1000)
         logging.getLogger("screensnap").debug("热键体检间隔调整为 %d 秒", value)
 
+    def _note_input(self, _event=None):
+        """通用钩子回调：只记时间戳，不做任何其它工作（高频路径，规则 14）。"""
+        self._observed_input = time.monotonic()
+
+    @staticmethod
+    def _mouse_module():
+        """取鼠标钩子模块。
+
+        优先用独立包 `mouse`；没有就退回 `keyboard.mouse`（该子库已被上游标记废弃，
+        会在 stderr 打出 DeprecationWarning，这里就地屏蔽，避免污染控制台输出）。
+        """
+        try:
+            import mouse  # type: ignore
+
+            return mouse, "mouse"
+        except Exception:  # noqa: BLE001 未安装独立包
+            pass
+        try:
+            import warnings
+
+            with warnings.catch_warnings():
+                warnings.resetwarnings()
+                warnings.simplefilter("ignore")
+                import keyboard.mouse as legacy_mouse
+
+            return legacy_mouse, "keyboard.mouse(已废弃)"
+        except Exception:  # noqa: BLE001
+            return None, ""
+
+    def _ensure_input_hooks(self):
+        """挂上键盘与鼠标的通用钩子，用于「系统有输入但自家钩子没收到」的判定。"""
+        if self._input_hooks:
+            return
+        logger = logging.getLogger("screensnap")
+        try:
+            self._input_hooks.append(keyboard.hook(self._note_input))
+        except Exception as error:  # noqa: BLE001 观察钩子失败不影响热键本身
+            logger.debug("键盘观察钩子挂载失败: %s", error)
+        mouse, source = getattr(self, "_mouse", None), getattr(self, "_mouse_source", "")
+        if mouse is not None:
+            try:
+                self._input_hooks.append(mouse.hook(self._note_input))
+            except Exception as error:  # noqa: BLE001
+                logger.debug("鼠标观察钩子挂载失败: %s", error)
+        logger.debug("已挂上输入观察钩子: 键盘 1 个，鼠标 %s", source or "未挂上（将只用键盘事件判定）")
+
+    def _remove_input_hooks(self):
+        """卸载输入观察钩子（只在停止时调用，重装热键时保留）。"""
+        mouse = getattr(self, "_mouse", None)
+        for handle in self._input_hooks:
+            for module in (keyboard, mouse):
+                if module is None:
+                    continue
+                try:
+                    module.unhook(handle)
+                    break
+                except Exception:  # noqa: BLE001 换下一个模块试
+                    continue
+        self._input_hooks = []
+
+    def _hook_missed_input(self):
+        """系统近期有输入而自家钩子没收到 ⇒ 判定钩子已失效（唯一的失效判据）。"""
+        idle = last_input_seconds()
+        if idle is None or idle > RECENT_INPUT_SECONDS:
+            return False   # 空闲中或无法判定 ⇒ 不下结论
+        return (time.monotonic() - self._observed_input) > MISSED_INPUT_SECONDS
+
     def _maybe_log_heartbeat(self):
         """节流汇总（每 10 分钟一条）：让「体检确实在跑」有据可查（规则 14）。"""
         now = time.monotonic()
@@ -73,8 +168,8 @@ class HotkeyManager(QObject):
             return
         self._heartbeat_at = now
         logging.getLogger("screensnap").debug(
-            "热键体检累计: 预防性重装 %d 次，异常重装 %d 次，间隔 %d 秒",
-            self.preventive_reinstalls, self.reinstall_count,
+            "热键体检累计: 检查 %d 次，判定失效重装 %d 次，间隔 %d 秒",
+            self.checks, self.reinstall_count,
             max(MIN_HEALTH_SECONDS, self.health_timer.interval() // 1000))
 
     def register(self, settings):
@@ -139,6 +234,7 @@ class HotkeyManager(QObject):
         """
         if self._last_request is None:
             return
+        self.checks += 1
         logger = logging.getLogger("screensnap")
         alive = self.listener_alive()
         if force:
@@ -156,13 +252,16 @@ class HotkeyManager(QObject):
             logger.warning(
                 "热键钩子疑似被系统摘掉（监听线程不可用），正在重装: 第 %d 次",
                 self.reinstall_count + 1)
+        elif self._hook_missed_input():
+            # 系统近期有键鼠输入，而自家钩子两秒多没收到任何事件 ⇒ 判定钩子已被摘掉。
+            now = time.monotonic()
+            if now - self._last_retry < RETRY_MIN_SECONDS:
+                return
+            logger.warning(
+                "热键钩子已失效（系统有输入但钩子未收到），正在重装: 第 %d 次",
+                self.reinstall_count + 1)
         else:
-            # 监听线程正常 ⇒ 仍做一次预防性重装：Windows 静默摘钩无法探测（实测），
-            # 定期刷新是唯一能兜住它的办法，恢复时间就等于本周期。
-            self.requests.put(dict(self._last_request))
-            self.preventive_reinstalls += 1
-            logger.debug("定期预防性重装全局热键: 第 %d 次（周期 %d 秒）",
-                         self.preventive_reinstalls, self.health_timer.interval() // 1000)
+            # 一切正常 ⇒ 什么都不做（不重装、不打日志），只做 10 分钟一次的汇总。
             self._maybe_log_heartbeat()
             return
         self._last_retry = time.monotonic()
@@ -184,6 +283,7 @@ class HotkeyManager(QObject):
 
     def install(self, request):
         """先移除旧热键，部分注册失败时也清理已注册的部分。"""
+        self._ensure_input_hooks()
         self.clear()
         if not request["enabled"]:
             return
@@ -218,6 +318,7 @@ class HotkeyManager(QObject):
 
     def stop(self):
         """通知监听线程注销热键，并等待有限时间避免退出卡住。"""
+        self._remove_input_hooks()
         for timer in (getattr(self, "health_timer", None),):
             try:
                 if timer is not None:
