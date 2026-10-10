@@ -16,10 +16,10 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class MiscTests(CoreTests):
-    def test_hotkey_health_timer_interval_configurable_and_preventive_reinstall(self):
-        """用户选择「甲」（2026-10-11）：10 秒探活 + 60 秒探针两个定时器合并成一个**可配周期**
-        （默认 15 秒，设置页 3–300 秒）；每跳先探活，监听线程正常时**再排一次主动探针** ——
-        真机证明只有探针能发现「Windows 静默摘钩但监听线程还活着」这种形态。"""
+    def test_hotkey_health_interval_and_missed_input_detection(self):
+        """热键体检（2026-10-11 三轮迭代的最终契约）：周期可配（默认 4 秒，设置页 2–600）；
+        每跳——① 监听线程死 ⇒ 重装；② 系统有输入而自家钩子没收到 ⇒ 判定失效并重装；
+        ③ 正常 ⇒ 什么都不做（不重装、不打日志）。合成键探针与无条件定期重装都已废弃。"""
         import time as _time
         from unittest.mock import patch as _patch
         from config.config_manager import DEFAULTS, validate
@@ -39,9 +39,6 @@ class MiscTests(CoreTests):
                 return "h:" + binding
 
             def remove_hotkey(self, handle):
-                pass
-
-            def send(self, binding):
                 pass
 
         with _patch.object(hm, "keyboard", FakeKeyboard()):
@@ -851,8 +848,11 @@ class MiscTests(CoreTests):
                          pos=editor.canvas.mapFromScene(QPointF(12, 30)))
         self.assertTrue(editor.isVisible())
         self.assertTrue(item.isSelected())
-        self.assertTrue(editor.toolbar.tool_buttons["select"].isChecked())
-        self.assertEqual(editor.canvas.tool, "select")
+        # 契约变更（63e98c1，2026-10-10，用户明确要求）：编辑态由标注对象自己持有，
+        # 双击进入编辑**不再自动切换到「选择」工具** —— 只有主动点击工具按钮才切换。
+        self.assertFalse(editor.toolbar.tool_buttons["select"].isChecked(),
+                         "双击标注不应自动切换工具（用户明确要求，见 63e98c1）")
+        self.assertEqual(editor.canvas.tool, "arrow", "工具应保持为双击前的绘图工具")
         center = item.sceneBoundingRect().center()
         # 图形中心是旋转按钮：那里显示旋转光标。
         QTest.mouseMove(editor.canvas.viewport(),
@@ -887,16 +887,20 @@ class MiscTests(CoreTests):
         self.app.processEvents()
         self.assertIn(dialog, mask.intruding_windows())
         self.assertEqual(window_category(dialog), "other")
-        self.assertIsNone(mask.self_check_warning())
+        # 把「选区内的本程序窗口」固定为本用例自己的 dialog：
+        # 否则前面用例泄漏的窗口会混进来，断言就依赖用例执行顺序（2026-10-11 审计发现：
+        # 单独跑 OK、整模块跑红）。这是测试隔离修复，不是放宽断言。
+        with patch.object(mask, "intruding_windows", return_value=[dialog]):
+            self.assertIsNone(mask.self_check_warning())
 
-        # 打开总开关但关掉「本程序窗口」子项：该分类的窗口不再提示。
-        mask.settings["intruder_warning_enabled"] = True
-        mask.settings["intruder_warning_items"] = dict(
-            DEFAULTS["intruder_warning_items"], other=False)
-        self.assertIsNone(mask.self_check_warning())
-        # 重新勾选该子项后恢复提示。
-        mask.settings["intruder_warning_items"]["other"] = True
-        self.assertIn("本程序窗口", mask.self_check_warning())
+            # 打开总开关但关掉「本程序窗口」子项：该分类的窗口不再提示。
+            mask.settings["intruder_warning_enabled"] = True
+            mask.settings["intruder_warning_items"] = dict(
+                DEFAULTS["intruder_warning_items"], other=False)
+            self.assertIsNone(mask.self_check_warning())
+            # 重新勾选该子项后恢复提示。
+            mask.settings["intruder_warning_items"]["other"] = True
+            self.assertIn("本程序窗口", mask.self_check_warning())
         dialog.close()
         mask.close()
 

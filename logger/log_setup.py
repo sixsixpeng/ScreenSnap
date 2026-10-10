@@ -91,19 +91,60 @@ def configure_logging(settings):
 # 原生崩溃（访问违规/堆损坏）不会走 sys.excepthook，日志里什么都留不下。faulthandler 会在
 # 致命信号时把所有线程的 Python 栈写进 crash.log —— 这是「日志无输出却崩溃」的唯一现场证据。
 _CRASH_STREAM = None
+_CRASH_PATH = None
+
+
+def close_crash_dumps():
+    """关闭崩溃转储流（主要供测试收尾调用，避免临时目录句柄删不掉）。
+
+    产品运行期不需要调用：crash.log 按设计在整个进程内保持打开，才能留住崩溃现场。
+    """
+    global _CRASH_STREAM, _CRASH_PATH
+    if _CRASH_STREAM is None:
+        return
+    try:
+        faulthandler.disable()
+    except Exception:  # noqa: BLE001
+        pass
+    try:
+        _CRASH_STREAM.close()
+    except Exception:  # noqa: BLE001
+        pass
+    _CRASH_STREAM = None
+    _CRASH_PATH = None
 
 
 def enable_crash_dumps(directory):
-    """把致命错误（访问违规等）的 Python 栈写入日志目录下的 crash.log。"""
-    global _CRASH_STREAM
-    if _CRASH_STREAM is not None:
+    """把致命错误（访问违规等）的 Python 栈写入日志目录下的 crash.log。
+
+    日志目录可能在运行中被改（设置页的 `log_dir`，或测试里的临时目录），所以这里比较
+    目标路径：目录没变就复用已打开的流；变了就先关旧流、再重开到新目录。
+    2026-10-11 审计发现：原先只要启用过一次就直接 return，导致改了日志目录后 crash.log
+    仍写在旧目录（真机可见），也是两条用例永远删不掉临时目录（WinError 32）的根因。
+    """
+    global _CRASH_STREAM, _CRASH_PATH
+    path = (directory / "crash.log") if hasattr(directory, "__truediv__") \
+        else (str(directory) + "/crash.log")
+    path = str(path)
+    if _CRASH_STREAM is not None and _CRASH_PATH == path:
         return
+    if _CRASH_STREAM is not None:
+        # 先摘掉 faulthandler 再关流，避免它继续往已关闭的文件里写。
+        try:
+            faulthandler.disable()
+        except Exception:  # noqa: BLE001
+            pass
+        try:
+            _CRASH_STREAM.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _CRASH_STREAM = None
+        _CRASH_PATH = None
     try:
-        path = (directory / "crash.log") if hasattr(directory, "__truediv__") \
-            else (str(directory) + "/crash.log")
         stream = open(path, "a", encoding="utf-8")
         faulthandler.enable(file=stream, all_threads=True)
         _CRASH_STREAM = stream
+        _CRASH_PATH = path
         # 确认日志：这一行必须出现在 app.log 里，否则说明崩溃转储没启用（crash.log 也不会生成）。
         logging.getLogger("screensnap").info("崩溃转储已启用: %s", path)
     except (OSError, ValueError, RuntimeError):

@@ -805,7 +805,13 @@ class StickerManager(QObject):
         logging.getLogger("screensnap").info(
             "关闭全部贴图: %d 张（调用来源见同刻调用栈）", len(self.items))
         for item in self.items[:]:
-            item.close()
+            try:
+                item.close()
+            except RuntimeError as error:
+                # 退出路径上 remove() 会早退，此时窗口的 C++ 对象可能已被 Qt 析构，
+                # 对它调用 close() 会抛 RuntimeError（2026-10-11 审计 A-4 探针复现）。
+                # 关闭全部是用户可见动作，绝不能因为一张已消失的贴图整体失败。
+                logging.getLogger("screensnap").warning("关闭贴图时对象已销毁（已跳过）: %s", error)
         self.items.clear()
         self.selected_items.clear()
         self.history_sticker = None
@@ -822,7 +828,22 @@ class StickerManager(QObject):
         try:
             path = data_dir() / "stickers.json"
             path.parent.mkdir(parents=True, exist_ok=True)
-            states = [item.state() for item in self.items]
+            states = []
+            failed = 0
+            for item in self.items:
+                try:
+                    states.append(item.state())
+                except Exception as error:  # noqa: BLE001 退出路径上窗口可能已被 Qt 析构
+                    # 退出时 remove() 会早退，窗口对象可能已被 Qt 删除（WA_DeleteOnClose），
+                    # item.state() 会抛 RuntimeError。逐张兜住，绝不让单张失败导致整次会话
+                    # 写不出去或写成空数组（2026-10-11 爆炸半径审计 C-4）。
+                    failed += 1
+                    logging.getLogger("screensnap").warning(
+                        "读取贴图状态失败（已跳过）: %s", error)
+            if failed and not states:
+                logging.getLogger("screensnap").warning(
+                    "%d 张贴图状态都读取失败，保留上一次会话文件不覆盖", failed)
+                return False
             # 留痕（2026-10-11）：退出时若这里 items=0，就说明贴图在退出前已被移除，
             # 问题在移除路径而不在持久化本身。
             logging.getLogger("screensnap").debug(
@@ -937,6 +958,9 @@ class StickerManager(QObject):
                 item.rotate(rotation)
             item.border_enabled = state.get("border", item.settings.get("sticker_border_enabled", True))
             item.shadow_enabled = state.get("shadow", item.settings.get("sticker_shadow_enabled", False))
+            # 吸附提示开关是每张贴图自己的（右键菜单可切），随会话恢复；
+            # 老会话没有该键时沿用创建时从全局默认继承的值（2026-10-11 审计 C-B）。
+            item.snap_hint_enabled = bool(state.get("snap_hint_enabled", item.snap_hint_enabled))
             item.group_name = str(state.get("group", ""))
             item.set_background_mode(state.get("background_mode",
                                               item.settings.get("sticker_background_mode", "transparent")))

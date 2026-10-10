@@ -880,6 +880,7 @@ class StickerItem(QWidget):
                 "locked": self.locked, "top": self.always_on_top,
                 "click_through": self.click_through, "border": self.border_enabled,
                 "shadow": self.shadow_enabled, "background_mode": self.background_mode,
+                "snap_hint_enabled": bool(self.snap_hint_enabled),
                 "group": self.group_name, "origin": self.origin, "snap": snap}
 
     def thumbnail(self, width=96, height=72):

@@ -503,7 +503,7 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         try:
             self.stickers.persist()
             self.stickers.persist_clipboard_history()
-        except OSError as error:
+        except Exception as error:  # noqa: BLE001 退出路径绝不因保存失败而中断
             self.logger.error("保存贴图会话失败: %s", error, exc_info=True)
         # 会话先落盘再清理缓存，避免把本会话还引用着的贴图源文件当成孤儿删掉。
         self.cleanup_cache_if_scheduled("exit")

@@ -3152,20 +3152,12 @@ class CaptureTests(CoreTests):
 
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
     def test_quick_save_is_nudge_within_window(self):
@@ -3205,3 +3197,7 @@ if __name__ == "__main__":
             complete.assert_called_once()
         finally:
             mask.close()
+
+
+if __name__ == "__main__":  # 支持 python tests/test_capture.py
+    unittest.main()

@@ -64,9 +64,9 @@ class HotkeyManager(QObject):
         self._last_request = None
         self._last_retry = 0.0
         self.reinstall_count = 0
-        # 单一周期定时器（用户选择「甲」，2026-10-11）：每跳①探活（线程死了立刻重装），
-        # ②线程正常时做一次**预防性重装** —— 真机已证明「Windows 静默摘钩时监听线程仍存活」，
-        # 且合成键探针不可用（见文件头注释），所以用定期刷新兜住这一类无法探测的失效。
+        # 单一周期定时器（2026-10-11 三轮迭代后的最终形态）：每跳做一次体检 ——
+        # ① 监听线程死了 ⇒ 重装；② 系统有输入而自家钩子没收到 ⇒ 重装；③ 正常 ⇒ 什么都不做。
+        # 注意：曾经的「无条件预防性重装」与「合成键探针」都已废弃（原因见文件头注释）。
         self.health_timer = QTimer(self)
         self.health_timer.setInterval(DEFAULT_HEALTH_SECONDS * 1000)
         self.health_timer.timeout.connect(self.check_health)
@@ -81,6 +81,8 @@ class HotkeyManager(QObject):
         self.hook_reinstalls = 0
         self.checks = 0
         self._heartbeat_at = time.monotonic()
+        # 正在停止：避免 stop() 卸掉输入观察钩子后，工作线程又在 install() 里重新挂上（泄漏）。
+        self._stopping = False
 
     def set_health_interval(self, seconds):
         """按设置调整体检周期（夹紧到 2–600 秒；只在真的变化时生效）。"""
@@ -125,7 +127,7 @@ class HotkeyManager(QObject):
 
     def _ensure_input_hooks(self):
         """挂上键盘与鼠标的通用钩子，用于「系统有输入但自家钩子没收到」的判定。"""
-        if self._input_hooks:
+        if self._input_hooks or getattr(self, "_stopping", False):
             return
         logger = logging.getLogger("screensnap")
         try:
@@ -225,8 +227,10 @@ class HotkeyManager(QObject):
     def check_health(self, force=False):
         """体检：钩子被系统静默摘掉或库监听线程死亡时就地重装。
 
-        `force=True` 表示由用户操作触发的按需体检（例如托盘双击截图），
-        只跳过「限速」这一层，仍然只在监听线程确实不可用时才重装。
+        `force=True` 表示由用户操作触发的按需体检（例如托盘双击截图）：它**无条件重装一次**，
+        不看监听线程状态 —— 静默摘钩时监听线程仍然存活，任何「先判断再重装」的逻辑都发现不了它，
+        而重装本身才是恢复动作（约 4ms，真机验证有效）。
+        非 force 时才有判据：监听线程不可用、或「系统有输入而钩子没收到」，其余什么都不做。
 
         适用场景（真机反馈，2026-10-11）：安全软件在钩子链里拖慢回调时，Windows 会按
         LowLevelHooksTimeout 静默移除 WH_KEYBOARD_LL 钩子，且不报错 —— 表现为「被拦一次后
@@ -318,6 +322,7 @@ class HotkeyManager(QObject):
 
     def stop(self):
         """通知监听线程注销热键，并等待有限时间避免退出卡住。"""
+        self._stopping = True   # 先置位再卸载，防止工作线程把观察钩子又挂回去
         self._remove_input_hooks()
         for timer in (getattr(self, "health_timer", None),):
             try:

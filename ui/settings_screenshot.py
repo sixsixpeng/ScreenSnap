@@ -4,7 +4,7 @@ import logging
 
 from PySide6.QtCore import QSignalBlocker, QRectF, Qt, Signal
 from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen
-from PySide6.QtWidgets import (QKeySequenceEdit, QCheckBox, QComboBox, QHBoxLayout,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout,
                                QSizePolicy, QSlider, QVBoxLayout, QWidget, QLabel)
 
 from config.config_manager import (HINT_BAR_PRESETS, HINT_BAR_STYLE_FIELDS,
@@ -13,6 +13,7 @@ from config.config_manager import (HINT_BAR_PRESETS, HINT_BAR_STYLE_FIELDS,
 from ui.widgets.color_button import ColorButton
 from ui.widgets.hint_order_list import HintOrderList
 from ui.widgets.hint_preview import HintBarPreview, HintBarStylePreview
+from ui.widgets.hotkey_edit import HotkeyEdit
 from ui.widgets.tooltip import SettingsPage
 
 
@@ -369,8 +370,11 @@ HOVER_STYLE_PRESETS = (
 class ScreenshotPage(SettingsPage):
     """集中管理从触发截图到确认选区的设置。"""
 
-    def __init__(self, config, changed):
+    def __init__(self, config, changed, recording=None):
         super().__init__(config, changed)
+        # 由 settings_window 传入 self.recording.emit：录制快捷键时暂停全局热键
+        # （与「设置 > 快捷键」页完全一致的接线；没有它就会一边录一边真的触发截图）。
+        self.recording = recording
         self.group("截图时机")
         delay = self.number("capture_delay", "截图延迟 (ms)", 0, 5000,
                             "按下截图快捷键后等待多少毫秒再抓取画面，0 表示立即截图；\n"
@@ -414,7 +418,7 @@ class ScreenshotPage(SettingsPage):
                        "选区确认前按此键在光标处取色一次；取色态下左键取样会把色值复制到剪贴板")
         self._shortcut("capture_custom_size_shortcut", "自定义尺寸按键", "F",
                        "选区存在时按此键打开“自定义尺寸”对话框，按指定宽高重建选区")
-        self._shortcut("capture_recapture_shortcut", "重新截图按键", "R",
+        self._shortcut("capture_recapture_shortcut", "清除选择按键", "R",
                        "放弃当前冻结画面，回到同一显示器重新框选（不保留当前标注）")
         self._shortcut("capture_window_edit_shortcut", "窗口编辑按键", "E",
                        "把当前选区送进独立编辑器窗口，使用完整工具栏编辑")
@@ -744,17 +748,22 @@ class ScreenshotPage(SettingsPage):
         button.set_color(color)
 
     def _shortcut(self, key, label, default, help_text):
-        sequence = QKeySequenceEdit(QKeySequence(self.config.data.get(key, default)))
-        sequence.setMaximumSequenceLength(1)
-        sequence.setToolTip(help_text)
+        # 与「设置 > 快捷键」页共用 HotkeyEdit（规则 12）：裸 QKeySequenceEdit 有两个坑 ——
+        # ① 录制时不暂停全局热键，按 Space/S/F1 会同时真的触发截图，根本录不进去；
+        # ② 不做键名规范化（meta→windows、return→enter、del→delete、统一小写），
+        #    录出来的值落盘后 keyboard 库认不出来，表现为「界面上有、实际按不出来」。
+        sequence = HotkeyEdit(self.config.data.get(key, default),
+                              lambda text, setting=key, fallback=default:
+                              self._shortcut_changed(setting, fallback, text))
+        sequence.setToolTip(help_text + "；录制期间暂停全局热键")
         sequence.setProperty("help_text", help_text)
+        if self.recording is not None:
+            sequence.recording.connect(self.recording)
         self.controls[key] = sequence
         self.form.addRow(label, sequence)
-        sequence.keySequenceChanged.connect(
-            lambda value, setting=key, fallback=default: self._shortcut_changed(setting, fallback, value))
 
-    def _shortcut_changed(self, key, default, sequence):
-        """键位变化：空值或非法组合一律**回滚**到上一个有效值。
+    def _shortcut_changed(self, key, default, text):
+        """键位变化（text 已由 HotkeyEdit 规范化为 keyboard 库格式）：空值或非法组合一律**回滚**到上一个有效值。
 
         清空控件得到的空序列没有意义（按什么键都触发不了），非法组合也不能落盘；
         两种情况下都把控件与配置恢复成上一个有效键（没有则用默认键），避免这个功能
@@ -762,7 +771,7 @@ class ScreenshotPage(SettingsPage):
         """
         from config.config_manager import validate
 
-        text = "" if sequence.isEmpty() else sequence.toString(QKeySequence.PortableText)
+        text = text or ""
         if text:
             try:
                 validate({key: text})

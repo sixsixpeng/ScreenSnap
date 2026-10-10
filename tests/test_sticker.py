@@ -17,6 +17,37 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class StickerTests(CoreTests):
+    def test_persist_survives_deleted_window_on_quit(self):
+        """回归（2026-10-11 审计 A-4，已用离屏探针证实）：退出路径下 remove() 早退，而 Qt 已经在关窗时
+        析构了 C++ 对象 ⇒ item.state() 会抛 RuntimeError（libshiboken: Internal C++ object already deleted）。
+        旧代码只捕获 (OSError, TypeError, ValueError)，会漏出去并在退出时把会话写成空。"""
+        import tempfile
+        from pathlib import Path
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QImage
+        from unittest.mock import patch
+        from config.config_manager import DEFAULTS
+        from sticker.sticker_manager import StickerManager
+
+        with tempfile.TemporaryDirectory() as folder:
+            session = Path(folder) / "stickers.json"
+            session.write_text('[{"id": "keep-me"}]', encoding='utf-8')
+            manager = StickerManager(dict(DEFAULTS))
+            image = QImage(20, 15, QImage.Format_ARGB32)
+            image.fill(Qt.white)
+            item = manager.add(image, source=None, show=True)
+            manager.quitting = True          # 退出路径：remove() 会早退
+            item.close()                     # Qt 关窗并析构 C++ 对象
+            self.app.processEvents()
+            with patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                ok = manager.persist()
+            self.assertFalse(ok, "全部状态读取失败时必须报告失败")
+            self.assertEqual(session.read_text(encoding='utf-8'), '[{"id": "keep-me"}]',
+                             "读取失败时绝不能覆盖上一次的会话文件")
+            # 清理：先解绑再关，避免对已析构对象调用 close()（close_all 本轮已加固，这里也不依赖它）。
+            manager.quitting = False
+            manager.items.clear()
+
     def test_remove_keeps_item_in_session_while_quitting(self):
         """回归（用户 2026-10-11）：退出时 Qt 会关闭所有顶层窗口，贴图窗口的 closeEvent
         会走 manager.remove()；如果不加“正在退出”守卫，会话会在 shutdown() 保存之前被清空，
@@ -134,6 +165,13 @@ class StickerTests(CoreTests):
         self.assertIsNone(sticker.snap_hint)
         sticker.clear_snap_hint()
         self.assertIsNone(sticker.snap_hint)
+        # ⑥ 每张贴图的开关必须随会话持久化（2026-10-11 审计 C-B：此前只写 border/shadow，
+        #    重启后右键关掉的吸附提示又会冒出来）
+        sticker.toggle_snap_hint()
+        self.assertFalse(sticker.snap_hint_enabled)
+        self.assertFalse(sticker.state()["snap_hint_enabled"], "state() 必须带上每贴图开关")
+        sticker.toggle_snap_hint()
+        self.assertTrue(sticker.state()["snap_hint_enabled"])
 
     def test_group_properties_persist_and_unassign_keeps_stickers(self):
         from PySide6.QtGui import QColor, QImage

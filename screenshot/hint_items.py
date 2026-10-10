@@ -26,7 +26,6 @@ TOOLBAR_HIDE_KEY = ("capture_toolbar_hide_shortcut", "`")
 
 def hint_texts(settings, position, selection, inline=False,
                toolbar_hidden=False, multi_select=False,
-               picker=None, picker_color=None,
                right_capture=False, inline_tool="select"):
     """提示项 id → 文案；当前阶段不适用的项给出空串（绘制端会跳过）。
 
@@ -94,10 +93,8 @@ def hint_texts(settings, position, selection, inline=False,
 
 def hint_items(settings, position, selection, inline=False,
                toolbar_hidden=False, multi_select=False,
-               picker=None, picker_color=None,
                right_capture=False, inline_tool="select"):
     """按配置顺序给出提示条内容；总开关关闭或列表为空时返回空列表（整条不画）。"""
-    # 兼容旧调用：历史上传过 picker / picker_color；取色模式已删除，二者被吸收后忽略。
     if not settings.get("capture_hints_enabled", True):
         return []
     order = settings.get("capture_hint_order")

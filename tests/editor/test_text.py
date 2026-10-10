@@ -34,6 +34,15 @@ class TextTests(CoreTests):
         canvas._add_annotation(second)
 
         class StubDialog:
+            def setWindowFlag(self, *args, **kwargs):   # C3：input_text() 现在会给对话框置顶，桩必须跟随
+                return None
+
+            def raise_(self):
+                return None
+
+            def activateWindow(self):
+                return None
+
             def __init__(self, *args, **kwargs):
                 pass
 
@@ -121,6 +130,15 @@ class TextTests(CoreTests):
         self.assertNotEqual(before, 260)
 
         class StubDialog:
+            def setWindowFlag(self, *args, **kwargs):   # C3：input_text() 现在会给对话框置顶，桩必须跟随
+                return None
+
+            def raise_(self):
+                return None
+
+            def activateWindow(self):
+                return None
+
             def __init__(self, *args, **kwargs):
                 pass
 
@@ -602,8 +620,6 @@ class TextTests(CoreTests):
             self.app.processEvents()
 
 
-if __name__ == "__main__":  # 支持 python tests/test_editor.py
-    unittest.main()
 
 
 if __name__ == "__main__":

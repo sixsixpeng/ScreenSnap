@@ -400,17 +400,12 @@ class InlineEditor(QWidget):
         if watched is menu or menu.isAncestorOf(watched):
             return super().eventFilter(watched, event)
         event_type = event.type()
-        if event_type == QEvent.KeyPress and isinstance(event, QKeyEvent):
-            hide_key, hide_default = TOOLBAR_HIDE_KEY
-            hide_sequence = QKeySequence(view.settings.get(hide_key, hide_default))
-            if hide_sequence.isEmpty():
-                hide_sequence = QKeySequence(hide_default)
-            if QKeySequence(event.keyCombination()) == hide_sequence:
-                logging.getLogger("screensnap").debug(
-                    "工具栏隐藏键（编辑器过滤器）触发：视图=%s",
-                    view.monitor_rect.getRect())
-                QTimer.singleShot(0, view.toggle_inline_toolbar)
-                return True
+        # 删除记录（2026-10-11，D16）：这里曾有一段
+        #   `if QKeySequence(event.keyCombination()) == hide_sequence:` → toggle_inline_toolbar
+        # 的分支。`QKeyEvent.keyCombination()` 在合成/真实按键上都会触发**原生访问违规**
+        # （7ffaec4 已从 keyPressEvent 删掉同款，本处是遗留的第二处），而工具栏隐藏键现在由
+        # 「全局热键（mask_window._install_toolbar_hide_hotkey）+ 编辑器侧 WindowShortcut」
+        # 两重覆盖，所以整段删除。若日后要恢复，请勿再用 keyCombination()。
         # 工具栏整体拖动：抓手、工具栏空白处与中间挡片都能按住拖走。
         # 只有拖过之后才把双击当"复位"，免得抢掉"双击空白=确认截图"的既有行为。
         if (watched is self.toolbar_handle or watched is self.toolbar or
@@ -1069,8 +1064,6 @@ class MaskWindow(QWidget):
         self.quick_sticker_pending = False
         self.capture_cursor_enabled = settings["cursor"]
         self.selection = self.session.selection
-        self.picker_mode = False
-        self.picker_color = None
         self.position = QPoint(self.session.position)
         self.resize_cursor = "nwse"
         # UIA 的读取预算/子控件上限/熔断阈值按当前设置生效（进程内全局，开遮罩时刷新一次）。
@@ -1227,7 +1220,6 @@ class MaskWindow(QWidget):
             self.settings, (self.position.x(), self.position.y()),
             (selection.width(), selection.height()) if selection else None,
             inline=self.inline_active(),
-            picker_color=self.picker_color,
             toolbar_hidden=bool(editor is not None and editor.toolbar_hidden),
             multi_select=self.session.multi_select_mode,
             right_capture=self.session.right_capture_mode,
@@ -1507,8 +1499,7 @@ class MaskWindow(QWidget):
         """
         if self.inline_active():
             self._dismiss_inline_editor()
-            self.picker_mode = False
-        had = len(self.selection.rects)
+        had = len(self.selection.rects)   # 必须在 if 之外：日志在两种路径下都要用到
         self.selection.rects.clear()
         self.selection.active = None
         self.selection.dragging = None
@@ -2454,7 +2445,6 @@ class MaskWindow(QWidget):
             r, g, b = self.image.convert("RGB").getpixel((x, y))
             color = "#%02x%02x%02x" % (r, g, b)
             QGuiApplication.clipboard().setText(color)
-            self.picker_color = color
             self.picker_copied.emit(color)
         self.update_all()
 
@@ -2493,21 +2483,9 @@ class MaskWindow(QWidget):
                         self.session.inline_editor.begin_region_resize()
             self.update_all()
             return
-        if self.picker_mode:
-            if event.button() == Qt.LeftButton:
-                # 取色用 Alt/Ctrl + 左键取样，避免与框选 / UIA 选择冲突。
-                if QGuiApplication.keyboardModifiers() & (Qt.AltModifier | Qt.ControlModifier):
-                    point = self.to_physical_point(event.position().toPoint())
-                    x = point.x() + self.bounds["left"]
-                    y = point.y() + self.bounds["top"]
-                    if 0 <= x < self.image.width and 0 <= y < self.image.height:
-                        r, g, b = self.image.convert("RGB").getpixel((x, y))
-                        color = "#%02x%02x%02x" % (r, g, b)
-                        QGuiApplication.clipboard().setText(color)
-                        self.picker_color = color
-                        self.picker_copied.emit(color)
-                    self.update_all()
-            return
+        # 删除记录（2026-10-11，规则 32）：这里曾有 `if self.picker_mode:` 的整段取样分支。
+        # 取色已改为一次性动作（按 C 在光标处取样，见上方 2476 行的 Alt/Ctrl+左键分支与
+        # sample_color_at），全仓库再无 `picker_mode = True` 的写入点，该分支永远进不去，故删除。
         if event.button() in (Qt.LeftButton, Qt.RightButton):
             self.position = self.to_physical_point(event.position().toPoint())
             if event.button() == Qt.RightButton:
@@ -2880,36 +2858,6 @@ class MaskWindow(QWidget):
             getattr(owner, "monitor_rect", None) and owner.monitor_rect.getRect())
         handler()
         return True
-
-    def _picker_state(self, name, default=None):
-        """取色模式与色值按 session 共享：快捷键可能落在另一块屏的视图上。"""
-        session = getattr(self, "session", None)
-        if session is None:
-            return getattr(self, "_" + name, default)
-        return getattr(session, name, default)
-
-    def _set_picker_state(self, name, value):
-        session = getattr(self, "session", None)
-        if session is None:
-            setattr(self, "_" + name, value)
-        else:
-            setattr(session, name, value)
-
-    @property
-    def picker_mode(self):
-        return bool(self._picker_state("picker_mode", False))
-
-    @picker_mode.setter
-    def picker_mode(self, value):
-        self._set_picker_state("picker_mode", bool(value))
-
-    @property
-    def picker_color(self):
-        return self._picker_state("picker_color", None)
-
-    @picker_color.setter
-    def picker_color(self, value):
-        self._set_picker_state("picker_color", value)
 
     def trigger_quick_sticker(self):
         if (self.quick_sticker_consumed or not self.quick_sticker_enabled or

@@ -50,6 +50,11 @@ class ToolsTests(CoreTests):
                                      root / "logs" / datetime.now().strftime("%Y-%m") / "app.log")
                 finally:
                     configure_logging(dict(settings, logging_enabled=False))
+                    # configure_logging 在 logging_enabled=False 时会提前 return，
+                    # 走不到崩溃转储 ⇒ 必须显式关闭，否则临时目录里的 crash.log 删不掉（WinError 32）。
+                    from logger.log_setup import close_crash_dumps
+
+                    close_crash_dumps()
 
     def test_editor_operation_tips_are_visible(self):
         from config.config_manager import DEFAULTS
@@ -544,8 +549,6 @@ class ToolsTests(CoreTests):
             toolbar.deleteLater()
 
 
-if __name__ == "__main__":
-    unittest.main()
 
 
 if __name__ == "__main__":

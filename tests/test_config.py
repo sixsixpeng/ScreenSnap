@@ -1805,8 +1805,14 @@ class ConfigTests(CoreTests):
         self.assertEqual(repaired["capture_multi_edit_action"], "save")
         self.assertIn("capture_multi_select_shortcut", dropped)
         self.assertIn("capture_multi_edit_action", dropped)
+        # 契约变更（2026-10-11）：截图页改用与「快捷键」页共用的 HotkeyEdit ——
+        # 它在 editingFinished（录制结束）才提交，并把值规范化为 keyboard 库格式。
+        from ui.widgets.hotkey_edit import HotkeyEdit
+
+        self.assertIsInstance(shortcut, HotkeyEdit, "截图页的快捷键控件必须与快捷键页一致")
         shortcut.setKeySequence(QKeySequence("K"))
-        self.assertEqual(config.data["capture_save_shortcut"], "K")
+        shortcut.editingFinished.emit()
+        self.assertEqual(config.data["capture_save_shortcut"], "k")
         self.assertEqual(validate({"capture_save_shortcut": "Alt+S"})[
             "capture_save_shortcut"], "Alt+S")
         with self.assertRaises(ValueError):
@@ -1828,11 +1834,13 @@ class ConfigTests(CoreTests):
             self.assertEqual(edit.keySequence().toString(), default, key)
             replacement = f"Alt+{index}"
             edit.setKeySequence(QKeySequence(replacement))
-            self.assertEqual(config.data[key], replacement, key)
+            edit.editingFinished.emit()      # HotkeyEdit 在录制结束时才提交（契约变更 2026-10-11）
+            self.assertEqual(config.data[key], replacement.lower(), key)
             # 清空（空序列）没意义：控件与配置一起回滚到上一个有效键。
             edit.clear()
-            self.assertEqual(edit.keySequence().toString(), replacement, key)
-            self.assertEqual(config.data[key], replacement, key)
+            edit.editingFinished.emit()      # 清空同样要提交一次，才会走回滚分支
+            self.assertEqual(edit.keySequence().toString(), replacement, key)   # 控件按 Qt 惯例显示
+            self.assertEqual(config.data[key], replacement.lower(), key)          # 配置存 keyboard 库格式
             self.assertEqual(validate({key: "Alt+L"})[key], "Alt+L")
             with self.assertRaises(ValueError):
                 validate({key: "Ctrl+K, Ctrl+S"})
@@ -1842,7 +1850,9 @@ class ConfigTests(CoreTests):
         copy_shortcut = page.controls["capture_copy_shortcut"]
         previous = config.data["capture_copy_shortcut"]
         copy_shortcut.setKeySequence(QKeySequence(config.data["capture_save_shortcut"]))
-        self.assertEqual(copy_shortcut.keySequence().toString(), previous)
+        copy_shortcut.editingFinished.emit()   # 冲突回滚同样发生在录制结束时
+        # 控件按 Qt 惯例显示（Alt+5），配置里存 keyboard 库格式（alt+5）：比较前先归一化。
+        self.assertEqual(copy_shortcut.keySequence().toString(), QKeySequence(previous).toString())
         self.assertEqual(config.data["capture_copy_shortcut"], previous)
         self.assertIn("已由", copy_shortcut.toolTip())
         with self.assertRaises(ValueError):
@@ -2308,8 +2318,13 @@ class ConfigTests(CoreTests):
         page = ScreenshotPage(config, lambda: None)
         shortcut = page.controls["capture_quick_sticker_shortcut"]
         self.assertEqual(shortcut.keySequence().toString(), "Space")
+        # 同上：HotkeyEdit 在 editingFinished 提交，且键名规范化为 keyboard 库格式。
+        from ui.widgets.hotkey_edit import HotkeyEdit
+
+        self.assertIsInstance(shortcut, HotkeyEdit, "截图页的快捷键控件必须与快捷键页一致")
         shortcut.setKeySequence(QKeySequence("Ctrl+K"))
-        self.assertEqual(config.data["capture_quick_sticker_shortcut"], "Ctrl+K")
+        shortcut.editingFinished.emit()
+        self.assertEqual(config.data["capture_quick_sticker_shortcut"], "ctrl+k")
         self.assertEqual(validate({"capture_quick_sticker_shortcut": "Alt+Space"})[
             "capture_quick_sticker_shortcut"], "Alt+Space")
         with self.assertRaises(ValueError):
@@ -3472,6 +3487,11 @@ class ConfigTests(CoreTests):
             finally:
                 # 关闭文件句柄，避免临时目录在 Windows 上删不掉。
                 configure_logging({**DEFAULTS, "logging_enabled": False})
+                # 同上：logging_enabled=False 时 configure_logging 提前返回，崩溃转储流仍在，
+                # 必须显式关闭，否则临时目录里的 crash.log 删不掉（WinError 32）。
+                from logger.log_setup import close_crash_dumps
+
+                close_crash_dumps()
             self.assertIn("清理用户数据目录时跳过", text)
             self.assertIn("版本变化提示占位", text)
             self.assertRegex(text, r"\d{4}-\d{2}-\d{2} .*WARNING")
