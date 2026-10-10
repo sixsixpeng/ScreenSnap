@@ -24,14 +24,14 @@ HINT_ITEMS = (
     ("resize", "四角/边中点缩放"),
     ("select", "拖拽框选"),
     ("element_cycle", "Tab 切换窗口/控件层级"),
-    ("edit", "Enter/双击编辑"),
+    ("edit", "双击/Enter 提交（编辑里双击空白保存）"),
     ("nudge", "WASD/方向键微调"),
     ("cancel", "Esc 取消"),
     ("save", "右键双击/快捷键保存"),
     ("quick_sticker", "快速贴图"),
     ("picker", "取色"),
-    ("fixed_size", "自定义尺寸"),
-    ("recapture", "重新截图"),
+    ("fixed_size", "固定尺寸"),
+    ("recapture", "清除选择"),
     ("window_edit", "窗口编辑"),
     ("multi_select", "多选编辑模式"),
     ("copy", "仅复制"),
@@ -810,6 +810,9 @@ class ConfigManager:
 
     def load(self):
         """按缺失、无法解析、单项非法三种情况分别回退，并保留可排查的现场。"""
+        # 本次载入的现场：哪些键被回退成默认、哪些未知旧键被忽略（供启动提示与日志使用）。
+        self.repaired_keys = []
+        self.dropped_keys = []
         logger = logging.getLogger("screensnap")
         if not self.path.exists():
             self.data = copy.deepcopy(DEFAULTS)
@@ -833,6 +836,14 @@ class ConfigManager:
             backup = self.backup()
             if isinstance(loaded, dict):
                 self.data, dropped = repair(loaded)
+                # repair() 的第二个返回值是「被回退成默认的键」；未知旧键另有判定。
+                self.repaired_keys = list(dropped or [])
+                self.dropped_keys = [k for k in loaded
+                                   if k not in self.data]
+                logging.getLogger("screensnap").warning(
+                    "配置修复：回退 %d 项 %s；忽略未知键 %d 项 %s",
+                    len(self.repaired_keys), self.repaired_keys[:8],
+                    len(self.dropped_keys), self.dropped_keys[:8])
                 logger.warning("配置文件无效，已备份到 %s；回退 %s 等 %d 项: %s", backup,
                                "、".join(dropped[:5]) or "冲突热键", len(dropped), error)
             else:

@@ -2151,8 +2151,8 @@ class ConfigTests(CoreTests):
         # 默认全部开启；有选区且未进入编辑时，不适用的项（框选/固定尺寸/工具栏两项/
         # 原地编辑三项）为空。
         items = [item for item in mask.capture_hint_items() if item]
-        self.assertEqual(len(items), len(HINT_ITEM_IDS) - 7)
-        self.assertIn("F2 重新截图", items)
+        self.assertEqual(len(items), len(HINT_ITEM_IDS) - 6)
+        self.assertIn("F2 清除选择", items)
         self.assertIn("Alt+M 多选模式", items)
         self.assertIn("Tab/Shift+Tab 切换窗口层级", items)
         self.assertIn("Esc取消", items)
@@ -2173,7 +2173,7 @@ class ConfigTests(CoreTests):
         self.assertEqual([item for item in mask.capture_hint_items() if item], [])
         settings["capture_hint_order"] = ["multi_select"]
         mask.session.multi_select_mode = True
-        self.assertEqual(mask.capture_hint_items(), ["多选模式 · Enter完成"])
+        self.assertEqual(mask.capture_hint_items(), ["多选模式 · 右键双击或 Enter 提交"])
         mask.close()
 
     def test_hint_bar_style_config_and_editor(self):

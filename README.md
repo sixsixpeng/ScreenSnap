@@ -84,7 +84,7 @@ python -m venv .venv
 - "设置 > 截图 > 窗口与控件识别"分为「基础识别」「候选框外观」「无障碍识别与精度」三组：基础识别含识别总开关、自动选中、悬停高亮（含预览）；候选框外观含显示方式、风格、填充/边线/文字/标签颜色与不透明度及字号；无障碍识别与精度含 UIA 优先级、悬停刷新间隔、识别层级与 UIA 诊断。默认开启 UIA：识别会先用 Windows 无障碍树读取浏览器、Electron、Qt/WPF 等自绘界面内部的按钮、标签和编辑框，需要安装 `uiautomation`（`python -m pip install uiautomation`）；未安装或查询失败时自动退回窗口句柄识别。UIA 命中后最多继续向下查找 24 层，并优先沿覆盖鼠标点的最小子控件下钻；"识别层级"控制的是 Tab 可切换的祖先层数，不控制这段向下搜索。仍无法读取未暴露给 Windows 无障碍树的自绘元素。本程序的截图遮罩与贴图会穿透识别，同进程普通窗口仍可作为目标。
 - "设置 > 截图 > 遮罩与选区"可选择清透蓝、薄荷绿、奶油黄、樱花粉、淡紫等遮罩色预设，也可自定义颜色和不透明度；默认黑色 `#000000`、60% 不透明度。旧版深色/浅色选择会分别迁移为黑色/白色遮罩。
 - "设置 > 截图 > 截图时机"里可设置**截图延迟**（0–5000 毫秒）：按下全局截图热键后先等待再抓画面，用于避开快捷键冲突造成的界面变化，或等待菜单、动画、网页渲染完成。托盘菜单发起的截图会自动再追加 150 毫秒等待菜单关闭。
-- 选区确认前可按取色快捷键（默认 `C`，支持单键、修饰键组合或功能键，如 `Alt+C` / `F2`）进入/退出**取色模式**：取色态下 `Alt`/`Ctrl` + 左键在画面上取样会把十六进制色值复制到剪贴板并设为当前标注颜色；跟随放大镜的提示条实时显示坐标、色值与操作（`Alt/Ctrl+左键` 取样复制、当前取色键/`Esc` 退出）。用 Alt/Ctrl 修饰取样，避免与左键框选 / UIA 自动识别选择冲突。取色依赖放大镜与十字线，「设置 > 截图 > 取色」还提供放大镜像素网格开关与网格颜色。
+- 选区确认前可按取色快捷键（默认 `C`，支持单键、修饰键组合或功能键，如 `Alt+C` / `F2`）进入/退出**取色（一次性动作）**：取色态下 `Alt`/`Ctrl` + 左键在画面上取样会把十六进制色值复制到剪贴板并设为当前标注颜色；跟随放大镜的提示条实时显示坐标、色值与操作（`Alt/Ctrl+左键` 取样复制、当前取色键/`Esc` 退出）。用 Alt/Ctrl 修饰取样，避免与左键框选 / UIA 自动识别选择冲突。取色依赖放大镜与十字线，「设置 > 截图 > 取色」还提供放大镜像素网格开关与网格颜色。
 - 开启「标尺」后，选区四边会绘制像素刻度（底部/左侧带数值），辅助定位与测量；刻度与数值颜色可在「设置 > 截图 > 取色」配置（标尺默认关闭）。
 - 「截图确认后」新增**仅复制到剪贴板**（`copy`）选项：确认后把选区图片写入系统剪贴板并关闭遮罩，不落盘也不进编辑器；选区阶段按 `Y`（可改键）亦可随时触发。
 - 选区包含**本程序自身的窗口**（设置窗口、编辑器、通知缩略图、贴图、贴图管理、回收站、外观弹层、弹出菜单等）时，默认**不提示**：截图就是抓屏，程序不会替你关闭这些窗口。需要提醒时可在"设置 > 截图 > 操作提示 > 采集自检警示"打开总开关，并逐类勾选要参与提示的窗口类型；打开后提示条会在最前面附加一句暖色警示（如"⚠ 选区内有贴图，移开后重截"）。系统通知不参与提示。
@@ -261,7 +261,7 @@ python -m venv .venv
 | 取消截图 | `Esc` | 固定操作 | 始终可用 |
 | 固定尺寸选区 | `Ctrl+F` | 固定操作 | 始终可用 |
 | 微调最后选区 | `W` / `A` / `S` / `D` 或方向键 | 固定操作 | 始终可用 |
-| 进入取色模式 | `C` | 固定操作 | 始终可用（选区存在时），顶部提示栏也会提示 |
+| 在光标处取色一次 | `C` | 固定操作 | 始终可用（选区存在时），顶部提示栏也会提示 |
 
 快速保存与快速贴图只在截图遮罩活动时响应，不属于全局热键。两项都接受一个按键或一个带修饰键的组合（例如 `Alt+S`），可在"设置 > 截图 > 截图快捷操作"页底的"恢复本页默认"还原。
 
@@ -422,7 +422,7 @@ Win11 Toast 模式下，截图图片提示缓存本地 PNG 作为 hero 图片，
 | `crosshair` | `true` | 是否显示全屏定位十字线。 |
 | `crosshair_color` | `#ff0000` | 定位十字线颜色；可在"设置 > 截图 > 定位辅助"改色。 |
 | `crosshair_width` | `1` px | 定位十字线宽度，范围 1–8 px。 |
-| `capture_picker_shortcut` | `C` | 在光标处取色一次的按键（一次性动作，无取色模式），支持单键、修饰键组合或功能键（如 `Alt+C` / `F2`）；取色态下 `Alt`/`Ctrl` + 左键取样复制十六进制色值到剪贴板并设为当前标注颜色（避免与左键框选 / UIA 自动识别选择冲突）。 |
+| `capture_picker_shortcut` | `C` | 在光标处取色一次的按键（一次性动作，无取色（一次性动作）），支持单键、修饰键组合或功能键（如 `Alt+C` / `F2`）；取色态下 `Alt`/`Ctrl` + 左键取样复制十六进制色值到剪贴板并设为当前标注颜色（避免与左键框选 / UIA 自动识别选择冲突）。 |
 | `magnifier_size` | `140` | 放大镜边长（像素），范围 100–320；采样区域按同一缩放倍率等比换算，调大即看到更大范围。 |
 | `magnifier_grid` | `true` | 放大镜内是否叠加像素网格线，便于 1px 级对齐。 |
 | `magnifier_grid_color` | `#cccccc` | 放大镜像素网格颜色。 |
@@ -1410,7 +1410,7 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 
 - **截图与遮罩**
   - 仅复制到剪贴板：确认后写剪贴板并关闭遮罩，不落盘不进编辑器；遮罩与编辑器「仅复制」按钮齐备。复制反馈改用应用内本地缩略图预览，保证复制内容可见（不依赖 Win11 Toast hero 图）。
-  - 取色模式：`C` 进入/退出，`Alt`/`Ctrl`+左键取样复制十六进制色值；取色提示合并进顶部提示栏，消除重叠。
+  - 取色（一次性动作）：`C` 进入/退出，`Alt`/`Ctrl`+左键取样复制十六进制色值；取色提示合并进顶部提示栏，消除重叠。
   - 标尺：选区四边像素刻度，默认关闭、可在设置开启。
   - 放大镜像素网格（开关 + 颜色）；`Esc` 前台兜底（`core/window_focus.py` + 全局 Esc 钩子），修复首帧无焦点。
 - **编辑器与标注**
@@ -1446,15 +1446,15 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 
 - 2026-10-02：修复两处序号相关配置与交互。① 设置「编辑器 > 默认工具」的「默认标注工具」下拉框漏列了本轮新增的「序号」(`number`)，导致无法在设置里把默认工具设为序号；已在选项列表补上「序号」（取色/裁剪/马赛克/荧光笔等本就在列）。② 序号续号改用「填补最小空缺」：原来用 `sequence_start + 已存在数量` 算新号，删除中间一个后数量变小，会与最大号重复/留空；新增 `AnnotationCanvas.next_sequence_number()`，从 `sequence_start` 起取最小未被占用的整数（如已有 1/3/4，下一个为 2），既不会重复也无需改写已有标号，最终仍自然连续。新增 `test_sequence_next_number_fills_gap_after_delete` 锁定该行为；`test_annotation_sequence_*` 系列仍通过。
 
-- 2026-10-02：修复取色提示栏重叠。原实现里「按 C 取色」提示是独立 `picker_hint` QLabel 定在遮罩顶部中央，而顶部提示栏本就由 `overlay_info.paint_info` 在取色态（`pick_color` 有值时）绘制取色文字——两者在顶部完全重叠；且鼠标暂不在图上时 `pick_color` 为 `None`，`paint_info` 仍画原始"拖拽框选…"提示栏，于是"原始提示 + 新提示"两条在顶部叠在一起。改为：给 `paint_info` 增加 `picker_mode` 参数，取色模式下**始终**显示取色说明（含坐标/色值/左键复制/C·Esc 退出），不再依赖 `pick_color` 是否取到；并**删除**多余的独立 `picker_hint` QLabel 及其 `_update_picker_hint`/`_hide_picker_hint`（遮罩 Esc 退出、C 切换三处调用一并清理，改由 `update_all()` 重绘顶部提示栏）。现在取色提示唯一地位于顶部提示栏、不再重叠。重写 `test_capture_picker_hint_visibility` 锁定该行为（取色模式 `paint_info` 显示取色说明且不含原始操作文案；遮罩不再持有 `picker_hint` 属性）。
+- 2026-10-02：修复取色提示栏重叠。原实现里「按 C 取色」提示是独立 `picker_hint` QLabel 定在遮罩顶部中央，而顶部提示栏本就由 `overlay_info.paint_info` 在取色态（`pick_color` 有值时）绘制取色文字——两者在顶部完全重叠；且鼠标暂不在图上时 `pick_color` 为 `None`，`paint_info` 仍画原始"拖拽框选…"提示栏，于是"原始提示 + 新提示"两条在顶部叠在一起。改为：给 `paint_info` 增加 `picker_mode` 参数，取色（一次性动作）下**始终**显示取色说明（含坐标/色值/左键复制/C·Esc 退出），不再依赖 `pick_color` 是否取到；并**删除**多余的独立 `picker_hint` QLabel 及其 `_update_picker_hint`/`_hide_picker_hint`（遮罩 Esc 退出、C 切换三处调用一并清理，改由 `update_all()` 重绘顶部提示栏）。现在取色提示唯一地位于顶部提示栏、不再重叠。重写 `test_capture_picker_hint_visibility` 锁定该行为（取色（一次性动作） `paint_info` 显示取色说明且不含原始操作文案；遮罩不再持有 `picker_hint` 属性）。
 
-- 2026-10-02：取色取样改 Alt/Ctrl + 左键，并完善序号删除重排。① 取色模式下左键取样会与左键框选 / UIA 自动识别选择功能重叠，故取样触发改为 **`Alt` 或 `Ctrl` + 左键**；不带修饰键的左键在取色模式下既不取样也不触发选区/识别，直接忽略。`overlay_info` 顶部提示条文案同步改为"`Alt/Ctrl+左键` 取样复制到剪贴板 | C/Esc 退出取色"。② 序号「删除中间多个」修复：此前 `next_sequence_number` 只做最小空缺填补，删除中间连续多个（如 2/3/4/5）后剩余项仍留空缺，并不算真正连续。新增 `AnnotationCanvas.renumber_sequence_items()`——删除/变动后把所有现有序号标注按当前大小顺序从 `sequence_start` 起重排为 `1/2/3…`，无论删的是中间单个还是连续多个都连续无空缺；`remove_selected()` 删除选中后调用它再 `checkpoint`（撤销会回到删除前状态）。`next_sequence_number` 保留 min-unused 作为兜底，重排后自然等于 `start + 现有项数`。新增 `test_sequence_renumber_after_deleting_middle` 锁定「删除中间连续多个后重排为连续」与「删除单个后重排」；既有 `test_sequence_next_number_fills_gap_after_delete` 仍通过。
+- 2026-10-02：取色取样改 Alt/Ctrl + 左键，并完善序号删除重排。① 取色（一次性动作）下左键取样会与左键框选 / UIA 自动识别选择功能重叠，故取样触发改为 **`Alt` 或 `Ctrl` + 左键**；不带修饰键的左键在取色（一次性动作）下既不取样也不触发选区/识别，直接忽略。`overlay_info` 顶部提示条文案同步改为"`Alt/Ctrl+左键` 取样复制到剪贴板 | C/Esc 退出取色"。② 序号「删除中间多个」修复：此前 `next_sequence_number` 只做最小空缺填补，删除中间连续多个（如 2/3/4/5）后剩余项仍留空缺，并不算真正连续。新增 `AnnotationCanvas.renumber_sequence_items()`——删除/变动后把所有现有序号标注按当前大小顺序从 `sequence_start` 起重排为 `1/2/3…`，无论删的是中间单个还是连续多个都连续无空缺；`remove_selected()` 删除选中后调用它再 `checkpoint`（撤销会回到删除前状态）。`next_sequence_number` 保留 min-unused 作为兜底，重排后自然等于 `start + 现有项数`。新增 `test_sequence_renumber_after_deleting_middle` 锁定「删除中间连续多个后重排为连续」与「删除单个后重排」；既有 `test_sequence_next_number_fills_gap_after_delete` 仍通过。
 
-- 2026-10-02：取色进入提示补充进顶部栏。非取色模式下 `paint_info` 单行提示条末尾追加"`C` 取色"（快捷键跟随 `capture_picker_shortcut` 设置；按键处理也同步改为读取该设置，单字母 A–Z 生效，否则回退 `C`），用户不必靠记忆知道按 C 进取色。
+- 2026-10-02：取色进入提示补充进顶部栏。非取色（一次性动作）下 `paint_info` 单行提示条末尾追加"`C` 取色"（快捷键跟随 `capture_picker_shortcut` 设置；按键处理也同步改为读取该设置，单字母 A–Z 生效，否则回退 `C`），用户不必靠记忆知道按 C 进取色。
 
 - 2026-10-02：按反馈完善新功能与兼容性：①「仅复制」入口三处齐备——编辑器输出组新增「仅复制」按钮（只复制合成图到剪贴板、不落盘不退出）、截图遮罩选区动作区新增「仅复制」按钮（复制整屏或当前选区到剪贴板并关闭遮罩）、原「截图确认后=仅复制」路径保留；②「序号标注」补齐图标（工具栏「序号」按钮显示红底白字「1」）并支持个性化——形状（圆/方/三角/菱形/五边形/六边形/星形）、填充色、文字色、字号、起始值，以及 6 组预设组合（红圆/蓝方/绿星/琥珀菱形/紫五边形/青六边形），设置页「序号标注」分组与编辑器/原地编辑「更多设置」均可调整并实时预览；③ 默认保存文件名加 `ScreenSnap_` 前缀（`ScreenSnap_%Y%m%d_%H%M%S`）；④「截图取色」在遮罩顶部新增常驻提示条（移动预览色值、左键复制十六进制色值、C/Esc 退出）；⑤ 贴图右键「回收站」改为常驻入口（空时显示占位项），降低误删风险；⑥ 兼容性：所有新增键均写入 `DEFAULTS` 与 `validate`（`sequence_shape/text_color/fill_color/preset` 等），旧配置缺键会自动补默认，不影响既有行为。验证：新增 `test_annotation_sequence_supports_all_shapes`、`test_sequence_preset_applies_shape_and_colors`、`test_capture_picker_hint_visibility`；更新 `test_settings_controls_have_initialized_defaults`（文件名前缀）、`test_capture_actions_exist_below_hint_on_each_monitor`（4 按钮）、`test_annotation_sequence_serializes_and_restores`（新构造签名）。离屏环境 Qt 退出清理会在部分含真实窗口的用例 teardown 崩溃（环境性，非断言失败），直接相关的 10 项定向用例全部通过。
 
-- 2026-10-02：截图体验增强第一版落地（截图/取色/对齐/标注/回收主线中的低风险项）：①「仅复制到剪贴板」——截图确认后行为新增 `copy` 选项，确认后把选区图片写入系统剪贴板并关闭遮罩，不落盘也不进编辑器（右键双击与快速保存仍直接保存）；②「放大镜像素网格」——定位辅助组新增开关与网格颜色，放大镜内叠加像素网格便于 1px 对齐；③「截图取色」——新增 `C` 快捷键进入/退出取色模式，取色态下左键取样把十六进制色值复制到剪贴板，提示条实时显示坐标/色值/操作提示。配套：配置骨架一次性埋入 `capture_picker_shortcut / magnifier_grid / magnifier_grid_color / ruler_* / sequence_* / color_history_limit / sticker_recycle_*` 等键与校验（第一版后续功能的默认值与边界），设置页补放大镜网格开关与颜色、确认后行为 `copy` 选项、取色快捷键。验证：新增 `test_capture_enhancement_settings`（配置校验与放大镜网格绘制）与 `test_capture_after_selection_copy_writes_clipboard_and_closes`（仅复制端到端，mock 隔离 clipboard 以规避离屏环境真实剪贴板崩溃）；运行配置/设置/overlay/after_selection 相关 13 项定向用例全部通过。取色端到端、序号/标尺/回收站等仍需后续实现与桌面验收。
+- 2026-10-02：截图体验增强第一版落地（截图/取色/对齐/标注/回收主线中的低风险项）：①「仅复制到剪贴板」——截图确认后行为新增 `copy` 选项，确认后把选区图片写入系统剪贴板并关闭遮罩，不落盘也不进编辑器（右键双击与快速保存仍直接保存）；②「放大镜像素网格」——定位辅助组新增开关与网格颜色，放大镜内叠加像素网格便于 1px 对齐；③「截图取色」——新增 `C` 快捷键进入/再按一次继续取色，取色态下左键取样把十六进制色值复制到剪贴板，提示条实时显示坐标/色值/操作提示。配套：配置骨架一次性埋入 `capture_picker_shortcut / magnifier_grid / magnifier_grid_color / ruler_* / sequence_* / color_history_limit / sticker_recycle_*` 等键与校验（第一版后续功能的默认值与边界），设置页补放大镜网格开关与颜色、确认后行为 `copy` 选项、取色快捷键。验证：新增 `test_capture_enhancement_settings`（配置校验与放大镜网格绘制）与 `test_capture_after_selection_copy_writes_clipboard_and_closes`（仅复制端到端，mock 隔离 clipboard 以规避离屏环境真实剪贴板崩溃）；运行配置/设置/overlay/after_selection 相关 13 项定向用例全部通过。取色端到端、序号/标尺/回收站等仍需后续实现与桌面验收。
 
 - 2026-10-02：截图体验增强第二版（剩余主线项）：①「标尺」——定位辅助组新增开关与颜色，遮罩四边绘制像素刻度（顶部/右侧仅短刻度，底部/左侧带数值），辅助定位与测量；②「贴图回收站」——关闭的贴图默认进入回收站（右键菜单「回收站」子菜单可恢复或清空），避免误删，按上限丢弃最早项，开关与上限在贴图设置页可调；③「序号标注」——工具栏新增「序号」工具，单击图片放置圆形序号标记且号码自动递增，颜色/字号/起始值在编辑器设置页可调，并接入序列化与撤销。验证：新增 `test_sticker_recycle_bin_keeps_closed_stickers_and_restores`（回收与恢复）、`test_annotation_sequence_serializes_and_restores`（序号序列化往返）；运行配置/设置/标尺/回收站/序号相关定向用例全部通过。
 
@@ -1510,7 +1510,7 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 
 - 2026-10-10：R 键语义由「重新截图」改为「清除选择」。现象：按 R 会重新抓屏并关闭遮罩，把鼠标带回触发位置，用户要的是"取消当前这一块选区"。改动：`screenshot/mask_window.py` 的选区动作表把 `recapture` 指向 `clear_selection()` —— 清空选区、回到未选择状态，不重抓屏、不关遮罩、不移动鼠标；工具栏「重新截图」保持原样，仍走 `request_recapture()` / `recapture_requested`（两条路径分开）；`screenshot/hint_items.py` 的提示文案改为「清除选择」。验证：`tests.test_capture::test_clear_selection_resets_without_recapturing`、`tests.test_uia`（默认与改键后的提示与"不重截"断言）、`tests.test_dpi::test_show_mask_connects_recapture_for_every_monitor_view`。
 
-- 2026-10-10：左键划选后按 R 生效（清除选择）。现象：主副屏按 R 都没有任何反应。原因：R 的处理器 `clear_selection()` 正常，但 `screenshot/mask_window.py::sync_capture_action_shortcuts` 在原地编辑激活时只放行 E（窗口编辑）与 F（尺寸），R 被禁用 —— 而左键划选必然进入原地编辑，所以 R 永远按不动。改动：R 加入放行名单；`clear_selection()` 在原地编辑激活时先调用新增的 `_dismiss_inline_editor()`（按多选的收尾顺序关掉画布/工具栏/抓手、`cleanup`、`deleteLater`、复位 `session.inline_editor` 并重挂 S/快速贴图/功能键），再清空选区，同时复位取色模式；画布上已画的标注按「清除」语义丢弃并记 DEBUG 日志。验证：新增 `tests.test_capture::test_clear_selection_shortcut_is_enabled_while_inline_editing`，`tests.test_capture` 98 条 OK、`tests.test_uia` 50 条 OK（skipped=1）。
+- 2026-10-10：左键划选后按 R 生效（清除选择）。现象：主副屏按 R 都没有任何反应。原因：R 的处理器 `clear_selection()` 正常，但 `screenshot/mask_window.py::sync_capture_action_shortcuts` 在原地编辑激活时只放行 E（窗口编辑）与 F（尺寸），R 被禁用 —— 而左键划选必然进入原地编辑，所以 R 永远按不动。改动：R 加入放行名单；`clear_selection()` 在原地编辑激活时先调用新增的 `_dismiss_inline_editor()`（按多选的收尾顺序关掉画布/工具栏/抓手、`cleanup`、`deleteLater`、复位 `session.inline_editor` 并重挂 S/快速贴图/功能键），再清空选区，同时复位取色（一次性动作）；画布上已画的标注按「清除」语义丢弃并记 DEBUG 日志。验证：新增 `tests.test_capture::test_clear_selection_shortcut_is_enabled_while_inline_editing`，`tests.test_capture` 98 条 OK、`tests.test_uia` 50 条 OK（skipped=1）。
 
 - 2026-10-10：左键划选后按 Y（仅复制）生效。现象：副屏按 Y 没有任何反应。原因与 R 同一处：`screenshot/mask_window.py::sync_capture_action_shortcuts` 在原地编辑激活时只放行 E/F/R，Y（`copy`）被禁用，而左键划选必然进入原地编辑。改动：放行 Y；`copy_selection_to_clipboard()` 在原地编辑激活时先取 `editor.output_image()`（带标注的成品图）写入剪贴板、发 `copy_done`、退出原地编辑并关闭遮罩，**不落盘**（与编辑器工具栏「仅复制」语义一致）；未选择仍是整屏、普通选区仍是选区裁剪。验证：新增 `tests.test_capture::test_copy_shortcut_is_enabled_while_inline_editing`；`tests.test_capture` 99 条 OK、`tests.test_uia` 50 条 OK（skipped=1）。
 
@@ -1526,5 +1526,9 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 
 - 2026-10-10（二）：副屏微调键失效 + 主副屏一动微调就原生崩溃。现象：副屏按 W/A/S/D/方向键无反应；随后在任一屏拖手柄（握住控制点）后微调即崩溃，日志无异常栈、最后一行停在「原地编辑就绪」。排查：入口日志「遮罩收到按键」为 0（按键没进程序）；`python -X faulthandler -m unittest tests.test_capture -k mask_drag_resizes` 把原生崩溃钉在 `QTest.keyClick`；逐段删除定位到上一版加在遮罩 `keyPressEvent` 的工具栏隐藏键分支（`QKeySequence(event.keyCombination())` 在合成按键上原生崩溃）。改动：删除该冗余分支（隐藏键由全局热键 + 编辑器侧 `WindowShortcut` 覆盖）；`keyPressEvent` 内 `view → self`（两处，原为别的类的自由变量，跨屏命中已销毁对象）；`QCursor.setPos` 前加类型与可见性守卫；补微调日志。验证：`test_capture` 102 条 OK、`test_config` 106 条 OK（4 条被跳过的用例全部恢复）。
 
-- 2026-10-10（三）：取色改为一次性动作（去掉取色模式）。现象：旧流程要按 C 进模式、移动鼠标取样、再按 C 或 Esc 退出，期间 F/E/R/Y/Alt+M 与工具栏隐藏键被门控禁用，Esc 还要先退模式才取消截图。改动（screenshot/mask_window.py）：capture_picker_shortcut（默认 C）改为"在光标处直接取样一次"（复制色值并按 picker_notification 通知）；新增 sample_color_at_cursor 与 sample_color_at，Alt 或 Ctrl 加左键取样随时可用；删除 toggle_picker_mode 与提示条模式文案；Esc 恢复取消整轮的唯一语义。验证：-k picker / -k hint / -k mask 全绿，另加两条用例覆盖无模式取样与光标映射。\n
+- 2026-10-10（三）：取色改为一次性动作（去掉取色（一次性动作））。现象：旧流程要按 C 进模式、移动鼠标取样、再按 C 或 Esc 退出，期间 F/E/R/Y/Alt+M 与工具栏隐藏键被门控禁用，Esc 还要先退模式才取消截图。改动（screenshot/mask_window.py）：capture_picker_shortcut（默认 C）改为"在光标处直接取样一次"（复制色值并按 picker_notification 通知）；新增 sample_color_at_cursor 与 sample_color_at，Alt 或 Ctrl 加左键取样随时可用；删除 toggle_picker_mode 与提示条模式文案；Esc 恢复取消整轮的唯一语义。验证：-k picker / -k hint / -k mask 全绿，另加两条用例覆盖无模式取样与光标映射。\n
 - 2026-10-10（四）：新增崩溃看护（崩溃自动重启）。背景：原生崩溃（访问违规/堆损坏）会直接杀掉进程，托盘图标一起消失，只能手动重启；而且此前连日志都没有（已由 faulthandler + crash.log 补齐）。新增 supervisor.py：用 python supervisor.py 启动时由它拉起 main.py，子进程非 0 退出（异常/崩溃）就自动重启，退出码 0（托盘退出/正常关闭）则看护一起退出；防崩溃循环为 300 秒内最多 3 次，超过写入 logs/supervisor.log 并停止自动重启；每次重启记一行（退出码 + 存活秒数）。python main.py 行为不变（调试用）。
+
+- 2026-10-10（五）：提示条文案按三态同步（并点明左键/右键双击）。现象：未选择时提示写「左拖松开按设置 · 右拖追加」（措辞过时、没提进入快速编辑与右键多选）；原地编辑里写「双击空白提交」，但「提交」只属于多选、原地编辑应是保存；右键选择后提示啰嗦（进入编辑/执行/确认三种说法）；多选反而没有「提交」字样；R 早已改为清除选择但提示仍写「重新截图」；方向键微调没提「需先握住控制点」；取色模式删除后 hint_items 仍留着整段 picker 死分支。改动：screenshot/hint_items.py 按真实双击语义（mouseDoubleClickEvent）重写文案 —— 未选择：左拖松开进入快速编辑 · 右键拖选多选 · UIA点击快编；原地编辑：左键双击空白保存；右键选择后：右键双击提交（收集模式）；多选：多选模式 · 右键双击或 Enter 提交；普通选区：左键双击提交 / 右键双击直存 | S快速保存；R 文案改清除选择；nudge 补“握住控制点后”；删除 picker 死分支（picker/picker_color 仅作为兼容参数保留并忽略）。另修正 save 条目缺少“有选区”守卫：未选择时不再提示「右键双击直存 | S快速保存」（此时双击仅关闭遮罩）。验证：-k inline 20 / -k hint 9 / -k picker 5 / -k mask 22 全绿，全量 test_capture 通过。
+
+- 2026-10-10（六）：Enter 与右键双击语义收紧 + 提示条四态同步 + 设置标签同步。现象：Enter 在无选区时等于 Esc（会关掉整轮截图）、单选时直接提交；右键双击空白同样关闭遮罩；提示条在未选择时就提示「右键双击直存 | S快速保存」，而原地编辑里又漏掉实际可用的 S/R/E/Y/F/缩放/微调。改动：screenshot/mask_window.py —— Enter 只在“多选选区”（多选模式或区域数大于 1）时提交到编辑，其余忽略并写日志；右键双击有选区时保留直存/收集态提交，空白处双击改为忽略并写日志。screenshot/hint_items.py —— 未选择：左拖松开进入快速编辑 · 右键拖选多选 · UIA点击快编；原地编辑：左键双击空白保存，并补 S 保存/R 清除选择/E 窗口编辑/Y 仅复制/F 固定尺寸/四角缩放/微调；右键收集：右键双击提交 · 右键继续框选；多选：多选模式 · 右键双击或 Enter 提交；Space 文案改为“按住 Space 后鼠标拖选 直接贴图”；F 固定尺寸改为各状态都提示。config/config_manager.py —— 提示项标签同步：recapture=清除选择、edit=双击/Enter 提交（编辑里双击空白保存）、fixed_size=固定尺寸。验证：-k hint 9 / -k mask 22 / -k inline 20 / -k picker 5 全绿；test_capture 103、test_misc 41、test_config 106、test_uia 50、test_ui 15、test_app 9、test_dpi 47、test_sticker 64 全 OK；真机提示条与 Enter/右键双击三态待人工确认。
