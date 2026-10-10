@@ -4,7 +4,7 @@ import logging
 import math
 
 from PIL import Image, ImageFilter
-from PySide6.QtCore import Qt, QPointF, QRectF, QLineF, Signal, QTimer
+from PySide6.QtCore import Qt, QPointF, QRect, QRectF, QLineF, Signal, QTimer
 from PySide6.QtGui import (QBrush, QPainter, QPainterPath, QPen, QColor, QPixmap, QImage,
                              QPolygonF, QPainterPathStroker, QTextBlockFormat,
                              QTextCursor, QTransform, QCursor, QKeySequence)
@@ -1797,6 +1797,8 @@ class AnnotationCanvas(QGraphicsView):
         return False
 
     def mousePressEvent(self, event):
+        # 按下这一刻定格手柄状态（手柄在标注区域内，必须先定手柄再判本体）。
+        self.note_active_handle(event.globalPosition().toPoint())
         if (self.space_pressed and self.start is None
                 and self.mosaic_drawing is None
                 and event.button() == Qt.LeftButton
@@ -2188,6 +2190,11 @@ class AnnotationCanvas(QGraphicsView):
         from editor.text_input_dialog import TextInputDialog
 
         dialog = TextInputDialog(self, title, self.settings, initial, values=values)
+        # 原地编辑（截图内联）时画布挂在【置顶遮罩】之下，普通 QDialog 会被遮罩挡住看不见：
+        # 统一置顶 + 显式抬升/激活；独立编辑器下同样正确（对话框在其窗口之上）。
+        dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
+        dialog.raise_()
+        dialog.activateWindow()
         if dialog.exec() != QDialog.Accepted:
             return None, {}, False
         changed = dialog.changed_settings()
@@ -2326,6 +2333,8 @@ class AnnotationCanvas(QGraphicsView):
         self.erase_menu(point).popup(position)
 
     def mouseReleaseEvent(self, event):
+        # 松开才允许更新手柄状态。
+        self.clear_active_handle()
         if self.space_pan_active and event.button() == Qt.LeftButton:
             self.space_pan_active = False
             self.space_pan_start = None
@@ -2561,8 +2570,194 @@ class AnnotationCanvas(QGraphicsView):
             return
         self.confirmed.emit()
 
+    def active_handle(self):
+        """当前按住的手柄名称（按下时定格，松开前不变）；没有则 None。
+
+        手柄通常就在标注区域内，所以判定顺序必须是「先手柄、后本体」；
+        又因为按下事件可能落在画布上（不是遮罩），状态统一由画布在按下时记录。
+        """
+        return getattr(self, "_active_handle_name", None)
+
+    def note_active_handle(self, global_pos):
+        """按下时定格手柄状态（由 mousePressEvent 调用）。"""
+        hit = self.pointer_handle(global_pos)
+        self._active_handle_name = hit[1] if hit else None
+        return self._active_handle_name
+
+    def clear_active_handle(self):
+        """松开时清除手柄状态。"""
+        self._active_handle_name = None
+
+    def pointer_handle(self, global_pos=None):
+        """返回指针下的“选中标注”手柄 (item, 名称)，没有则 None。
+
+        名称取 nw/n/ne/e/se/s/sw/w，或 "rotate" 表示旋转手柄；
+        复用画布自身的命中阈值（8 像素），与悬停光标那套完全同源。
+        """
+        if global_pos is None:
+            return None
+        point = self.mapToScene(self.mapFromGlobal(global_pos))
+        for item in self.scene_data.selectedItems():
+            if self.rotation_handle_at(item, point):
+                return (item, "rotate")
+            for name, spot in self.item_resize_handles(item).items():
+                if (spot.x() - point.x()) ** 2 + (spot.y() - point.y()) ** 2 <= 64:
+                    return (item, name)
+        return None
+
+    def pointer_on_handle(self, global_pos=None):
+        """指针是否压在“选中标注”的手柄上（含旋转手柄）。"""
+        return self.pointer_handle(global_pos) is not None
+
+    def rotate_selected(self, direction):
+        """按住旋转手柄时用方向键旋转：direction=+1 顺时针、-1 逆时针（每次 1 度）。
+
+        以标注包围盒中心为轴心（旋转后中心不漂）；旋转后其余手柄方向跟着走，
+        紧接着的缩放微调也会以「当前实际朝向」为准（见 resize_selected 的场景逆变换）。
+        """
+        items = self.scene_data.selectedItems()
+        if not items:
+            return False
+        changed = False
+        for item in items:
+            before = item.mapToScene(item.boundingRect().center())
+            item.setRotation(item.rotation() + 1.0 * direction)
+            after = item.mapToScene(item.boundingRect().center())
+            item.setPos(item.pos() + before - after)
+            changed = True
+        if changed:
+            self.checkpoint()
+            self.update()
+        return changed
+
+    def resize_selected(self, dx, dy):
+        """手柄上的键盘缩放微调 —— 以【按住的那个手柄】为准。
+
+        · 角标 nw/ne/se/sw：等比拉伸（两轴同一比例，保持长宽比）；
+        · 左右中点 e/w：只改宽；上下中点 n/s：只改高；
+        · 锚点 = 手柄【对面】的角/边不动（按住左边 ⇒ 右边不动，依此类推），
+          方向按键盘方向与手柄位置组合决定（右侧手柄按 → 放大，左侧手柄按 → 缩小）；
+        · 旋转或自由变形后用 _local_vector 把本地位移换算成场景位移，屏幕锚点不漂；
+        · 没有 rect() 的标注（画笔路径等）用包围盒等比/单轴缩放，逻辑同上。
+        """
+        name = self.active_handle() or ""
+        items = self.scene_data.selectedItems()
+        if not items:
+            return False
+        left = name in ("nw", "w", "sw")
+        right = name in ("ne", "e", "se")
+        top = name in ("nw", "n", "ne")
+        bottom = name in ("sw", "s", "se")
+        if not (left or right or top or bottom):
+            # 没有手柄信息时（例如单元测试直接调用）按“右下角”处理：向右下放大。
+            right = bottom = True
+        # 键盘方向 → 手柄上的增量在循环内按【每个标注当前的旋转变换】换算（见下方 local）。
+        # 全部手柄都等比：角标与四个边中点，任何方向键 ⇒ 以中心为基准等比缩放（长宽比恒定）。
+        # （2026-10-10 用户确认：早期「边中点只拉一个轴」的说法作废。）
+        proportional = True
+        changed = False
+        for item in items:
+            bounds = item.boundingRect()
+            if bounds.width() < 2 or bounds.height() < 2:
+                logging.getLogger("screensnap").debug(
+                    "手柄键盘缩放：跳过过小的标注 %s", type(item).__name__)
+                continue
+            # 旋转后必须以【当前实际朝向】判定方向：把键盘的屏幕方向用标注的
+            # 场景变换逆映射到它自己的坐标轴，再决定放大还是缩小。
+            inv, ok = item.sceneTransform().inverted()
+            if ok:
+                origin = inv.map(QPointF(0, 0))
+                local = inv.map(QPointF(dx, dy)) - origin
+            else:
+                local = QPointF(dx, dy)
+            step_x = (local.x() if right else -local.x()) if (left or right) else 0.0
+            step_y = (local.y() if bottom else -local.y()) if (top or bottom) else 0.0
+            factor_x = factor_y = 1.0
+            if proportional:
+                # 等比：以按下的那个方向为准算比例，另一轴跟随，保持长宽比。
+                if step_x:
+                    factor_x = factor_y = max(0.05, 1.0 + step_x / bounds.width())
+                elif step_y:
+                    factor_x = factor_y = max(0.05, 1.0 + step_y / bounds.height())
+            else:
+                if step_x:
+                    factor_x = max(0.05, 1.0 + step_x / bounds.width())
+                if step_y:
+                    factor_y = max(0.05, 1.0 + step_y / bounds.height())
+            # 【中心锚点】：以标注中心为基准缩放 —— 四条边一起动（等比拉伸），中心不动。
+            before = item.mapToScene(bounds.center())
+            raw = item.rect() if hasattr(item, "rect") else None
+            rect = QRectF(raw) if isinstance(raw, QRect) else raw
+            if isinstance(rect, QRectF):
+                new_w = max(2.0, rect.width() * factor_x)
+                new_h = max(2.0, rect.height() * factor_y)
+                center = rect.center()
+                item.setRect(QRectF(center.x() - new_w / 2.0, center.y() - new_h / 2.0,
+                                    new_w, new_h))
+            else:
+                item.setTransform(QTransform().scale(factor_x, factor_y), True)
+            after = item.mapToScene(item.boundingRect().center())
+            item.setPos(item.pos() + before - after)
+            changed = True
+            logging.getLogger("screensnap").debug(
+                "手柄键盘缩放：%s 手柄=%s dx=%s dy=%s 比例=%.4f/%.4f 尺寸=%sx%s",
+                type(item).__name__, name or "(默认右下)", dx, dy, factor_x, factor_y,
+                round(bounds.width() * factor_x, 1), round(bounds.height() * factor_y, 1))
+        if changed:
+            self.checkpoint()
+            self.update()
+        return changed
+
+    def nudge_selected(self, dx, dy):
+        """方向键/WASD 微调选中的标注图形（移动图形本身，不是移动选区）。
+
+        · 中间按住标注时用它；边缘/手柄的“缩放微调”由遮罩负责，两者不要混。
+        · 平移与标注自身旋转无关：旋转只影响本地尺寸与手柄方向，场景位移照旧 1 步。
+        · 画布单位 = 图像像素（导出分辨率不受 dpr 影响），因此这里固定 1 步。
+        """
+        items = self.scene_data.selectedItems()
+        if not items:
+            return False
+        for item in items:
+            if hasattr(item, "path"):
+                # 画笔/箭头这类标注的几何在 path() 里，setPos 对它不起作用（表驱动用例实测）：
+                # 必须直接平移路径本身，否则「微调移动」对这些类型完全无效。
+                item.setPath(item.path().translated(QPointF(dx, dy)))
+            else:
+                item.setPos(item.pos() + QPointF(dx, dy))
+        self.checkpoint()   # 与其它编辑一致：微调可撤销
+        self.update()
+        return True
+
     def keyPressEvent(self, event):
         """处理删除、撤销/重做、临时平移和放弃编辑等画布快捷键。"""
+        if (event.modifiers() == Qt.NoModifier and self.scene_data.selectedItems()
+                and event.key() in (Qt.Key_W, Qt.Key_A, Qt.Key_S, Qt.Key_D,
+                                    Qt.Key_Up, Qt.Key_Left, Qt.Key_Down, Qt.Key_Right)):
+            # 选中标注时方向键/WASD 移动图形本身（遮罩侧只在未选中标注时才接管按键）。
+            dx = (-1 if event.key() in (Qt.Key_A, Qt.Key_Left)
+                  else 1 if event.key() in (Qt.Key_D, Qt.Key_Right) else 0)
+            dy = (-1 if event.key() in (Qt.Key_W, Qt.Key_Up)
+                  else 1 if event.key() in (Qt.Key_S, Qt.Key_Down) else 0)
+            # 按住手柄 ⇒ 等比缩放（与原地编辑一致）；否则移动图形本身。
+            # 这条分支以前只写在遮罩里，导致窗口编辑（独立编辑器）按键永远是"整体移动"。
+            logging.getLogger("screensnap").debug(
+                "画布按键去向：手柄=%s dx=%s dy=%s 分支=%s",
+                self.active_handle(), dx, dy,
+                "旋转" if self.active_handle() == "rotate" else "缩放/移动")
+            if self.active_handle() == "rotate":
+                # 旋转手柄 + 方向键：上和右 = 顺时针，下和左 = 逆时针（用户定义）。
+                spin = 1 if (dy < 0 or dx > 0) else -1
+                if self.rotate_selected(spin):
+                    event.accept()
+                    return
+            elif self.active_handle():
+                if self.resize_selected(dx, dy):
+                    event.accept()
+                    return
+            if self.nudge_selected(dx, dy):
+                event.accept()
+                return
         if event.key() == Qt.Key_Escape:
             if self.chain_active and self._chain_tool():
                 self._finish_chain()

@@ -452,26 +452,6 @@ class InlineEditor(QWidget):
         mapped = QMouseEvent(event_type, QPointF(local), QPointF(view.mapToGlobal(local)),
                              event.button(), event.buttons(), event.modifiers())
         point = view.to_physical_point(local)
-        if (event_type == QEvent.MouseButtonPress and event.button() == Qt.LeftButton
-
-                and QGuiApplication.keyboardModifiers() & (Qt.AltModifier | Qt.ControlModifier)):
-            # 取色必须优先于"手柄/边线"判断：否则 Alt+左键会落回画布，遮罩的取色分支收不到事件
-            # （日志实证：取色模式已开启，但遮罩里没有 取色取样 记录）。
-            # 同一次点击会被画布与视口各转发一次：按"位置 + 时间"去重，避免取样两次（两声提示音）。
-            key = (local.x(), local.y())
-            now = time.monotonic()
-            if (getattr(view, "_picker_forward_key", None) == key
-                    and now - getattr(view, "_picker_forward_at", 0.0) < 0.2):
-                logging.getLogger("screensnap").debug(
-                    "取色转发去重：忽略重复点击 (%d,%d)", local.x(), local.y())
-                return True
-            view._picker_forward_key = key
-            view._picker_forward_at = now
-            logging.getLogger("screensnap").debug(
-                "取色转发：控件=%s 映射局部点=(%d,%d)",
-                type(watched).__name__, local.x(), local.y())
-            view.mousePressEvent(mapped)
-            return True
         if event_type == QEvent.MouseMove:
             view.mouseMoveEvent(mapped)
             return view.selection.resizing is not None or view.selection.dragging is not None
@@ -484,6 +464,14 @@ class InlineEditor(QWidget):
                     rect.contains(point) for rect in view.selection.rects):
                 view.position = point
                 view.selection.nudge_corner = None
+                # 【手柄状态 = 独立状态，只在“鼠标按下”这一刻判定，松开前不再更新】
+                # 压在标注手柄上 ⇒ _active_handle 非空 ⇒ 方向键/WASD 走“缩放微调”；
+                # 压在标注中间   ⇒ _active_handle 为空 ⇒ 方向键/WASD 走“移动标注图形”。
+                # 绝不能改成用实时光标判定：缩放会把手柄移开指针，中途判定会翻转成“移动”（实测）。
+                # 用 getattr 逐层兜底：有些路径（含测试桩）连 session 都没有，直接取属性会抛错。
+                _editor = getattr(getattr(self, "session", None), "inline_editor", None)
+                _ic = getattr(_editor, "canvas", None) if _editor is not None else None
+                view._active_handle = (_ic.pointer_handle(QCursor.pos()) if _ic is not None else None)
         elif event_type == QEvent.MouseButtonRelease and (view.selection.resizing is not None or
                                                           view.selection.dragging is not None):
             view.mouseReleaseEvent(mapped)
@@ -2168,6 +2156,28 @@ class MaskWindow(QWidget):
         # 规则：最近一次微调（抓住控制点按方向键）在 0.3 秒内 → S 当作"下移"；否则 S 是快捷保存。
         # 依据实测：按住鼠标时 resizing 有时为真有时为假，唯有"最近微调时间"稳定可判。
         recently_nudged = (time.monotonic() - getattr(self, "_nudge_at", 0.0)) <= 0.3
+        _canvas = getattr(getattr(self.session, "inline_editor", None), "canvas", None)
+        _on_edge = (self.selection.handle_at(self.position) is not None
+                    or self.selection.border_at(self.position)
+                    or getattr(self, "_active_handle", None) is not None
+                    or (_canvas is not None and _canvas.active_handle() is not None))
+        if (QApplication.mouseButtons() & Qt.LeftButton) and _canvas is not None \
+                and _canvas.scene_data.selectedItems():
+            if _on_edge and _canvas.active_handle() == "rotate":
+                # 压住【旋转手柄】时 S 与 ↓ 一致 = 逆时针（上和右=顺时针，下和左=逆时针），
+                # 不再走缩放分支 —— 之前这里一律 resize_selected(0,1)，真机上表现为"S 触发缩放"。
+                _canvas.rotate_selected(-1)
+                return
+            if _on_edge:
+                # 压住其它手柄：S 与 ↓ 一致 —— 等比缩放一步。
+                # 注意：resize_selected 对没有 rect() 的标注（文字/箭头/画笔）会返回 False，
+                # 此时也必须 return —— 否则会掉进“快捷保存”，表现为“按住时 S 反而保存了”（实测反馈）。
+                _canvas.resize_selected(0, 1)
+                return
+            # 按住标注中间：S = 标注下移 1 像素，不是保存。
+            _canvas.nudge_selected(0, 1)
+            return
+        
         if (getattr(self, "_grip_down", False)
                 or self.selection.resizing is not None or self.selection.dragging is not None
                 or (self.selection.nudge_corner is not None and recently_nudged)):
@@ -2646,6 +2656,47 @@ class MaskWindow(QWidget):
             elif event.modifiers() == Qt.NoModifier:
                 dx = (-1 if key in (Qt.Key_A, Qt.Key_Left) else 1 if key in (Qt.Key_D, Qt.Key_Right) else 0)
                 dy = (-1 if key in (Qt.Key_W, Qt.Key_Up) else 1 if key == Qt.Key_Down else 0)
+                canvas = getattr(self.session.inline_editor, "canvas", None)
+                # 判定全量留痕（D13）：一次按键即可看出是"按键没到""没选中标注""判定挡住了"，
+                # 还是"被手柄分支放行"。诊断用，低频（只在按键时打）。
+                logging.getLogger("screensnap").debug(
+                    "原地编辑按键判定：key=%s dx=%s dy=%s 左键按住=%s 选中标注=%s "
+                    "选区手柄=%s 标注手柄=%s",
+                    key, dx, dy, bool(QApplication.mouseButtons() & Qt.LeftButton),
+                    len(canvas.scene_data.selectedItems()) if canvas is not None else -1,
+                    self.selection.handle_at(self.position) is not None
+                    or self.selection.border_at(self.position),
+                    bool(canvas is not None and canvas.pointer_on_handle(QCursor.pos())))
+                # 只有“左键确实按着”且“没压在手柄/边线上”时，方向键才移动标注图形本身；
+                # 压在手柄/边线上时交给下面的选区微调/缩放（两者不能混）。用 mouseButtons() 判断
+                # 真实按键状态，避免“松开后仍能移动”的假按住。
+                # 顺序：先手柄、后本体 —— 手柄常常就压在标注区域内，顺序反了会误判成移动。
+                on_handle = (getattr(self, "_active_handle", None) is not None
+                             or (canvas is not None and canvas.active_handle() is not None))
+                on_edge = (self.selection.handle_at(self.position) is not None
+                           or self.selection.border_at(self.position)
+                           or on_handle)
+                if (canvas is not None and on_edge and on_handle
+                        and (QApplication.mouseButtons() & Qt.LeftButton)
+                        and canvas.scene_data.selectedItems()):
+                    logging.getLogger("screensnap").debug(
+                        "原地编辑按键去向：手柄=%s（遮罩记忆=%s）dx=%s dy=%s 分支=%s",
+                        canvas.active_handle(), getattr(self, "_active_handle", None), dx, dy,
+                        "旋转" if canvas.active_handle() == "rotate" else "缩放")
+                    if canvas.active_handle() == "rotate":
+                        # 旋转手柄 + 方向键：上和右 = 顺时针，下和左 = 逆时针。
+                        canvas.rotate_selected(1 if (dy < 0 or dx > 0) else -1)
+                        event.accept()
+                        return
+                    # 其余手柄：等比缩放微调（以中心为基准，四边一起动）。
+                    if canvas.resize_selected(dx, dy):
+                        event.accept()
+                        return
+                if (QApplication.mouseButtons() & Qt.LeftButton) and not on_edge \
+                        and canvas is not None and canvas.scene_data.selectedItems():
+                    if canvas.nudge_selected(dx, dy):
+                        event.accept()
+                        return
                 if (dx or dy) and self.selection.rects:
                     # 只有指针正压在手柄/边线上，或此前真正抓住过（nudge_corner 记忆）才微调：
                     # 从未抓过时方向键既不移动、也不写下微调记忆（记忆会顺带把 S 快捷保存禁用掉）。

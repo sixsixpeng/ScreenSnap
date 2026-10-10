@@ -19,6 +19,303 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class CanvasTests(CoreTests):
+    def test_text_input_dialog_is_kept_on_top_of_the_mask(self):
+        """回归（2026-10-10 真机反馈）：原地编辑里文字输入弹窗被置顶遮罩挡住看不见。
+
+        这里用桩替换对话框，断言画布在弹出前设置了 WindowStaysOnTopHint 并抬升窗口。
+        """
+        from unittest.mock import patch as _patch
+        from config.config_manager import DEFAULTS
+        from PySide6.QtWidgets import QDialog
+
+        editor = EditorWindow(Image.new("RGB", (60, 60), "white"), dict(DEFAULTS))
+        calls = {}
+
+        class StubDialog(QDialog):
+            def __init__(self, parent, *a, **kw):
+                super().__init__(parent)
+                calls["flags"] = 0
+                calls["raised"] = False
+
+            def setWindowFlag(self, flag, on=True):
+                calls["flags"] = flag
+                return super().setWindowFlag(flag, on)
+
+            def raise_(self):
+                calls["raised"] = True
+                return super().raise_()
+
+            def activateWindow(self):
+                calls["activated"] = True
+                return super().activateWindow()
+
+            def exec(self):
+                return QDialog.Rejected
+
+        with _patch("editor.text_input_dialog.TextInputDialog", StubDialog):
+            editor.canvas.input_text("文字")
+        self.assertEqual(calls.get("flags"), Qt.WindowStaysOnTopHint,
+                         "文字输入对话框必须置顶，否则会被截图遮罩挡住")
+        self.assertTrue(calls.get("raised"), "应显式抬升对话框")
+        self.assertTrue(calls.get("activated"), "应激活对话框")
+    def test_rotation_aware_resize_direction_and_rotate_handle_keys(self):
+        """① 旋转后缩放方向以【当前实际朝向】为准；② 旋转手柄 + 方向键 = 旋转（↑/→ 顺时针）。
+
+        方向规则（用户 2026-10-10 定义）：把屏幕方向用标注自身的场景变换逆映射到它的
+        局部轴，再决定放大还是缩小 —— 所以旋转 180° 后，屏幕「→」对 e 手柄是「往左移」＝缩小。
+        """
+        from PySide6.QtCore import QRectF
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationRectItem
+
+        editor = EditorWindow(Image.new("RGB", (80, 80), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        item = AnnotationRectItem(QRectF(0, 0, 20, 20))
+        item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+        canvas.scene_data.addItem(item)
+        canvas.scene_data.clearSelection()
+        item.setSelected(True)
+        # ② 旋转手柄 + 方向键 ⇒ 旋转（每次 1 度，→ 顺时针＝角度变大）
+        canvas._active_handle_name = "rotate"
+        angle0 = item.rotation()
+        self.assertTrue(canvas.rotate_selected(1), "旋转手柄应能旋转")
+        self.assertGreater(item.rotation(), angle0, "→ 应为顺时针（角度增加）")
+        before_center = item.mapToScene(item.boundingRect().center())
+        canvas.rotate_selected(-1)
+        after_center = item.mapToScene(item.boundingRect().center())
+        self.assertAlmostEqual(before_center.x(), after_center.x(), places=3, msg="旋转中心不漂")
+        self.assertAlmostEqual(before_center.y(), after_center.y(), places=3, msg="旋转中心不漂")
+        # ① 未旋转：e 手柄在右边 ⇒ 屏幕 → 放大
+        item.setRotation(0.0)
+        canvas._active_handle_name = "e"
+        size0 = item.mapToScene(item.boundingRect()).boundingRect().size()
+        canvas.resize_selected(1, 0)
+        size1 = item.mapToScene(item.boundingRect()).boundingRect().size()
+        self.assertGreater(size1.width(), size0.width(), "未旋转时 → 应放大")
+        # ① 旋转 180°：e 手柄视觉上跑到左边 ⇒ 同一个屏幕 → 应该缩小（以实际方向为准）
+        item.setRotation(180.0)
+        size2 = item.mapToScene(item.boundingRect()).boundingRect().size()
+        canvas.resize_selected(1, 0)
+        size3 = item.mapToScene(item.boundingRect()).boundingRect().size()
+        self.assertLess(size3.width(), size2.width(),
+                        "旋转 180° 后 e 手柄在左侧 ⇒ 屏幕 → 应变小（按当前实际方向）")
+        # 反向对称：旋转 180° 后屏幕 ← 应放大
+        size4 = item.mapToScene(item.boundingRect()).boundingRect().size()
+        canvas.resize_selected(-1, 0)
+        size5 = item.mapToScene(item.boundingRect()).boundingRect().size()
+        self.assertGreater(size5.width(), size4.width(), "旋转 180° 后 ← 应放大")
+    def test_all_annotation_types_cover_nudge_and_resize(self):
+        """规则 29：全部标注类型逐个核对「微调移动 + 手柄等比缩放」。"""
+        from PySide6.QtCore import QPointF, QRectF
+        from PySide6.QtGui import QPainterPath, QPixmap
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import (
+            AnnotationRectItem, AnnotationEllipseItem, AnnotationPathItem, AnnotationTextItem,
+            AnnotationPixmapItem, AnnotationSequenceItem, EraseMaskItem, RoundedRectItem)
+
+        def pen_path():
+            path = QPainterPath(QPointF(0, 0))
+            path.lineTo(10, 0)
+            path.lineTo(10, 10)
+            return path
+
+        editor = EditorWindow(Image.new("RGB", (80, 80), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        factories = {
+            "rect": lambda: AnnotationRectItem(QRectF(0, 0, 10, 10)),
+            "ellipse": lambda: AnnotationEllipseItem(QRectF(0, 0, 10, 10)),
+            "rounded": lambda: RoundedRectItem(QRectF(0, 0, 10, 10), 3),
+            "pen": lambda: AnnotationPathItem(pen_path()),
+            "text": lambda: AnnotationTextItem("x"),
+            "pixmap": lambda: AnnotationPixmapItem(QPixmap(12, 12)),
+            "sequence": lambda: AnnotationSequenceItem(1),
+        }
+        covered = []
+        for name, make in factories.items():
+            with self.subTest(annotation=name):
+                item = make()
+                item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+                canvas.scene_data.addItem(item)
+                canvas.scene_data.clearSelection()
+                item.setSelected(True)
+                self.assertIn(item, canvas.scene_data.selectedItems(), f"{name}: 应可选中")
+                center0 = item.mapToScene(item.boundingRect().center())
+                self.assertTrue(canvas.nudge_selected(1, 0), f"{name}: 移动应生效")
+                center1 = item.mapToScene(item.boundingRect().center())
+                self.assertNotAlmostEqual(center0.x(), center1.x(), places=3, msg=f"{name}: 移动应改变中心")
+                size0 = item.mapToScene(item.boundingRect()).boundingRect().size()
+                canvas._active_handle_name = "se"
+                self.assertTrue(canvas.resize_selected(1, 0), f"{name}: 手柄缩放应生效")
+                size1 = item.mapToScene(item.boundingRect()).boundingRect().size()
+                self.assertGreater(size1.width(), size0.width(), f"{name}: 宽度应变大")
+                self.assertGreater(size1.height(), size0.height(), f"{name}: 等比 ⇒ 高度也要变大")
+                center2 = item.mapToScene(item.boundingRect().center())
+                self.assertAlmostEqual(center1.x(), center2.x(), places=3, msg=f"{name}: 缩放中心不漂")
+                covered.append(name)
+        erase = EraseMaskItem(None, 20, 20)
+        self.assertFalse(bool(erase.flags() & QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable),
+                         "橡皮层按设计不可选中（不参与微调）")
+        self.assertFalse(bool(erase.flags() & QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable),
+                         "橡皮层按设计不可移动")
+        print("  已覆盖标注类型:", ", ".join(covered), "+ 橡皮层(设计上不可选中)")
+        self.assertGreaterEqual(len(covered), 7, "七种类型都要真跑过")
+
+    def test_both_editors_share_canvas_and_handle_scaling(self):
+        """规则 7：两个编辑器（独立 EditorWindow / 原地 InlineEditor）行为一致。
+
+        bounds 必须是 dict（MaskWindow 会遍历它）；原地编辑器在 mask.complete() 之后才建立
+        —— 这两点照抄通过用例 test_canvas.py 的既有夹具。
+        """
+        from PySide6.QtCore import QPointF, QRect, QRectF
+        from PySide6.QtGui import QPainterPath
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from editor.annotation_items import AnnotationRectItem, AnnotationPathItem
+
+        standalone = EditorWindow(Image.new("RGB", (80, 80), "white"), dict(DEFAULTS))
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = {**DEFAULTS, "filename": "inline", "inline_edit": True, "magnifier": False}
+        settings["capture_after_selection"] = "edit"
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+        mask.selection.rects.append(QRect(10, 12, 60, 40))
+        mask.complete()
+        self.app.processEvents()
+        inline = mask.session.inline_editor
+        self.assertIsNotNone(inline, "原地编辑应已创建")
+        self.assertEqual(type(inline.canvas).__name__, type(standalone.canvas).__name__,
+                         "两个编辑器应共享同一个画布类")
+        for label, canvas in (("独立编辑", standalone.canvas), ("原地编辑", inline.canvas)):
+            with self.subTest(editor=label):
+                item = AnnotationRectItem(QRectF(0, 0, 10, 10))
+                item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+                canvas.scene_data.addItem(item)
+                canvas.scene_data.clearSelection()
+                item.setSelected(True)
+                size0 = item.mapToScene(item.boundingRect()).boundingRect().size()
+                canvas._active_handle_name = "se"
+                self.assertTrue(canvas.resize_selected(1, 0), f"{label}: 手柄缩放应生效")
+                size1 = item.mapToScene(item.boundingRect()).boundingRect().size()
+                self.assertGreater(size1.width(), size0.width(), f"{label}: 宽度应变大")
+                self.assertGreater(size1.height(), size0.height(), f"{label}: 等比 ⇒ 高度也要变大")
+                canvas._active_handle_name = None
+                pos0 = item.pos()
+                self.assertTrue(canvas.nudge_selected(1, 0), f"{label}: 移动应生效")
+                self.assertNotEqual(item.pos(), pos0, f"{label}: 移动应改变位置")
+        print("  两个编辑器均通过（共享 %s）" % type(standalone.canvas).__name__)
+
+    def test_resize_and_nudge_cover_every_annotation_type(self):
+        """逐类型核对：微调移动 + 手柄等比缩放，覆盖画布里所有标注类型。
+
+        表驱动（规则 26/29）：每一种类型单独一个 subTest，构造失败也算该类型未通过 ——
+        不允许用沉默跳过把「没验到」伪装成通过。
+        """
+        from PySide6.QtCore import QRectF, QPointF
+        from PySide6.QtGui import QPainterPath
+        from PySide6.QtWidgets import QGraphicsRectItem, QGraphicsView
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import (
+            AnnotationRectItem, AnnotationEllipseItem, AnnotationPathItem,
+            AnnotationTextItem, RoundedRectItem)
+
+        def _pen_path():
+            path = QPainterPath(QPointF(0, 0))
+            path.lineTo(10, 0)
+            path.lineTo(10, 10)
+            return path
+
+        editor = EditorWindow(Image.new("RGB", (80, 80), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        factories = {
+            "rect": lambda: AnnotationRectItem(QRectF(0, 0, 10, 10)),
+            "ellipse": lambda: AnnotationEllipseItem(QRectF(0, 0, 10, 10)),
+            "rounded": lambda: RoundedRectItem(QRectF(0, 0, 10, 10), 3),
+            # 路径必须有非退化几何（单点路径包围盒是 0x0，会把断言测成"没变化"）。
+            "pen(path)": lambda: AnnotationPathItem(_pen_path()),
+            "text": lambda: AnnotationTextItem("x"),
+        }
+        results = []
+        for name, make in factories.items():
+            with self.subTest(annotation=name):
+                item = make()
+                item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+                canvas.scene_data.addItem(item)
+                canvas.scene_data.clearSelection()
+                item.setSelected(True)
+                self.assertIn(item, canvas.scene_data.selectedItems())
+                center_before = item.mapToScene(item.boundingRect().center())
+                moved = canvas.nudge_selected(1, 0)
+                center_after_move = item.mapToScene(item.boundingRect().center())
+                self.assertTrue(moved, f"{name}: 移动应生效")
+                self.assertNotAlmostEqual(center_before.x(), center_after_move.x(), places=3,
+                                          msg=f"{name}: 移动后中心应改变")
+                size_before = item.mapToScene(item.boundingRect()).boundingRect().size()
+                canvas._active_handle_name = "se"
+                scaled = canvas.resize_selected(1, 0)
+                size_after = item.mapToScene(item.boundingRect()).boundingRect().size()
+                self.assertTrue(scaled, f"{name}: 缩放应生效")
+                self.assertGreater(size_after.width(), size_before.width(), f"{name}: 宽度应变大")
+                self.assertGreater(size_after.height(), size_before.height(), f"{name}: 等比 ⇒ 高度也要变大")
+                center_final = item.mapToScene(item.boundingRect().center())
+                self.assertAlmostEqual(center_after_move.x(), center_final.x(), places=3,
+                                       msg=f"{name}: 缩放中心不应漂移")
+                self.assertAlmostEqual(center_after_move.y(), center_final.y(), places=3,
+                                       msg=f"{name}: 缩放中心不应漂移")
+                results.append(name)
+        print("  已覆盖标注类型:", ", ".join(results))
+        self.assertGreaterEqual(len(results), 3, "至少三种类型要真跑过")
+
+    def test_resize_selected_scales_rect_item_by_one_pixel(self):
+        """手柄上的键盘缩放：宽、高各 ±1px，且 QRect/QRectF 两种 rect() 都要生效。
+
+        回归用例（2026-10-10）：resize_selected 曾因只认 QRectF、以及漏 import QRect（NameError）
+        而在真机上整条路静默失效 —— 按键压住标注手柄完全不见缩放。
+        """
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from config.config_manager import DEFAULTS
+
+        editor = EditorWindow(Image.new("RGB", (60, 60), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        item = QGraphicsRectItem(0, 0, 10, 10)
+        item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+        item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
+        canvas.scene_data.addItem(item)
+        item.setSelected(True)
+        self.assertIn(item, canvas.scene_data.selectedItems(), "前置条件：标注必须处于选中状态")
+        # 新契约（2026-10-10 用户定义）：角标 = 以【中心】为基准等比拉伸，四条边一起动。
+        before_center = item.mapToScene(item.boundingRect().center())
+        self.assertTrue(canvas.resize_selected(1, 0), "角标向右应放大")
+        self.assertGreater(item.rect().width(), 10, "宽度应变大")
+        self.assertGreater(item.rect().height(), 10, "等比拉伸时高度也要跟着变大")
+        self.assertAlmostEqual(item.rect().width() / item.rect().height(), 1.0, places=3,
+                               msg="等比：长宽比应保持 1:1")
+        after_center = item.mapToScene(item.boundingRect().center())
+        self.assertAlmostEqual(before_center.x(), after_center.x(), places=3, msg="中心不应漂移")
+        self.assertAlmostEqual(before_center.y(), after_center.y(), places=3, msg="中心不应漂移")
+        # 窗口编辑（独立编辑器）的按键路径：按住手柄 ⇒ 缩放；未按手柄 ⇒ 移动。
+        from PySide6.QtTest import QTest
+        from PySide6.QtCore import Qt as _Qt
+        canvas._active_handle_name = "se"
+        w_before = item.rect().width()
+        QTest.keyClick(canvas, _Qt.Key_Right)
+        self.assertGreater(item.rect().width(), w_before,
+                           "窗口编辑里按住手柄按 → 应缩放（不是整体移动）")
+        canvas._active_handle_name = None
+        pos_before = item.pos()
+        QTest.keyClick(canvas, _Qt.Key_Right)
+        self.assertNotEqual(item.pos(), pos_before, "未按手柄时按 → 应移动图形")
+        # 边中点同样等比（用户确认：不是「只拉一个轴」）：宽高都要变，且长宽比不变。
+        canvas._active_handle_name = "n"
+        w0, h0 = item.rect().width(), item.rect().height()
+        self.assertTrue(canvas.resize_selected(0, -1), "上中点按 ↑ 应缩放")
+        self.assertGreater(item.rect().width(), w0, "边中点缩放时宽度也要变（等比）")
+        self.assertGreater(item.rect().height(), h0, "边中点缩放时高度也要变（等比）")
+        self.assertAlmostEqual(item.rect().width() / item.rect().height(), 1.0, places=3,
+                               msg="边中点也要保持长宽比")
+
     def test_picked_color_updates_active_annotation_color(self):
         from PySide6.QtGui import QGuiApplication
         from config.config_manager import DEFAULTS
