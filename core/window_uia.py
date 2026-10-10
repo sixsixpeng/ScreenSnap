@@ -353,7 +353,14 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
             if win_rect is not None:
                 rect = _clamp_rect(rect, win_rect)
             return [rect]
-        chain = climb(control, handle, max_depth, logger, win_rect, cache)
+        # Tab 的层级链必须从【与悬停相同的最深控件】往上爬：
+        # 只用 control_at 的结果时，虚拟化列表/资源管理器常常只给到列表容器，
+        # 于是 Tab 只能在窗口和几个大容器之间循环，回不到鼠标下的小元素
+        # （用户 2026-10-11 在资源管理器实测：悬停能看到文件行，Tab 回不去）。
+        # 复用悬停同款下钻：同一线程、同一读取预算与熔断，不新增风险类型，
+        # 而且 Tab 的频率远低于悬停轮询。
+        deep = deepest_at(control, x, y, logger, cache=cache)
+        chain = climb(deep, handle, max_depth, logger, win_rect, cache)
         logger.debug("UIA 识别到 %d 层元素: %s", len(chain), chain)
         return chain
     except Exception as error:

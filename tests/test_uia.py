@@ -16,6 +16,41 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class UiaTests(CoreTests):
+    def test_element_chain_starts_from_the_same_deepest_control_as_hover(self):
+        """回归（用户 2026-10-11，资源管理器实测）：Tab 只能在窗口与几个大容器间循环，
+        回不到鼠标下的小元素；原因是 query() 的非悬停路径直接用 control_at 的结果往上爬，
+        少了悬停那次的 deepest_at 下钻。这里用桩断言二者一致（不触发真实 UIA）。"""
+        import logging
+        from unittest.mock import patch as _patch
+        from core import window_uia
+
+        shallow = object()
+        deep = object()
+        calls = {}
+
+        def fake_control_at(*a, **kw):
+            return shallow
+
+        def fake_deepest_at(control, x, y, logger, limit=None, cache=None, read_budget=None):
+            calls["deepest_from"] = control
+            return deep
+
+        def fake_climb(control, *a, **kw):
+            calls["climb_from"] = control
+            return ["chain"]
+
+        with _patch.object(window_uia, "control_at", fake_control_at), \
+                _patch.object(window_uia, "deepest_at", fake_deepest_at), \
+                _patch.object(window_uia, "climb", fake_climb), \
+                _patch.object(window_uia, "top_window_at", lambda *a, **kw: 12345), \
+                _patch.object(window_uia, "physical_rect_of", lambda *a, **kw: (0, 0, 10, 10)), \
+                _patch.object(window_uia, "module", lambda: object()):
+            chain = window_uia.query(object(), (5, 5), 8, logging.getLogger("t"))
+        self.assertEqual(chain, ["chain"])
+        self.assertIs(calls.get("deepest_from"), shallow, "应先对点上控件做一次下钻")
+        self.assertIs(calls.get("climb_from"), deep,
+                      "往上爬必须从下钻后的最深控件开始，否则 Tab 回不到小元素")
+
     def test_general_page_reset_restores_uia_and_hover_interval(self):
         from config.config_manager import DEFAULTS
         from ui.settings_window import SettingsWindow

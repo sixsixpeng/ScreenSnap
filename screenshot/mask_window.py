@@ -3058,7 +3058,10 @@ class MaskWindow(QWidget):
             return
         # 已经画出选区后不再提示元素：这时用户在调整或确认自己的选区，
         # 继续高亮只会干扰（也是“截图完了还在识别”的来源）。
-        if not self.hover_detection_enabled() or self.selection.rects:
+        # 只有【手动画出的】选区才关掉悬停提示；UIA/元素选区（单击元素或 Tab 切层级）必须继续悬停 ——
+        # 否则一旦用 Tab 选过一层，鼠标再移动就永远不提示区域了（用户 2026-10-11 反馈）。
+        if not self.hover_detection_enabled() or (
+                self.selection.rects and not self.session.element_selected):
             self.hover_rect = None
             self.hover_source_rect = None
             return
@@ -3134,9 +3137,16 @@ class MaskWindow(QWidget):
             return
         if not self.settings.get("window_detection", True):
             return
+        # 层级链必须对应【鼠标当前位置】：指针移动过就丢弃旧链重新解析，
+        # 否则 Tab / Shift+Tab 会在上一个位置的层级里空转（用户 2026-10-11 要求）。
+        chain_point = getattr(self, "_element_chain_point", None)
+        if chain_point is None or (self.position - chain_point).manhattanLength() > 2:
+            self.element_chain = []
+            self.element_index = -1
         if not self.element_chain and not self.detect_elements():
             logging.getLogger("screensnap").debug("鼠标下没有可识别的窗口或控件")
             return
+        self._element_chain_point = QPoint(self.position)
         if self.element_index < 0:
             self.element_index = 0 if step > 0 else len(self.element_chain) - 1
         else:

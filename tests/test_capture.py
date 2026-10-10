@@ -963,6 +963,56 @@ class CaptureTests(CoreTests):
         self.assertIn("右键继续框选", collecting["multi_select"])
         self.assertNotIn("右键双击直存", collecting["save"])
 
+    def test_hover_stays_alive_after_element_selection(self):
+        """回归（用户 2026-10-11）：Tab/单击元素选中一层后，鼠标再移动就不再提示区域了。
+
+        契约：只有【手动画出的】选区才关掉悬停提示；UIA/元素选区（单击元素、Tab 切层级）必须继续悬停，
+        否则「自动拾取」被整体干掉。另外层级链要跟随鼠标位置重解析。
+        """
+        from unittest.mock import patch as _patch
+        from PySide6.QtCore import QPoint, QRect, Qt
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 160}
+        settings = {**DEFAULTS, "inline_edit": True, "magnifier": False,
+                    "window_detection": True, "window_uia_detect": True}
+        with _patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (200, 160), "blue"), bounds, [bounds], settings)
+        mask.show()   # poll_hover 第一句就是 isVisible() 早退（遮罩不可见时不查询）
+        self.app.processEvents()
+        view = mask.session.views[0]
+        calls = []
+        view.detect_hover = lambda: calls.append(1) or None
+        # 悬停总开关本身另有覆盖：这里打桩为开，专测「元素选区不关悬停」这一条契约。
+        view.hover_detection_enabled = lambda: True
+        # 物理全局点必须落在该遮罩的物理矩形内（bounds 从 0,0 起 ⇒ 物理即局部）。
+        inside = QPoint(100, 80)
+        with _patch("screenshot.mask_window.QCursor.pos", return_value=inside):
+            # ① 手绘选区（element_selected=False）⇒ 悬停被抑制
+            view.session.element_selected = False
+            view.selection.rects.clear()
+            view.selection.rects.append(QRect(5, 5, 20, 20))
+            view.hover_rect = None
+            view.hover_stamp = 0.0
+            calls.clear()
+            view.poll_hover()
+            self.assertEqual(calls, [], "手绘选区存在时应抑制悬停提示")
+            # ② 元素选区（Tab 切层/单击元素）⇒ 悬停必须继续工作
+            view.session.element_selected = True
+            view.hover_stamp = 0.0
+            calls.clear()
+            view.poll_hover()
+            self.assertTrue(calls, "元素选区（Tab 选中）后仍应继续解析悬停，不能把自动拾取整体关掉")
+        # ③ 层级链跟随鼠标位置：指针移动后旧链必须被丢弃
+        view.element_chain = [(0, 0, 10, 10)]
+        view.element_index = 0
+        view._element_chain_point = QPoint(-999, -999)
+        detected = []
+        view.detect_elements = lambda: detected.append(1) or False
+        view.position = QPoint(30, 30)
+        view.cycle_element(1)
+        self.assertTrue(detected, "指针位置变化后 Tab 必须重新解析当前位置的层级链")
     def test_inline_hints_only_show_supported_actions(self):
         """原地编辑提示只发当前工具实际支持的动作：二次编辑要选择工具，快速贴图始终不发。"""
         from config.config_manager import DEFAULTS
