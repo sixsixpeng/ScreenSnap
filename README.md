@@ -548,6 +548,15 @@ Win11 Toast 模式下，截图图片提示缓存本地 PNG 作为 hero 图片，
 | `log_dir` | `""` | 自定义日志根目录；留空使用程序目录下 `logs`。 |
 
 > **原生崩溃看 `crash.log`**：访问违规（0xC0000005）、堆损坏（0xC0000374）这类**原生崩溃**不会走 `sys.excepthook`，`app.log` 最后一行往往停在正常业务日志上，看起来像「崩溃却没有日志」。程序启动时已通过 `faulthandler` 把致命错误发生时**所有线程的 Python 栈**写入日志目录下同级的 `crash.log`（`logger/log_setup.py` 的 `enable_crash_dumps`）。排查顺序：① 看 `app.log` 最后一行定位最后动作 → ② 若没有任何 Python 异常栈，打开 `logs/YYYY-MM/crash.log` → ③ 按栈定位；手工复现时也可用 `python -X faulthandler -m unittest tests.<模块> -k <关键词>` 直接拿到崩溃栈。
+- **崩溃自动重启（看护）**：`python main.py` 启动时会把控制权交给看护（`supervisor.py`），由看护把程序作为**子进程**运行。
+  子进程异常退出（含原生崩溃，例如访问违规 `0xC0000005` / 退出码 `3221225477`）时 **1 秒后自动重启**；
+  **300 秒内最多 3 次**，超限写 `logs/supervisor.log` 并停止自动重启。正常退出（托盘退出）时看护一起退出。
+  重启后托盘提示「ScreenSnap 上次异常退出（code=…），已自动重启」，`app.log` 记一条 `WARNING`。
+  关闭看护（单进程调试）：设环境变量 `SCREENSNAP_NO_WATCHDOG=1`。
+- **崩溃复现开关（仅测试用）**：`python main.py --crash-test 4` —— 启动 4 秒后制造一次真实的进程终止（`os.abort()`，退出码 3），
+  用于验证「崩溃 → `crash.log` 落盘 → 1 秒后自动重启 → 托盘提示」整条链路。
+  只在**首次启动**崩一次：参数会被摘掉，看护重启出来的子进程不再自崩（否则会连续重启）。省略秒数时默认 5 秒。
+
 
 ### 贴图会话与吸附设置
 

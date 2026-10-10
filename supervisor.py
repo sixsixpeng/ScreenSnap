@@ -55,8 +55,11 @@ def main(argv=None, command=None, limit=LIMIT, window=WINDOW, backoff=BACKOFF):
     while True:
         started = time.monotonic()
         env = None
+        env = dict(os.environ)
+        env["SCREENSNAP_SUPERVISED"] = "1"
         if restarted_from is not None:
-            env = dict(os.environ)
+            # 崩溃复现开关只对首次启动生效，重启出来的进程不再自崩。
+            env.pop("SCREENSNAP_CRASH_TEST", None)
             env[chr(83) + chr(67) + chr(82) + chr(69) + chr(69) + chr(78) + chr(83) + chr(78) + chr(65) + chr(80) + chr(95) + chr(82) + chr(69) + chr(83) + chr(84) + chr(65) + chr(82) + chr(84) + chr(69) + chr(68)] = str(restarted_from)
         code = subprocess.run(command, env=env).returncode
         if not should_restart(code):

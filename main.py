@@ -513,13 +513,64 @@ def delete_user_data_after_shutdown(instance_lock):
 
 
 
+def _crash_test_fault():
+    """仅供 --crash-test 使用：制造一次真实的原生访问违规（0xC0000005），"""
+    """用来验证「崩溃 → faulthandler 落盘 → 看护 1 秒后自动重启」这条链路。"""
+    logging.getLogger("screensnap").warning("崩溃复现开关触发：即将制造访问违规（--crash-test）")
+    # 注意：ctypes.string_at(0) 在本环境会被 Python 转成 OSError 并被
+    # bootstrap 的未捕获异常钩子接住 —— 进程不死，看护也就不会重启（实测）。
+    # faulthandler._sigsegv() 是真正的段错误，不可被 Python 捕获，进程直接终止。
+    import faulthandler
+    _sigsegv = getattr(faulthandler, "_sigsegv", None)
+    if _sigsegv is not None:
+        _sigsegv()
+    else:
+        import os
+        os.abort()
+
+
 if __name__ == "__main__":
+    # --crash-test N：只让“首次启动”崩一次。必须在交棒给看护**之前**解析并把参数摘掉，
+    # 否则看护会把 --crash-test 原样传给每个子进程 —— 表现为无限连续重启（实测）。
+    # 秒数改用环境变量传递；看护在重启子进程时会清掉它（supervisor.py）。
+    if "--crash-test" in sys.argv:
+        _index = sys.argv.index("--crash-test")
+        try:
+            _delay = float(sys.argv[_index + 1])
+            del sys.argv[_index:_index + 2]
+        except (IndexError, ValueError):
+            _delay = 5.0
+            del sys.argv[_index]
+        os.environ["SCREENSNAP_CRASH_TEST"] = str(_delay)
+    # 正常启动也带崩溃自动重启：首次启动把控制权交给看护循环（supervisor.main），
+    # 由它把本程序作为子进程运行并在异常退出后重启。已由看护启动（SUPERVISED=1）
+    # 或设置 SCREENSNAP_NO_WATCHDOG=1 时直接运行，避免递归。
+    if (os.environ.get("SCREENSNAP_SUPERVISED") != "1"
+            and os.environ.get("SCREENSNAP_NO_WATCHDOG") != "1"):
+        import supervisor
+        sys.exit(supervisor.main(sys.argv[1:]))
     instance_lock = acquire_single_instance_lock()
     if instance_lock is None:
         notify_existing_instance()
         sys.exit(0)
     install_exception_hooks()
     program = Application()
+    if "--crash-test" in sys.argv:
+        # 例：python main.py --crash-test 8  —— 8 秒后制造一次真实原生崩溃。
+        _index = sys.argv.index("--crash-test")
+        try:
+            _delay = float(sys.argv[_index + 1])
+        except (IndexError, ValueError):
+            _delay = 5.0
+            if "--crash-test" in sys.argv:
+                del sys.argv[sys.argv.index("--crash-test")]
+        # 只在首次启动崩一次：把秒数转成环境变量、把参数从 argv 摘掉，
+        # 这样看护重启出来的子进程不会再崩（否则会连续重启，实测过）。
+        os.environ["SCREENSNAP_CRASH_TEST"] = str(_delay)
+        del sys.argv[_index:_index + 2]
+    _crash_delay = os.environ.get("SCREENSNAP_CRASH_TEST")
+    if _crash_delay:
+        QTimer.singleShot(int(float(_crash_delay) * 1000), _crash_test_fault)
     exit_code = program.qt.exec()
     if program.reset_user_data_requested:
         if not delete_user_data_after_shutdown(instance_lock):
