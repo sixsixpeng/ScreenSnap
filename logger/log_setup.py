@@ -83,9 +83,9 @@ def configure_logging(settings):
         console.setFormatter(logging.Formatter(
             "%(asctime)s %(levelname)s %(module)s:%(lineno)d [%(context)s] %(message)s"))
         logger.addHandler(console)
-    return logger
-
+    # 必须在 return 之前调用：曾经写在 return 之后，等于死代码，crash.log 从未生成（2026-10-10 实测）。
     enable_crash_dumps(directory)
+    return logger
 
 
 # 原生崩溃（访问违规/堆损坏）不会走 sys.excepthook，日志里什么都留不下。faulthandler 会在
@@ -104,5 +104,7 @@ def enable_crash_dumps(directory):
         stream = open(path, "a", encoding="utf-8")
         faulthandler.enable(file=stream, all_threads=True)
         _CRASH_STREAM = stream
+        # 确认日志：这一行必须出现在 app.log 里，否则说明崩溃转储没启用（crash.log 也不会生成）。
+        logging.getLogger("screensnap").info("崩溃转储已启用: %s", path)
     except (OSError, ValueError, RuntimeError):
         pass
