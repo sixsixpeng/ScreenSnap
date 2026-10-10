@@ -58,6 +58,126 @@ class CanvasTests(CoreTests):
                          "文字输入对话框必须置顶，否则会被截图遮罩挡住")
         self.assertTrue(calls.get("raised"), "应显式抬升对话框")
         self.assertTrue(calls.get("activated"), "应激活对话框")
+    def test_clicking_blank_exits_edit_state_and_clicking_an_item_keeps_only_it(self):
+        """用户 2026-10-10：点击空白应让所有标注退出编辑态；点击某个标注则其它退出。"""
+        from PySide6.QtCore import QPoint, QRectF, Qt
+        from PySide6.QtGui import QPen
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationRectItem, editable
+
+        editor = EditorWindow(Image.new("RGB", (220, 180), "white"), dict(DEFAULTS))
+        editor.resize(380, 320)
+        editor.show()
+        canvas = editor.canvas
+        self.app.processEvents()
+        first = editable(AnnotationRectItem(QRectF(0, 0, 50, 40)))
+        first.setPen(QPen(Qt.red, 4))
+        second = editable(AnnotationRectItem(QRectF(0, 0, 50, 40)))
+        second.setPen(QPen(Qt.blue, 4))
+        canvas.scene_data.addItem(first)
+        canvas.scene_data.addItem(second)
+        first.setPos(30, 30)
+        second.setPos(120, 90)
+        canvas.set_tool("pen")
+        first.setSelected(True)
+        second.setSelected(True)
+        self.assertEqual(len(canvas.scene_data.selectedItems()), 2, "准备：两个都在编辑态")
+        blank = canvas.mapFromScene(canvas.sceneRect().topLeft() + QRectF(6, 6, 0, 0).topLeft())
+        QTest.mouseClick(canvas.viewport(), Qt.LeftButton, pos=blank)
+        self.app.processEvents()
+        self.assertEqual(canvas.scene_data.selectedItems(), [], "点击空白应退出所有标注的编辑态")
+        self.assertEqual(canvas.tool, "pen", "点击空白不应切换工具")
+        # 点击某个标注：只保留它，另一个退出编辑态
+        first.setSelected(True)
+        second.setSelected(True)
+        spot = canvas.mapFromScene(second.mapToScene(second.boundingRect().center()))
+        QTest.mouseClick(canvas.viewport(), Qt.LeftButton, pos=spot)
+        self.app.processEvents()
+        selected = canvas.scene_data.selectedItems()
+        self.assertEqual(len(selected), 1, "点击某个标注后应只剩它在编辑态")
+        self.assertIs(selected[0], second, "留下的应是点中的那个标注")
+        self.assertEqual(canvas.tool, "pen", "点击标注不应切换工具")
+        editor.close()
+    def test_handles_stay_draggable_with_a_drawing_tool(self):
+        """回归（用户 2026-10-10）：准备拖控制点却变成绘图。
+
+        任何工具下按在【选中标注的控制点】都必须进入缩放而不是落笔；
+        同时空白处框选仍只属于选择工具（不得放开）。
+        """
+        from PySide6.QtCore import QPoint, QRectF, Qt
+        from PySide6.QtGui import QPen
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationRectItem, editable
+
+        editor = EditorWindow(Image.new("RGB", (200, 160), "white"), dict(DEFAULTS))
+        editor.resize(360, 300)
+        editor.show()
+        canvas = editor.canvas
+        self.app.processEvents()
+        item = editable(AnnotationRectItem(QRectF(0, 0, 80, 60)))
+        item.setPen(QPen(Qt.red, 4))
+        canvas.scene_data.addItem(item)
+        item.setPos(50, 40)
+        canvas.set_tool("pen")
+        item.setSelected(True)
+        handles = canvas.item_resize_handles(item)
+        corner = canvas.mapFromScene(handles["se"])
+        count = len(canvas.annotations())
+        QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=corner)
+        self.app.processEvents()
+        self.assertIs(canvas.resizing, item, "按在控制点上应进入缩放，而不是落笔")
+        self.assertIsNone(getattr(canvas, "_deferred_pen", None), "按控制点不应触发延迟落笔")
+        QTest.mouseMove(canvas.viewport(), corner + QPoint(20, 16))
+        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=corner + QPoint(20, 16))
+        self.app.processEvents()
+        self.assertEqual(len(canvas.annotations()), count, "拖控制点不应新增标注")
+        # 说明：真实拖动放量在离屏合成事件里走不到（QTest.mouseMove 不带按键位），
+        # 这里只断言「进入了缩放抓取 + 没有落笔 + 没有新增标注」；
+        # 拖动放量的正确性由既有的控制点/按键微调用例覆盖。
+        self.assertEqual(canvas.tool, "pen", "拖控制点不应切换工具")
+        editor.close()
+    def test_click_enters_edit_state_while_drag_still_draws(self):
+        """规则 1（用户 2026-10-10）：点击=编辑、拖动=画图。
+
+        · 用画笔【单击】已有标注 ⇒ 该标注进入编辑态（被选中），工具不切换、不留下点状笔迹；
+        · 用画笔【按住拖动】⇒ 照常画图（在已有标注上也能画）。
+        """
+        from PySide6.QtCore import QPoint, QRectF, Qt
+        from PySide6.QtGui import QPen
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationRectItem, editable
+
+        editor = EditorWindow(Image.new("RGB", (200, 160), "white"), dict(DEFAULTS))
+        editor.resize(360, 300)
+        editor.show()
+        canvas = editor.canvas
+        self.app.processEvents()
+        # 必须走 editable()：否则图元没有 ItemIsSelectable，setSelected 会被静默忽略，
+        # 用例就会误报“没能进入编辑态”（真实代码建标注时都会调用 editable）。
+        item = editable(AnnotationRectItem(QRectF(0, 0, 70, 50)))
+        item.setPen(QPen(Qt.red, 4))
+        canvas.scene_data.addItem(item)
+        item.setPos(60, 50)
+        canvas.set_tool("pen")
+        center = canvas.mapFromScene(item.mapToScene(item.boundingRect().center()))
+        count = len(canvas.annotations())
+        # ① 单击已有标注 ⇒ 进入编辑态（注意 undo 无人调用，对象身份不变）
+        QTest.mouseClick(canvas.viewport(), Qt.LeftButton, pos=center)
+        self.app.processEvents()
+        selected = canvas.scene_data.selectedItems()
+        self.assertEqual(len(selected), 1, "单击已有标注应进入编辑态")
+        self.assertIs(selected[0], item, "进入编辑态的应是那个标注本身")
+        self.assertEqual(canvas.tool, "pen", "进入编辑态不应切换工具")
+        self.assertEqual(len(canvas.annotations()), count, "单击不应留下点状笔迹")
+        # ② 按住拖动 ⇒ 仍然画图（用项目自带的 _pen_drag 助手，与其它画笔用例同源）
+        canvas.scene_data.clearSelection()
+        self._pen_drag(canvas, (20, 20), (60, 45))
+        self.app.processEvents()
+        self.assertEqual(len(canvas.annotations()), count + 1, "拖动应正常画出新标注")
+        editor.close()
     def test_rotation_aware_resize_direction_and_rotate_handle_keys(self):
         """① 旋转后缩放方向以【当前实际朝向】为准；② 旋转手柄 + 方向键 = 旋转（↑/→ 顺时针）。
 

@@ -974,9 +974,10 @@ class CaptureTests(CoreTests):
                                   inline_tool="select")
         pen_hints = hint_texts(base, (10, 20), (80, 60), inline=True,
                                inline_tool="pen")
-        # 二次编辑/删除只在选择工具下直接支持
+        # 2026-10-10 起：双击文字编辑在任何工具下都可用（编辑态由标注对象持有），
+        # 因此两种工具都应给出这条提示；仅「双击删除非文字标注」仍限选择工具、不单独提示。
         self.assertIn("双击文字编辑", select_hints["inline_edit"])
-        self.assertEqual(pen_hints["inline_edit"], "")
+        self.assertIn("双击文字编辑", pen_hints["inline_edit"])
         # 右键菜单与撤销在两种工具下都支持
         self.assertTrue(select_hints["inline_menu"])
         self.assertTrue(pen_hints["inline_menu"])

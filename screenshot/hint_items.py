@@ -33,8 +33,8 @@ def hint_texts(settings, position, selection, inline=False,
     · `selection` 为 `(宽, 高)` 表示已有选区，`None` 表示还在框选阶段；
     · `inline` 为真表示已进入原地编辑；
     取色已改为一次性动作（无模式），下面两个参数仅为兼容旧调用保留、取值被忽略。
-    · `inline_tool` 是原地编辑当前工具：二次编辑/删除只在选择工具下生效，
-      其它工具下不发这条提示，避免提示了实际做不到的操作；
+    · `inline_tool` 是原地编辑当前工具。2026-10-10 起「双击文字编辑」在任何工具下都可用，
+      因此 `inline_edit` 不再按工具过滤；仅「双击非文字标注删除」仍限选择工具（不单独发提示）。
     """
     save_key = str(settings.get("capture_save_shortcut", "S"))
     picker_key = str(settings.get("capture_picker_shortcut", "C") or "C")
@@ -86,7 +86,7 @@ def hint_texts(settings, position, selection, inline=False,
         # 原地编辑里可以二次编辑/删除已有标注，但只有选择工具直接支持：其它工具下
         # 双击只是切回选择并选中，所以这里按当前工具决定是否提示。
         "inline_edit": ("双击文字编辑 · 双击图形删除"
-                        if inline and inline_tool == "select" else ""),
+                        if inline else ""),   # 双击文字编辑在任何工具下都可用（2026-10-10 起）
         "inline_menu": "右键标注菜单" if inline else "",
         "inline_history": "Ctrl+Z撤销 · Ctrl+Y重做" if inline else "",
     }

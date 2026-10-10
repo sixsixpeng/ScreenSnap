@@ -1575,8 +1575,7 @@ class AnnotationCanvas(QGraphicsView):
             painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
             painter.setBrush(Qt.NoBrush)
             painter.drawPath(self.mosaic_drawing)
-        if self.tool != "select":
-            return
+        # 选中框与手柄在任何工具下都绘制：编辑已有标注不依赖工具状态。
         selected = self.scene_data.selectedItems()
         painter.setPen(QPen(QColor("#00ad91"), 1))
         painter.setBrush(Qt.NoBrush)
@@ -1780,6 +1779,31 @@ class AnnotationCanvas(QGraphicsView):
         self._add_annotation(item)
         self.checkpoint()
 
+    def _materialize_deferred_pen(self, point):
+        """规则 1：指针移动超过阈值时，把“按下时只记起点”的画笔/马克笔真正落笔。
+
+        返回 True 表示本次已开始绘制（调用方应继续按普通绘制流程处理）。
+        """
+        start = getattr(self, "_deferred_pen", None)
+        if start is None:
+            return False
+        if (abs(point.x() - start.x()) + abs(point.y() - start.y())) < 3:
+            return False
+        self._deferred_pen = None
+        self.straight_drawing = bool(getattr(self, "_deferred_straight", False))
+        if self.straight_drawing:
+            self.drawing = QPainterPath()
+            self.committed_segments = []
+        else:
+            self.drawing = QPainterPath(start)
+        return True
+
+    def _materialize_deferred_pen_at(self, event):
+        """鼠标移动时把「延迟落笔」的画笔/马克笔物化（规则 1）。"""
+        if getattr(self, "_deferred_pen", None) is None:
+            return
+        self._materialize_deferred_pen(self.mapToScene(event.position().toPoint()))
+
     def _space_press_targets_handle(self, event):
         """空格+左键按在选中标注的控制点上时，应走「自由拉伸」而不是临时平移。
 
@@ -1829,7 +1853,31 @@ class AnnotationCanvas(QGraphicsView):
             event.accept()
             return
         point = self.mapToScene(event.position().toPoint())
-        if self.tool == "select" and event.button() == Qt.LeftButton:
+        # 方案甲：处在【编辑态】（已被选中）的标注，任何工具下都能直接拖动；
+        # 未选中的标注仍归当前工具落笔 —— 所以「在已有标注上画新图形」不受影响。
+        # 注：曾试过「按在任意已有标注上就拖动」，那会压住画图（-k draw 4 失败 1 错误），已废弃。
+        if (self.tool != "select" and event.button() == Qt.LeftButton
+                and self.scene_data.selectedItems()):
+            hit = self.annotation_at(point)
+            if hit is not None and hit.isSelected():
+                self._tool_item_drag = True
+                super().mousePressEvent(event)
+                event.accept()
+                return
+        # 控制点优先：任何工具下按在【选中标注的控制点/旋转手柄】上都进入缩放/旋转，
+        # 不落笔（用户 2026-10-10 反馈：准备拖手柄结果画了一笔）。
+        # 只放开「控制点」这一条：空白处框选仍只属于选择工具（上次整体放开的教训）。
+        handle_hit = False
+        if self.tool != "select" and event.button() == Qt.LeftButton:
+            selected = self.scene_data.selectedItems()
+            for item in selected:
+                if self.resize_handle_at(self.item_resize_handles(item), point) is not None:
+                    handle_hit = True
+                    break
+                if len(selected) == 1 and self.rotation_handle_at(item, point):
+                    handle_hit = True
+                    break
+        if event.button() == Qt.LeftButton and (self.tool == "select" or handle_hit):
             self.selection_area = None
             self.rotating = None
             self.viewport().update()
@@ -1911,22 +1959,38 @@ class AnnotationCanvas(QGraphicsView):
             event.accept()
             return
         if self.tool not in ("select", "hand") and event.button() == Qt.LeftButton:
+            # 在空白处起笔 ⇒ 先退出所有标注的编辑态（与选择工具点空白一致）。
+            # 只在需要拖出形状的工具上做：文字/序号/取色/橡皮/马赛克是“单击生效”，语义不同。
+            if (self.tool in ("pen", "marker", "rect", "ellipse", "arrow")
+                    and self.annotation_at(point) is None
+                    and self.scene_data.selectedItems()):
+                self.scene_data.clearSelection()
+                self.viewport().update()
             # 多段绘制进行中：保留上一终点作为本段起点，不从按下点重置。
             if not (self.chain_active and self._chain_tool() and self.start is not None):
                 self.start = point
             self.preview_end = point
             if self.tool in ("pen", "marker"):
                 self.straight_drawing = self._straight_gesture_active(event)
-                if self.straight_drawing:
-                    self.drawing = QPainterPath()
-                    if not self.chain_active:
-                        self.committed_segments = []
-                else:
-                    self.drawing = QPainterPath(self.start)
+                if self.chain_active:
+                    # 连笔模式不做延迟：起笔点就是链的续点，语义与单笔不同。
+                    if self.straight_drawing:
+                        self.drawing = QPainterPath()
+                    else:
+                        self.drawing = QPainterPath(self.start)
+                    return
+                # 规则 1（用户 2026-10-10）：点击=编辑、拖动=画图。
+                # 先不落笔，只记住起点；指针移动超过阈值才真正开始画。
+                # 这样单击/双击已有标注 ⇒ 进入编辑态，且不会留下点状笔迹把选中顶掉。
+                self._deferred_pen = point
+                self._deferred_straight = self.straight_drawing
+                event.accept()
+                return
             return
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        self._materialize_deferred_pen_at(event)
         if self.space_pan_active:
             point = event.position().toPoint()
             distance = point - self.space_pan_start
@@ -2035,13 +2099,13 @@ class AnnotationCanvas(QGraphicsView):
                 if self.straight_drawing:
                     self.drawing = self._straight_preview_path(end)
                 else:
-                    self.drawing.lineTo(end)
+                    if self.drawing is not None:   # 延迟落笔期间 drawing 仍为 None（规则 1）
+                        self.drawing.lineTo(end)
             self.viewport().update()
         if self.start is None:
             super().mouseMoveEvent(event)
-            if self.tool == "select":
-                self._update_alignment_guides()
-                self._update_resize_cursor(event.position().toPoint())
+            self._update_alignment_guides()
+            self._update_resize_cursor(event.position().toPoint())
 
     def _free_distortion(self, event=None):
         """四角是否允许自由拉伸：按住 Ctrl/Alt/Shift 或 Space 任意其一。
@@ -2115,7 +2179,8 @@ class AnnotationCanvas(QGraphicsView):
             self._reset_hover_cursor()
             QToolTip.hideText()
             return
-        for item in self.scene_data.selectedItems() if self.tool == "select" else ():
+        # 任何工具下都要能编辑选中标注：悬停即显示手柄与提示，不再要求先切到选择工具。
+        for item in self.scene_data.selectedItems():
             if self.rotation_handle_at(item, point):
                 self.setCursor(self.rotation_cursor)
                 QToolTip.showText(
@@ -2304,10 +2369,8 @@ class AnnotationCanvas(QGraphicsView):
         return menu
 
     def show_annotation_menu(self, item, position):
-        if self.tool != "select":
-            self.set_tool("select")
-            self.setDragMode(QGraphicsView.RubberBandDrag)
-            self.selection_requested.emit()
+        # 只选中目标，不把工具切成“选择”—— 工具状态只由用户主动点工具栏改变
+        # （用户 2026-10-10 要求：画标注是常态，编辑已有标注不该顺带切走工具）。
         self.scene_data.clearSelection()
         item.setSelected(True)
         self.viewport().update()
@@ -2333,13 +2396,25 @@ class AnnotationCanvas(QGraphicsView):
 
     def show_erase_menu(self, point, position):
         """在画布上直接删除某处擦除，无需回退其后的标注。"""
-        if self.tool != "select":
-            self.set_tool("select")
-            self.setDragMode(QGraphicsView.RubberBandDrag)
-            self.selection_requested.emit()
+        # 同样不切换工具：擦除菜单与当前工具无关。
         self.erase_menu(point).popup(position)
 
     def mouseReleaseEvent(self, event):
+        if getattr(self, "_deferred_pen", None) is not None:
+            # 规则 1（用户 2026-10-10）：按下后从未移动 ⇒ 这是一次点击 ⇒
+            # 让指针下的已有标注进入编辑态（选中）；不落笔，因此不会有点状笔迹顶掉选中。
+            point = self._deferred_pen
+            self._deferred_pen = None
+            self.start = None
+            self.preview_end = None
+            item = self.annotation_at(point)
+            # 点击空白 ⇒ 退出所有标注的编辑态；点击某个标注 ⇒ 只保留它（其它一律退出）。
+            self.scene_data.clearSelection()
+            if item is not None:
+                item.setSelected(True)
+            self.viewport().update()
+            event.accept()
+            return
         # 松开才允许更新手柄状态。
         self.clear_active_handle()
         if self.space_pan_active and event.button() == Qt.LeftButton:
@@ -2526,7 +2601,8 @@ class AnnotationCanvas(QGraphicsView):
             self.viewport().update()
             return
         super().mouseReleaseEvent(event)
-        if self.tool == "select":
+        if self.tool == "select" or getattr(self, "_tool_item_drag", False):
+            self._tool_item_drag = False
             self.checkpoint()
 
     def mouseDoubleClickEvent(self, event):
@@ -2558,18 +2634,30 @@ class AnnotationCanvas(QGraphicsView):
         # 命中标注而非擦除层：被擦过的文字/标注仍可双击编辑或删除。
         item = self.annotation_at(point)
         if item is not None:
-            if self.tool == "select":
-                if isinstance(item, AnnotationTextItem):
-                    self.edit_text_item(item)
-                else:
-                    self.scene_data.clearSelection()
-                    item.setSelected(True)
-                    self.remove_selected()
+            if isinstance(item, AnnotationTextItem):
+                # 双击文字直接进编辑框：任何工具下都成立（编辑不依赖工具状态）。
+                self.edit_text_item(item)
                 self._update_resize_cursor(event.position().toPoint())
                 return
-            self.set_tool("select")
-            self.setDragMode(QGraphicsView.RubberBandDrag)
-            self.selection_requested.emit()
+            if self.tool != "select":
+                # 方案甲（用户 2026-10-10）：双击任意标注即让它进入【编辑态】——编辑态由标注
+                # 自身的选中状态维护，不依赖全局工具；工具保持不变（可继续画）。
+                # 双击的第一拍会先落一个点状笔迹（画笔/马克笔），先撤掉它，
+                # 否则新笔迹会顶掉刚建立的选中，表现为“双击没能进入编辑态”。
+                # 注：这里曾试过先 undo() 撤掉第一拍的点状笔迹，但 undo 会按历史重建场景，
+                # 对象身份失效（选中态落不到用户看到的那个标注上），已回退。
+                # 规则 1（点击=编辑、拖动=画图）需要“延迟落笔”，尚未实现，见 README/待办。
+                self.scene_data.clearSelection()
+                item.setSelected(True)
+                self.viewport().update()
+                self._update_resize_cursor(event.position().toPoint())
+                return
+            self.scene_data.clearSelection()
+            item.setSelected(True)
+            self.remove_selected()
+            self._update_resize_cursor(event.position().toPoint())
+            return
+            # 双击已有标注：只选中它（文字进入编辑、其它类型删除），工具保持不变。
             self.scene_data.clearSelection()
             item.setSelected(True)
             self._update_resize_cursor(event.position().toPoint())
