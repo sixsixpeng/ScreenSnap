@@ -274,7 +274,6 @@ class CaptureTests(CoreTests):
         self.assertEqual(selection.rects[-1].topLeft(), QPoint(149, 91))
         self.assertIsNone(selection.nudge_corner)
 
-    @unittest.skip("离屏环境下会触发原生崩溃（0xC0000005），需真机验证")
     def test_mask_drag_resizes_each_corner(self):
         from PySide6.QtCore import QPoint, QPointF, QEvent
         from PySide6.QtGui import QMouseEvent
@@ -827,7 +826,6 @@ class CaptureTests(CoreTests):
             self.assertFalse(saved)
             self.assertTrue(all(not view.isVisible() for view in discard_mask.session.views))
 
-    @unittest.skip("离屏环境下会触发原生崩溃（0xC0000005），需真机验证")
     def test_inline_repeated_handle_nudges_keep_cursor_on_handle(self):
         from PySide6.QtCore import QSize
         from config.config_manager import DEFAULTS
@@ -1140,7 +1138,6 @@ class CaptureTests(CoreTests):
                      if widget.item(i).checkState() == Qt.Unchecked]
         self.assertEqual(len(unchecked), len(HINT_ITEM_IDS) - 2)
 
-    @unittest.skip("离屏环境下会触发原生崩溃（0xC0000005），需真机验证")
     def test_inline_region_reset_keeps_rounded_preview(self):
         from config.config_manager import DEFAULTS
         from screenshot.mask_window import MaskWindow

@@ -1945,7 +1945,6 @@ class ConfigTests(CoreTests):
                     app.edit_images.assert_called_once()
                     app.save_capture_images.assert_not_called()
 
-    @unittest.skip("离屏环境下会触发原生崩溃（0xC0000005），需真机验证")
     def test_multi_select_from_inline_editor_uses_configured_save_or_discard(self):
         from config.config_manager import DEFAULTS
         from editor.annotation_items import shape

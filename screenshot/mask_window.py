@@ -1309,6 +1309,7 @@ class MaskWindow(QWidget):
             self.setFocus(Qt.ActiveWindowFocusReason)
             self._sync_escape_fallback()
 
+
     def _install_toolbar_hide_hotkey(self):
         """用系统级热键处理工具栏隐藏键：不依赖"哪块遮罩拿到键盘输入"。
 
@@ -2622,22 +2623,6 @@ class MaskWindow(QWidget):
             self.complete(save_direct=not self.session.right_capture_mode)
 
     def keyPressEvent(self, event):
-        # 只处理真正的 Qt 按键事件：Mock 事件喂给 QKeySequence 会在转换阶段原生崩溃。
-        if (isinstance(event, QKeyEvent) and event.type() == QEvent.KeyPress
-                and not event.isAutoRepeat() and self.session.inline_editor is not None):
-            logging.getLogger("screensnap").debug(
-                "遮罩收到按键(快速编辑中)：视图=%s key=%s mods=%s",
-                self.monitor_rect.getRect(), event.key(), int(event.modifiers()))
-            hide_key, hide_default = TOOLBAR_HIDE_KEY
-            hide_sequence = QKeySequence(self.settings.get(hide_key, hide_default))
-            if hide_sequence.isEmpty():
-                hide_sequence = QKeySequence(hide_default)
-            if QKeySequence(event.keyCombination()) == hide_sequence:
-                logging.getLogger("screensnap").debug(
-                    "工具栏隐藏键（遮罩按键）触发：视图=%s", self.monitor_rect.getRect())
-                self.toggle_inline_toolbar()
-                event.accept()
-                return
 
         """处理取消、提交、固定尺寸创建与最后选区的像素微调。"""
         key = event.key()
@@ -2677,7 +2662,11 @@ class MaskWindow(QWidget):
                                      else self.position + QPoint(dx, dy))
                     self.update_inline_region()
                     view = self.focus_view_for_position(self.position)
-                    QCursor.setPos(view.mapToGlobal(view.to_logical_point(self.position)))
+                    logging.getLogger("screensnap").debug(
+                        "微调：视图=%s key=%s dx=%s dy=%s 位置=%s",
+                        self.monitor_rect.getRect(), key, dx, dy, self.position)
+                    if isinstance(self.position, QPoint) and self.isVisible():
+                        QCursor.setPos(self.mapToGlobal(self.to_logical_point(self.position)))
             return
         if key == Qt.Key_Tab:
             self.cycle_element(-1 if event.modifiers() & Qt.ShiftModifier else 1)
@@ -2707,7 +2696,7 @@ class MaskWindow(QWidget):
                     self.position = (QPoint(self.selection.nudge_corner[2]) if self.selection.nudge_corner
                                      else self.position + QPoint(dx, dy))
                     view = self.focus_view_for_position(self.position)
-                    QCursor.setPos(view.mapToGlobal(view.to_logical_point(self.position)))
+                    QCursor.setPos(self.mapToGlobal(self.to_logical_point(self.position)))
         self.update_all()
 
     def keyReleaseEvent(self, event):
