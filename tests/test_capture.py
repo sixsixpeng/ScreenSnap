@@ -451,7 +451,7 @@ class CaptureTests(CoreTests):
             mask = MaskWindow(Image.new("RGB", (160, 100), "blue"), bounds, monitors, settings)
         try:
             items = " ".join(mask.capture_hint_items())
-            self.assertIn("左拖松开按设置", items)
+            self.assertIn("左拖松开进入快速编辑", items)
             self.assertNotIn("退出取色", items)
             self.assertTrue(mask.capture_hint_items())
         finally:
@@ -940,18 +940,26 @@ class CaptureTests(CoreTests):
                 self.fail(f"遮罩销毁后的 Esc 兜底回调抛出了异常: {error}")
 
     def test_capture_hints_explain_left_and_right_capture_flows(self):
+        # 未选择时没有任何选区：不该提示提交/保存（双击此时只关闭遮罩）；
+        # 有选区后才提示左键双击提交、右键双击直存/提交。
         from config.config_manager import DEFAULTS
         from screenshot.hint_items import hint_texts
 
         settings = dict(DEFAULTS)
         initial = hint_texts(settings, (0, 0), None)
-        self.assertIn("左拖松开按设置", initial["select"])
+        self.assertIn("左拖松开进入快速编辑", initial["select"])
+        self.assertIn("右键拖选多选", initial["select"])
         self.assertIn("UIA点击快编", initial["select"])
-        self.assertIn("右拖追加", initial["select"])
-        self.assertIn("S快速保存", initial["save"])
-        self.assertIn("右键双击直存", initial["save"])
+        self.assertEqual(initial["save"], "")
+        self.assertEqual(initial["edit"], "")
+
+        picked = hint_texts(settings, (0, 0), (20, 15))
+        self.assertIn("S快速保存", picked["save"])
+        self.assertIn("右键双击直存", picked["save"])
+        self.assertIn("左键双击提交", picked["edit"])
+
         collecting = hint_texts(settings, (0, 0), (20, 15), right_capture=True)
-        self.assertIn("Enter/双击确认进入编辑", collecting["edit"])
+        self.assertIn("右键双击提交", collecting["edit"])
         self.assertIn("右键继续框选", collecting["multi_select"])
         self.assertNotIn("右键双击直存", collecting["save"])
 
@@ -1094,7 +1102,7 @@ class CaptureTests(CoreTests):
         config.data["capture_hints_enabled"] = True
         config.data["capture_recapture_shortcut"] = "F9"
         text = " ".join(hint_items(config.data, (10, 20), (300, 200)))
-        self.assertIn("F9 重新截图", text)
+        self.assertIn("F9 清除选择", text)
         config.data["capture_hints_enabled"] = False
         self.assertEqual([item for item in hint_items(config.data, (10, 20), (300, 200))
                           if item], [])

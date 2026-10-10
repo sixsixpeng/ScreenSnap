@@ -1238,7 +1238,7 @@ class MaskWindow(QWidget):
         return hint_items(
             self.settings, (self.position.x(), self.position.y()),
             (selection.width(), selection.height()) if selection else None,
-            inline=self.inline_active(), picker=False,
+            inline=self.inline_active(),
             picker_color=self.picker_color,
             toolbar_hidden=bool(editor is not None and editor.toolbar_hidden),
             multi_select=self.session.multi_select_mode,
@@ -1251,7 +1251,7 @@ class MaskWindow(QWidget):
         return hint_texts(
             self.settings, (self.position.x(), self.position.y()),
             (selection.width(), selection.height()) if selection else None,
-            inline=inline, picker=False, picker_color=self.picker_color,
+            inline=inline,
             multi_select=self.session.multi_select_mode,
             right_capture=self.session.right_capture_mode,
             toolbar_hidden=bool(editor is not None and editor.toolbar_hidden),
@@ -2623,7 +2623,13 @@ class MaskWindow(QWidget):
         if event.button() == Qt.LeftButton:
             self.complete()
         elif event.button() == Qt.RightButton:
-            self.complete(save_direct=not self.session.right_capture_mode)
+            # 右键双击：有选区时保留直存/收集态提交；空白处双击忽略（不再关掉整轮截图）。
+            if self.selection.active or self.selection.rects:
+                self.complete(save_direct=not self.session.right_capture_mode)
+            else:
+                logging.getLogger("screensnap").debug(
+                    "右键双击忽略：当前没有选区（视图=%s）", self.monitor_rect.getRect())
+                event.accept()
 
     def keyPressEvent(self, event):
 
@@ -2672,7 +2678,27 @@ class MaskWindow(QWidget):
         if key == Qt.Key_Escape:
             self.close()
         elif key in (Qt.Key_Return, Qt.Key_Enter):
-            self.complete()
+            # Enter 只对“多选选区”有意义：无选区或只有单选时都不是 Esc/提交，直接忽略。
+            rects = len(self.selection.rects)
+            multi = self.session.multi_select_mode or rects > 1
+            if multi and (self.selection.active or self.selection.rects):
+                logging.getLogger("screensnap").debug(
+                    "Enter 提交多选选区：视图=%s 区域数=%s 多选模式=%s",
+                    self.monitor_rect.getRect(), rects, self.session.multi_select_mode)
+                self.complete()
+            else:
+                logging.getLogger("screensnap").debug(
+                    "Enter 忽略：无选区或单选（视图=%s 区域数=%s 多选模式=%s）",
+                    self.monitor_rect.getRect(), rects, self.session.multi_select_mode)
+            event.accept()
+            return
+            if self.selection.active or self.selection.rects:
+                self.complete()
+            else:
+                logging.getLogger("screensnap").debug(
+                    "Enter 忽略：当前没有选区（视图=%s）", self.monitor_rect.getRect())
+                event.accept()
+                return
         else:
             dx = (-1 if key in (Qt.Key_A, Qt.Key_Left) else 1 if key in (Qt.Key_D, Qt.Key_Right) else 0)
             dy = (-1 if key in (Qt.Key_W, Qt.Key_Up) else 1 if key == Qt.Key_Down else 0)

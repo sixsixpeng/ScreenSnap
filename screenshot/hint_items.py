@@ -24,16 +24,17 @@ CAPTURE_ACTION_KEYS = (
 TOOLBAR_HIDE_KEY = ("capture_toolbar_hide_shortcut", "`")
 
 
-def hint_texts(settings, position, selection, inline=False, picker=False,
-               picker_color=None, toolbar_hidden=False, multi_select=False,
+def hint_texts(settings, position, selection, inline=False,
+               toolbar_hidden=False, multi_select=False,
+               picker=None, picker_color=None,
                right_capture=False, inline_tool="select"):
     """提示项 id → 文案；当前阶段不适用的项给出空串（绘制端会跳过）。
 
     · `selection` 为 `(宽, 高)` 表示已有选区，`None` 表示还在框选阶段；
     · `inline` 为真表示已进入原地编辑；
+    取色已改为一次性动作（无模式），下面两个参数仅为兼容旧调用保留、取值被忽略。
     · `inline_tool` 是原地编辑当前工具：二次编辑/删除只在选择工具下生效，
       其它工具下不发这条提示，避免提示了实际做不到的操作；
-    · `picker` 为真表示处于取色态（只保留取色相关说明）。
     """
     save_key = str(settings.get("capture_save_shortcut", "S"))
     picker_key = str(settings.get("capture_picker_shortcut", "C") or "C")
@@ -43,40 +44,42 @@ def hint_texts(settings, position, selection, inline=False, picker=False,
     hide_key = str(settings.get(*TOOLBAR_HIDE_KEY))
     action_keys = {name: str(settings.get(key, default))
                    for name, key, default, _label in CAPTURE_ACTION_KEYS}
-    if picker:
-        # 取色态下只保留与取色相关的说明，避免与取样操作抢注意力。
-        color_text = f"取色 {picker_color}  |  " if picker_color else ""
-        return {"coords": f"{position[0]}, {position[1]}  |  {color_text}",
-                "edit": "Alt/Ctrl+左键 取样复制到剪贴板",
-                "cancel": f"{picker_key}/Esc 退出取色"}
     size = f"  {selection[0]} x {selection[1]}" if selection else ""
     return {
         "coords": f"{position[0]}, {position[1]}{size}",
         "drag_move": "拖动移动" if selection and not inline else "",
-        "resize": "四角/边中点缩放" if selection and not inline else "",
-        "select": "左拖松开按设置 · UIA点击快编 · 右拖追加" if selection is None else "",
+        "resize": "四角/边中点缩放" if selection else "",
+                "select": "左拖松开进入快速编辑 · 右键拖选多选 · UIA点击快编" if selection is None else "",
         "element_cycle": ("Tab/Shift+Tab 切换窗口层级"
                   if settings.get("window_detection", True) and not inline
                   else ""),
-        "edit": (("Enter/双击确认进入编辑" if right_capture else "Enter/双击执行")
-             if not inline else "双击空白提交") if selection else "",
-        "nudge": "WASD/方向键微调" if selection and not inline else "",
+        # 双击语义取自 mouseDoubleClickEvent：原地编辑里左键双击=保存；
+        # 非原地编辑里左键双击=提交，右键双击在收集模式=提交、否则=直存。
+        "edit": (("右键双击提交" if right_capture else "左键双击提交")
+             if selection and not inline else
+             "左键双击空白保存" if inline else ""),
+        "nudge": "握住控制点后 WASD/方向键微调" if selection else "",
         "cancel": "Esc取消" if not inline else "Esc放弃编辑",
-        "save": ((f"{save_key}快速保存" if right_capture else
-              f"右键双击直存 | {save_key}快速保存") if not inline else ""),
+        # 保存类提示只在**已有选区**时才有意义：没有选区时双击只是关闭遮罩。
+        # 原地编辑里 S 也是保存（save_selection 判定）；非编辑时按收集态区分直存/快速保存。
+        "save": ((f"{save_key} 保存") if inline else
+             (f"{save_key}快速保存" if right_capture else
+              f"右键双击直存 | {save_key}快速保存")
+             if selection else ""),
         # 快速贴图快捷键在原地编辑里被禁用（trigger_quick_sticker 直接返回），不要提示。
-        "quick_sticker": f"{quick} 贴图" if quick and not inline else "",
+        "quick_sticker": f"按住 {quick} 后鼠标拖选 直接贴图" if quick and not inline else "",
         # 取色在未选择 / 原地编辑 / 多选下都可用，提示语相应地在三种界面都显示。
         "picker": f"{picker_key} 取色",
-        "fixed_size": f"{fixed_key} 固定尺寸" if selection is None else "",
-        "recapture": (f"{action_keys['recapture']} 重新截图"
-                      if selection and not inline else ""),
+        # F 固定尺寸：无选区可新建、原地编辑里改尺寸、收集/多选里改最后一块 —— 各状态都可用。
+        "fixed_size": f"{fixed_key} 固定尺寸",
+        "recapture": (f"{action_keys['recapture']} 清除选择"
+                      if selection else ""),
         "window_edit": (f"{action_keys['window_edit']} 窗口编辑"
-                        if selection and not inline else ""),
-        "multi_select": ("右键继续框选 · Enter/双击确认" if right_capture else
-             "多选模式 · Enter完成" if multi_select else
+                        if selection else ""),
+        "multi_select": ("右键双击提交 · 右键继续框选" if right_capture else
+             "多选模式 · 右键双击或 Enter 提交" if multi_select else
                  f"{action_keys['multi_select']} 多选模式"),
-        "copy": f"{action_keys['copy']} 仅复制" if selection and not inline else "",
+        "copy": f"{action_keys['copy']} 仅复制" if selection else "",
         "toolbar_move": "拖动边缘/空白处 移动工具栏" if inline else "",
         "toolbar_hide": (f"{hide_key} {'显示工具栏' if toolbar_hidden else '隐藏工具栏'}"
                          if inline else ""),
@@ -89,17 +92,19 @@ def hint_texts(settings, position, selection, inline=False, picker=False,
     }
 
 
-def hint_items(settings, position, selection, inline=False, picker=False,
-               picker_color=None, toolbar_hidden=False, multi_select=False,
+def hint_items(settings, position, selection, inline=False,
+               toolbar_hidden=False, multi_select=False,
+               picker=None, picker_color=None,
                right_capture=False, inline_tool="select"):
     """按配置顺序给出提示条内容；总开关关闭或列表为空时返回空列表（整条不画）。"""
+    # 兼容旧调用：历史上传过 picker / picker_color；取色模式已删除，二者被吸收后忽略。
     if not settings.get("capture_hints_enabled", True):
         return []
     order = settings.get("capture_hint_order")
     if order is None:
         order = list(HINT_ITEM_IDS)
-    texts = hint_texts(settings, position, selection, inline=inline, picker=picker,
-                       picker_color=picker_color, toolbar_hidden=toolbar_hidden,
+    texts = hint_texts(settings, position, selection, inline=inline,
+                       toolbar_hidden=toolbar_hidden,
                        multi_select=multi_select, right_capture=right_capture,
                        inline_tool=inline_tool)
     return [texts.get(item, "") for item in order]

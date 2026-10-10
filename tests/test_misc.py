@@ -283,7 +283,12 @@ class MiscTests(CoreTests):
         self.assertEqual(selected, [])
         self.assertTrue(mask.isVisible())
         self.assertEqual(len(mask.selection.rects), 1)
+        # 新语义：Enter 只对“多选选区”生效；只有一块时 Enter 被忽略（不是 Esc、也不提交）。
         QTest.keyClick(mask, Qt.Key_Return)
+        self.assertEqual(routed, [])
+        self.assertTrue(mask.isVisible())
+        # 用左键双击确认（该手势对单块同样有效），验证“确认后才进入编辑流程”。
+        QTest.mouseDClick(mask, Qt.LeftButton, Qt.NoModifier, end)
         self.assertEqual(len(routed), 1)
         self.assertEqual(routed[0][0][0].size, (41, 31))
         self.assertEqual(selected, [])
