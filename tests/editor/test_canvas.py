@@ -1066,9 +1066,17 @@ class CanvasTests(CoreTests):
             editor.canvas.setFocus()
             self.app.processEvents()
             editor.toolbar.tool_buttons["arrow"].click()
+            # 契约（D17 起）：必须先【抓住控制点】再按键才会微调 ——
+            # 旧契约「不抓点、方向键整体平移选区」已被守卫明确移除，这里按现行契约重写。
+            viewport = editor.canvas.viewport()
+            corner = mask.selection.rects[0].bottomRight()
+            QTest.mousePress(viewport, Qt.LeftButton, pos=viewport.mapFrom(mask, corner))
+            self.assertIsNotNone(mask.selection.resizing, "按在角手柄上应进入缩放抓取")
             with patch("screenshot.mask_window.QCursor.setPos"):
                 QTest.keyClick(editor.canvas, Qt.Key_Right)
-            self.assertEqual(mask.selection.rects[0], QRect(41, 40, 300, 200))
+            self.assertEqual(mask.selection.rects[0], QRect(40, 40, 301, 200),
+                             "抓住右下角后按 → ⇒ x 轴 +1px")
+            QTest.mouseRelease(viewport, Qt.LeftButton, pos=viewport.mapFrom(mask, corner))
             button = editor.toolbar.options_button
             opened = []
             def capture_menu():
@@ -1078,9 +1086,13 @@ class CanvasTests(CoreTests):
             QTest.mouseClick(button, Qt.LeftButton)
             self.app.processEvents()
             self.assertEqual(opened, [True])
+            corner = mask.selection.rects[0].bottomRight()
+            QTest.mousePress(viewport, Qt.LeftButton, pos=viewport.mapFrom(mask, corner))
             with patch("screenshot.mask_window.QCursor.setPos"):
                 QTest.keyClick(editor.canvas, Qt.Key_Right)
-            self.assertEqual(mask.selection.rects[0], QRect(42, 40, 300, 200))
+            self.assertEqual(mask.selection.rects[0], QRect(40, 40, 302, 200),
+                             "再次抓住右下角按 → ⇒ x 轴再 +1px")
+            QTest.mouseRelease(viewport, Qt.LeftButton, pos=viewport.mapFrom(mask, corner))
             QTimer.singleShot(0, capture_menu)
             QTest.mouseClick(button, Qt.LeftButton)
             self.app.processEvents()
