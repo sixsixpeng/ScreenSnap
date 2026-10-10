@@ -57,6 +57,12 @@
 
 30. **Any change to the settings schema triggers a full configuration audit.** When you add, rename or remove a configuration key — or change its type or defaults — re-check the **whole** lifecycle in the same round, not just the call site you were working on: DEFAULTS, legacy/missing-key initialization, \`validate()\` repair rules, the \`PRESERVED_ON_VERSION_RESET\` list, settings-page controls (and their live-refresh wiring), import/export, reset-to-defaults, the version gate's reset path, every reader of the key, the tests that assert them, and the README tables. Missing one of these is how a new key silently reverts, breaks a reset, or leaves the settings page out of sync — the audit is cheap compared with the round it costs later. Report which lifecycle stages you checked.
 
+31. **Run the three change gates — before, during and after every code change.** Rules 26 and 27 already say "enumerate the blast radius" and "verify on both screens", yet they only fired when the user reported a symptom: three consecutive rounds broke behaviour that had worked before (the `` ` `` rescue, the S dual-semantics, the nudge crash) because nothing forced a checkpoint. Make them mechanical, and do not skip a gate because the fix looks small:
+
+    - **Gate 1 — baseline before touching anything.** Run the focused subset for the areas you are about to touch (e.g. `python -m unittest tests.test_capture -k mask`, `-k nudge`, `-k inline`) and show the result. No baseline means no edit: otherwise a regression can only be discovered by the user, and "it was already broken" cannot be told apart from "I broke it" (C7 comes too late on its own).
+    - **Gate 2 — impact list.** Write down every historical behaviour the change can reach, using the rule 26/27 enumeration (primary vs secondary screen, both editors, the six capture states, stickers, notifications, the configuration lifecycle), and for each item *how* it will be verified (test name, key, log line). An empty list means the impact assessment is unfinished.
+    - **Gate 3 — same subset afterwards, plus one new regression test.** The same `-k` subset must be green, and the historical behaviour you touched gets a test of its own; if it genuinely cannot be covered, say why. **Never turn red into green with `@unittest.skip`** — a skip is allowed only for something that truly needs the real desktop (rule 19), and the report must then state "coverage removed" for that case.
+    - **Report four things:** which entry points changed, which command produced which result, which surfaces were verified, and which were **not** verified.
 ## 经验与常见错误
 
 > 由规则 25 维护：只收录**真实发生过**的错误；每条含「现象 / 排查 / 避免」；新增前先询问用户。
@@ -231,6 +237,15 @@
   - 现象：为修副屏微调，我把 `w/a/s/d` 注册成 `suppress=True` 的全局热键 → **整个 S 键被系统级吞掉** → `save_selection()` 再也收不到 → 主副屏**保存**同时失效，破坏了 `f719939` 定下的「S 按住控制点=下移微调 / 否则=快捷保存」双语义。
   - 排查：改某个键之前先 `git log -- screenshot/mask_window.py` 找到它的设计提交，用 `git show -s --format=%b <sha>` 读设计意图（本次就是 `f719939` 的提交说明写着 S 走 `save_selection()` 判定）。
   - 避免：兜底热键一律 `suppress=False`（让原路径照常工作），或只兜**没有双重语义**的键（例如工具栏隐藏键）；**绝不**吞掉既是动作键又是修饰性判断的键（S/W/A/D、方向键、Space）；改共享按键语义前先查它当初为什么那样设计（规则 27）。
+- **D15 原生崩溃不会进 `sys.excepthook` —— 必须开 `faulthandler`，现场看 `crash.log`**
+  - 现象：连续几轮「程序崩溃但日志里一条都没有」，`app.log` 最后一行还停在正常业务日志（如「原地编辑就绪」）；而同一份日志里 Python 异常（`10:58 未捕获的全局异常`）却有完整记录 —— 说明日志器本身没坏。
+  - 排查：先看退出码 —— `-1073741819`(0xC0000005 访问违规) / `3221225477` / `-1073740940`(0xC0000374 堆损坏) 都属**原生**崩溃；`logging`、`try/except`、`sys.excepthook`、`threading.excepthook` 在这些情况下**一律不会执行**；手工复现时加 `python -X faulthandler -m unittest …` 即可拿到 Python 栈（本次正是靠它把崩溃钉在 `QTest.keyClick` 那一步）。
+  - 避免：启动即 `faulthandler.enable(file=<logs>/YYYY-MM/crash.log, all_threads=True)`（本项目已接入 `logger/log_setup.py` 的 `enable_crash_dumps`）；排查顺序固定为 ①`app.log` 最后一行 → ②没有 Python 栈 ⇒ 看 `crash.log` → ③按栈定位；**禁止**再用「改一版试试」代替取证。
+
+- **D16 别用 `QKeyEvent.keyCombination()` 处理可能由测试/合成的按键事件**
+  - 现象：为处理可打印字符，我在遮罩 `keyPressEvent` 里加了 `QKeySequence(event.keyCombination()) == 序列` 判定；随后 `QTest.keyClick`（以及真机投递）触发**原生访问违规**，崩溃点在 Qt 事件派发内部，连该分支的入口日志都没来得及写。
+  - 排查：删掉该判定后，原先崩溃的用例立即转绿（`Ran 2 tests / OK`）；`faulthandler` 的栈指向 `QTest.keyClick` 那一行 —— 说明崩在事件被投递/处理的过程中，而不是我们后续的业务代码。
+  - 避免：可打印字符的快捷键**不要**在 `keyPressEvent` 里做 `keyCombination()` 比较；改用 QShortcut（挂 canvas、context 用 `Qt.WindowShortcut`）或全局热键覆盖；确实要在事件里比较时，先 `isinstance(event, QKeyEvent)`，并只用 `event.key()` / `event.modifiers()` 这类稳定 API，**绝不**对事件对象做序列化转换。
 ## Validation
 
 - Use the project environment's `python` executable. On the expected Windows setup, `py -3` may resolve to a different interpreter without project dependencies.
