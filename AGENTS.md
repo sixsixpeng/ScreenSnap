@@ -259,6 +259,16 @@
   - 排查：关键就在同一段代码 —— 那两项挡住的是“按住左键拖动/缩放过程中按方向键”这条路径；下方的 `releaseMouse()` 不是等价兜底，而是**强行结束拖动**。回滚（`git checkout -- screenshot/mask_window.py`）后不再丢标注，据此确认是本次改动引入。
   - 避免：① 删除任何守卫前，先写出它拦住的**具体操作序列**（按住什么、按了什么、处于什么状态），写不出来就不许删；② 结论理顺后必须写成**代码位置的主注释**（含“移除后会怎样”与实测日期），只记进 AGENTS 不够 —— 下一轮没人会先读 AGENTS 再动那一行；③ 涉及拖动/缩放/事件中断这类状态机的改动，改前改后都要在**真机**跑一遍操作序列（离屏用例覆盖不到）。
 
+- **D18 探针/用例自己占着资源，却把被测函数的失败当成产品缺陷**
+  - 现象：为验证「旧通知身份自动迁移」，探针用 pywin32 往临时 `.lnk` 写完旧的 `System.AppUserModelID` 后立刻调用 `ensure_registered()`，函数返回 `unavailable`（迁移失败），我据此以为产品逻辑有洞。
+  - 排查：把探针改成写完 `del store` + `gc.collect()` 释放 `IPropertyStore` 句柄后，同一次调用立刻返回 `created` —— 是探针自己占着文件；另外 Shell 的属性存储**写完立刻读回会给出陈旧值**（读回 `None`），据此判定同样会把成功误判成失败。
+  - 避免：① 写 `.lnk`/注册表/COM 属性的探针与用例，操作完必须释放句柄（`del` + `gc.collect()`）再调用被测函数；② 迁移/写入类逻辑**不要用「写完立刻读回」当判据**，以「写入未抛异常」为准，读回只做留痕；③ 探针失败时先怀疑探针自己的环境与资源占用，再怀疑产品。
+
+- **D19 启动早期的留痕写进了还没配置 handler 的 logger，等于没写**
+  - 现象：首次运行注册 Windows 通知身份的功能**明明生效**（快捷方式与 AUMID 都在），但 `app.log` 里搜不到那行「已注册通知身份」，排查时一度以为功能没跑。
+  - 排查：调用点在 `program = Application()` **之前**，而日志是 `Application.__init__` 里才 `configure_logging`；`logging.getLogger("screensnap")` 此时没有任何 handler，`INFO` 直接被丢弃（Python 的 lastResort 只处理 WARNING 及以上）。把调用移到 `Application()` 之后，同一行立刻出现在 `app.log`。
+  - 避免：任何「启动阶段」的留痕都要先确认日志已配置（本项目：放在 `Application()` 之后，或显式 `configure_logging` 之后再记）；写完留痕**必须真机看一次日志**再宣布完成 —— 否则排查时会因为「没有证据」而误判功能未生效。
+
 ## Validation
 
 - Use the project environment's `python` executable. On the expected Windows setup, `py -3` may resolve to a different interpreter without project dependencies.
