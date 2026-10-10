@@ -730,8 +730,25 @@ class AnnotationCanvas(QGraphicsView):
             self.corner_radius = radius
         self.viewport().update()
 
+    # ── 标注越出画布的允许余量（像素）—— 这是唯一的调参入口，直接改数字即可 ──
+    # 正数 = 允许越出这么多像素（笔迹更贴边）；0 = 中心线只到图片边缘；负数 = 比边缘再内缩（更保守）。
+    # 2026-10-11 用户实测：-1 时显示刚好（先试 3 太靠外），故定为 -1。
+    OVERFLOW_MARGIN = -1
+
     def image_point(self, point):
-        bounds = self.sceneRect()
+        """把场景点转成**用于标注几何**的图片坐标：最远只到画布边缘。
+
+        2026-10-11 明确的行为划分（用户要求）：
+        · 标注（画笔、箭头、矩形、椭圆、文字、擦除、马赛克笔刷）最远只到画布边缘 —— 指针可以
+          自由移出画布，但落在画布外的位置会被夹到边缘这一点；
+        · 指针本身从不被移动；
+        · **框选（选区橡皮筋）不走这里** —— mouseMoveEvent 里 selection_end 用原始场景点，
+          这样框选可拖到画布外，也不会把画布外的按下/右键算成边缘那一点（原先会影响选择与菜单）；
+        · 超出画布的部分仍按 editor_overcanvas_mode 处理：clip（默认）在编辑视图与导出时裁掉，
+          block 由 constrain_selected_to_canvas() 在编辑结束时把标注平移回画布内。
+        """
+        margin = self.OVERFLOW_MARGIN
+        bounds = self.sceneRect().adjusted(-margin, -margin, margin, margin)
         return QPointF(min(max(point.x(), bounds.left()), bounds.right()),
                        min(max(point.y(), bounds.top()), bounds.bottom()))
 
@@ -2018,7 +2035,9 @@ class AnnotationCanvas(QGraphicsView):
             event.accept()
             return
         if self.selection_start is not None:
-            self.selection_end = self.image_point(self.mapToScene(event.position().toPoint()))
+            # 框选不走 image_point：允许拖到画布外，也避免画布外的点被夹成边缘那一点
+            # （2026-10-11：用户要求「标注要夹、框选和菜单不要夹」）。
+            self.selection_end = self.mapToScene(event.position().toPoint())
             self.viewport().update()
             event.accept()
             return

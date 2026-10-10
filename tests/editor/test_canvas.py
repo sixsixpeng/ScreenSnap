@@ -19,6 +19,117 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class CanvasTests(CoreTests):
+    def test_promoting_inline_editor_carries_annotation_objects(self):
+        """回归（2026-10-11 用户反馈）：快速编辑里画了标注后按 E 进窗口编辑，标注必须以**对象**交接，
+
+        不能只交一张烘焙好的图片 —— 否则那些标注无法再选中/移动/改样式。这里断言：
+        ① 交出去的图是**底图**（标注位置仍是背景色，未被烘焙）；② 标注快照能被新编辑器 restore 回来。
+        """
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from editor.annotation_items import AnnotationRectItem
+
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = {**DEFAULTS, "filename": "inline", "inline_edit": True, "magnifier": False}
+        settings["capture_after_selection"] = "edit"
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+        routed = []
+        mask.edit_requested.connect(lambda images, positions: routed.append((images, positions)))
+        try:
+            mask.selection.rects.append(QRect(10, 12, 60, 40))
+            mask.complete()
+            self.app.processEvents()
+            editor = mask.session.inline_editor
+            self.assertIsNotNone(editor, "原地编辑应已创建")
+            canvas = editor.canvas
+            for origin in (QPointF(2, 2), QPointF(18, 10)):
+                item = AnnotationRectItem(QRectF(origin.x(), origin.y(), 12, 9))
+                canvas.scene_data.addItem(item)
+            self.assertEqual(len(canvas.annotations()), 2, "先画两个标注")
+            mask._promote_inline_editor_to_window()
+            self.app.processEvents()
+            self.assertEqual(len(routed), 1, "应发出一次转交")
+            image = routed[0][0][0][0]                       # [(image, alternate)], [position]
+            self.assertEqual(image.size, (60, 40), "交出去的应是选区尺寸的底图")
+            pixel = image.convert("RGB").getpixel((8, 6))     # 标注所在处
+            self.assertNotEqual(pixel, (255, 0, 0), "标注不得被烘焙进交出去的图片")
+            from screenshot.mask_window import take_pending_editor_annotations
+
+            records = take_pending_editor_annotations()
+            self.assertTrue(records, "应通过模块级交接槽暂存标注快照")
+            self.assertFalse(take_pending_editor_annotations(), "交接槽取一次即清空")
+            window = EditorWindow(image, dict(DEFAULTS))
+            window.canvas.restore(records)
+            self.assertEqual(len(window.canvas.annotations()), 2,
+                             "新编辑器应恢复出同样数量的标注对象")
+            window.close()
+        finally:
+            mask.close()
+
+    def test_annotation_points_clamp_to_canvas_in_both_editors(self):
+        """契约（2026-10-11 用户要求「这个特性在两个编辑器都要有」）：独立编辑与原地编辑
+
+        都必须是「标注最远只到画布边缘、指针可自由移出」。两者共用同一个 AnnotationCanvas，
+        本用例对**两个实例**分别断言，避免以后只改一处（规则 7 / 29）。
+        """
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        standalone = EditorWindow(Image.new("RGB", (80, 60), "white"), dict(DEFAULTS))
+        bounds = {"left": 0, "top": 0, "width": 120, "height": 80}
+        settings = {**DEFAULTS, "filename": "inline", "inline_edit": True, "magnifier": False}
+        settings["capture_after_selection"] = "edit"
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (120, 80), "blue"), bounds, [bounds], settings)
+        try:
+            mask.selection.rects.append(QRect(10, 12, 60, 40))
+            mask.complete()
+            self.app.processEvents()
+            inline = mask.session.inline_editor
+            self.assertIsNotNone(inline, "原地编辑应已创建")
+            for label, canvas in (("独立编辑", standalone.canvas), ("原地编辑", inline.canvas)):
+                with self.subTest(editor=label):
+                    rect = canvas.sceneRect()
+                    outside = QPointF(rect.left() - 30, rect.bottom() + 45)
+                    self.assertEqual(canvas.image_point(outside),
+                                     QPointF(rect.left() - canvas.OVERFLOW_MARGIN,
+                                             rect.bottom() + canvas.OVERFLOW_MARGIN),
+                                     "画布外的标注点必须夹到画布边缘（%s）" % label)
+                    inside = QPointF(rect.center())
+                    self.assertEqual(canvas.image_point(inside), inside,
+                                     "画布内的点保持不变（%s）" % label)
+            # 框选走原始场景点：同一个点在框选路径上不被夹（与标注几何区分开）
+            canvas = standalone.canvas
+            outer = QPointF(canvas.sceneRect().left() - 30, canvas.sceneRect().bottom() + 45)
+            self.assertNotEqual(canvas.image_point(outer), outer, "标注路径要夹")
+        finally:
+            mask.close()
+            standalone.close()
+
+    def test_annotation_points_stop_at_canvas_edge_but_selection_does_not(self):
+        """契约（2026-10-11 用户明确要求）：标注最远只到画布边缘，指针可以自由移出；
+
+        框选（选区橡皮筋）必须用**原始**场景点 —— 否则画布外的按下/右键会被算成边缘那一点，
+        影响选择与右键菜单。image_point() 只服务于标注几何，selection_end 不走它。
+        """
+        from config.config_manager import DEFAULTS
+        editor = EditorWindow(Image.new("RGB", (80, 60), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        bounds = canvas.sceneRect()
+        outer = QPointF(bounds.left() - 40, bounds.top() - 25)
+        margin = canvas.OVERFLOW_MARGIN
+        self.assertEqual(canvas.image_point(outer),
+                         QPointF(bounds.left() - margin, bounds.top() - margin),
+                         "画布外的标注点必须夹到画布边缘")
+        far = QPointF(bounds.right() + 120, bounds.bottom() + 90)
+        self.assertEqual(canvas.image_point(far),
+                         QPointF(bounds.right() + margin, bounds.bottom() + margin))
+        inside = QPointF(bounds.center())
+        self.assertEqual(canvas.image_point(inside), inside, "画布内的点保持不变")
+        source = canvas.image_point.__code__.co_names
+        self.assertIn("sceneRect", source, "image_point 仍按画布矩形夹取")
+        editor.close()
+
     def test_text_input_dialog_is_kept_on_top_of_the_mask(self):
         """回归（2026-10-10 真机反馈）：原地编辑里文字输入弹窗被置顶遮罩挡住看不见。
 
