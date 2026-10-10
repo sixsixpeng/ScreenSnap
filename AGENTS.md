@@ -63,6 +63,13 @@
     - **Gate 2 — impact list.** Write down every historical behaviour the change can reach, using the rule 26/27 enumeration (primary vs secondary screen, both editors, the six capture states, stickers, notifications, the configuration lifecycle), and for each item *how* it will be verified (test name, key, log line). An empty list means the impact assessment is unfinished.
     - **Gate 3 — same subset afterwards, plus one new regression test.** The same `-k` subset must be green, and the historical behaviour you touched gets a test of its own; if it genuinely cannot be covered, say why. **Never turn red into green with `@unittest.skip`** — a skip is allowed only for something that truly needs the real desktop (rule 19), and the report must then state "coverage removed" for that case.
     - **Report four things:** which entry points changed, which command produced which result, which surfaces were verified, and which were **not** verified.
+32. **Any change to a capture/editor state must audit the hint bar in the same round — wording *and* visibility.** The hint bar is where users learn the current gestures, and it drifts silently: after R changed from "recapture" to "clear selection" the hint still read 重新截图; after the picker-mode state was removed, `hint_texts()` kept a whole dead `picker` branch plus a `picker=` argument nobody passes any more; the inline state still says 双击空白提交 although 提交 only exists in multi-select. Whenever a change touches a state, a gesture, or the meaning of a shortcut — or adds/removes a state — do all of the following in the same round:
+
+    - Enumerate the states and write down, for each, which hint items must show, which must be empty, and the exact sentence: **未选择** / **左键选择后（原地编辑）** / **右键选择后** / **多选收集** / **取色** / **两个编辑器**. A change that does not say what the hint bar should look like afterwards is not finished.
+    - Update `screenshot/hint_items.py` in the same commit, and update the `-k hint` tests — they are the contract for the wording (C8). Wording changes are contract changes: say which cases changed meaning.
+    - Delete items and branches for states that no longer exist: no dead `picker`-style branch, no parameter that is always `False`, no item that can never render.
+    - Keep each sentence actionable and unique: never mention an action that cannot be performed in that state, and never repeat one sentence in two items (提交 belongs to multi-select only; the inline state 保存 rather than 提交).
+    - Verify the hint bar in the real app on **both screens** (rule 26): offscreen tests cannot see it, so a green suite is not evidence about the hint bar.
 ## 经验与常见错误
 
 > 由规则 25 维护：只收录**真实发生过**的错误；每条含「现象 / 排查 / 避免」；新增前先询问用户。
@@ -223,6 +230,7 @@
   - 现象：副屏快速编辑里按工具栏隐藏键无效。陆续加了 QShortcut（已创建/就绪/触发）、编辑器事件过滤器、遮罩 keyPressEvent 三层日志，全部 0 行；再装**应用级 QApplication eventFilter**，同样 0 行 —— 而同一时刻日志显示「前台=python(2560,0,2560x1440)[本进程]」且 isActiveWindow()=True。同一进程里另一块屏的窗口按键完全正常。
   - 排查：① 先用应用级 eventFilter 区分「键没进程序」与「进了没处理」（D10）；② 用 SCREENSNAP_NO_ESC_HOOK=1 关掉自家全局钩子复测，排除自家人为因素；③ 对比同一操作在两块屏上的日志差异（一块有事件、一块零事件）。
   - 避免：输入类需求不要只押在 Qt 的快捷键/焦点链上；对「两块屏都必须可用」的键，优先采用**不依赖窗口焦点**的机制（本项目做法：用 keyboard 注册全局热键，截图开始时注册、遮罩关闭时释放，钩子线程只 emit 信号、切换在 Qt 线程执行），并保留一个可临时禁用它的环境变量开关便于对照；一旦证据表明系统级输入不可达，就停止在这条链上继续加入口，换机制收尾。
+  - **实测收窄（2026-10-10 真机复核）**：副屏上动作键（S/C/F/E/R/Y/Alt+M）全部正常 —— 它们走 Qt 的 ApplicationShortcut，只要求「本应用在前台」，与「哪块遮罩拿到键盘事件」无关；真正必须改用不依赖焦点机制的只有两类：① 可打印字符类自定义键（反引号）；② 方向键/WASD 微调。因此本条的适用范围是这两类，而不是「所有多屏按键」。
 - **D12 自由变量在跨屏路径里指向别的 C++ 对象 → 原生崩溃（无 Python 栈）**
   - 现象：遮罩 `keyPressEvent` 里写着 `QCursor.setPos(view.mapToGlobal(view.to_logical_point(self.position)))` —— `view` 本是编辑器事件过滤器里的名字，在遮罩方法里解析到了别的同名对象；副屏（T2752Q）拖手柄微调时命中跨屏/已销毁的 Qt 对象 → **原生访问违规**，日志里只有「原地编辑就绪：视图=(2560, 0, …)」然后**无异常栈直接断掉**。
   - 排查：崩溃日志**没有 Python 栈**时先怀疑 C++ 对象误用（不是 Python 异常）；在该方法区间里搜自由变量：`Select-String 'view\.'` 限定方法行号范围；用 `git log -- <file>` 对照历史版本确认这行原本该用什么。
