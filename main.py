@@ -283,6 +283,12 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
     def tray_clicked(self, reason):
         """仅在托盘双击时启动自由截图，右键留给菜单。"""
         if reason == QSystemTrayIcon.DoubleClick:
+            # 按需体检（用户 2026-10-11 建议）：托盘双击说明用户就在机器前，顺手确认一次全局热键
+            # 是否还活着；否则被安全软件摘掉钩子后最多要等 10 秒的定时体检才恢复。
+            try:
+                self.hotkeys.check_health(force=True)
+            except Exception:  # noqa: BLE001 体检失败绝不能影响截图
+                pass
             self.start_capture("capture")
 
 

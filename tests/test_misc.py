@@ -16,6 +16,152 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class MiscTests(CoreTests):
+    def test_hotkey_health_timer_interval_configurable_and_preventive_reinstall(self):
+        """用户选择「甲」（2026-10-11）：10 秒探活 + 60 秒探针两个定时器合并成一个**可配周期**
+        （默认 15 秒，设置页 3–300 秒）；每跳先探活，监听线程正常时**再排一次主动探针** ——
+        真机证明只有探针能发现「Windows 静默摘钩但监听线程还活着」这种形态。"""
+        import time as _time
+        from unittest.mock import patch as _patch
+        from config.config_manager import DEFAULTS, validate
+        from hotkey import hotkey_manager as hm
+
+        self.assertEqual(DEFAULTS["hotkey_health_interval"], 60)
+        self.assertEqual(validate({})["hotkey_health_interval"], 60)
+        for bad in (0, 2, 14, 601, 9999):
+            with self.assertRaises(ValueError, msg=f"{bad} 应被拒绝"):
+                validate({"hotkey_health_interval": bad})
+
+        class FakeKeyboard:
+            class _listener:
+                listening = True
+
+            def add_hotkey(self, binding, callback, suppress=False):
+                return "h:" + binding
+
+            def remove_hotkey(self, handle):
+                pass
+
+            def send(self, binding):
+                pass
+
+        with _patch.object(hm, "keyboard", FakeKeyboard()):
+            manager = hm.HotkeyManager()
+            try:
+                # ① 设置里的值经 register() 生效
+                manager.register({"hotkeys_enabled": True,
+                                  "hotkeys": {"capture": "ctrl+alt+a"},
+                                  "capture_hotkey_suppress": False,
+                                  "hotkey_health_interval": 20})
+                self.assertEqual(manager.health_timer.interval(), 20_000)
+                # ② 越界与非法值一律夹紧/回落，绝不让定时器跑飞
+                manager.set_health_interval(1)
+                self.assertEqual(manager.health_timer.interval(), hm.MIN_HEALTH_SECONDS * 1000)
+                manager.set_health_interval(9999)
+                self.assertEqual(manager.health_timer.interval(), hm.MAX_HEALTH_SECONDS * 1000)
+                manager.set_health_interval("坏值")
+                self.assertEqual(manager.health_timer.interval(), hm.DEFAULT_HEALTH_SECONDS * 1000)
+                # ③ 健康时的一跳必须做一次预防性重装（合并定时器的真正意义）
+                manager._last_request = {"enabled": True,
+                                         "bindings": {"capture": "ctrl+alt+a"},
+                                         "suppress_capture": False}
+                self.assertTrue(manager.listener_alive())
+                manager.check_health()
+                deadline = _time.monotonic() + 3
+                while manager.preventive_reinstalls == 0 and _time.monotonic() < deadline:
+                    _time.sleep(0.02)
+                self.assertEqual(manager.preventive_reinstalls, 1,
+                                 "健康时的一跳应做预防性重装（静默摘钩无法探测，只能定期刷新）")
+                deadline = _time.monotonic() + 3
+                while not manager.handles and _time.monotonic() < deadline:
+                    _time.sleep(0.02)
+                self.assertTrue(manager.handles, "预防性重装后热键句柄必须重建")
+            finally:
+                manager.stop()
+
+    def test_hotkey_callback_trace_is_actually_logged(self):
+        """回归（2026-10-11 真机）：热键回调留痕曾写成 `from core.log_rate import log_every`，
+        而实际模块是 `logger.log_rate` ⇒ ImportError 被 `except` 静默吞掉 ⇒「热键回调」留痕
+        永远 0 条，日志里明明有「触发热键」却查不出输入是否到达钩子。"""
+        from hotkey.hotkey_manager import HotkeyManager
+
+        manager = HotkeyManager()
+        try:
+            with self.assertLogs("screensnap", level="DEBUG") as captured:
+                manager.set_paused(False)
+                manager.emit_action("capture")
+            self.assertTrue(any("热键回调" in line for line in captured.output),
+                            "热键触发必须留下可核对的留痕（模块路径不能写错）")
+            self.assertTrue(any("来源=keyboard钩子" in line for line in captured.output))
+            # 暂停期间不应记录也不应转发
+            manager.set_paused(True)
+            manager.emit_action("capture")
+        finally:
+            manager.stop()
+    def test_hotkey_manager_reinstalls_when_listener_dies(self):
+        """回归（用户 2026-10-11）：安全软件拖慢钩子回调时，Windows 会按 LowLevelHooksTimeout
+        静默移除 WH_KEYBOARD_LL 钩子，表现为「被拦一次后所有热键永久失效」且没有任何报错。
+
+        这里用假 keyboard 模块验证体检逻辑：① 监听线程不可用 ⇒ 重装一次；
+        ② 重装有限速（30 秒内不重复）；③ 监听线程正常 ⇒ 什么都不做。"""
+        import time as _time
+        from unittest.mock import patch as _patch
+        from hotkey import hotkey_manager as hm
+
+        class FakeListener:
+            listening = True
+
+        class FakeKeyboard:
+            def __init__(self):
+                self._listener = FakeListener()
+                self.added = []
+                self.removed = []
+
+            def add_hotkey(self, binding, callback, suppress=False):
+                self.added.append(binding)
+                return "handle-" + binding
+
+            def remove_hotkey(self, handle):
+                self.removed.append(handle)
+
+        fake = FakeKeyboard()
+        with _patch.object(hm, "keyboard", fake):
+            manager = hm.HotkeyManager()
+            try:
+                manager.register({"hotkeys_enabled": True,
+                                  "hotkeys": {"capture": "ctrl+alt+a"},
+                                  "capture_hotkey_suppress": False})
+                deadline = _time.monotonic() + 3
+                while not manager.handles and _time.monotonic() < deadline:
+                    _time.sleep(0.02)
+                self.assertTrue(manager.handles, "应完成一次安装")
+                self.assertTrue(manager.listener_alive())
+                manager.check_health()
+                self.assertEqual(manager.reinstall_count, 0, "监听线程正常时不应重装")
+                # 模拟钩子被系统摘掉：库监听线程没了
+                fake._listener = None
+                self.assertFalse(manager.listener_alive())
+                manager.check_health()
+                self.assertEqual(manager.reinstall_count, 1, "监听线程不可用时应重装一次")
+                manager.check_health()
+                self.assertEqual(manager.reinstall_count, 1, "重装必须限速，不能刷屏")
+                manager._last_retry = 0.0
+                manager.check_health()
+                self.assertEqual(manager.reinstall_count, 2, "超过限速窗口后允许再次重装")
+                # 按需体检（托盘双击截图）：不受限速约束，必须能立刻恢复
+                manager._last_retry = _time.monotonic()
+                manager.check_health()
+                self.assertEqual(manager.reinstall_count, 2, "自动体检仍受限速约束")
+                manager.check_health(force=True)
+                self.assertEqual(manager.reinstall_count, 3, "按需体检应跳过限速，立刻重装")
+                # 关键：监听线程看起来正常时，按需体检也必须重装 ——
+                # Windows 静默摘钩时监听线程仍然存活，只靠标志位判断永远恢复不了。
+                fake._listener = FakeListener()
+                self.assertTrue(manager.listener_alive())
+                manager.check_health(force=True)
+                self.assertEqual(manager.reinstall_count, 4, "监听线程正常也应按需重装")
+            finally:
+                manager.stop()
+
     def test_package_public_api(self):
         from config import ConfigManager as PublicConfigManager
         from core import capture, data_dir

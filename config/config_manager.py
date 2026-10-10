@@ -155,6 +155,10 @@ DEFAULTS = {
     },
     "capture_delay": 0,
     "capture_hotkey_suppress": True,
+    # 全局热键体检周期（秒）：每跳先探活（线程死了立刻重装），正常时做一次预防性重装。
+    # 真机实测无法用合成键探测「Windows 静默摘钩」（keyboard 不响应自身注入的事件），
+    # 所以改为定期刷新钩子：数值越小恢复越快，代价是刷新更频繁。
+    "hotkey_health_interval": 60,
     "theme": "system",
     "bubble": True, "notification_backend": "win11toast",
     "notification_timeout": 2,
@@ -542,6 +546,8 @@ def validate(data):
             raise ValueError("贴图吸附距离必须在 1 到 40 像素之间")
         elif key == "sticker_snap_targets" and value not in ("screen", "window", "both"):
             raise ValueError("未知贴图吸附目标")
+        elif key == "hotkey_health_interval" and not 15 <= value <= 600:
+            raise ValueError("热键体检间隔必须在 15 到 600 秒之间")
         elif key == "sticker_snap_hint_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("吸附提示颜色必须是六位十六进制颜色")
         elif key == "sticker_snap_hint_width" and not 1 <= value <= 6:
