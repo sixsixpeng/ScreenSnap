@@ -10,6 +10,7 @@ import os
 from ctypes import wintypes
 from dataclasses import dataclass
 
+import shiboken6
 from PySide6.QtCore import QRect
 from PySide6.QtWidgets import QApplication
 
@@ -94,21 +95,28 @@ def top_window_at(x, y, skip_stickers=True):
     desktop = user32.GetDesktopWindow()
     shell = user32.GetShellWindow()
     found = []
-    skip = ignored_mask_window if not skip_stickers else ignored_app_window
+    # 句柄集合在枚举**之前**收集好：ctypes 回调里绝不能调用 Qt 的 winId()（对象已析构时会抛异常，
+    # 而回调里的异常无法传播 ⇒ 直接原生崩溃，2026-10-11 实测）。
+    skip_handles = overlay_handles("screensnap_mask" if not skip_stickers else "screensnap_overlay")
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
     def collect(handle, unused):
-        if found:
+        # ctypes 回调里抛异常无法传播（返回值未定义）⇒ 整体兜底；命中时仍返回 False 停止枚举，
+        # 出错时返回 True 继续枚举（2026-10-11 全局崩溃排查）。
+        try:
+            if found:
+                return False
+            if (handle in (desktop, shell) or is_cloaked(handle)
+                    or window_class(user32, handle) in IGNORED_CLASSES
+                    or not user32.IsWindowVisible(handle) or user32.IsIconic(handle)
+                    or int(handle) in skip_handles):
+                return True
+            if not covers(user32, handle, x, y):
+                return True
+            found.append(int(handle))
             return False
-        if (handle in (desktop, shell) or is_cloaked(handle)
-                or window_class(user32, handle) in IGNORED_CLASSES
-                or not user32.IsWindowVisible(handle) or user32.IsIconic(handle)
-                or skip(handle)):
+        except Exception:  # noqa: BLE001 单个窗口判定失败只跳过它
             return True
-        if not covers(user32, handle, x, y):
-            return True
-        found.append(int(handle))
-        return False
 
     try:
         callback = callback_type(collect)
@@ -130,37 +138,59 @@ def is_cloaked(handle):
         return False
 
 
-def ignored_app_window(handle):
+def overlay_handles(property_name):
+    """收集本程序带指定属性的顶层窗口句柄（**绝不抛异常**）。
+
+    为什么必须在这里做（2026-10-11 崩溃修复）：这两个函数原先是在 ctypes 的 EnumWindows
+    回调里被调用的，而 `winId()/effectiveWinId()` 会强制创建原生句柄；部件对应的 C++ 对象
+    已被销毁时（连续快速创建贴图/遮罩就会）它会抛 RuntimeError —— **在 ctypes 回调里异常
+    无法向上传播，直接原生崩溃**（用户连续贴 4 张图时实测崩在 collect → ignored_app_window）。
+    因此改为：枚举**之前**把句柄收集成一个集合，回调里只做整数比较。
+    """
+    handles = set()
+    app = QApplication.instance()
+    if app is None:
+        return handles
+    try:
+        widgets = list(app.topLevelWidgets())
+    except RuntimeError:
+        return handles
+    for widget in widgets:
+        # 关键：必须先判活再碰它。第二版崩溃（2026-10-11 00:34，栈顶就在这里）证明仅靠 try/except
+        # 不够 —— 对已析构的 C++ 对象，property()/winId() 在 C++ 层就会崩，Python 的 except 轮不到。
+        try:
+            if not shiboken6.isValid(widget):
+                continue
+            if not widget.property(property_name):
+                continue
+            handles.add(int(widget.winId()))
+            handles.add(int(widget.effectiveWinId()))
+        except Exception:  # noqa: BLE001 - 任何异常都只跳过这一个窗口
+            continue
+    return handles
+
+
+def ignored_app_window(handle, handles=None):
     """判断句柄是否对应本程序显式标记为穿透识别的 Qt 顶层窗口。
 
     遮罩与贴图都带 screensnap_overlay：贴图吸附时被跳过，避免与贴图间吸附重复。
+    handles 为预先收集好的句柄集合（回调内必须显式传入，见 overlay_handles 的说明）。
     """
-    app = QApplication.instance()
-    if app is None:
-        return False
-    for widget in app.topLevelWidgets():
-        if not widget.property("screensnap_overlay"):
-            continue
-        if int(widget.winId()) == int(handle) or int(widget.effectiveWinId()) == int(handle):
-            return True
-    return False
+    if handles is None:
+        handles = overlay_handles("screensnap_overlay")
+    return int(handle) in handles
 
 
-def ignored_mask_window(handle):
+def ignored_mask_window(handle, handles=None):
     """判断句柄是否对应本程序的截图遮罩；只有遮罩必须被识别穿透。
 
     贴图、菜单等其它本程序窗口不再被忽略，UIA 识别与点击选择都能命中它们；
     但贴图吸附仍由 ignored_app_window 排除，不会与贴图间吸附重复。
+    handles 为预先收集好的句柄集合（回调内必须显式传入，见 overlay_handles 的说明）。
     """
-    app = QApplication.instance()
-    if app is None:
-        return False
-    for widget in app.topLevelWidgets():
-        if not widget.property("screensnap_mask"):
-            continue
-        if int(widget.winId()) == int(handle) or int(widget.effectiveWinId()) == int(handle):
-            return True
-    return False
+    if handles is None:
+        handles = overlay_handles("screensnap_mask")
+    return int(handle) in handles
 
 
 def is_tool_window(user32, handle):
@@ -181,28 +211,37 @@ def visible_targets():
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     desktop = user32.GetDesktopWindow()
     shell = user32.GetShellWindow()
+    # 崩溃修复（2026-10-11）：本程序覆盖层句柄在枚举**之前**收集好。原先在回调里调用
+    # ignored_app_window() → widget.winId()，部件 C++ 对象已析构时抛 RuntimeError，
+    # 而 ctypes 回调里的异常无法传播 ⇒ 直接原生崩溃（用户连续贴 4 张图实测）。
+    overlays = overlay_handles("screensnap_overlay")
     targets = []
 
     def collect(handle, unused):
-        if handle in (desktop, shell) or is_cloaked(handle) or not user32.IsWindowVisible(handle) \
-                or user32.IsIconic(handle):
+        # ctypes 回调里抛异常无法传播（返回值未定义，枚举可能提前中止）⇒ 整体兜底，
+        # 出错时仍返回 True 继续枚举（2026-10-11 全局崩溃排查）。
+        try:
+            if handle in (desktop, shell) or is_cloaked(handle) or not user32.IsWindowVisible(handle) \
+                    or user32.IsIconic(handle):
+                return True
+            if window_class(user32, handle) in IGNORED_CLASSES or int(handle) in overlays:
+                return True
+            bounds = wintypes.RECT()
+            if not user32.GetWindowRect(handle, ctypes.byref(bounds)):
+                return True
+            physical = native_rect(bounds)
+            # 悬浮小窗（状态栏、桌面挂件）会抢走水平/垂直吸附，这里要求一定大小。
+            if physical.width() < MIN_EDGE or physical.height() < MIN_EDGE or is_tool_window(user32, handle):
+                logger.debug("跳过不适合吸附的窗口: hwnd=%d 类名=%r 尺寸=%dx%d",
+                             int(handle), window_class(user32, handle),
+                             physical.width(), physical.height())
+                return True
+            targets.append(WindowTarget(int(handle), window_text(user32, handle),
+                                        window_class(user32, handle),
+                                        physical_rect_to_logical(physical)))
             return True
-        if window_class(user32, handle) in IGNORED_CLASSES or ignored_app_window(handle):
+        except Exception:  # noqa: BLE001 单个窗口读取失败只跳过它
             return True
-        bounds = wintypes.RECT()
-        if not user32.GetWindowRect(handle, ctypes.byref(bounds)):
-            return True
-        physical = native_rect(bounds)
-        # 悬浮小窗（状态栏、桌面挂件）会抢走水平/垂直吸附，这里要求一定大小。
-        if physical.width() < MIN_EDGE or physical.height() < MIN_EDGE or is_tool_window(user32, handle):
-            logger.debug("跳过不适合吸附的窗口: hwnd=%d 类名=%r 尺寸=%dx%d",
-                         int(handle), window_class(user32, handle),
-                         physical.width(), physical.height())
-            return True
-        targets.append(WindowTarget(int(handle), window_text(user32, handle),
-                                    window_class(user32, handle),
-                                    physical_rect_to_logical(physical)))
-        return True
 
     try:
         callback = callback_type(collect)

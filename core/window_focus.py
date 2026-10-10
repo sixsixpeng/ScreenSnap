@@ -13,6 +13,7 @@ import ctypes
 import logging
 import os
 
+import shiboken6
 from PySide6.QtGui import QGuiApplication
 
 # Windows 专用的前台抢夺兜底；离屏/自动化测试会把它置为 False，避免干扰用户当前窗口。
@@ -36,8 +37,14 @@ def foreground_handle():
 
 
 def widget_handle(widget):
-    """窗口句柄；窗口已销毁或平台不支持时返回 0。"""
+    """窗口句柄；窗口已销毁或平台不支持时返回 0。
+
+    必须先判活再取句柄（2026-10-11 崩溃修复的同一课）：对已析构的 C++ 对象，winId() 在 C++
+    层就会崩，仅靠下面的 except 兜不住 —— 同一天 window_snap.py 就是这么崩过两次的。
+    """
     try:
+        if not shiboken6.isValid(widget):
+            return 0
         return int(widget.winId())
     except (AttributeError, RuntimeError, TypeError, ValueError):
         return 0

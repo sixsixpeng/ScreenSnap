@@ -16,6 +16,31 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class UiaTests(CoreTests):
+    def test_overlay_handles_survive_destroyed_widgets(self):
+        """回归（2026-10-11 真机崩溃）：连续快速创建贴图时，本程序覆盖层的 C++ 对象可能已析构，
+
+        此时 winId() 会抛 RuntimeError。这两个函数原先是在 ctypes 的 EnumWindows 回调里被调用，
+        异常无法传播 ⇒ 直接原生崩溃（用户连续贴 4 张图时崩在 ignored_app_window）。
+        现在要求：① 句柄收集对已析构部件**不抛异常**；② 枚举路径正常返回。
+        """
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QWidget
+        from core.window_snap import ignored_app_window, overlay_handles, visible_targets
+        widget = QWidget()
+        widget.setProperty("screensnap_overlay", True)
+        # 分支一：部件在 C++ 层已失效（shiboken6.isValid 为 False）—— 必须在碰它之前就跳过，
+        # 因为对已析构对象调用 property()/winId() 会在 C++ 层崩溃、Python 的 except 轮不到。
+        with patch("core.window_snap.shiboken6.isValid", return_value=False):
+            self.assertEqual(overlay_handles("screensnap_overlay"), set())
+            self.assertIsInstance(visible_targets(), list)
+        # 分支二：部件还活着但取值抛异常（例如句柄尚未创建）—— 同样只跳过，不向上抛。
+        with patch.object(type(widget), "winId", side_effect=RuntimeError("already deleted")):
+            self.assertEqual(overlay_handles("screensnap_overlay"), set(),
+                             "已析构部件的 winId 抛异常时必须跳过而不是向上抛")
+            self.assertFalse(ignored_app_window(4242), "不得因异常中断判断")
+            self.assertIsInstance(visible_targets(), list, "枚举路径必须正常返回")
+        widget.deleteLater()
+
     def test_element_chain_starts_from_the_same_deepest_control_as_hover(self):
         """回归（用户 2026-10-11，资源管理器实测）：Tab 只能在窗口与几个大容器间循环，
         回不到鼠标下的小元素；原因是 query() 的非悬停路径直接用 control_at 的结果往上爬，
