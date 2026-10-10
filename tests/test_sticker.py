@@ -611,7 +611,7 @@ class StickerTests(CoreTests):
 
         for view in views:
             view.sticker_requested.connect.assert_called_once_with(app.add_sticker)
-            view.quick_sticker_requested.connect.assert_called_once_with(app.add_sticker)
+            view.quick_sticker_requested.connect.assert_called_once_with(app.add_quick_sticker)
 
     def test_inline_editor_paste_creates_sticker_when_save_fails(self):
         from config.config_manager import DEFAULTS

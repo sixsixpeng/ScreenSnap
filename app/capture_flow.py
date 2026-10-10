@@ -276,15 +276,17 @@ class CaptureFlowMixin:
             self.save_capture_images(images)
 
 
-    def save_capture_images(self, images, positions=None):
+    def save_capture_images(self, images, positions=None, notify=True, copy_to_clipboard=True):
         """直接保存选区图片，但沿用编辑器最终效果与手动保存配置。"""
         for image, alternate in images:
             editor = EditorWindow(image, self.config.data, alternate, from_capture=True)
             editor.copy_done.connect(self.notify_capture_copied)
             editor.save_as_dir_chosen.connect(self.remember_save_as_dir)
-            editor.image_saved.connect(self.saved)
+            # notify=False 时仍记录日志与历史，只是不弹保存提示（快速贴图只要贴图那一条提示）。
+            editor.image_saved.connect(
+                lambda path, image, flag=notify: self.saved(path, image, notify=flag))
             try:
-                editor.save(automatic=True, copy_to_clipboard=True)
+                editor.save(automatic=True, copy_to_clipboard=copy_to_clipboard)
             except OSError as error:
                 self.initial_save_failed(f"直接保存截图失败: {error}")
             finally:

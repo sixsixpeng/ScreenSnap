@@ -37,7 +37,21 @@ class StickerFlowMixin:
     def _connect_sticker_signals(self, views):
         for view in views:
             view.sticker_requested.connect(self.add_sticker)
-            view.quick_sticker_requested.connect(self.add_sticker)
+            view.quick_sticker_requested.connect(self.add_quick_sticker)
+
+
+    def add_quick_sticker(self, image, position=None):
+        """Space 快速贴图：先按统一保存目录落盘（与编辑器“贴图”一致），再创建贴图。"""
+        # 编辑器路径的落盘由编辑器自己完成（save(automatic=True)），快速贴图没有编辑器，
+        # 因此在这里补一次保存；保存失败不阻断贴图，只记日志并提示。
+        try:
+            # notify=False：只通知“已创建贴图”，不弹“图片已保存”；
+            # copy_to_clipboard=False：快速贴图不改动剪贴板（贴图本身才是产物）。
+            self.save_capture_images([(image, None)], notify=False, copy_to_clipboard=False)
+        except (OSError, TypeError, ValueError, RuntimeError) as error:
+            self.logger.error("快速贴图保存失败: %s", error, exc_info=True)
+            self.notify(f"快速贴图保存失败: {error}")
+        self.add_sticker(image, position)
 
 
     def add_sticker(self, image, position=None):
