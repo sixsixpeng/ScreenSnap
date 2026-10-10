@@ -7,6 +7,7 @@ import subprocess
 import sys
 import threading
 from pathlib import Path
+import shiboken6
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer, QSignalBlocker, QObject, Signal, Slot, QLockFile
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen, QGuiApplication, QFont, QCursor
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QGraphicsView, QFileDialog
@@ -169,7 +170,7 @@ class CaptureFlowMixin:
         self.mask.activateWindow()
         if self.mask.auto_complete_after_show:
             mask = self.mask
-            QTimer.singleShot(0, lambda: mask.complete() if mask.isVisible() else None)
+            QTimer.singleShot(0, lambda: mask.complete() if shiboken6.isValid(mask) and mask.isVisible() else None)
         self.mask.setFocus(Qt.ActiveWindowFocusReason)
         QTimer.singleShot(0, self._activate_capture_mask)
         for view in self.mask.session.views:

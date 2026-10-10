@@ -150,10 +150,15 @@ def enum_physical_monitors():
     monitors = []
 
     def collect(handle, unused, rect, data):
-        info = MonitorInfo()
-        info.cbSize = ctypes.sizeof(info)
-        if user32.GetMonitorInfoW(handle, ctypes.byref(info)):
-            monitors.append((info.szDevice, native_rect(info.rcMonitor)))
+        # ctypes 回调里抛异常无法传播（返回值未定义，枚举可能提前中止）⇒ 整体兜底 + 始终 True
+        # （2026-10-11 全局崩溃排查）。
+        try:
+            info = MonitorInfo()
+            info.cbSize = ctypes.sizeof(info)
+            if user32.GetMonitorInfoW(handle, ctypes.byref(info)):
+                monitors.append((info.szDevice, native_rect(info.rcMonitor)))
+        except Exception:  # noqa: BLE001 单块显示器读取失败只跳过它
+            pass
         return True
 
     try:

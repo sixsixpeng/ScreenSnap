@@ -16,12 +16,17 @@ def visible_windows():
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
     def collect(handle, unused):
-        # 过滤极小窗口，避免不可见工具窗口干扰选区吸附。
-        if user32.IsWindowVisible(handle) and not user32.IsIconic(handle):
-            bounds = wintypes.RECT()
-            if user32.GetWindowRect(handle, ctypes.byref(bounds)):
-                if bounds.right - bounds.left > 40 and bounds.bottom - bounds.top > 40:
-                    rectangles.append((bounds.left, bounds.top, bounds.right, bounds.bottom))
+        # ctypes 回调里抛异常无法向上传播（返回值会变成未定义，EnumWindows 可能提前中止），
+        # 所以回调体一律整体兜底，并且始终返回 True（2026-10-11 全局崩溃排查）。
+        try:
+            # 过滤极小窗口，避免不可见工具窗口干扰选区吸附。
+            if user32.IsWindowVisible(handle) and not user32.IsIconic(handle):
+                bounds = wintypes.RECT()
+                if user32.GetWindowRect(handle, ctypes.byref(bounds)):
+                    if bounds.right - bounds.left > 40 and bounds.bottom - bounds.top > 40:
+                        rectangles.append((bounds.left, bounds.top, bounds.right, bounds.bottom))
+        except Exception:  # noqa: BLE001 单个窗口读取失败只跳过它
+            pass
         return True
 
     try:

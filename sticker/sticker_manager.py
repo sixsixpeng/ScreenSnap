@@ -6,6 +6,7 @@ import hashlib
 from time import time_ns
 from pathlib import Path
 
+import shiboken6
 from PySide6.QtCore import Qt, QObject, Signal, QBuffer, QIODevice, QTimer, QPoint
 from PySide6.QtGui import QCursor, QGuiApplication, QImage
 from PySide6.QtWidgets import QFileDialog, QMessageBox
@@ -416,7 +417,8 @@ class StickerManager(QObject):
             self.active_sticker = item
             self._update_selection_visuals()
             return
-        QTimer.singleShot(0, lambda current=item: self._clear_sticker_focus(current))
+        QTimer.singleShot(0, lambda current=item: self._clear_sticker_focus(current)
+                       if shiboken6.isValid(current) else None)
 
     def _clear_sticker_focus(self, item):
         if self.focused_sticker is item and not item.hasFocus():

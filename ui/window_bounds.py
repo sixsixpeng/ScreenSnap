@@ -1,5 +1,6 @@
 import logging
 
+import shiboken6
 from PySide6.QtCore import QEvent, QObject, QRect, QTimer, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QDialog, QMenu, QWidget
@@ -35,7 +36,8 @@ class WindowBoundsFilter(QObject):
     def eventFilter(self, watched, event):
         if (event.type() == QEvent.Show and isinstance(watched, QWidget)
                 and watched.isWindow() and self._should_constrain(watched)):
-            QTimer.singleShot(0, watched, lambda: self._constrain(watched))
+            QTimer.singleShot(0, watched,
+                          lambda: self._constrain(watched) if shiboken6.isValid(watched) else None)
         return super().eventFilter(watched, event)
 
     @staticmethod
