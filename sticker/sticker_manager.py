@@ -40,6 +40,9 @@ class StickerManager(QObject):
         self.active_sticker = None
         self.focused_sticker = None
         self.selected_items = set()
+        # 正在退出：Qt 会关闭所有顶层窗口，那不是用户“关掉贴图”，
+        # 不能因此把它们移出会话（否则退出时保存 0 张、重启不恢复）。
+        self.quitting = False
         self.history_index = 0
         self.history_sticker = None
         self.clipboard = clipboard or QGuiApplication.clipboard()
@@ -618,6 +621,12 @@ class StickerManager(QObject):
 
     def remove(self, item):
         """贴图销毁后从会话列表移除，避免持久化已关闭窗口。"""
+        if getattr(self, "quitting", False):
+            # 退出中：窗口是被 Qt 关掉的，会话必须保留（用户 2026-10-11 反馈：
+            # 退出时贴图在屏幕上，重启却不恢复）。这里只留痕、不移除、不进回收站。
+            logging.getLogger("screensnap").debug(
+                "退出中忽略贴图关闭: %s", item.source or "临时图片")
+            return
         self._remember_placement(item)
         for follower in self.items:
             relation = follower.snap_target or {}
@@ -633,6 +642,10 @@ class StickerManager(QObject):
         self.selected_items.discard(item)
         if item in self.items:
             self.items.remove(item)
+            # 留痕（2026-10-11）：排查“退出时保存 0 张、重启不恢复贴图”。
+            # 若退出路径意外先关窗口，这条日志会出现在「正在退出，保存 …」之前。
+            logging.getLogger("screensnap").debug(
+                "贴图移出会话: 剩余 %d 张（源=%s）", len(self.items), item.source or "临时图片")
             self._update_selection_visuals()
             self.changed.emit()
             self.schedule_persist()
@@ -787,6 +800,10 @@ class StickerManager(QObject):
 
     def close_all(self):
         """关闭所有窗口并清除历史贴图引用，避免继续复用旧实例。"""
+        # 留痕（2026-10-11）：这条路径会清空 items，而它此前完全静默 ——
+        # 排查“退出时保存 0 张、重启不恢复贴图”时，必须能看出是不是它干的。
+        logging.getLogger("screensnap").info(
+            "关闭全部贴图: %d 张（调用来源见同刻调用栈）", len(self.items))
         for item in self.items[:]:
             item.close()
         self.items.clear()
@@ -806,6 +823,12 @@ class StickerManager(QObject):
             path = data_dir() / "stickers.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             states = [item.state() for item in self.items]
+            # 留痕（2026-10-11）：退出时若这里 items=0，就说明贴图在退出前已被移除，
+            # 问题在移除路径而不在持久化本身。
+            logging.getLogger("screensnap").debug(
+                "保存贴图会话: items=%d states=%d 可见=%d",
+                len(self.items), len(states),
+                sum(1 for item in self.items if item.isVisible()))
             for item in self.items:
                 self._remember_placement(item, save=False)
             try:

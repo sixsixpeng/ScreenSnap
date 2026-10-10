@@ -17,6 +17,31 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class StickerTests(CoreTests):
+    def test_remove_keeps_item_in_session_while_quitting(self):
+        """回归（用户 2026-10-11）：退出时 Qt 会关闭所有顶层窗口，贴图窗口的 closeEvent
+        会走 manager.remove()；如果不加“正在退出”守卫，会话会在 shutdown() 保存之前被清空，
+        表现为“退出时贴图还在屏幕上，重启却不恢复”。"""
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QImage
+        from sticker.sticker_manager import StickerManager
+
+        image = QImage(40, 30, QImage.Format_ARGB32)
+        image.fill(Qt.white)
+        manager = StickerManager(dict(DEFAULTS))
+        item = manager.add(image, source=None, show=False)
+        self.assertIn(item, manager.items)
+        # ① 正常关闭：应移出会话
+        manager.remove(item)
+        self.assertNotIn(item, manager.items)
+        # ② 退出中关闭：必须保留（否则退出时保存 0 张）
+        item2 = manager.add(image, source=None, show=False)
+        manager.quitting = True
+        manager.remove(item2)
+        self.assertIn(item2, manager.items, "退出过程中的窗口关闭不应清空会话")
+        manager.quitting = False
+        manager.close_all()
+
     def test_snap_hint_preset_wiring(self):
         """预设联动：选预设 ⇒ 一次性写入颜色/线宽/线型；手动改动 ⇒ 预设变“自定义”。"""
         from PySide6.QtWidgets import QComboBox

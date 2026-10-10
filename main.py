@@ -131,7 +131,7 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         self.tray.messageClicked.connect(self.open_notification_target)
         self.sticker_panel = None
         self.menu = make_tray_menu(
-            self.qt, lambda: self.start_capture("capture", from_tray=True), self.open_settings, self.qt.quit,
+            self.qt, lambda: self.start_capture("capture", from_tray=True), self.open_settings, self.quit_app,
             lambda: self.dispatch("edit_clipboard"), lambda: self.dispatch("open_image"),
             self.config.data["hotkeys"],
             open_sticker=lambda: self.dispatch("open_sticker_file"),
@@ -316,7 +316,7 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         apply_theme(self.qt, self.config.data["theme"])
         configure_logging(self.config.data)
         self.menu = make_tray_menu(
-            self.qt, lambda: self.start_capture("capture", from_tray=True), self.open_settings, self.qt.quit,
+            self.qt, lambda: self.start_capture("capture", from_tray=True), self.open_settings, self.quit_app,
             lambda: self.dispatch("edit_clipboard"), lambda: self.dispatch("open_image"),
             self.config.data["hotkeys"],
             open_sticker=lambda: self.dispatch("open_sticker_file"),
@@ -470,6 +470,19 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
             self.logger.warning("自动清理缓存失败(%s): %s", when, error)
             return
         self.logger.info("已按设置自动清理缓存(%s): %s", when, result)
+
+    def quit_app(self):
+        """托盘“退出”入口：先标记正在退出，再结束事件循环。
+
+        Qt 在退出时会关闭所有顶层窗口，贴图窗口的 closeEvent 会走 manager.remove()，
+        若不加这个标记，会话会在 shutdown() 保存之前被清空（表现为“退出时贴图在屏幕上，
+        重启却不恢复”，2026-10-11 真机反馈，日志已证实）。
+        """
+        try:
+            self.stickers.quitting = True
+        except Exception:  # noqa: BLE001 退出路径绝不能因清理失败而卡住
+            pass
+        self.qt.quit()
 
     def shutdown(self):
         """退出前保存贴图会话并释放全局热键和托盘。"""
