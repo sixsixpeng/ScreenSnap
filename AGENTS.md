@@ -269,6 +269,11 @@
   - 排查：调用点在 `program = Application()` **之前**，而日志是 `Application.__init__` 里才 `configure_logging`；`logging.getLogger("screensnap")` 此时没有任何 handler，`INFO` 直接被丢弃（Python 的 lastResort 只处理 WARNING 及以上）。把调用移到 `Application()` 之后，同一行立刻出现在 `app.log`。
   - 避免：任何「启动阶段」的留痕都要先确认日志已配置（本项目：放在 `Application()` 之后，或显式 `configure_logging` 之后再记）；写完留痕**必须真机看一次日志**再宣布完成 —— 否则排查时会因为「没有证据」而误判功能未生效。
 
+- **D20 事件路径里遍历 Qt 部件 / 取原生句柄，碰到已析构的 C++ 对象 ⇒ 无 Python 栈的原生崩溃**
+  - 现象：连续快速创建并拖动贴图（实测 4 张）时进程直接消失，`app.log` 最后一行停在正常业务日志（`sticker_item:682 停止窗口跟随`），没有任何 Python 异常；`crash.log` 的栈顶是 `core/window_snap.py:141 ignored_app_window` ← `:190 collect`（**ctypes 的 EnumWindows 回调**）← `:209 visible_targets` ← `sticker/sticker_item.py:468 begin_snap_session` ← `:407 mousePressEvent`。同一类崩溃第二次出现时栈顶变成我刚写的新函数 `:148 overlay_handles`。
+  - 排查：① `crash.log` 是**追加**写的，`Get-Content -Tail` 看到的是被截断的尾部 ⇒ 必须先按 `Current thread` / `Windows fatal exception` 标记定位**最后一次**崩溃块再读；② 栈顶若是 `winId()` / `effectiveWinId()` / `property()` 这类 Qt 调用，先怀疑**已析构对象**而不是业务逻辑；③ 用 `shiboken6.isValid(widget)` 写 5 行探针确认存活；④ **第一版只加 `try/except` 无效**（第二次崩溃的栈顶正是新加的 try 内部那行）⇒ 证明对已析构对象，`property()/winId()` 是在 **C++ 层**崩的，Python 的 `except` 根本轮不到。
+  - 避免：① 遍历 `QApplication.topLevelWidgets()` / `allWidgets()`，或调用 `winId()/effectiveWinId()/property()` 之前，**先 `shiboken6.isValid(w)` 判活**（本项目 `screenshot/mask_window.py::intruding_windows` 的 `live_widget()` 早就是正确写法，照它抄）；② **ctypes 回调里绝不碰 Qt** —— 回调需要的信息要在 `EnumWindows` **之前**收集成纯 Python 数据（`set`/`list`，如 `overlay_handles()`），回调里只做整数比较；③ `try/except` 只能当**第二道**防线，不能当唯一防线；④ 出一处就**全库排查同类点**（`grep -n "topLevelWidgets|allWidgets|winId()"`），本次就是这样又补上了 `core/window_focus.py::widget_handle`；⑤ 改完必须在**真机**复现原操作序列（离屏用例覆盖不到“部件正在销毁”的时序），并为两条分支各留一条回归用例（`isValid=False` 与“取值抛异常”）。
+
 ## Validation
 
 - Use the project environment's `python` executable. On the expected Windows setup, `py -3` may resolve to a different interpreter without project dependencies.
