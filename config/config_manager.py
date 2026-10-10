@@ -209,6 +209,12 @@ DEFAULTS = {
     "file_sticker_path": True, "file_sticker_max": 8, "file_sticker_width": 360,
     "sticker_panel_thumb": 96,
     "sticker_snap_enabled": True, "sticker_snap_threshold": 8,
+    # 吸附提示样式：每张贴图在创建时继承这些默认值，之后由对象自己持有
+    # （全局改动只影响之后新建的贴图，不追溯已存在的贴图）。
+    "sticker_snap_hint_enabled": True, "sticker_snap_hint_color": "#00ad91",
+    "sticker_snap_hint_width": 1, "sticker_snap_hint_style": "dash",
+    "sticker_snap_hint_mode": "always", "sticker_snap_hint_duration": 600,
+    "sticker_snap_hint_inset": 2, "sticker_snap_hint_preset": "default",
     "sticker_snap_targets": "both", "sticker_follow_window": True,
     "sticker_follow_sticker": True,
     "sticker_follow_interval": 120,
@@ -536,6 +542,21 @@ def validate(data):
             raise ValueError("贴图吸附距离必须在 1 到 40 像素之间")
         elif key == "sticker_snap_targets" and value not in ("screen", "window", "both"):
             raise ValueError("未知贴图吸附目标")
+        elif key == "sticker_snap_hint_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("吸附提示颜色必须是六位十六进制颜色")
+        elif key == "sticker_snap_hint_width" and not 1 <= value <= 6:
+            raise ValueError("吸附提示线宽必须在 1 到 6 像素之间")
+        elif key == "sticker_snap_hint_style" and value not in ("solid", "dash", "dot", "dash_dot"):
+            raise ValueError("未知吸附提示线型")
+        elif key == "sticker_snap_hint_mode" and value not in ("drag", "always"):
+            raise ValueError("未知吸附提示显示时机")
+        elif key == "sticker_snap_hint_duration" and not 0 <= value <= 3000:
+            raise ValueError("吸附提示淡出延时必须在 0 到 3000 毫秒之间")
+        elif key == "sticker_snap_hint_inset" and not 0 <= value <= 8:
+            raise ValueError("吸附提示内缩距离必须在 0 到 8 像素之间")
+        elif key == "sticker_snap_hint_preset" and value not in (
+                "default", "blue_solid", "orange_dot", "white_contrast", "custom"):
+            raise ValueError("未知吸附提示预设")
         elif key == "notification_backend" and value not in ("win11toast", "legacy"):
             raise ValueError("未知通知方式")
         elif key == "notification_timeout" and not 0 <= value <= 60:

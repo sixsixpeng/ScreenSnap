@@ -58,10 +58,24 @@ class StickerItem(QWidget):
         self.scale_hint_timer.setSingleShot(True)
         self.scale_hint_timer.setInterval(1000)
         self.scale_hint_timer.timeout.connect(self.clear_scale_hint)
+        # 吸附提示在「仅吸附瞬间」模式下的淡出计时（时长由对象自己的 snap_hint_duration 决定）。
+        self.snap_hint_timer = QTimer(self)
+        self.snap_hint_timer.setSingleShot(True)
+        self.snap_hint_timer.timeout.connect(self.clear_snap_hint)
         self.drag_origin = None
         # 吸附关系：记录贴到了哪个目标以及相对偏移，跟随窗口时按它重新定位。
         self.snap_target = None
         self.snap_hint = None
+        # 吸附提示样式：创建时从全局默认【继承一次】，之后由本对象自己持有。
+        # 用户 2026-10-11 明确：全局开关只在初始化时影响对象，之后改全局不追溯已有贴图。
+        self.snap_hint_enabled = bool(self.settings.get("sticker_snap_hint_enabled", True))
+        self.snap_hint_color = self.settings.get("sticker_snap_hint_color", "#00ad91")
+        self.snap_hint_width = int(self.settings.get("sticker_snap_hint_width", 1))
+        self.snap_hint_style = self.settings.get("sticker_snap_hint_style", "dash")
+        self.snap_hint_mode = self.settings.get("sticker_snap_hint_mode", "always")
+        self.snap_hint_dragged = False
+        self.snap_hint_duration = int(self.settings.get("sticker_snap_hint_duration", 600))
+        self.snap_hint_inset = float(self.settings.get("sticker_snap_hint_inset", 2))
         self.follow_timer = None
         self.snap_candidate_keys = None
         # 拖动开始时枚举一次可见窗口，拖动过程中复用。
@@ -259,11 +273,16 @@ class StickerItem(QWidget):
             else:
                 painter.drawRect(frame)
             painter.setRenderHint(QPainter.Antialiasing, False)
-        if self.snap_hint:
+        if self.snap_hint and self.snap_hint_enabled:
             # 吸附虚线画在图像内侧：画在外沿时透明模式会被输入遮罩裁掉，圆角贴图同样跟随圆角。
-            painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
+            # 颜色/线型/线宽/内缩全部取自本对象（创建时从全局默认继承一次，见 __init__）。
+            style = {"solid": Qt.SolidLine, "dash": Qt.DashLine,
+                     "dot": Qt.DotLine, "dash_dot": Qt.DashDotLine}.get(
+                         self.snap_hint_style, Qt.DashLine)
+            painter.setPen(QPen(QColor(self.snap_hint_color), self.snap_hint_width, style))
             radius = self.border_corner_radius(rect)
-            hint_frame = QRectF(rect).adjusted(0.5, 0.5, -1.5, -1.5)
+            inset = max(0.0, self.snap_hint_inset)
+            hint_frame = QRectF(rect).adjusted(inset, inset, -inset - 1, -inset - 1)
             if radius > 0.5:
                 painter.drawRoundedRect(hint_frame, max(0.0, radius - 0.5),
                                         max(0.0, radius - 0.5))
@@ -349,10 +368,30 @@ class StickerItem(QWidget):
             region |= QRegion(expanded)
         self.setMask(region)
 
+    def clear_snap_hint(self):
+        """清掉当前吸附提示虚线（淡出计时到期或被开关关闭时调用）。"""
+        self.snap_hint_timer.stop()
+        if self.snap_hint is not None:
+            self.snap_hint = None
+            self.update()
+
+    def toggle_snap_hint(self):
+        """右键菜单：开/关这张贴图的吸附提示虚线（只影响显示，不动吸附关系与跟随）。"""
+        self.snap_hint_enabled = not self.snap_hint_enabled
+        if not self.snap_hint_enabled:
+            self.snap_hint = None
+        self.update()
+        self.state_changed.emit()
+        logging.getLogger("screensnap").info(
+            "贴图吸附提示显示: %s（源=%s）",
+            "开" if self.snap_hint_enabled else "关", self.source or "临时图片")
+
     def mousePressEvent(self, event):
         # 记录全局鼠标到窗口左上角的偏移，跨显示器拖动仍保持原抓取位置。
         self.activated.emit()
         if event.button() == Qt.LeftButton:
+            # 本次按下是否真的拖动过：决定松开后吸附提示是保留还是清掉（见 mouseReleaseEvent）。
+            self.snap_hint_dragged = False
             self.selection_requested.emit(self, bool(event.modifiers() & Qt.ControlModifier))
             self.setFocus()
         if event.button() == Qt.RightButton:
@@ -389,12 +428,32 @@ class StickerItem(QWidget):
         self.move(position)
         delta = self.pos() - old_position
         if delta.x() or delta.y():
+            self.snap_hint_dragged = True   # 真的移动过 ⇒ 松开后按模式保留/淡出提示
             self.batch_moved.emit(self, delta)
 
     def mouseReleaseEvent(self, event):
         """释放拖动状态，避免下一次鼠标移动继续平移。"""
         self.drag_origin = None
         self.refresh_snap_relation()
+        # 吸附提示虚线的收尾（只动提示，不动 snap_target —— 吸附关系与跟随照旧）：
+        # 判据是「这次按下后到底拖动过没有」，不是 snap_target —— 后者在松开时可能已被
+        # refresh_snap_relation() 改写，用它会导致提示被立刻掐掉（表现为“闪一下就没”）。
+        # · 没拖动（单纯点一下贴图）⇒ 直接清掉，绝不显示；
+        # · 拖动过 + mode=always（默认）⇒ 常显，直到吸附关系解除（release_snap 清）；
+        # · 拖动过 + mode=drag ⇒ 按 snap_hint_duration 淡出（0 = 立即消失）。
+        if self.snap_hint is not None:
+            if not getattr(self, "snap_hint_dragged", False):
+                # 单纯点一下：按【当前吸附状态】重新推导，而不是无条件清掉 ——
+                # 贴图本来就贴着目标时，提示属于“常显”，点几下不该把它弄没（用户反馈）。
+                # 没吸附（或总开关关掉）时推导结果就是 None ⇒ 也不会“点一下闪出来”。
+                edge = (self.snap_target or {}).get("edge") if self.snap_target else None
+                self.snap_hint = edge if (edge and self.snap_hint_enabled) else None
+                self.update()
+            elif self.snap_hint_mode == "drag":
+                if self.snap_hint_duration > 0:
+                    self.snap_hint_timer.start(self.snap_hint_duration)
+                else:
+                    self.clear_snap_hint()
         self.state_changed.emit()
 
     def snap_enabled(self):

@@ -16,6 +16,43 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class ConfigTests(CoreTests):
+    def test_sticker_snap_hint_defaults_and_repair(self):
+        """吸附提示样式的新配置键：默认值 + 非法值修复（规则 30 的配置生命周期）。"""
+        from config.config_manager import validate
+
+        defaults = validate({})
+        self.assertTrue(defaults["sticker_snap_hint_enabled"])
+        self.assertEqual(defaults["sticker_snap_hint_color"], "#00ad91")
+        self.assertEqual(defaults["sticker_snap_hint_width"], 1)
+        self.assertEqual(defaults["sticker_snap_hint_style"], "dash")
+        self.assertEqual(defaults["sticker_snap_hint_mode"], "always")
+        self.assertEqual(defaults["sticker_snap_hint_duration"], 600)
+        self.assertEqual(defaults["sticker_snap_hint_inset"], 2)
+        self.assertEqual(defaults["sticker_snap_hint_preset"], "default")
+        # 合法值原样保留
+        ok = validate({"sticker_snap_hint_color": "#123456",
+                       "sticker_snap_hint_width": 4,
+                       "sticker_snap_hint_style": "dash_dot",
+                       "sticker_snap_hint_mode": "always",
+                       "sticker_snap_hint_duration": 1200,
+                       "sticker_snap_hint_inset": 6,
+                       "sticker_snap_hint_preset": "blue_solid"})
+        self.assertEqual(ok["sticker_snap_hint_color"], "#123456")
+        self.assertEqual(ok["sticker_snap_hint_width"], 4)
+        self.assertEqual(ok["sticker_snap_hint_style"], "dash_dot")
+        self.assertEqual(ok["sticker_snap_hint_mode"], "always")
+        self.assertEqual(ok["sticker_snap_hint_preset"], "blue_solid")
+        # 非法值与相邻的吸附键一致：validate 直接抛 ValueError（不静默吞掉）
+        for bad in ({"sticker_snap_hint_style": "wavy"},
+                    {"sticker_snap_hint_width": 99},
+                    {"sticker_snap_hint_color": "not-a-color"},
+                    {"sticker_snap_hint_mode": "never"},
+                    {"sticker_snap_hint_duration": 99999},
+                    {"sticker_snap_hint_inset": -3},
+                    {"sticker_snap_hint_preset": "neon"}):
+            with self.assertRaises(ValueError, msg=f"{bad} 应被拒绝"):
+                validate(bad)
+
     def test_group_settings_dialog_applies_explicit_targets(self):
         from PySide6.QtGui import QColor, QImage
         from PySide6.QtWidgets import QDialogButtonBox, QRadioButton
@@ -884,6 +921,16 @@ class ConfigTests(CoreTests):
             def __init__(self, *args, **kwargs):
                 # 二次编辑的初值来自该标注自身（自动高度即 0），而不是公共配置。
                 captured.update(kwargs.get("values") or {})
+
+            # C3：input_text() 现在会给对话框加置顶/抬升/激活，桩必须跟随接口。
+            def setWindowFlag(self, *args, **kwargs):
+                return None
+
+            def raise_(self):
+                return None
+
+            def activateWindow(self):
+                return None
 
             def exec(self):
                 return QDialog.Accepted
@@ -2465,6 +2512,16 @@ class ConfigTests(CoreTests):
         class StubDialog:
             def __init__(self, parent, title, settings, initial="", values=None):
                 self.title = title
+
+            # C3：input_text() 现在会给对话框加置顶/抬升/激活，桩必须跟随接口。
+            def setWindowFlag(self, *args, **kwargs):
+                return None
+
+            def raise_(self):
+                return None
+
+            def activateWindow(self):
+                return None
 
             def exec(self):
                 return QDialog.Accepted

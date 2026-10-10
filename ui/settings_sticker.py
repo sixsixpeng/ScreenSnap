@@ -70,6 +70,97 @@ class BackgroundModePreview(QWidget):
         painter.drawText(area.adjusted(8, 0, -8, -3), Qt.AlignBottom | Qt.AlignHCenter, caption)
 
 
+class StickerSnapHintPreview(QWidget):
+    """实时预览吸附提示框（颜色/线宽/线型/内缩）；只画示意图，不触碰任何真实贴图。"""
+
+    def __init__(self, config, parent=None):
+        super().__init__(parent)
+        self.config = config
+        self.setFixedHeight(92)
+        self.setMinimumWidth(260)
+
+    def refresh(self):
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        area = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        painter.fillRect(area, QColor("#edf2f4"))
+        sticker = QRectF(area.center().x() - 54, area.center().y() - 26, 108, 46)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#4a90d9"))
+        painter.drawRoundedRect(sticker, 6, 6)
+        if self.config.data.get("sticker_snap_hint_enabled", True):
+            style = {"solid": Qt.SolidLine, "dash": Qt.DashLine,
+                     "dot": Qt.DotLine, "dash_dot": Qt.DashDotLine}.get(
+                         self.config.data.get("sticker_snap_hint_style", "dash"), Qt.DashLine)
+            inset = float(self.config.data.get("sticker_snap_hint_inset", 2))
+            painter.setBrush(Qt.NoBrush)
+            painter.setPen(QPen(QColor(self.config.data.get("sticker_snap_hint_color", "#00ad91")),
+                                int(self.config.data.get("sticker_snap_hint_width", 1)), style))
+            painter.drawRoundedRect(
+                sticker.adjusted(inset, inset, -inset - 1, -inset - 1), 6, 6)
+        painter.setPen(QColor("#ffffff"))
+        painter.drawText(area.adjusted(8, 0, -8, -3), Qt.AlignBottom | Qt.AlignHCenter,
+                         "吸附提示预览（拖动/吸附瞬间显示的那一圈）")
+
+
+SNAP_HINT_PRESETS = {
+    "default": ("#00ad91", 1, "dash"),
+    "blue_solid": ("#2f7bff", 2, "solid"),
+    "orange_dot": ("#ff8c00", 2, "dot"),
+    "white_contrast": ("#ffffff", 2, "dash_dot"),
+}
+
+
+def _set_snap_hint_control(page, key, value):
+    """把值同步到控件显示（控件类型不同，全部防御式处理，绝不抛异常）。"""
+    widget = getattr(page, "controls", {}).get(key)
+    if widget is None:
+        return
+    try:
+        if isinstance(widget, QSpinBox):
+            widget.setValue(int(value))
+        elif isinstance(widget, QComboBox):
+            index = widget.findData(value)
+            if index >= 0:
+                widget.setCurrentIndex(index)
+        else:
+            setter = getattr(widget, "set_value", None) or getattr(widget, "setValue", None)
+            if callable(setter):
+                setter(value)
+    except Exception:  # noqa: BLE001 预览/联动失败不应影响设置页
+        pass
+
+
+def apply_snap_hint_preset(page):
+    """选择预设 ⇒ 一次性写入颜色/线宽/线型；“自定义”不写任何值。"""
+    preset = page.controls["sticker_snap_hint_preset"].currentData()
+    values = SNAP_HINT_PRESETS.get(preset)
+    if not values:
+        return
+    color, width, style = values
+    for key, value in (("sticker_snap_hint_color", color),
+                       ("sticker_snap_hint_width", width),
+                       ("sticker_snap_hint_style", style)):
+        _set_snap_hint_control(page, key, value)
+        page.update_value(key, value)
+
+
+def mark_snap_hint_custom(page):
+    """手动改动颜色/线宽/线型 ⇒ 预设自动变为“自定义”（已是自定义则不动）。"""
+    combo = page.controls.get("sticker_snap_hint_preset")
+    if combo is None or combo.currentData() == "custom":
+        return
+    index = combo.findData("custom")
+    if index >= 0:
+        combo.blockSignals(True)
+        combo.setCurrentIndex(index)
+        combo.blockSignals(False)
+    page.update_value("sticker_snap_hint_preset", "custom")
+
+
 class StickerSelectionPreview(QWidget):
     """实时预览贴图默认阴影、描边与选中光晕。"""
 
@@ -170,6 +261,42 @@ class StickerPage(SettingsPage):
                     "屏幕：贴到显示器可用区域的四边，任务栏占位会被排除；\n"
                     "窗口和贴图：贴到普通窗口或其他可见贴图的四边（可贴到目标外侧）；\n"
                     "两者：同时考虑上面两类目标，取距离最近的一个")
+        self.group("吸附提示样式")
+        self.check("sticker_snap_hint_enabled", "显示吸附提示",
+                   "吸附瞬间沿贴图外沿显示的提示框；每张贴图还可以在右键菜单里单独开关")
+        self.choice("sticker_snap_hint_preset", "预设样式",
+                    [("默认青绿虚线", "default"), ("蓝色实线", "blue_solid"),
+                     ("橙色点线", "orange_dot"), ("白色高对比", "white_contrast"),
+                     ("自定义", "custom")],
+                    "预设会一次性设定颜色/线宽/线型；手动改动其中任一项即变成“自定义”")
+        self.color("sticker_snap_hint_color", "提示颜色", "吸附提示框的颜色（默认与提示虚线同为青绿）")
+        self.number("sticker_snap_hint_width", "提示线宽 (px)", 1, 6, "吸附提示框的线条宽度")
+        self.choice("sticker_snap_hint_style", "提示线型",
+                    [("实线", "solid"), ("虚线", "dash"), ("点线", "dot"), ("点划线", "dash_dot")],
+                    "吸附提示框的线型，默认虚线与旧行为一致")
+        self.choice("sticker_snap_hint_mode", "显示时机",
+                    [("吸附关系存在期间常显", "always"), ("仅吸附瞬间", "drag")],
+                    "默认“常显”：只要贴图还贴着目标就一直显示提示框；\n选“仅吸附瞬间”则松开后按下面的延时淡出")
+        self.number("sticker_snap_hint_duration", "淡出延时 (ms)", 0, 3000,
+                    "仅在“仅吸附瞬间”下生效：0 表示松开立即消失（默认 600ms）")
+        self.number("sticker_snap_hint_inset", "提示内缩 (px)", 0, 8,
+                    "提示框相对图像边缘向内缩进；透明模式必须内缩，否则会被输入遮罩裁掉")
+        self.snap_hint_preview = StickerSnapHintPreview(config)
+        self.previews.append(self.snap_hint_preview)
+        self.form.addRow(self.snap_hint_preview)
+        self.controls["sticker_snap_hint_preset"].currentIndexChanged.connect(
+            lambda _=0: apply_snap_hint_preset(self))
+        for _key in ("sticker_snap_hint_color", "sticker_snap_hint_width",
+                     "sticker_snap_hint_style"):
+            _widget = self.controls.get(_key)
+            _signal = None
+            for _name in ("color_changed", "valueChanged", "currentIndexChanged"):
+                _candidate = getattr(_widget, _name, None)
+                if _candidate is not None and hasattr(_candidate, "connect"):
+                    _signal = _candidate
+                    break
+            if _signal is not None:
+                _signal.connect(lambda *_a: mark_snap_hint_custom(self))
         self.check("sticker_follow_window", "吸附到窗口后跟随移动",
                    "贴到某个窗口后，该窗口移动或改变位置时贴图跟着一起走；\n"
                    "窗口关闭会自动解除吸附；也可在贴图右键菜单单独开关跟随")

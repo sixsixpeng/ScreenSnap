@@ -76,6 +76,8 @@ def build_menu(sticker):
         ("关闭描边" if sticker.border_enabled else "开启描边", action_icon("border"), sticker.toggle_border),
         ("隐藏阴影" if sticker.shadow_enabled else "显示阴影", action_icon("shadow"), sticker.toggle_shadow),
         ("关闭置顶" if sticker.always_on_top else "开启置顶", action_icon("pin"), sticker.toggle_top),
+        ("关闭吸附提示" if getattr(sticker, "snap_hint_enabled", True) else "开启吸附提示",
+         action_icon("locate"), sticker.toggle_snap_hint),
     ]:
         menu.addAction(icon if isinstance(icon, QIcon) else sticker.style().standardIcon(icon), label, callback)
     snap = getattr(sticker, "snap_target", None)

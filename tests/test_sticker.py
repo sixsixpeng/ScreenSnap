@@ -17,6 +17,99 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class StickerTests(CoreTests):
+    def test_snap_hint_preset_wiring(self):
+        """预设联动：选预设 ⇒ 一次性写入颜色/线宽/线型；手动改动 ⇒ 预设变“自定义”。"""
+        from PySide6.QtWidgets import QComboBox
+        from ui.settings_sticker import (SNAP_HINT_PRESETS, apply_snap_hint_preset,
+                                         mark_snap_hint_custom)
+
+        class FakePage:
+            """只实现联动用到的两个接口：controls 映射与 update_value。"""
+
+            def __init__(self, combo):
+                self.controls = {"sticker_snap_hint_preset": combo,
+                                 "sticker_snap_hint_color": None,
+                                 "sticker_snap_hint_width": None,
+                                 "sticker_snap_hint_style": None}
+                self.written = {}
+
+            def update_value(self, key, value):
+                self.written[key] = value
+
+        combo = QComboBox()
+        for name, value in (("默认青绿虚线", "default"), ("蓝色实线", "blue_solid"),
+                            ("橙色点线", "orange_dot"), ("白色高对比", "white_contrast"),
+                            ("自定义", "custom")):
+            combo.addItem(name, value)
+        page = FakePage(combo)
+        self.assertEqual(set(SNAP_HINT_PRESETS), {"default", "blue_solid",
+                                                  "orange_dot", "white_contrast"})
+        # 选“蓝色实线” ⇒ 三个键一起写入
+        combo.setCurrentIndex(1)
+        apply_snap_hint_preset(page)
+        self.assertEqual(page.written["sticker_snap_hint_color"], "#2f7bff")
+        self.assertEqual(page.written["sticker_snap_hint_width"], 2)
+        self.assertEqual(page.written["sticker_snap_hint_style"], "solid")
+        # 选“自定义” ⇒ 不写任何值（保留用户当前样式）
+        page.written.clear()
+        combo.setCurrentIndex(4)
+        apply_snap_hint_preset(page)
+        self.assertEqual(page.written, {})
+        # 手动改动 ⇒ 预设自动变“自定义”，且不覆盖任何样式值
+        combo.setCurrentIndex(0)
+        page.written.clear()
+        mark_snap_hint_custom(page)
+        self.assertEqual(page.written, {"sticker_snap_hint_preset": "custom"})
+        self.assertEqual(combo.currentData(), "custom")
+
+    def test_snap_hint_style_inherited_once_and_owned_by_the_sticker(self):
+        """吸附提示样式：创建时从全局默认继承一次，之后全局改动不追溯；每张贴图可单独开关。"""
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import Qt
+        from PySide6.QtGui import QImage
+        from sticker.sticker_item import StickerItem
+
+        image = QImage(40, 30, QImage.Format_ARGB32)
+        image.fill(Qt.white)
+        settings = dict(DEFAULTS, sticker_snap_hint_color="#ff00ff",
+                        sticker_snap_hint_width=3, sticker_snap_hint_style="solid",
+                        sticker_snap_hint_mode="always", sticker_snap_hint_inset=4,
+                        sticker_snap_hint_duration=0,
+                        sticker_border_enabled=False, sticker_shadow_enabled=False)
+        sticker = StickerItem(image, settings=settings)
+        # ① 创建时继承全局默认
+        self.assertEqual(sticker.snap_hint_color, "#ff00ff")
+        self.assertEqual(sticker.snap_hint_width, 3)
+        self.assertEqual(sticker.snap_hint_style, "solid")
+        self.assertEqual(sticker.snap_hint_mode, "always")
+        self.assertEqual(sticker.snap_hint_inset, 4)
+        self.assertTrue(sticker.snap_hint_enabled)
+        # ② 之后改全局不追溯已有贴图（对象自己持有）
+        settings["sticker_snap_hint_color"] = "#0000ff"
+        settings["sticker_snap_hint_enabled"] = False
+        settings["sticker_snap_hint_style"] = "dot"
+        self.assertEqual(sticker.snap_hint_color, "#ff00ff")
+        self.assertEqual(sticker.snap_hint_style, "solid")
+        self.assertTrue(sticker.snap_hint_enabled, "全局开关不应追溯已存在的贴图")
+        # ③ 新建的贴图才拿到新默认值
+        newer = StickerItem(QImage(image), settings=settings)
+        self.assertEqual(newer.snap_hint_color, "#0000ff")
+        self.assertFalse(newer.snap_hint_enabled)
+        # ④ 每贴图开关：右键菜单切换只影响自己；关闭时顺手清掉当前提示
+        sticker.snap_hint = "left"
+        sticker.toggle_snap_hint()
+        self.assertFalse(sticker.snap_hint_enabled)
+        self.assertIsNone(sticker.snap_hint, "关闭提示时应清掉当前那一圈")
+        sticker.toggle_snap_hint()
+        self.assertTrue(sticker.snap_hint_enabled)
+        self.assertTrue(newer.snap_hint_enabled is False, "切换不应波及其它贴图")
+        # ⑤ clear_snap_hint 幂等
+        sticker.snap_hint = "top"
+        sticker.clear_snap_hint()
+        self.assertIsNone(sticker.snap_hint)
+        sticker.clear_snap_hint()
+        self.assertIsNone(sticker.snap_hint)
+
     def test_group_properties_persist_and_unassign_keeps_stickers(self):
         from PySide6.QtGui import QColor, QImage
         from config.config_manager import DEFAULTS
