@@ -55,6 +55,8 @@
 
     State in the report which scenarios you actually checked and which you did not, instead of implying that the named one stands for all of them.
 
+30. **Any change to the settings schema triggers a full configuration audit.** When you add, rename or remove a configuration key — or change its type or defaults — re-check the **whole** lifecycle in the same round, not just the call site you were working on: DEFAULTS, legacy/missing-key initialization, \`validate()\` repair rules, the \`PRESERVED_ON_VERSION_RESET\` list, settings-page controls (and their live-refresh wiring), import/export, reset-to-defaults, the version gate's reset path, every reader of the key, the tests that assert them, and the README tables. Missing one of these is how a new key silently reverts, breaks a reset, or leaves the settings page out of sync — the audit is cheap compared with the round it costs later. Report which lifecycle stages you checked.
+
 ## 经验与常见错误
 
 > 由规则 25 维护：只收录**真实发生过**的错误；每条含「现象 / 排查 / 避免」；新增前先询问用户。
@@ -85,6 +87,16 @@
   - 现象：test_sticker.py 从 66 条掉到 5 条（真数据丢失，git 里也没有）。
   - 排查：删除脚本的结束锚点没找到时兜底删到了文件尾。
   - 避免：删除前先验证结束锚点存在，不存在就中止；改完核对条目数守恒。
+
+- **A7 未入库文件被脚本覆盖后无法回滚，且覆盖时无人察觉**
+  - 现象：RELEASE_NOTES.md 的内容变成了另一段完全无关的文本（对话里发过的检查清单），而我此前多轮一直在编辑它；发现时已是最后一次写入之后。
+  - 排查：read 文件头部 + Select-String '^### ' 核对结构；git ls-files RELEASE_NOTES.md 返回空 → 该文件按规则 20 **从未入库**，没有历史可回滚。
+  - 避免：对"故意不提交"的文件（RELEASE_NOTES.md）**每次写入前先复制一份到临时目录**；写脚本时内容变量与目标文件名一一对应，写盘前断言首行等于预期标题（如 「# ScreenSnap 发布记录」）与必要结构标记，不满足就中止。
+
+- **A8 临时脚本名一旦被删过就不能复用（工具限制）**
+  - 现象：write 报 cannot write "…\_t2.py": file no longer exists — re-read the file, then retry，整段程序中止，本轮白跑一次。
+  - 排查：该文件名在本会话里被 Remove-Item 删过；工具按"已观察到的文件状态"校验，删除后即视为不存在。
+  - 避免：临时脚本一律用**新名字**（_fix1.py、_fix2.py… 或带序号/时间戳），不要复用删过的名字；收尾清理只删本次新建的文件。
 
 ### B. 跨语言脚本与命令执行
 
@@ -134,6 +146,21 @@
   - 排查：用**独立的单行导入自检**（单独脚本文件，不要依赖 shell 里的嵌套引号）确认崩溃发生在导入阶段；看退出码是否为 -1073741819；并确认改动前该模块能否被导入。
   - 避免：模块级只放纯数据与枚举（例如 `QKeySequence.Undo` 枚举值）；`QKeySequence(...)`、QIcon、QPixmap 等 Qt 对象一律在函数内构造，或在 QApplication 建立之后构造。
 
+- **C7 模块变红先用 `git stash` 与 HEAD 对照，别把既有失败算成回归、也别放过自己引入的回归**
+  - 现象：跨屏多选改完后 `test_dpi` 3 条红，无法判断哪些是我引入的。
+  - 排查：`git stash push <改动文件>` → 在 HEAD 版本跑同样 3 条 → 对比（1 条 HEAD 通过=我引入的回归；2 条 HEAD 同样失败=既有失败）→ `git stash pop`。随后定位到回归原因是归属判定把测试桩 Mock 的 `monitor_rect.contains()` 当真值，加了 `isinstance(monitor_rect, QRect)` 守卫即解决。
+  - 避免：改动共享方法后若某模块变红，先做 HEAD 对照再修；引入的回归必须修完才能提交，既有失败顺手修或明确标注（都属于"改了实现没改期望"的爆炸半径，规则 27）。
+
+- **C8 设计契约变更后没有同步旧断言，红的是"旧契约"而不是回归**
+  - 现象：把"采集阶段快捷键只在主遮罩上创建"改成"每块遮罩各建一份"后，test_dpi 三条红：assertTrue(all(view.capture_action_shortcuts is None …))、assertIsNone(secondary.capture_action_shortcuts)、以及用例名里的 only_primary_has_shortcuts。
+  - 排查：grep -n "capture_action_shortcuts is None|only_primary|is None" 定位旧断言；再用 git stash 对 HEAD 跑同样用例（见 C7）区分"旧契约"与"真回归"。
+  - 避免：契约级改动（一份→多份、单窗口→多窗口、单选→多选）先把**断言、用例名、文档表格、日志文案**一起 grep 出来改（本轮还漏改了「S 快捷键未创建…（只有主遮罩视图创建快捷键）」这类旧日志文案）。
+
+- **C9 会话级/全局资源的用例要断言"性质"，不要断言"精确次数"**
+  - 现象：AssertionError: ['escape-handle', 'escape-handle'] != ['escape-handle']（关闭路径多同步一次）；把桩改成幂等后仍红，两轮都耗在这条脆断言上。
+  - 排查：让断言把**实际列表**打出来（本次就是列表差异一行定位），并检查桩是否幂等（句柄为空应早退）。
+  - 避免：对"安装/释放/幂等/去抖"这类资源，断言**性质**——可见期间**不**释放、不可见后**至少**释放一次、不重复安装；桩必须幂等。
+
 ### D. 判断与流程
 
 - **D1 把推断当成结论上报**
@@ -153,7 +180,43 @@
   - 排查：两个动作共用同一条 status 到 notify 的通道，只改了其中一处。
   - 避免：修一处后审计所有同类入口（同一信号或函数的所有调用点），并把结论写进文档防止复发。
 
+- **D5 "没反应"类问题先加可观测点，再动逻辑**
+  - 现象：主屏 Alt+M 进不去多选，我按推测连改两轮都没中（改归属转交、改快捷键放行），用户只能反复回报"还是不行"。
+  - 排查：在入口与每个分支加 DEBUG（`多选切换：视图=… primary=… inline=… _forwarded=…`），一次复现就把链路钉死（日志直接显示"收到请求 → 转交给主视图 → 主视图那一跳被拦下"）。
+  - 避免：凡是"按了没反应"的问题，第一轮先补日志（入口 + 分支 + 忽略原因），拿到一次真实复现再改代码；没有任何可观测点的修复只能算猜测，不许当结论上报。
 
+- **D6 防双触发的去抖/幂等守卫会反噬——必须区分"用户重复"与"内部转交/再入"**
+  - 现象：为防两条 Alt+M 快捷键各触发一次而加的 0.25s 去抖，把同一毫秒内的**主动转交**也判成重复（日志：`多选切换：忽略 0.000s 内的重复触发`）→ 主屏依旧进不去多选。
+  - 排查：去抖时间戳在**入口**就写入，转交发生在同一毫秒；`not _forwarded` 之前的判断把内部调用与用户第二次按键混为一谈。
+  - 避免：守卫要带**显式来源标记**（`_forwarded=True` 之类的再入标记）并只对用户入口生效；写去抖时同时写下"哪些内部调用必须绕过它"，并留一条"忽略原因"日志以便区分二者。
+
+- **D7 文档丢失后按"未推送提交"重建，不许凭记忆编造**
+  - 现象：发布记录被误覆盖且无历史可回滚，我一度想凭记忆补条目。
+  - 排查：git log --oneline gitcode/master..HEAD（未推送＝未发布）逐条列出，映射到发布记录分区；必要时用 git log -S 定位具体改动。
+  - 避免：重建只以可核对的事实（提交列表、diff、日志）为依据；查不到出处的分区显式标注"原条目丢失，待补"，不编造（规则 23 同样适用于重建）。
+
+- **D8 输入源"只建一份"是多屏应用的高频缺陷（同一按键被多条快捷键/多个窗口触发）**
+  - 现象：某块屏上 Esc/S/C/F/E/R/Alt+M/Y/反引号全部无反应，点一下屏幕就恢复；而且是"每次都要点"而非只首次。
+    后续（反面教材）：照"每窗口各一份"改完，问题升级为**主副屏 Esc 全部失效**（1 条日志即可看出：同一键的"已创建"出现多份、而"触发"为 0）。
+  - 排查：看快捷键日志里的**视图矩形**（只出现一个视图 ＝ 另一块屏没有键）；看日志行的「前台=」字段是否一直是外部窗口；grep -n "if primary:" 找出所有"只建一份"的输入源；再看兜底守卫（如 _sync_escape_fallback）的判定基准是不是"任意窗口活动"而不是"光标所在窗口活动"。
+  - 避免：① **快捷键只保留单一来源**（本项目的 \`if primary:\` 结构），**绝不**为多屏"每窗口各建一份同键 ApplicationShortcut" —— Qt 会判为 ambiguous（冲突）而**拒绝触发任何一份**；本条经验的第一版就是这么写的，照它改完直接把"某块屏不行"升级成"主副屏 Esc 全废"（真机实测）。
+    ② 多屏输入的正确解法是**让光标所在那块遮罩成为活动窗口**（core/window_focus.activate_window + 前台兜底），因为 ApplicationShortcut 只要求"本应用是前台"。
+    ③ 判定/兜底（含 Esc 兜底是否安装）一律以**光标所在那块遮罩**为基准，不要以"某块遮罩（如 primary）是否活动"为准，也不要用时间戳去抖（见 D6）。
+    ④ **可打印字符**（反引号等）会被 QGraphicsView 用 ShortcutOverride 吞掉：遮罩侧的键收不到，需要在**编辑器侧**再建一份（挂 canvas、context 用 \`Qt.WindowShortcut\`，如 Alt+M / 工具栏隐藏键），或把按键显式转交。
+
+- **D9 涉及框架行为的假设先用最小探针证伪**
+  - 现象：我断定反引号键无反应是 QKeySequence 解析为空，差点据此改错方向。
+  - 排查：写 5 行离屏探针直接打印 QKeySequence(...).isEmpty()/toString()（QT_QPA_PLATFORM=offscreen）→ 实测 isEmpty=False、toString 为反引号，假设被证伪。
+  - 避免：凡"框架大概是这样"的判断先探针验证；探针结果与推断不符时把它作为证据写进报告（D1），并据此换方向。
+
+- **D10 关键动作必须分段留痕：入口 / 命中 / 忽略原因 —— 「没反应」先证明输入有没有到程序**
+  - 现象：副屏反引号无效。我先给快捷键加「已创建」「就绪」日志，两者都显示 启用=True，却始终没有「触发」；再在遮罩视图的 keyPressEvent 里逐键打印，仍是 0 行 —— 这才明白不是路由问题，而是按键根本没进程序（焦点被别的窗口拿走，或自家的全局键盘钩子吞了输入）。
+  - 排查：① 在每一层输入入口都留一条痕：QShortcut.activated / 编辑器事件过滤器 / 遮罩 keyPressEvent / 应用级 QApplication eventFilter；② 对着日志比「前台=」字段与 isActiveWindow() 的结果是否一致；③ 用环境变量临时关掉自家全局钩子（本项目 SCREENSNAP_NO_ESC_HOOK=1）再按同一个键，若立刻恢复即证明是钩子吞输入。
+  - 避免：任何关键动作都要三段留痕 —— 入口（收到没有）、命中/判定值（键值、启用状态、视图归属）、忽略原因（为什么没做）；「没反应」类问题先证明输入到没到程序，再谈路由与判定；禁止用「按理应该会触发」当结论（D1/D5）。
+- **D11 窗口被系统报为前台，却收不到任何键盘事件 —— 别再往 Qt 输入链加入口，改用不依赖焦点的机制**
+  - 现象：副屏快速编辑里按工具栏隐藏键无效。陆续加了 QShortcut（已创建/就绪/触发）、编辑器事件过滤器、遮罩 keyPressEvent 三层日志，全部 0 行；再装**应用级 QApplication eventFilter**，同样 0 行 —— 而同一时刻日志显示「前台=python(2560,0,2560x1440)[本进程]」且 isActiveWindow()=True。同一进程里另一块屏的窗口按键完全正常。
+  - 排查：① 先用应用级 eventFilter 区分「键没进程序」与「进了没处理」（D10）；② 用 SCREENSNAP_NO_ESC_HOOK=1 关掉自家全局钩子复测，排除自家人为因素；③ 对比同一操作在两块屏上的日志差异（一块有事件、一块零事件）。
+  - 避免：输入类需求不要只押在 Qt 的快捷键/焦点链上；对「两块屏都必须可用」的键，优先采用**不依赖窗口焦点**的机制（本项目做法：用 keyboard 注册全局热键，截图开始时注册、遮罩关闭时释放，钩子线程只 emit 信号、切换在 Qt 线程执行），并保留一个可临时禁用它的环境变量开关便于对照；一旦证据表明系统级输入不可达，就停止在这条链上继续加入口，换机制收尾。
 ## Validation
 
 - Use the project environment's `python` executable. On the expected Windows setup, `py -3` may resolve to a different interpreter without project dependencies.
