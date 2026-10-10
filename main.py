@@ -271,6 +271,12 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
             # 版本变化导致数据被清空时必须明确告知，避免用户以为设置/贴图丢了。
             self.notify(f"版本已更新（{self.version_reset_from} → {APP_VERSION}），用户数据已重置")
             return
+        restarted = os.environ.get("SCREENSNAP_RESTARTED", "")
+        if restarted:
+            # 看护进程在异常退出后拉起本进程时设置的标记：只提示一次，且优先于普通启动提示。
+            self.logger.warning("崩溃后自动重启（上次退出码=%s）", restarted)
+            self.notify(f"ScreenSnap 上次异常退出（code={restarted}），已自动重启")
+            return
         self.notify("已启动，可使用快捷键截图或右键托盘打开设置")
 
 
