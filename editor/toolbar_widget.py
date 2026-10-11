@@ -208,6 +208,9 @@ class ToolbarWidget(QWidget):
                            ("椭圆", "ellipse"), ("序号", "number"), ("文字", "text"),
                            ("橡皮擦", "eraser"), ("马赛克", "mosaic"), ("取色", "picker"), ("裁剪", "crop")]:
             button = QToolButton()
+            # 2026-10-11（审查实测回归）：A/S/Ctrl+S/Space/方向键/WASD 都是**画布专属**键 ⇒ 按钮若可获焦，
+            # 点过按钮后这些键全部失效 ✗（必须先点回画布）。工具栏按钮不需要键盘焦点 ⇒ 统一 NoFocus ✓。
+            button.setFocusPolicy(Qt.NoFocus)
             button.setProperty("annotationTool", True)
             icon = action_icon("eraser") if key == "eraser" else annotation_icon(key)
             button.setIcon(icon)
@@ -490,6 +493,7 @@ class ToolbarWidget(QWidget):
         self.cursor_switch.setFixedHeight(34)
         self.cursor_switch.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
         options = QToolButton()
+        options.setFocusPolicy(Qt.NoFocus)   # 同上：不吃焦点（2026-10-11 审查回归）
         options.setText("更多设置")
         options.setIcon(settings_icon())
         options.setIconSize(QSize(20, 20))
@@ -511,7 +515,9 @@ class ToolbarWidget(QWidget):
         preview_box = QWidget()
         preview_layout = QVBoxLayout(preview_box)
         preview_layout.setContentsMargins(0, 0, 0, 0)
-        screen = QGuiApplication.primaryScreen()
+        # 2026-10-11（审查 L4）：原来固定用**主屏**高度算预览缩略图尺寸 ✗ ⇒ 编辑器在副屏时不反映
+        # 所在屏（规则 26 的尺寸轴）⇒ 改为优先用本部件所在屏，拿不到再退回主屏。
+        screen = self.screen() or QGuiApplication.primaryScreen()
         usable = screen.availableGeometry().height() if screen is not None else 900
         self.previews = {}
         for kind in ("text", "arrow", "pen", "rect", "ellipse", "marker", "mosaic", "eraser", "crop", "sequence", "picker"):
@@ -824,6 +830,7 @@ class ToolbarWidget(QWidget):
         # 画布会吞掉 Space（ShortcutOverride，用于拖动画布）⇒ 唯一那份必须挂在**画布**上，
         # 见 editor/annotation_canvas.py 的 _sticker_shortcut；此处不再创建。
         self.appearance_toggle = QToolButton(self)
+        self.appearance_toggle.setFocusPolicy(Qt.NoFocus)   # 同上：不吃焦点（2026-10-11 审查回归）
         self.appearance_toggle.setIcon(settings_icon())
         self.appearance_toggle.setText("外观")
         self.appearance_toggle.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
@@ -1333,6 +1340,8 @@ class ToolbarWidget(QWidget):
     def button(self, layout, label, action, icon):
         """常用命令同时展示 Qt 标准图标和文字，完整名称留在悬浮提示中。"""
         button = QToolButton()
+        # 同上：工具栏按钮一律不吃键盘焦点，保证画布专属键始终有效（2026-10-11 审查回归）。
+        button.setFocusPolicy(Qt.NoFocus)
         button.setIcon(icon if isinstance(icon, QIcon) else self.style().standardIcon(icon))
         button.setText(label)
         button.setToolButtonStyle(Qt.ToolButtonTextBesideIcon)
@@ -1370,6 +1379,8 @@ class ToolbarWidget(QWidget):
     def menu_button(self, layout, label, actions):
         """低频操作收入菜单，避免所有按钮占满一行。"""
         button = QToolButton()
+        # 同上：不吃焦点（2026-10-11 审查回归；menu_button 工厂）。
+        button.setFocusPolicy(Qt.NoFocus)
         button.setText(label)
         menu_icons = {"层级": QStyle.SP_FileDialogDetailedView,
                   "旋转 / 翻转": QStyle.SP_BrowserReload,
@@ -1611,7 +1622,8 @@ class ToolbarWidget(QWidget):
         mapping = {
             "save": ("capture_save_shortcut", "S"),
             "copy_only": ("capture_copy_shortcut", "Y"),
-            "save_as": ("editor_save_as_shortcut", "Q"),
+            # 2026-10-11（审查 L1）：兜底默认原为 "Q" ✗ 与 DEFAULTS 的 "A" 不一致 ⇒ 对齐为 "A"。
+            "save_as": ("editor_save_as_shortcut", "A"),
             "undo": ("editor_undo_shortcut", "Ctrl+Z"),
             "redo": ("editor_redo_shortcut", "Ctrl+Y"),
             "paste": (None, "空格"),
@@ -1626,13 +1638,16 @@ class ToolbarWidget(QWidget):
     def set_hotkeys(self, hotkeys):
         self.hotkeys = hotkeys or {}
         for button, action in self.command_buttons:
-            # 与 button() 保持同一规则：贴图按钮恒显示本窗口的「空格」，不跟随全局 paste（F3）。
-            binding = {"paste": "空格"}.get(action) or shortcut_label(self.hotkeys, action)
+            # 2026-10-11（审查 H4）：原来这里查**全局热键表**（shortcut_label(self.hotkeys, …)）✗ ⇒ 与
+            # 构造期用的 editor_binding() **来源不同** ⇒ 每次改设置后 tooltip 脱钩：
+            #   undo/redo 显示回硬编码的 Ctrl+Z/Y ✗，save/save_as/copy 的"（快捷键: …）"整段消失 ✗。
+            # 现在统一走 editor_binding()（唯一来源 ✓ 含贴图恒为「空格」的规则 ✓ 规则 8/D4）。
+            binding = self.editor_binding(action)
             detail = button.property("tooltip_detail") or button.text()
             button.setToolTip(rich_tooltip(button.text(), detail, binding))
         for menu_button in self.menu_buttons:
             for action in menu_button.menu().actions():
-                binding = shortcut_label(self.hotkeys, action.data())
+                binding = self.editor_binding(action.data())   # 同上：与构造期同源（审查 H4）
                 if action.data() and binding:
                     action.setText(f"{action.property('base_label')} ({binding})")
                 elif action.data():

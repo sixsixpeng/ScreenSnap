@@ -55,7 +55,9 @@ class HotkeyPage(SettingsPage):
                 ("editor_redo_shortcut", "重做（两个编辑器）",
                  "两个编辑器共用的重做按键，默认 Ctrl+Y。"),
                 ("editor_zoom_reset_shortcut", "画布缩放复位（仅独立编辑器）",
-                 "把画布缩放复位到 100%，默认 Ctrl+0；滚轮缩放只在独立编辑器启用，但复位两边都可用。")):
+                 # 2026-10-11（审查 M1）：label 写"仅独立编辑器"、tooltip 却写"两边都可用" ✗ 自相矛盾
+                 # ⇒ 统一为"仅独立编辑器"（原地编辑器没有画布缩放，Ctrl+0 不生效是有意设计 ✓ 规则 33）。
+                 "把画布缩放复位到 100%，默认 Ctrl+0；仅独立编辑器可用（原地编辑器没有画布缩放）。")):
             self.text(key, label, tip)
 
     def reset_page(self):

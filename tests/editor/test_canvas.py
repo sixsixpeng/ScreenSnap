@@ -855,6 +855,42 @@ class CanvasTests(CoreTests):
         self.assertEqual(horizontal.value(), 0, "Alt 不再横向移动（用户要求）")
         self.assertGreater(vertical.value(), 0, "Alt+滚轮应回落为纵向滚动")
 
+    def test_save_as_and_undo_keys_follow_configuration(self):
+        """2026-10-11 审查 H1/L6 回归：另存为键与撤销/重做键必须**跟随配置**（原来硬编码 ✗）。
+
+        实测过的旧行为：把另存为改成 D 后按 D **无反应** ✗、按 A 反而弹另存为 ✗；
+        把撤销改成 Alt+Z 后按 Ctrl+Z **仍然生效** ✗。本用例把这三点一起钉住。
+        """
+        from PIL import Image
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        from editor.annotation_canvas import AnnotationCanvas
+
+        settings = dict(DEFAULTS, editor_save_as_shortcut="D", editor_undo_shortcut="Alt+Z",
+                        editor_redo_shortcut="Alt+Y")
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 160), "white"), settings)
+        canvas.show()
+        self.app.processEvents()
+        try:
+            fired = []
+            canvas.save_as_requested.connect(lambda: fired.append("save_as"))
+            canvas.setFocus()
+            QTest.keyClick(canvas, Qt.Key_D)                 # 配置里的另存为键 ⇒ 应触发
+            QTest.keyClick(canvas, Qt.Key_A)                 # 旧硬编码键 ⇒ 不应触发
+            self.assertEqual(fired, ["save_as"], "另存为必须跟随配置键（D 触发、A 不触发）")
+
+            undo_calls, redo_calls = [], []
+            with patch.object(canvas, "undo", side_effect=lambda *a, **k: undo_calls.append(1)), \
+                 patch.object(canvas, "redo", side_effect=lambda *a, **k: redo_calls.append(1)):
+                QTest.keyClick(canvas, Qt.Key_Z, Qt.AltModifier)      # 配置键 ⇒ 应撤销
+                QTest.keyClick(canvas, Qt.Key_Z, Qt.ControlModifier)  # 旧硬编码键 ⇒ 不应撤销
+                QTest.keyClick(canvas, Qt.Key_Y, Qt.AltModifier)      # 配置键 ⇒ 应重做
+            self.assertEqual(len(undo_calls), 1, "撤销必须跟随配置键（Alt+Z 生效、Ctrl+Z 不生效）")
+            self.assertEqual(len(redo_calls), 1, "重做必须跟随配置键（Alt+Y 生效）")
+        finally:
+            canvas.close()
+
     def test_dragging_rotation_handle_rotates_without_moving_item(self):
         """2026-10-11 用户实测回归：按住旋转按钮拖动 = **旋转**（位置不变）。
 

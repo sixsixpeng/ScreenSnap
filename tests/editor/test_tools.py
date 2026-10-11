@@ -56,6 +56,27 @@ class ToolsTests(CoreTests):
 
                     close_crash_dumps()
 
+    def test_toolbar_buttons_never_take_keyboard_focus(self):
+        """2026-10-11 审查回归：工具栏按钮一律 NoFocus。
+
+        A / S / Ctrl+S / Space / 方向键 / WASD 都是**画布专属**键（D14：双语义键不能用 QShortcut 抢先）。
+        按钮若可获焦，用户点过按钮后这些键就**全部失效**（必须先点回画布）—— 审查方已离屏实测。
+        这里断言 `ToolbarWidget` 内的 QToolButton 全部 NoFocus（轻量、不构造完整编辑器 ✓）。
+        """
+        from PySide6.QtWidgets import QToolButton
+        from config.config_manager import DEFAULTS
+        from editor.toolbar_widget import ToolbarWidget
+
+        # 注意签名：ToolbarWidget(pen_color=…, settings=None, …) ⇒ settings 必须用关键字传 ✓
+        toolbar = ToolbarWidget(settings=dict(DEFAULTS))
+        try:
+            buttons = toolbar.findChildren(QToolButton)
+            self.assertTrue(buttons, "工具栏应当有 QToolButton")
+            offenders = [b.text() for b in buttons if b.focusPolicy() != Qt.NoFocus]
+            self.assertEqual(offenders, [], "以下工具栏按钮仍可获焦（会吞掉画布快捷键）")
+        finally:
+            toolbar.close()
+
     def test_editor_operation_tips_are_visible(self):
         from config.config_manager import DEFAULTS
 

@@ -26,14 +26,15 @@ TOOLBAR_HIDE_KEY = ("capture_toolbar_hide_shortcut", "`")
 
 def hint_texts(settings, position, selection, inline=False,
                toolbar_hidden=False, multi_select=False,
-               right_capture=False, inline_tool="select"):
+               right_capture=False):
     """提示项 id → 文案；当前阶段不适用的项给出空串（绘制端会跳过）。
 
     · `selection` 为 `(宽, 高)` 表示已有选区，`None` 表示还在框选阶段；
     · `inline` 为真表示已进入原地编辑；
-    取色已改为一次性动作（无模式），下面两个参数仅为兼容旧调用保留、取值被忽略。
-    · `inline_tool` 是原地编辑当前工具。2026-10-10 起「双击文字编辑」在任何工具下都可用，
-      因此 `inline_edit` 不再按工具过滤；仅「双击非文字标注删除」仍限选择工具（不单独发提示）。
+    取色已改为一次性动作（无模式）。
+    2026-10-10 起「双击文字编辑」在任何工具下都可用，因此 `inline_edit` 不再按工具过滤；
+    仅「双击非文字标注删除」仍限选择工具（不单独发提示）。
+    2026-10-11（审查 L2）：删掉从未被使用的死参数 `inline_tool`（规则 32 禁死参数/死分支）。
     """
     save_key = str(settings.get("capture_save_shortcut", "S"))
     picker_key = str(settings.get("capture_picker_shortcut", "C") or "C")
@@ -45,6 +46,10 @@ def hint_texts(settings, position, selection, inline=False,
     quick = (str(settings.get("capture_quick_sticker_shortcut", "Space"))
              if settings.get("capture_quick_sticker_enabled", False) else "")
     hide_key = str(settings.get(*TOOLBAR_HIDE_KEY))
+    # 2026-10-11（审查 M5）：撤销/重做提示原来把 "Ctrl+Z/Y" **写死** ✗ ⇒ 用户改键后提示条骗人，
+    # 违反规则 8/32 的"同源"（同函数其它键都从 settings 取 ✓）⇒ 一并从配置读。
+    undo_key = str(settings.get("editor_undo_shortcut", "Ctrl+Z") or "Ctrl+Z")
+    redo_key = str(settings.get("editor_redo_shortcut", "Ctrl+Y") or "Ctrl+Y")
     action_keys = {name: str(settings.get(key, default))
                    for name, key, default, _label in CAPTURE_ACTION_KEYS}
     size = f"  {selection[0]} x {selection[1]}" if selection else ""
@@ -98,13 +103,13 @@ def hint_texts(settings, position, selection, inline=False,
         "inline_edit": ("双击-文字编辑/删除图形"
                         if inline else ""),   # 双击文字编辑在任何工具下都可用（2026-10-10 起）
         "inline_menu": "右键标注菜单" if inline else "",
-        "inline_history": "Ctrl+Z/Y-撤销重做" if inline else "",
+        "inline_history": f"{undo_key}/{redo_key}-撤销重做" if inline else "",
     }
 
 
 def hint_items(settings, position, selection, inline=False,
                toolbar_hidden=False, multi_select=False,
-               right_capture=False, inline_tool="select"):
+               right_capture=False):
     """按配置顺序给出提示条内容；总开关关闭或列表为空时返回空列表（整条不画）。"""
     if not settings.get("capture_hints_enabled", True):
         return []
@@ -113,6 +118,5 @@ def hint_items(settings, position, selection, inline=False,
         order = list(HINT_ITEM_IDS)
     texts = hint_texts(settings, position, selection, inline=inline,
                        toolbar_hidden=toolbar_hidden,
-                       multi_select=multi_select, right_capture=right_capture,
-                       inline_tool=inline_tool)
+                       multi_select=multi_select, right_capture=right_capture)
     return [texts.get(item, "") for item in order]

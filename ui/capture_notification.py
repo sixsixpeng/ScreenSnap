@@ -28,7 +28,10 @@ class CaptureNotification(QWidget):
         # 通知缩略图/Toast 临时图的落盘位置由 settings 里的保存目录决定（2026-10-11）。
         self.settings = settings or {}
         self._pressed = False
-        self.toast_title = f"{title} · {count} 张"
+        # 2026-10-11（用户反馈：所有带图通知都挂着一个固定的"· 1 张"✗）：目前保存/贴图都是一张张来的，
+        # 恒为 1 ⇒ 这个后缀纯属噪音。改为**只有多于一张时才显示**（未来真出现多张也不会丢信息 ✓）。
+        count_suffix = f" · {count} 张" if isinstance(count, int) and count > 1 else ""
+        self.toast_title = f"{title}{count_suffix}"
         self.toast_body = detail or "图片预览"
         self._toast_image = image.copy() if isinstance(image, QImage) else to_qimage(image)
         self.native_failed.connect(self._show_local_preview)
@@ -36,7 +39,7 @@ class CaptureNotification(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 10, 12, 12)
         layout.setSpacing(8)
-        heading = QLabel(f"{title} · {count} 张", self)
+        heading = QLabel(f"{title}{count_suffix}", self)
         heading.setAttribute(Qt.WA_TransparentForMouseEvents)
         layout.addWidget(heading)
         self.preview = QLabel(self)

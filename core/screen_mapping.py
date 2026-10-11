@@ -23,6 +23,8 @@ _cache = {"stamp": 0.0, "mappings": []}
 
 
 @dataclass(frozen=True)
+# 2026-10-11（审查 L5）：与 core/dpi.py 的 ScreenMapping **同名不同义** ✗ —— 本类里的 "logical" 指
+# **Qt 逻辑坐标**；规则 22 中的"遮罩压缩逻辑空间"是 DisplayMapper.logical（mask 内部专用）✓ 勿混用。
 class ScreenMapping:
     """一块显示器的设备名、物理矩形、Qt 逻辑矩形与设备像素比。"""
 

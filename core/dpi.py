@@ -10,6 +10,10 @@ from PySide6.QtGui import QGuiApplication
 
 
 @dataclass(frozen=True)
+# 2026-10-11（审查 L5）：本文件的 ScreenMapping 与 core/screen_mapping.py 的同名类**不是同一个东西** ✗：
+# 这里描述"屏幕 + DPI（缩放）"，那个描述"屏幕 + Qt 逻辑坐标"。注意 screen_mapping 里的 "logical"
+# 指 **Qt 逻辑坐标**，与规则 22 的"遮罩压缩逻辑空间"（DisplayMapper.logical）**同名不同义** ✓。
+# （规则 22 提到的 DpiMapper 已更名为 DisplayMapper，代码中不存在 DpiMapper ✓）
 class ScreenMapping:
     """一块显示器在截图物理像素、内部逻辑坐标和 Qt 原生窗口坐标中的对应关系。"""
 

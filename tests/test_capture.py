@@ -1020,10 +1020,10 @@ class CaptureTests(CoreTests):
 
         base = dict(DEFAULTS, capture_quick_sticker_enabled=True,
                     capture_quick_sticker_shortcut="Space")
-        select_hints = hint_texts(base, (10, 20), (80, 60), inline=True,
-                                  inline_tool="select")
-        pen_hints = hint_texts(base, (10, 20), (80, 60), inline=True,
-                               inline_tool="pen")
+        # 2026-10-11（审查 L2，C8 契约同步）：`hint_texts` 的死参数 `inline_tool` 已删除；
+        # 该用例本来就是验证"文字编辑在任何工具下都可用"（与工具无关）⇒ 两次调用等价。
+        select_hints = hint_texts(base, (10, 20), (80, 60), inline=True)
+        pen_hints = hint_texts(base, (10, 20), (80, 60), inline=True)
         # 2026-10-10 起：双击-文字编辑在任何工具下都可用（编辑态由标注对象持有），
         # 因此两种工具都应给出这条提示；仅「双击删除非文字标注」仍限选择工具、不单独提示。
         self.assertIn("双击-文字编辑", select_hints["inline_edit"])

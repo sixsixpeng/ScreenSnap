@@ -343,14 +343,14 @@ APP_VERSION = "1.0.13"   # ← 发布新版本时只改这一行
 | --- | --- |
 | 环境与路径 | `save_dir`、`log_dir`、`file_sticker_path` |
 | 开机与系统注册 | `start_on_boot`（注册表里的自启项还在，重置会造成状态不一致） |
-| 按键习惯 | `hotkeys`、`hotkeys_enabled`、`capture_quick_sticker_shortcut`、`capture_save_shortcut`、`capture_custom_size_shortcut`、`capture_recapture_shortcut`、`capture_window_edit_shortcut`、`capture_multi_select_shortcut`、`capture_copy_shortcut`、`capture_toolbar_hide_shortcut`、`capture_picker_shortcut` |
+| 按键习惯 | `hotkeys`、`hotkeys_enabled`、`capture_quick_sticker_shortcut`、`capture_save_shortcut`、`capture_custom_size_shortcut`、`capture_recapture_shortcut`、`capture_window_edit_shortcut`、`capture_multi_select_shortcut`、`capture_copy_shortcut`、`capture_toolbar_hide_shortcut`、`capture_picker_shortcut`、`capture_picker_format_shortcut`、`editor_save_as_shortcut`、`editor_undo_shortcut`、`editor_redo_shortcut`、`editor_zoom_reset_shortcut` |
 | 输出组织习惯 | `filename`、`save_format`、`archive_by_month`、`archive_by_day`、`image_archive_period` |
 | 打扰程度 | `bubble`、`notification_timeout`、`copy_notification`、`save_notification`、`sticker_notification` |
 | 功能开关 | `window_detection`、`window_hover_detect`、`magnifier`、`magnifier_size`、`magnifier_grid`、`cursor`、`ruler_enabled`、`uia_debug_tree`、`sticker_recycle_enabled`、`intruder_warning_enabled`、`capture_delay`、`capture_hotkey_suppress`、`logging_enabled`、`log_monthly_folder` |
 | 明暗主题 | `theme` |
 | 另存为记忆 | `save_as_dir`（内部记忆值，不出现在设置页） |
 
-**不保留**（走新版本默认值）：所有样式类（`sticker_*`、`editor_*`、`rect_*`、`arrow_*`、`pen_*`、`marker_*`、`mosaic_*`、`hint_bar_*`、`capture_hint_*`、`sequence_*`、`window_hover_*` 的颜色/宽度/透明度/圆角/阴影）、工具默认态（`annotation_tool`、`arrow_chain`、`pen_chain`、`rect_style`、`mosaic_mode`、`editor_overcanvas_mode`、`editor_zoom_wheel_step` 等）、瞬时状态（`last_capture_rect`、`color_sticker_value` 等），以及 `app_version` 本身。清单定义在 `config/config_manager.py` 的 `PRESERVED_ON_VERSION_RESET`。
+**不保留**（走新版本默认值）：所有**样式类**（`sticker_*`、`editor_*`、`rect_*`、`arrow_*`、`pen_*`、`marker_*`、`mosaic_*`、`hint_bar_*`、`capture_hint_*`、`sequence_*`、`window_hover_*` 的颜色/宽度/透明度/圆角/阴影 —— ⚠️ 2026-10-11 澄清：这里的 `editor_*` 指**样式/开关**类（如 `editor_zoom_wheel_step`）；**快捷键** `editor_*_shortcut` 属上表"按键习惯"，**是保留的** ✓ 两者勿混）、工具默认态（`annotation_tool`、`arrow_chain`、`pen_chain`、`rect_style`、`mosaic_mode`、`editor_overcanvas_mode`、`editor_zoom_wheel_step` 等）、瞬时状态（`last_capture_rect`、`color_sticker_value` 等），以及 `app_version` 本身。清单定义在 `config/config_manager.py` 的 `PRESERVED_ON_VERSION_RESET`。
 
 > 清理用户数据目录时会**跳过被本进程占用的文件**（单实例锁 `screensnap.lock`、正在写入的日志）：Windows 下这类文件删不掉，若因此让整次清理失败，版本号就永远对不上、每次启动都报错。
 
@@ -431,6 +431,16 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `crosshair_color` | `#ff0000` | 定位十字线颜色；可在"设置 > 截图 > 定位辅助"改色。 |
 | `crosshair_width` | `1` px | 定位十字线宽度，范围 1–8 px。 |
 | `capture_picker_shortcut` | `C` | 在光标处取色一次的按键（一次性动作，无取色态），支持单键、修饰键组合或功能键（如 `Alt+C` / `F2`）；另有选区时按住 `Alt`/`Ctrl` + 左键取样，复制十六进制色值到剪贴板并设为当前标注颜色（避免与左键框选 / UIA 自动识别选择冲突）。 |
+| `capture_copy_shortcut` | `Y` | 选区确认前的「仅复制」键（可配置单键；原地编辑时也可用）。 |
+| `capture_custom_size_shortcut` | `F` | 选区阶段的「自定义尺寸」键。 |
+| `capture_recapture_shortcut` | `R` | 选区阶段的「清除选择」键（语义已由"重新截图"改为"清除选择"）。 |
+| `capture_window_edit_shortcut` | `E` | 选区阶段的「窗口编辑」键。 |
+| `capture_toolbar_hide_shortcut` | `` ` `` | 工具栏隐藏/恢复键（默认反引号；原地编辑器同样可用）。 |
+| `capture_picker_format_shortcut` | `X` | 切换取色表达式（十六进制 / rgb / rgba / hsl / 全部三行）的键。 |
+| `editor_save_as_shortcut` | `A` | 两个编辑器的「另存为」键（2026-10-11 起**真正生效**：按配置比较，微调语境下让位给 `A`=左移，见调整记录 53）。 |
+| `editor_undo_shortcut` | `Ctrl+Z` | 两个编辑器的撤销键（画布按键判定按此键）。 |
+| `editor_redo_shortcut` | `Ctrl+Y` | 两个编辑器的重做键。 |
+| `editor_zoom_reset_shortcut` | `Ctrl+0` | 画布缩放复位到 100%；**仅独立编辑器**可用（原地编辑器没有画布缩放）。 |
 | `magnifier_size` | `140` | 放大镜边长（像素），范围 100–320；采样区域按同一缩放倍率等比换算，调大即看到更大范围。 |
 | `magnifier_grid` | `true` | 放大镜内是否叠加像素网格线，便于 1px 级对齐。 |
 | `magnifier_grid_color` | `#cccccc` | 放大镜像素网格颜色。 |
@@ -1159,3 +1169,8 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 50. 新增（旋转拖拽回归用例）：`tests/editor/test_canvas.py::test_dragging_rotation_handle_rotates_without_moving_item` —— **不写死坐标**，在包围盒周围 ±40 像素扫描找 `rotation_handle_at()` 命中点，再模拟"按下 + 拖动两次"（`_rotate_to` 第一次只标定 ✓），断言 `canvas.rotating is item`（未被拖动标注抢先 ✓）、角度变化 ✓、位置不变 ✓（X/Y 各一条）。验证 —— `test_canvas 77 条 OK`。
 51. 修复（`A` 键双语义 + 微调误弹另存为）：现象 —— 键盘微调标注时按 `A`（或任何一次 `A`）会弹出「另存为」✗，且 `test_capture` 全量**永久卡死**（无摘要 ✗）。排查 —— `faulthandler.dump_traceback_later(20)` 抓到栈：`mask_window.save_as ← execute ← <lambda> ← 用例的 QTest.keyClick(A)` ⇒ 是**原地编辑器的 `save_as_shortcut`（Qt.WindowShortcut）抢在 keyPressEvent 之前吃掉了 `A`** ✗，我加在 `keyPressEvent` 里的"微调让位"门槛永远轮不到（与 D8 ④ 的 Space 同型）。改法 —— 与 `S`/`Ctrl+S`/`Space` 统一：**不注册该快捷键**，`A` 交给**画布 keyPressEvent** 处理（画布已按微调语境让位 ✓，并经 `canvas.save_as_requested → 遮罩 execute("save_as")` 接回 ✓）；顺带删掉原地编辑器里残留的 `Ctrl+0 → reset`（规则 7：上一轮只在独立编辑器删了 ✗）并更新过时的注册日志文案（C8）。验证 —— `test_capture` **106 条 OK**（原为永久卡死 ✓）· `-k nudge` 4 条 OK · `-k inline` 20 条 OK · `-k save` 12 条 OK。
 52. 调整（另存为对话框：大窗 + 单双张统一 + 中文 + 侧栏）：现象 —— 自绘对话框太小「位置(L):」显示不全 ✗；单张走 Windows 原生、多选走自绘 ⇒ 两套外观不一致 ✗。改法 —— 统一走自绘：`resize(980, 640)` + `setMinimumSize(760, 520)` + 有 `anchor` 时居中到目标屏 ✓；显式中文标签（`位置/文件名/文件类型/保存/取消`，因 Qt 的 `qtbase_zh_CN.qm` 实测缺 `Look in`/`Files of type` 两条译文 ✗）；侧栏 `save_as_sidebar_urls()` = 计算机 + **桌面** + 用户文件夹 + 文档/下载/图片 + **所有磁盘**（实测 10 项 ✓）；测试打桩时走静态入口（`type(...).__module__` 以 `unittest` 开头 ✓）以免真实模态框挂住用例（D29）。验证 —— `test_canvas -k save_as` 3 条 OK · `test_capture -k save` 12 条 OK · `test_tools` 17 条 OK。
+53. 修复（`editor_save_as_shortcut` 只有键没有行为 ✗ 审查实测；用户选择"让改键生效"）：现象 —— 设置页承诺"可改成 D 或 Ctrl+Shift+S"，但实测配置成 `D` 时按 D 触发另存为 **0 次**、按 `A` 仍触发 **1 次** ✗（画布与遮罩两处都硬编码 `Qt.Key_A` ✗）。改法 —— 新增 `annotation_canvas.py::_binding_matches(event, key, default)`：**按配置比较**，只用 `event.key()` / `event.modifiers()`（稳定 API ✓ **不用** `event.keyCombination()`，D16 实测会原生崩溃 ✗）；画布另存为分支与遮罩 `keyPressEvent` 的 A 分支都改用它 ✓；日志带上实际键位（`画布另存为键按下 ⇒ 触发另存为（键=D）`）。**不做** QShortcut ✗（双语义键会被它抢先，D14）。验证 —— 新增用例 `test_save_as_and_undo_keys_follow_configuration`（配置=D ⇒ D 触发、A 不触发 ✓）· `test_canvas 78 条 OK` · `-k mask 22 OK` · `-k inline 20 OK`。
+54. 修复（撤销/重做硬编码 ✗ 审查 L6）：现象 —— 把撤销改成 `Alt+Z` 后按 `Ctrl+Z` **仍然生效** ✗。改法 —— 画布的 `event.matches(QKeySequence.Undo/Redo)` 改为同一个 `_binding_matches(...)` ✓（只用 key()/modifiers() ⇒ 一次通过 ✓；此前我用 `event.matches(QKeySequence(配置))` 的写法会让 `test_canvas` 无摘要崩溃 ✗ 已回滚 ✗）。验证 —— 同一新用例覆盖 `Alt+Z` 生效、`Ctrl+Z` 不生效 ✓。
+55. 修复（工具栏 tooltip 与真实绑定脱钩 ✗ 审查 H4）：现象 —— 改设置后 hover 提示里「撤销/重做」显示回硬编码的 `Ctrl+Z/Y` ✗，而「保存/另存为/仅复制」的「（快捷键: …）」**整段消失** ✗。原因 —— 构造期用 `editor_binding()`（读 settings ✓），而 `set_hotkeys()`（每次改设置都被调用）走的是**全局热键表** `shortcut_label(self.hotkeys, …)` ✗ ⇒ 两个来源。改法 —— `set_hotkeys` 的两处都改用 `self.editor_binding(action)` ✓（唯一来源 ✓ 贴图恒为「空格」的规则也由它统一 ✓）。验证 —— `test_tools 17 条 OK`；真机：改键后不重启、触发一次设置保存，hover 各按钮应显示新键 ✓。
+56. 修复（4 个 editor_* 键没有校验/冲突检测 ✗ 审查 M2）：现象 —— 实测 `validate("")→""`、`validate("notakey")` 原样通过、`repair({…:""})` 不回退，且 `{capture_save="A", editor_save_as="A"}`、`{capture_copy="Y", editor_undo="Y"}`、`{capture_save="X", picker_format="X"}` 三组**同键全部通过** ✗（空串会让两个编辑器静默不注册 ✓；同键会触发 Qt ambiguous ⇒ 全应用该键失效 ✗ AGENTS D8⑤）。改法 —— 把这 5 个键（4 个 editor_* + `capture_picker_format_shortcut`）并入 `validate` 的快捷键分支与 `CAPTURE_SHORTCUT_KEYS`（冲突检测表）✓。验证 —— `test_config 109 条 OK`。
+57. 调整（提示条迁移改为"只在升级时执行"✗ 审查 H2/H3）：现象 —— 用户取消勾选提示项、或拖动 `select/uia_quick_edit/element_cycle` 的顺序，**重启后被静默改回来并回写磁盘** ✗（实测 3 项 → 被补成 23 项 ✗）。原因 —— `migrate_legacy_settings` 里"补齐缺失项 + 校正三项顺序"两段**每次加载都跑** ✗ 且结果不同就 `save_safely()` 回写 ✗。改法 —— 加版本闸门：仅当存储的 `app_version ≠ 当前版本`（真的升级了）那一轮执行 ✓；同版本内完全尊重用户的勾选与顺序 ✓（**不新增配置键** ⇒ 不扩散 schema 变更 ✓ 规则 30）。验证 —— `test_config 109 条 OK`；真机：取消勾选两项 + 拖动顺序 ⇒ 重启两次都保持 ✓。
