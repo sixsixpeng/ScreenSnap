@@ -1614,7 +1614,6 @@ class ToolbarWidget(QWidget):
             "save_as": ("editor_save_as_shortcut", "Q"),
             "undo": ("editor_undo_shortcut", "Ctrl+Z"),
             "redo": ("editor_redo_shortcut", "Ctrl+Y"),
-            "reset": ("editor_zoom_reset_shortcut", "Ctrl+0"),
             "paste": (None, "空格"),
         }
         if action in mapping:

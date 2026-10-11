@@ -16,6 +16,33 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class UiTests(CoreTests):
+    def test_magnifier_and_hint_bar_flip_as_one_group(self):
+        """2026-10-11 用户要求：放大镜与提示条**整组一起翻**。
+
+        现象：靠右时提示条被夹在右边缘、只有放大镜也触边才翻；靠下时提示条先单独翻上去，
+        放大镜触底后整组才翻（两步走）。实现：magnifier_rect 接收提示条的 reserve_x/reserve_y，
+        只参与"要不要翻"的判定 ⇒ 任意一个放不下 ⇒ 整组翻到光标另一侧。
+        """
+        from screenshot.magnifier_widget import magnifier_rect
+
+        # 区域要足够大、光标放在中间：否则边缘夹取（clamp）会掩盖翻转方向（离屏实测 400x300 就夹住了）。
+        area = QRect(0, 0, 600, 800)
+        point = QPoint(300, 400)
+        base = magnifier_rect(point, area, 120)
+        self.assertGreater(base.left(), point.x(), "无预留时放大镜应在光标右侧")
+        # 提示条放不下（预留宽度）⇒ 横向让位到左侧
+        flipped_x = magnifier_rect(point, area, 120, reserve_x=200)
+        self.assertLess(flipped_x.left(), base.left(), "提示条放不下时必须横向翻转")
+        # 提示条放不下（预留高度）⇒ 纵向让位到上方
+        flipped_y = magnifier_rect(point, area, 120, reserve_y=300)
+        self.assertLess(flipped_y.top(), base.top(), "提示条放不下时必须纵向翻转")
+        # 两个方向都放不下 ⇒ 两个方向都翻（组行为一致）
+        both = magnifier_rect(point, area, 120, reserve_x=200, reserve_y=300)
+        self.assertLess(both.left(), base.left())
+        self.assertLess(both.top(), base.top())
+        # 预留为 0 时不改变行为（向后兼容）
+        self.assertEqual(magnifier_rect(point, area, 120, reserve_x=0, reserve_y=0), base)
+
     def test_color_button_swatch_is_larger_outside_compact_controls(self):
         from PySide6.QtCore import QSize
         from ui.widgets.color_button import ColorButton
