@@ -1204,8 +1204,8 @@ class MaskWindow(QWidget):
             # 2026-10-11 用户反馈：右键选区后（未进编辑器）按 Ctrl+S 没反应 ⇒ 在遮罩上也把 Ctrl+S
             # 当保存键（与 S 同一条处理）。遮罩快捷键是 primary 单来源 + ApplicationShortcut，
             # 因此主副屏、左键/右键单区/右键多区各种入口都一致。
-            self.capture_save_ctrl_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
-            self.capture_save_ctrl_shortcut.setContext(Qt.ApplicationShortcut)
+            # 2026-10-11：Ctrl+S 曾用 ApplicationShortcut，实测"注册成功但从不触发"（日志：已注册 8 条、
+            # save_selection 入口 0 条）⇒ 改为与 Space 同款：在掩码 keyPressEvent 里直接处理（D11 ✓）。
             # 2026-10-11：**不**在这里给 A 建 ApplicationShortcut —— 它会抢先吞掉微调用的 A（D14：
             # 动作键与修饰性判断同键时不许用快捷键拦截）。A 改在 keyPressEvent 里判断语境后处理。
             logging.getLogger("screensnap").info(
@@ -2894,6 +2894,12 @@ class MaskWindow(QWidget):
         key = event.key()
         # 2026-10-11：A = 另存为，但**微调语境下必须让位**给 W/A/S/D 的"左移/缩放手柄"（D14）。
         # 判定与 save_as_selection 一致：按住左键 / 正在拖动或缩放 / 压着手柄 / 0.3 秒内刚微调过。
+        # 2026-10-11：Ctrl+S = 保存（与 S 同一条处理）。与 Space/A 同款：在 keyPressEvent 里直接处理，
+        # 不依赖 ApplicationShortcut（那份实测"已注册却不触发"✗）。在编辑器里则由画布分支接管 ✓。
+        if key == Qt.Key_S and (event.modifiers() & Qt.ControlModifier):
+            logging.getLogger("screensnap").info("遮罩 Ctrl+S 按下 ⇒ save_selection")
+            self.save_selection()
+            return
         if key == Qt.Key_A and event.modifiers() == Qt.NoModifier:
             _canvas = getattr(getattr(self.session, "inline_editor", None), "canvas", None)
             _nudging = (
