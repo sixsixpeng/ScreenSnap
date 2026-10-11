@@ -87,18 +87,18 @@ def hint_texts(settings, position, selection, inline=False,
         "window_edit": (f"{action_keys['window_edit']} 窗口编辑"
                         if selection else ""),
         "multi_select": ("右键双击提交 · 右键继续框选" if right_capture else
-             "多选模式 · 右键双击或 Enter 提交" if multi_select else
+             "多选|Enter-提交" if multi_select else
                  f"{action_keys['multi_select']} 多选模式"),
         "copy": f"{action_keys['copy']} 仅复制" if selection else "",
-        "toolbar_move": "拖动边缘/空白处 移动工具栏" if inline else "",
+        "toolbar_move": "拖动-移动工具栏" if inline else "",
         "toolbar_hide": (f"{hide_key} {'显示工具栏' if toolbar_hidden else '隐藏工具栏'}"
                          if inline else ""),
         # 原地编辑里可以二次编辑/删除已有标注，但只有选择工具直接支持：其它工具下
         # 双击只是切回选择并选中，所以这里按当前工具决定是否提示。
-        "inline_edit": ("双击文字编辑 · 双击图形删除"
+        "inline_edit": ("双击-文字编辑/删除图形"
                         if inline else ""),   # 双击文字编辑在任何工具下都可用（2026-10-10 起）
         "inline_menu": "右键标注菜单" if inline else "",
-        "inline_history": "Ctrl+Z撤销 · Ctrl+Y重做" if inline else "",
+        "inline_history": "Ctrl+Z/Y-撤销重做" if inline else "",
     }
 
 

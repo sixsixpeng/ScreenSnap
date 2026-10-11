@@ -2296,7 +2296,7 @@ class ConfigTests(CoreTests):
         self.assertEqual([item for item in mask.capture_hint_items() if item], [])
         settings["capture_hint_order"] = ["multi_select"]
         mask.session.multi_select_mode = True
-        self.assertEqual(mask.capture_hint_items(), ["多选模式 · 右键双击或 Enter 提交"])
+        self.assertEqual(mask.capture_hint_items(), ["多选|Enter-提交"])
         mask.close()
 
     def test_hint_bar_style_config_and_editor(self):
