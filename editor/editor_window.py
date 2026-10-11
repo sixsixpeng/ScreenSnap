@@ -407,27 +407,15 @@ class EditorWindow(QMainWindow):
                 chosen, _ = QFileDialog.getSaveFileName(owner, "另存为", str(suggested),
                                                        save_as_filter(self.settings))
             else:
-                # 2026-10-11 第四版（用户实测：原生对话框只能选屏、屏内位置由 Windows 决定 —— 先是右下角、
-                # 后是左上角）：要**精确居中**只能用 Qt 自绘对话框 ⇒ 只在这条多选路径上这么用。
-                # 目录/预填文件名/过滤器/记忆目录（save_as_dir_chosen）全部保持原样。
+                # 2026-10-11 第五版（第四版用"构造 QFileDialog 实例 + exec()"实现居中 ✗）：
+                # 那样**测试拦不住**（用例 patch 的是静态 QFileDialog.getSaveFileName ✗）⇒ 弹出真实模态
+                # 对话框 ⇒ test_capture 挂死（C1 复现）。改回**静态调用**（可被 patch ✓）并加
+                # DontUseNativeDialog ✓ —— Qt 自绘对话框由 Qt 自己**居中于父窗口** ✓，而父窗口正是
+                # 上面那个铺满目标屏的隐形 owner ✓ ⇒ 仍然落在该屏中心 ✓，且测试能正常拦截 ✓。
                 _ensure_chinese_dialogs()
-                dialog = QFileDialog(owner, "另存为", str(suggested), save_as_filter(self.settings))
-                dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-                # 显式中文标签兜底（万一没有 qtbase_zh_CN.qm）：位置/文件名/文件类型 + 保存/取消。
-                dialog.setLabelText(QFileDialog.DialogLabel.LookIn, "位置(L):")
-                dialog.setLabelText(QFileDialog.DialogLabel.FileName, "文件名(N):")
-                dialog.setLabelText(QFileDialog.DialogLabel.FileType, "文件类型(T):")
-                dialog.setLabelText(QFileDialog.DialogLabel.Accept, "保存(S)")
-                dialog.setLabelText(QFileDialog.DialogLabel.Reject, "取消")
-                dialog.setFileMode(QFileDialog.FileMode.AnyFile)
-                dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
-                target = anchor if hasattr(anchor, "center") else QRect(anchor.x(), anchor.y(), 1, 1)
-                size = dialog.sizeHint()
-                dialog.move(target.center().x() - size.width() // 2,
-                            target.center().y() - size.height() // 2)
-                logging.getLogger("screensnap").info(
-                    "另存为：自绘对话框居中到屏幕 %s", target.getRect())
-                chosen = dialog.selectedFiles()[0] if dialog.exec() and dialog.selectedFiles() else ""
+                chosen, _ = QFileDialog.getSaveFileName(
+                    owner, "另存为", str(suggested), save_as_filter(self.settings),
+                    options=QFileDialog.Option.DontUseNativeDialog)
         finally:
             if anchor_window is not None:
                 anchor_window.close()
