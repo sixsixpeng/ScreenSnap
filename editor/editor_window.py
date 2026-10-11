@@ -65,6 +65,10 @@ def build_save_dialog(parent, suggested, settings, anchor=None, is_stub=False):
         return None
     _ensure_chinese_dialogs()
     dialog = QFileDialog(parent, "另存为", str(suggested), save_as_filter(settings))
+    # 2026-10-11（用户实测：「A 左键弹窗似乎在遮罩下面」）：截图遮罩是**全屏置顶窗**（WindowStaysOnTop）
+    # ⇒ 普通的子对话框会被它压住 ✗（D23 的变体：原地编辑时遮罩**不能**关，因为编辑器就在遮罩里）。
+    # 解决：对话框自身也置顶 + 显示后 raise/activate ⇒ 稳定浮在遮罩之上 ✓。
+    dialog.setWindowFlag(Qt.WindowStaysOnTopHint, True)
     dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
     dialog.setFileMode(QFileDialog.FileMode.AnyFile)
     dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
