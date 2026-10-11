@@ -849,6 +849,19 @@ def migrate_legacy_settings(data):
         missing = [item_id for item_id in HINT_ITEM_IDS if item_id not in order]
         if missing:
             migrated["capture_hint_order"] = list(order) + missing
+
+    # 2026-10-11（用户要求）：已存顺序里这三项若相对次序不对，就地调整相对顺序——只占用它们**原本
+    # 所在的那几个位置**，其余项位置一概不变（不重排用户的整体顺序）；幂等。
+    order = migrated.get("capture_hint_order")
+    if isinstance(order, list):
+        wanted = ["select", "uia_quick_edit", "element_cycle"]
+        slots = [index for index, item_id in enumerate(order) if item_id in wanted]
+        if len(slots) == len(wanted) and [order[index] for index in slots] != wanted:
+            for index, item_id in zip(slots, wanted):
+                order[index] = item_id
+            migrated["capture_hint_order"] = order
+            logging.getLogger("screensnap").info(
+                "提示条顺序就地调整相对次序（左键 → UIA → Tab）")
             logging.getLogger("screensnap").info(
                 "提示条顺序表补齐新增项（默认勾选）: %s", missing)
     return migrated
