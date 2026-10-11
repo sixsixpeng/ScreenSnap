@@ -273,9 +273,10 @@ def window_logical_rect(handle):
         return None
     physical = native_rect(bounds)
     result = physical_rect_to_logical(physical)
-    # 跟随轮询与拖动都会高频调用，同一矩形最多每秒记一次。
+    # 跟随轮询与拖动都会高频调用。2026-10-11（规则 14）：原来"同一矩形最多每秒一次"，实测最近
+    # 2000 行里仍有 273 条（最大的刷屏源）⇒ 放宽到 5 秒一次；矩形不变则完全静默。
     log_every(logging.getLogger("screensnap"), logging.DEBUG, "rect",
-              (int(handle), result.left(), result.top(), result.width(), result.height()), 1.0,
+              (int(handle), result.left(), result.top(), result.width(), result.height()), 5.0,
               "窗口矩形: hwnd=%d 物理(%d,%d,%dx%d) → 逻辑(%d,%d,%dx%d)",
               int(handle), physical.left(), physical.top(), physical.width(), physical.height(),
               result.left(), result.top(), result.width(), result.height())

@@ -4,6 +4,10 @@ import logging
 import os
 
 
+# 上一次枚举到的可见窗口集合：用于把"每窗口一行"改成"只在变化时记一条"（规则 14）。
+_LAST_VISIBLE = [None]
+
+
 def visible_windows():
     """仅在 Windows 上枚举可见且未最小化的窗口，用于选区吸附。"""
     if os.name != "nt":
@@ -38,8 +42,11 @@ def visible_windows():
         logging.getLogger("screensnap").warning("枚举窗口失败，本次不提供窗口吸附: %s", error)
         return []
     logger = logging.getLogger("screensnap")
-    logger.debug("枚举到 %d 个可见窗口", len(rectangles))
-    for index, (left, top, right, bottom) in enumerate(rectangles):
-        logger.debug("可见窗口[%d]: 物理(%d,%d,%dx%d)", index, left, top,
-                     right - left, bottom - top)
+    # 2026-10-11（规则 14）：原来"每个窗口一行"，跟随轮询时把日志刷满（实测最近 2000 行里 121 条）。
+    # 改成**窗口集合变化时记一条汇总**；枚举结果不变就完全静默。
+    if rectangles != _LAST_VISIBLE[0]:
+        _LAST_VISIBLE[0] = list(rectangles)
+        logger.debug("可见窗口 %d 个: %s", len(rectangles),
+                     ", ".join("%d,%d,%dx%d" % (left, top, right - left, bottom - top)
+                               for left, top, right, bottom in rectangles))
     return rectangles

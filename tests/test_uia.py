@@ -234,7 +234,7 @@ class UiaTests(CoreTests):
         QTest.keyClick(mask, Qt.Key_M, Qt.AltModifier)
         self.app.processEvents()
         self.assertTrue(mask.session.multi_select_mode)
-        self.assertIn("多选模式", " ".join(filter(None, mask.capture_hint_items())))
+        self.assertIn("多选|Enter-提交", " ".join(filter(None, mask.capture_hint_items())))
 
         mask.selection.rects.append(QRect(12, 14, 40, 30))
         mask.complete()

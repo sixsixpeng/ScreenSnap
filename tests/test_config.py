@@ -2092,7 +2092,8 @@ class ConfigTests(CoreTests):
                 settings["capture_multi_select_shortcut"] = "Alt+N"
                 mask.sync_capture_action_shortcuts(settings)
                 self.assertEqual(editor.multi_select_shortcut.key().toString(), "Alt+N")
-                self.assertIn("Alt+N 多选模式", " ".join(filter(None, mask.capture_hint_items())))
+                # 2026-10-11：多选收集态的提示文案已统一为「多选|Enter-提交」（原「Alt+N 多选模式」）。
+                self.assertIn("多选|Enter-提交", " ".join(filter(None, mask.capture_hint_items())))
                 editor.canvas._add_annotation(
                     shape("rect", QPointF(2, 2), QPointF(18, 16), "#ff0000", 2))
                 editor.canvas.checkpoint()
