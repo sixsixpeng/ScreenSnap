@@ -855,13 +855,18 @@ def migrate_legacy_settings(data):
     order = migrated.get("capture_hint_order")
     if isinstance(order, list):
         wanted = ["select", "uia_quick_edit", "element_cycle"]
-        slots = [index for index, item_id in enumerate(order) if item_id in wanted]
-        if len(slots) == len(wanted) and [order[index] for index in slots] != wanted:
-            for index, item_id in zip(slots, wanted):
-                order[index] = item_id
-            migrated["capture_hint_order"] = order
-            logging.getLogger("screensnap").info(
-                "提示条顺序就地调整相对次序（左键 → UIA → Tab）")
+        present = [item_id for item_id in order if item_id in wanted]
+        if sorted(present) == sorted(wanted) and present != wanted:
+            # 把这三项**整组搬到它们当中最早出现的位置**（Tab 原本在哪儿就留在那一带），
+            # 其余项相对顺序完全不变；顺带去掉重复项（追加迁移可能留下重复）。
+            first = next(index for index, item_id in enumerate(order) if item_id in wanted)
+            head = [item_id for item_id in order[:first] if item_id not in wanted]
+            rest = [item_id for item_id in order if item_id not in wanted]
+            merged = rest[:len(head)] + wanted + rest[len(head):]
+            if merged != order:
+                migrated["capture_hint_order"] = merged
+                logging.getLogger("screensnap").info(
+                    "提示条顺序把 左键/UIA/Tab 三项整组移到最早位置（其余项不动）")
             logging.getLogger("screensnap").info(
                 "提示条顺序表补齐新增项（默认勾选）: %s", missing)
     return migrated
