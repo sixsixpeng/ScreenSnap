@@ -834,8 +834,18 @@ class InlineEditor(QWidget):
         """另存为：可选目录与文件名（默认定位上次目录、预填当前命名），并记住该目录。"""
         # 另存为对话框允许同时改目录与文件名：默认定位上次用过的目录，并预填当前命名规则。
         suggested = self.allocate_path(directory=save_as_directory(self.settings))
-        chosen, _ = QFileDialog.getSaveFileName(self, "另存为", str(suggested),
-                                               save_as_filter(self.settings))
+        # 2026-10-11（用户实测：左键单划 + A 弹的还是**老的原生窗口** ✗）：共用编辑器原来自带一份
+        # 静态调用 ✗，与独立编辑器的新对话框不一致 ⇒ 统一走 editor.editor_window.build_save_dialog()
+        #（中文标签 + 侧栏桌面/所有磁盘 + 980x640 ✓；规则 7：两个编辑器必须一致）。
+        from editor.editor_window import build_save_dialog, save_dialog_is_stubbed
+
+        if save_dialog_is_stubbed():                     # 测试打桩 ⇒ 走静态入口，避免真实模态框（D29）
+            chosen, _ = QFileDialog.getSaveFileName(self, "另存为", str(suggested),
+                                                   save_as_filter(self.settings))
+        else:
+            dialog = build_save_dialog(self, suggested, self.settings)
+            chosen = (dialog.selectedFiles()[0]
+                      if dialog.exec() and dialog.selectedFiles() else "")
         if not chosen:
             return None
         path, save_settings = normalize_save_as_path(chosen, self.settings)
