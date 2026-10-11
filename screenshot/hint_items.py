@@ -56,8 +56,8 @@ def hint_texts(settings, position, selection, inline=False,
         # 且「UIA点击快编」是缩写不好懂 ⇒ 拆成三项（各自可在设置里开关/排序）。
         "select": "左拖松开-快速编辑" if selection is None else "",
         "right_select": "右键拖选-多选" if selection is None else "",
-        "uia_quick_edit": "UIA 点击-快速编辑" if selection is None else "",
-        "element_cycle": ("Tab-切换窗口层级"
+        "uia_quick_edit": "点击选择UIA识别" if selection is None else "",
+        "element_cycle": ("tab+shift切换层级"
                   if settings.get("window_detection", True) and not inline
                   else ""),
         # 双击语义取自 mouseDoubleClickEvent：原地编辑里左键双击=保存；

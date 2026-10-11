@@ -27,7 +27,7 @@ HINT_ITEMS = (
     ("resize", "四角/边中点缩放"),
     # 用户 2026-10-11 明确顺序：左键提示 → UIA 提示 → Tab 提示（三项相邻，其余项位置不动）。
     ("select", "拖拽框选"),
-    ("uia_quick_edit", "UIA 点击-快速编辑"),
+    ("uia_quick_edit", "点击选择UIA识别"),
     ("element_cycle", "Tab 切换窗口/控件层级"),
     ("right_select", "右键拖选-多选"),
     ("edit", "双击/Enter 提交（编辑里双击空白保存）"),
