@@ -94,59 +94,6 @@ class EraseTests(CoreTests):
         finally:
             canvas.close()
 
-    def test_erase_composite_uses_a_small_source_rect(self):
-        """2026-10-11 性能回归（真凶 ✓）：涂抹时标注层合成必须只用**小脏矩形**。
-
-        历史 —— `_paint_erased_composite` 每帧 `self.base.hide()` … `self.base.show()` ✗ ⇒
-        QGraphicsScene 判定整场景变化 ⇒ 视口整屏重绘 ⇒ 合成放大成整屏（实测 source=1184×784 ✗
-        ⇒ 39 帧里标注 paint 被调用 1560 次、占 63% 时间 ✗）。改为"只在擦除激活期间隐藏一次"后，
-        实测每次移动+重绘由 12.0/14.6/34.8 ms 降到 **1.2/1.8/4.4 ms**（标注 1/5/20 ✓ 提速约 8–10×）。
-        这里直接盯住 `scene.render` 的 source 尺寸 ✓ 防止再次退化 ✓。
-        """
-        from editor.annotation_canvas import AnnotationCanvas
-        from PySide6.QtCore import QPointF, QEvent, Qt
-        from PySide6.QtGui import QMouseEvent
-        from PIL import Image
-        from config.config_manager import DEFAULTS
-
-        canvas = AnnotationCanvas(Image.new("RGB", (1200, 800), "white"),
-                                  dict(DEFAULTS, eraser_brush=True, eraser_width=20))
-        canvas.resize(1200, 800)
-        canvas.show()
-        self.app.processEvents()
-        sources = []
-        scene = canvas.scene_data
-        original_render = scene.render
-
-        def spy_render(painter, target, source, *args, **kwargs):
-            sources.append((round(source.width()), round(source.height())))
-            return original_render(painter, target, source, *args, **kwargs)
-
-        scene.render = spy_render
-        canvas.set_tool("eraser")
-        canvas.erasing = True
-        canvas.eraser_group += 1
-        canvas.eraser_last = QPointF(200, 200)
-        canvas.eraser_point = QPointF(200, 200)
-        try:
-            # 先把"初始化/首次显示"的整屏绘制冲掉 ✓ —— 它必然是全屏 ✓ 不属于涂抹期间的成本 ✓
-            self.app.processEvents()
-            sources.clear()
-            for step in range(1, 8):
-                pt = QPointF(200 + step * 12, 200 + step * 8)
-                event = QMouseEvent(QEvent.MouseMove, QPointF(canvas.mapFromScene(pt)),
-                                    Qt.NoButton, Qt.LeftButton, Qt.NoModifier)
-                canvas.mouseMoveEvent(event)
-                self.app.processEvents()
-            self.assertTrue(sources, "涂抹过程中应当发生合成（说明擦除层是活的 ✓）")
-            # 前两帧必然偏大（第一帧是"擦除层刚加入场景"触发的整屏重绘 ✓ 不可避免）⇒ 看稳定态 ✓
-            steady = sources[2:] or sources
-            biggest = max(max(width, height) for width, height in steady)
-            self.assertLess(biggest, 200,
-                            f"合成的 source 必须是小脏矩形，实测最大 {biggest}px（整屏重绘已退化 ✗）")
-        finally:
-            scene.render = original_render
-            canvas.close()
 
     def test_brush_cursor_follows_pointer_outside_the_canvas(self):
         """2026-10-11 用户反馈："橡皮擦/马赛克的鼠标会被吸附在屏幕边缘与画布边缘，无法快速移动到中间" ✗。
@@ -226,44 +173,6 @@ class EraseTests(CoreTests):
                     finally:
                         widget.close()
 
-    def test_eraser_move_repaints_only_a_small_dirty_rect(self):
-        """2026-10-11 性能回归：橡皮擦移动**只重画笔迹所在小块** ✓（原先整视口重绘 ✗）。
-
-        实测（离屏 1200x800，60 次移动）：整视口重绘 9.8/14.8/43.4 ms ⇒ 脏矩形 2.0/2.6/6.1 ms，
-        提速 4.9× / 5.7× / 7.1×（标注 1/5/20 个 ✓）。这里断言请求的重绘矩形明显小于整视口 ✓。
-        """
-        from editor.annotation_canvas import AnnotationCanvas
-        from PySide6.QtCore import QPointF, QRect
-        from PIL import Image
-        from config.config_manager import DEFAULTS
-
-        canvas = AnnotationCanvas(Image.new("RGB", (1200, 800), "white"),
-                                  dict(DEFAULTS, eraser_brush=True, eraser_width=20))
-        canvas.resize(1200, 800)
-        canvas.show()
-        canvas.set_tool("eraser")
-        self.app.processEvents()
-        canvas.erasing = True
-        canvas.eraser_group += 1
-        start = QPointF(200, 200)
-        canvas.eraser_last = start
-        canvas.eraser_point = start
-        try:
-            end = QPointF(260, 230)
-            canvas.erase_segment(start, end)
-            from PySide6.QtGui import QMouseEvent
-            from PySide6.QtCore import QEvent
-            local = canvas.mapFromScene(end)
-            event = QMouseEvent(QEvent.MouseMove, QPointF(local), Qt.NoButton,
-                                Qt.LeftButton, Qt.NoModifier)
-            canvas.mouseMoveEvent(event)
-            rect = canvas._last_eraser_update_rect
-            self.assertFalse(rect.isEmpty(), "应当请求一次重绘")
-            self.assertLess(rect.width() * rect.height(),
-                            canvas.viewport().rect().width() * canvas.viewport().rect().height() // 4,
-                            "重绘区域必须远小于整视口（脏矩形 ✓）")
-        finally:
-            canvas.close()
 
     def test_eraser_brush_draws_straight_with_ctrl_or_alt(self):
         """涂抹模式下按住 Ctrl/Alt ⇒ 直线擦除（起点→当前点一条 ✓ 橡皮筋中途被替换 ✓）。"""

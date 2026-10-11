@@ -223,9 +223,6 @@ class EraseMaskItem(QGraphicsItem):
 
     def drop_groups(self, groups):
         """丢弃指定分组的笔迹并重绘遮罩；返回是否发生了变化。"""
-        groups = set(groups)
-        if not groups:
-            return False
         kept = [stroke for stroke in self.strokes if stroke[0] not in groups]
         if len(kept) == len(self.strokes):
             return False

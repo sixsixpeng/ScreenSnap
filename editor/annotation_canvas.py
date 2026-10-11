@@ -1312,22 +1312,8 @@ class AnnotationCanvas(QGraphicsView):
         items = [(item, item.base_strokes()) for item in self.erase_items()]
         items = [(item, strokes) for item, strokes in items if strokes]
         if not items:
-            self._base_mask_cache = (None, None)
             return None
-        # 2026-10-11 性能（关键 ✓）：这个函数会**新建一整幅图像大小的 QImage**（5120×1440 ≈ 29 MB ✗）
-        # 并逐笔重画 ✗，却被**每一帧**的合成调用 ⇒ 是脏矩形优化后剩下的主要成本（实测 2–6 ms/帧 ✓）。
-        # 笔迹只在 add_stroke / add_rect / drop_groups / 改标记时变化 ⇒ 用签名做缓存 ✓。
-        signature = tuple(
-            (id(item), len(strokes),
-             # 2026-10-11 复查修正：必须把"是否擦原图"的**标记集合**也算进签名 ✓ ——
-             # 否则 `set_groups_erase_base()` 改了**中间**某段笔迹的标记时签名不变 ✗ ⇒ 仍返回旧掩码 ✗。
-             tuple(sorted(item.base_flags())),
-             tuple(stroke[1:3] + stroke[5:7] for stroke in strokes[:2]),
-             tuple(stroke[1:3] + stroke[5:7] for stroke in strokes[-2:]))
-            for item, strokes in items)
-        cached_signature, cached_mask = getattr(self, "_base_mask_cache", (None, None))
-        if cached_signature == signature and cached_mask is not None:
-            return cached_mask
+        # 2026-10-12：性能缓存已按用户要求**回退** ✓ ⇒ 每次调用都重建遮罩 ✓（正确性优先 ✓）
         union = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
         union.fill(Qt.transparent)
         painter = QPainter(union)
@@ -1339,7 +1325,6 @@ class AnnotationCanvas(QGraphicsView):
                 item.paint_stroke(painter, stroke)
             painter.restore()
         painter.end()
-        self._base_mask_cache = (signature, union)      # 供下一帧复用 ✓（笔迹一变签名就变 ✓）
         return union
 
     def render_image(self):
@@ -1437,12 +1422,8 @@ class AnnotationCanvas(QGraphicsView):
                         self.settings.get("eraser_width", self.settings["pen_width"]),
                         self.settings.get("eraser_erase_base", False))
         self.erase_mask_dirty = True
-        # 2026-10-11 性能（关键 ✓）：只重画**这条笔迹**的范围 —— 原来这里是无条件整视口
-        # `viewport().update()` ✗ ⇒ 它会把 mouseMoveEvent 里算好的脏矩形**放大回整屏** ✗，
-        # 于是合成又变成整屏（实测 9.8–43 ms/帧 ✗）。
-        radius = float(self.settings.get("eraser_width", self.settings["pen_width"])) / 2 + 3
-        dirty = QRectF(start, end).normalized().adjusted(-radius, -radius, radius, radius)
-        self.viewport().update(self.mapFromScene(dirty).boundingRect().adjusted(-2, -2, 2, 2))
+        # 2026-10-12：性能优化已回退（用户要求 ✓）⇒ 恢复整视口重绘 ✓（一定画得出去 ✓）
+        self.viewport().update()
 
     def _erase_live_active(self):
         """实时视图是否需要按擦除层合成（存在擦除层时）。"""
@@ -1462,9 +1443,10 @@ class AnnotationCanvas(QGraphicsView):
     def _paint_erased_composite(self, painter):
         """仅渲染可见区域：先铺背景，再画底图（按开关决定是否擦底图），最后画被遮罩镂空的标注层。"""
         # 只合成**脏矩形**（有记录时 ✓）；没有记录（例如导出/打印路径 ✓）才退回整视口 ✓。
-        vp = getattr(self, "_dirty_viewport_rect", None)
-        if vp is None or vp.isEmpty() or not self.viewport().rect().contains(vp):
-            vp = self.viewport().rect()
+        # 2026-10-12（用户要求）：**性能优化已回退** ✓ —— 这里恢复为整视口合成 ✓
+        # （此前为省时间引入了"脏矩形/强制脏区" ✗ ⇒ 与 Qt 的碎块 paintEvent 相互干扰，
+        #  导致直线擦除只在部分区域重绘 ✗；用户明确要求"保留划直线、回退性能部分" ✓）。
+        vp = self.viewport().rect()
         if vp.isEmpty():
             return
         visible = self.mapToScene(vp).boundingRect().intersected(self.sceneRect())
@@ -1524,9 +1506,6 @@ class AnnotationCanvas(QGraphicsView):
         """
         import time as _time
 
-        # 2026-10-11 性能优化：记下本次重绘的**脏矩形**（视口像素 ✓）⇒ 擦除合成只处理这块区域 ✓
-        # （此前无论重绘多小都合成整个视口 ✗ 实测 14–36 ms/帧 ⇒ 拖动一秒要 0.8–2.1 秒 ✗）
-        self._dirty_viewport_rect = QRect(event.rect())
         started = _time.perf_counter()
         super().paintEvent(event)
         elapsed = (_time.perf_counter() - started) * 1000.0
@@ -2153,26 +2132,19 @@ class AnnotationCanvas(QGraphicsView):
             if self.erasing and self.settings.get("eraser_brush", True):
                 if (self.straight_drawing or self._straight_gesture_active(event)) \
                         and self.start is not None:
-                    # 直线擦除：把本组已画的橡皮筋线从**所有**擦除层里丢掉（不假设只有一个层 ✓），
-                    # 再画"起点→当前点"这一条 ⇒ 松手时留下的就是一条直线 ✓。
-                    for _item in self.erase_items():
-                        _item.drop_groups({self.eraser_group})
+                    # 2026-10-12（用户要求："性能部分回退、保留划直线" ✓）：
+                    # 恢复为性能优化**之前**的简单实现 —— 丢掉本组已画的橡皮筋线 ✓、重画"起点→当前点" ✓、
+                    # 然后**无条件整视口重绘** ✓（与记号笔按住 Ctrl 的直线做法一致 ✓ ⇒ 一定画得出去 ✓）。
+                    # 快照/强制脏区/诊断留痕等性能与排查手段**全部移除** ✓（它们正是"只有一小段显示"的来源 ✗）。
+                    for _erase_item in self.erase_items():
+                        _erase_item.drop_groups({self.eraser_group})
                     self.erase_segment(self.start, point)
+                    self.viewport().update()
                 else:
                     self.erase_segment(self.eraser_last, point)
                 self.eraser_last = point
-            # 2026-10-11 性能优化（实测合成 14–36 ms/帧 ⇒ 拖动一秒 0.8–2.1 秒 ✗）：
-            # 只重画"本次笔迹 + 本帧光标圆环（含上一帧的残留 ✓）"这一小块 ⇒ 合成随之只处理脏区 ✓
-            # （此前无条件 `viewport().update()` = 整视口重绘 ✗）。
-            radius = float(self.settings.get("eraser_width", self.settings["pen_width"])) / 2 + 3
-            dirty = QRectF(point, self.eraser_last or point).normalized()
-            for ring_point in (previous_point, point):
-                if ring_point is not None:
-                    dirty = dirty.united(QRectF(ring_point.x() - radius, ring_point.y() - radius,
-                                                radius * 2, radius * 2))
-            update_rect = self.mapFromScene(dirty).boundingRect().adjusted(-2, -2, 2, 2)
-            self._last_eraser_update_rect = QRect(update_rect)   # 供用例断言"只重画小块" ✓
-            self.viewport().update(update_rect)
+            # 2026-10-12：性能优化已回退（用户要求 ✓）⇒ 恢复整视口重绘 ✓（与自由涂抹的其它工具一致 ✓）
+            self.viewport().update()
             return
         if self.tool == "mosaic" and self.settings.get("mosaic_brush", True):
             # 未按住时也跟随指针，用虚线圆环显示笔刷宽度与位置。
