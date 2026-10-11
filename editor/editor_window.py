@@ -218,7 +218,9 @@ class EditorWindow(QMainWindow):
         self.operation_tips = QLabel(
             "拖动绘制标注 | 选择工具可快速选中、移动或调整标注 | "
             "双击空白处保存并退出 | 滚轮上下滚动，Ctrl+滚轮缩放，Alt+滚轮横向移动 | "
-            "用滑块或数值调整缩放 | 右键/中键拖动或空格拖动平移 | Esc 放弃编辑"
+            # 2026-10-11（审查 L3）：原文案写"或**空格**拖动平移" ✗ —— Space 早已统一为**贴图**（见
+            # annotation_canvas 的 Space 分支与遮罩全局热键，D14）⇒ 删掉这句，避免教错操作。
+            "用滑块或数值调整缩放 | 右键/中键拖动平移 | Space 贴图 | Esc 放弃编辑"
         )
         self.operation_tips.setObjectName("editorOperationTips")
         self.operation_tips.setWordWrap(True)
@@ -478,10 +480,11 @@ class EditorWindow(QMainWindow):
             # 2026-10-11 第七版：单张与多选统一走**同一个自绘对话框**（中文标签 + 侧栏 + 大窗）✓；
             # 只有测试打桩时才走静态入口（unittest.mock 替换 getSaveFileName ⇒ is_stub 为真 ✓），
             # 否则测试会被真实模态框挂住（D29：test_capture 全量卡死的根源之一）。
-            patched = QFileDialog.getSaveFileName
-            if type(patched).__module__.split(".")[0] == "unittest":
-                chosen, _ = patched(owner, "另存为", str(suggested),
-                                    save_as_filter(self.settings))
+            # 2026-10-11（审查 A#8）：原来在这里**内联复制**了一份"是否被测试打桩"的判定 ✗ ⇒
+            # 改用同名助手 save_dialog_is_stubbed()（唯一来源 ✓ 与 build_save_dialog 的判据一致）。
+            if save_dialog_is_stubbed():
+                chosen, _ = QFileDialog.getSaveFileName(owner, "另存为", str(suggested),
+                                                        save_as_filter(self.settings))
             else:
                 _ensure_chinese_dialogs()
                 dialog = build_save_dialog(owner, suggested, self.settings, anchor=anchor)
@@ -517,10 +520,6 @@ class EditorWindow(QMainWindow):
         self.activateWindow()
         self.raise_()
         self.canvas.setFocus(Qt.OtherFocusReason)
-
-    def invalidate_rotation_reset(self):
-        self.rotation_reset_state = None
-        self.toolbar.reset_rotation_button.setEnabled(False)
 
     def invalidate_rotation_reset(self):
         # 2026-10-11：本方法曾被一次"整块替换"误删（AttributeError: no attribute invalidate_rotation_reset，

@@ -362,10 +362,10 @@ class InlineEditor(QWidget):
         # 反而弹出真实"另存为"模态框把用例挂死 ✗；D16 的"合成事件回投"又会原生崩溃 ✗。
         # ⇒ 与 S / Ctrl+S / Space 统一：**不注册快捷键**，改由**画布 keyPressEvent** 处理
         #（画布已按微调语境让位 ✓，并经 canvas.save_as_requested → 遮罩 execute("save_as") 接回 ✓）。
-        # 2026-10-11 用户要求：Ctrl+S 两个编辑器都要（与 S 并存，互为别名）。
-        self.save_ctrl_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
-        self.save_ctrl_shortcut.setContext(Qt.WindowShortcut)
-        self.save_ctrl_shortcut.activated.connect(lambda: self.toolbar.command.emit("save"))
+        # 2026-10-11（审查 A#4）：**删掉**这里的 Ctrl+S 窗口 QShortcut ✗ —— 它与画布 keyPressEvent 里的
+        # Ctrl+S 分支重复（同一窗口同一键两份处理 ✗ D8⑤ 关注点），而且上面 363-364 行的注释早就写着
+        # "不注册快捷键、改由画布处理" ⇒ 注释与代码自相矛盾（D3）。现在**单一来源**：编辑器里由画布
+        # keyPressEvent 处理 ✓（NoFocus 保证焦点一直在画布 ✓），遮罩阶段由遮罩 keyPressEvent 处理 ✓。
         # 2026-10-11 用户要求：撤销/重做/复位缩放两个编辑器都要（沿用同一批配置键，走同一条工具栏命令）。
         # 2026-10-11（规则 7：两个编辑器都要改 —— 上一轮只在独立编辑器删了 Ctrl+0→reset ✗ 这里漏了）：
         # 工具栏的 reset 是「重置当前标注参数」✗，与画布缩放无关；原地编辑器没有画布缩放 ⇒ 不注册。
@@ -831,7 +831,12 @@ class InlineEditor(QWidget):
                                     self.round_corners, self.corner_radius)
 
     def save_as(self):
-        """另存为：可选目录与文件名（默认定位上次目录、预填当前命名），并记住该目录。"""
+        """另存为：可选目录与文件名（默认定位上次目录、预填当前命名），并记住该目录。
+
+        2026-10-11（审查 L7）：本方法**故意不接收** `anchor` —— 原地编辑器的对话框父窗口就是编辑器
+        自身（贴在选区上）✓ ⇒ 由 Qt 居中于父窗口即可落在**所在那块屏**；`anchor` 是多选另存为
+        （EditorWindow.save_as）用来把对话框钉到某块屏的机制，这里加了会变成死参数 ✗（规则 33）。
+        """
         # 另存为对话框允许同时改目录与文件名：默认定位上次用过的目录，并预填当前命名规则。
         suggested = self.allocate_path(directory=save_as_directory(self.settings))
         # 2026-10-11（用户实测：左键单划 + A 弹的还是**老的原生窗口** ✗）：共用编辑器原来自带一份
@@ -1362,8 +1367,7 @@ class MaskWindow(QWidget):
             inline=self.inline_active(),
             toolbar_hidden=bool(editor is not None and editor.toolbar_hidden),
             multi_select=self.session.multi_select_mode,
-            right_capture=self.session.right_capture_mode,
-            inline_tool=(editor.canvas.tool if editor is not None else "select"))
+            right_capture=self.session.right_capture_mode)
 
     def hint_texts(self, selection, inline):
         """提示项 id → 文案（供用例复用；实际显示走 `capture_hint_items`）。"""
@@ -1374,8 +1378,7 @@ class MaskWindow(QWidget):
             inline=inline,
             multi_select=self.session.multi_select_mode,
             right_capture=self.session.right_capture_mode,
-            toolbar_hidden=bool(editor is not None and editor.toolbar_hidden),
-            inline_tool=(editor.canvas.tool if editor is not None else "select"))
+            toolbar_hidden=bool(editor is not None and editor.toolbar_hidden))
 
     def capture_action_hints(self):
         """兼容旧调用：返回选区功能键的 (键, 名称) 列表（供用例复用）。"""
@@ -1981,6 +1984,23 @@ class MaskWindow(QWidget):
             return None
         return selection.translated(self.bounds["left"], self.bounds["top"])
 
+    def _selection_area_native(self, selection=None):
+        """选区矩形，但转换到 **Qt 原生全局**空间（规则 22）。
+
+        2026-10-11（审查 M3，实测）：采集自检原先把 `_selection_area()`（**物理全局**）直接与
+        `widget.frameGeometry()`（**Qt 原生全局**）相交 ✗ ⇒ 混合 DPI 下两者尺度不同 ⇒ 2560x1440@125%
+        实测把选区**外侧** 200px 的对话框误报成"选区内有本窗口" ✗（换算到物理后并不相交）。
+        这里统一到 Qt 原生空间再比较 ✓（逐角转换：物理全局 → Qt 原生全局 ✓）。
+        """
+        area = self._selection_area(selection)
+        if area is None:
+            return None
+        top_left = self.mapper.physical_global_to_native_global(
+            QPoint(area.left(), area.top()))
+        bottom_right = self.mapper.physical_global_to_native_global(
+            QPoint(area.left() + area.width(), area.top() + area.height()))
+        return QRect(top_left, bottom_right)
+
     def window_label(self, widget):
         """干扰窗口在提示条里的中文名（窗口可自报，见 `screensnap_self_window`）。"""
         return window_label(widget)
@@ -1993,7 +2013,8 @@ class MaskWindow(QWidget):
         内部控件不算——它们只画在遮罩表面，不会进入裁切像素。带 `screensnap_self_window`
         属性自报的浮层（如工具栏「外观」弹层）同样计入，避免"被采进画面却无警示"。
         """
-        area = self._selection_area(selection)
+        # 2026-10-11（审查 M3）：与下面的 widget.frameGeometry() **同空间**比较（Qt 原生 ✓）
+        area = self._selection_area_native(selection)
         if area is None:
             return []
         hits = []
@@ -2041,7 +2062,9 @@ class MaskWindow(QWidget):
             else:
                 logger.debug("选区已不含本程序窗口")
         labels = {self.window_label(widget) for widget in hits}
-        area = self._selection_area(selection)
+        # 2026-10-11（审查 M3 第二处）：extra_intruders 的矩形来自 frameGeometry（**Qt 原生** ✗）⇒
+        # 必须与同空间比较，否则混合 DPI 下把选区外的弹层误判成"选区内" ✗（同第一处）。
+        area = self._selection_area_native(selection)
         if area is not None and enabled.get("popup", True):
             for label, rect in self.extra_intruders:
                 if rect.width() > 0 and rect.height() > 0 and area.intersects(rect):
@@ -2913,7 +2936,16 @@ class MaskWindow(QWidget):
             logging.getLogger("screensnap").info("遮罩 Ctrl+S 按下 ⇒ save_selection")
             self.save_selection()
             return
-        if key == Qt.Key_A and event.modifiers() == Qt.NoModifier:
+        # 2026-10-11（审查 H1 收尾）：原来**硬编码** Qt.Key_A ✗ ⇒ 用户把"另存为"改成别的键时，遮罩
+        # 阶段（未进编辑器）仍只认 A。这里按配置比较（只用 key()/modifiers() ✓ 不用 keyCombination ✗ D16）。
+        try:
+            _save_as_sequence = QKeySequence(str(self.settings.get("editor_save_as_shortcut", "A")))
+            _save_as_hit = (not _save_as_sequence.isEmpty()
+                            and key == _save_as_sequence[0].key()
+                            and event.modifiers() == _save_as_sequence[0].keyboardModifiers())
+        except (TypeError, IndexError, AttributeError):
+            _save_as_hit = False
+        if _save_as_hit:
             _canvas = getattr(getattr(self.session, "inline_editor", None), "canvas", None)
             _nudging = (
                 (QApplication.mouseButtons() & Qt.LeftButton)
@@ -2961,13 +2993,16 @@ class MaskWindow(QWidget):
                 on_edge = (self.selection.handle_at(self.position) is not None
                            or self.selection.border_at(self.position)
                            or on_handle)
-                if (canvas is not None and on_edge and on_handle
+                # 2026-10-11（用户反馈："原地编辑旋转时按 Q 也能微调"）：这里原来**没有 dx/dy 门槛** ✗ ⇒
+                # 按住旋转手柄时按**任意键**（Q、F、C…）都会走到下面的 rotate_selected(-1) ⇒ 表现为"随便按
+                # 一个键就转一下" ✗。补上 `(dx or dy)`：只有真正的微调键（W/A/S/D、方向键）才进入 ✓。
+                if (canvas is not None and on_edge and on_handle and (dx or dy)
                         and (QApplication.mouseButtons() & Qt.LeftButton)
                         and canvas.scene_data.selectedItems()):
                     logging.getLogger("screensnap").debug(
-                        "原地编辑按键去向：手柄=%s（遮罩记忆=%s）dx=%s dy=%s 分支=%s",
-                        canvas.active_handle(), getattr(self, "_active_handle", None), dx, dy,
-                        "旋转" if canvas.active_handle() == "rotate" else "缩放")
+                        "原地编辑按键去向：键=%s 手柄=%s（遮罩记忆=%s）dx=%s dy=%s 分支=%s",
+                        event.key(), canvas.active_handle(), getattr(self, "_active_handle", None),
+                        dx, dy, "旋转" if canvas.active_handle() == "rotate" else "缩放")
                     if canvas.active_handle() == "rotate":
                         # 旋转手柄 + 方向键：上和右 = 顺时针，下和左 = 逆时针。
                         canvas.rotate_selected(1 if (dy < 0 or dx > 0) else -1)
@@ -3406,6 +3441,28 @@ class MaskWindow(QWidget):
                        self.monitor_rect.width(), self.monitor_rect.height()))
             return
         logger = logging.getLogger("screensnap")
+        # 2026-10-11：Tab 选层后、鼠标**未移动**期间不要重新点亮悬停高亮（否则与 Tab 高亮并存 ✗）。
+        # 指针移动超过 2px ⇒ 解除抑制并继续正常悬停 ✓（随后由"悬停到别的元素"规则取消 Tab 选区 ✓）。
+        suppressed_at = getattr(self, "_hover_suppressed_at", None)
+        if suppressed_at is not None:
+            if (self.position - suppressed_at).manhattanLength() <= 2:
+                self.hover_rect = None
+                self.hover_source_rect = None
+                return
+            self._hover_suppressed_at = None
+            # 2026-10-11（用户反馈："按 Tab 清了悬停，但再次移动鼠标没有清除 Tab 选择" ✗）：
+            # 原来只在**悬停识别成功之后**才清元素选区 ✗ ⇒ 一旦那次识别被节流/抑制/查询失败，
+            # 就永远轮不到 ✗。这里改为**指针一移动就清**（Tab 选中的那一层随即取消 ✓），
+            # 之后正常悬停会重新点亮新的元素 ✓ —— 两条高亮始终只有一条 ✓。
+            if self.session.element_selected:
+                logging.getLogger("screensnap").debug(
+                    "指针移动 ⇒ 取消 Tab 切换的层选区（悬停重新接管）")
+                for view in self.session.views:
+                    view.selection.rects.clear()
+                    view.selection.active = None
+                    view.update_all()
+                self.session.element_selected = False
+                self.update_all()
         # 鼠标移出高亮区域时立即取消，不等下一次轮询，避免高亮滞后。
         if self.hover_rect is not None and not self.hover_rect.contains(self.position):
             self.hover_rect = None
@@ -3454,6 +3511,24 @@ class MaskWindow(QWidget):
                   (visible.x(), visible.y(), visible.width(), visible.height()) if not visible.isEmpty() else None,
               (logical.x(), logical.y(), logical.width(), logical.height()) if not logical.isEmpty() else None,
               paint_enabled)
+        # 2026-10-11（用户反馈：Tab/Shift+Tab 切层级选中一层后再移动鼠标识别到别的区域 ⇒ 屏幕上
+        # **同时出现两个高亮** ✗ —— 一个是 Tab 留下的元素选区、一个是新的悬停高亮）。
+        # 处理：当前选区来自元素选择（单击元素或 Tab 切层级 ⇒ session.element_selected ✓）
+        # 且鼠标已经悬停到**别的**元素上 ⇒ 立即取消那个元素选区，只保留悬停高亮 ✓；
+        # 鼠标仍停在同一元素内则保持不变（不闪 ✓）。
+        if (self.session.element_selected and self.selection.rects
+                and self.hover_rect is not None
+                and not any(rect.contains(self.position) for rect in self.selection.rects)):
+            logging.getLogger("screensnap").debug(
+                "悬停到别的元素: 取消元素选区（避免同时出现两个高亮） 原选区=%s 悬停=%s",
+                self.selection.rects, self.hover_rect)
+            # 2026-10-11 补强（D25：每块遮罩各持有自己的选区 ✗）⇒ **所有视图**一起清，
+            # 否则鼠标在另一块屏继续识别时，旧屏上那个"Tab 高亮"仍然亮着 ✗。
+            for other in self.session.views:
+                other.selection.rects.clear()
+                other.selection.active = None
+                other.update_all()
+            self.session.element_selected = False
         self.update_all()
 
 
@@ -3514,9 +3589,20 @@ class MaskWindow(QWidget):
         else:
             self.element_index = (self.element_index + step) % len(self.element_chain)
         self.apply_element(self.element_index)
+        # 2026-10-11（用户要求：**按 Tab/Shift+Tab 时也要取消鼠标对应的元素高亮** ✓）：
+        # Tab 选中一层后，鼠标的悬停高亮必须让位（否则屏幕上同时两个高亮 ✗）。
+        # 做法：① 所有视图清掉 hover 高亮；② 记下"抑制位置" ⇒ 鼠标**没真正移动**时轮询不再点亮它 ✓
+        #（一旦移动超过阈值就解除抑制 ✓ 那时再由"悬停到别的元素"规则取消 Tab 选区 ✓ 双向互斥）。
+        for view in self.session.views:
+            view.hover_rect = None
+            view.hover_source_rect = None
+            view.hover_query_point = None
+            view.hover_stamp = 0.0
+            view._hover_suppressed_at = QPoint(self.position)
+            view.update_all()
         logging.getLogger("screensnap").debug(
-            "切换到第 %d/%d 层窗口元素", self.element_index + 1,
-            len(self.element_chain))
+            "Tab 切换层级 ⇒ 取消悬停高亮（与元素选区双向互斥） 层=%d/%d",
+            self.element_index + 1, len(self.element_chain))
 
     def _fixed_size_target(self):
         """返回 F 应当重置尺寸的区域：优先上次 F 建的区域，其次左键拖出的区域。

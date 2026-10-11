@@ -2942,6 +2942,28 @@ class AnnotationCanvas(QGraphicsView):
         self.update()
         return True
 
+    def _binding_matches(self, event, key_name, default):
+        """按**配置里的键位**比较当前按键（2026-10-11，审查 H1/L6）。
+
+        背景：另存为（`editor_save_as_shortcut`）与撤销/重做原本都**硬编码** ✗ ⇒ 用户改键无效
+        （实测：配置成 D 时按 D 触发 0 次、按 A 仍触发 1 次 ✗）。这里统一按配置比较。
+        只用 `event.key()` / `event.modifiers()` 这类稳定 API ✓ —— **不得**用
+        `event.keyCombination()` / `QKeyEvent` 序列化（D16 实测会原生崩溃 ✗）。
+        取不到 settings、或配置为空/非法时返回 False（行为退化为"该键不生效"，不崩 ✓）。
+        """
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            return False
+        try:
+            sequence = QKeySequence(str(settings.get(key_name, default)))
+            if sequence.isEmpty():
+                return False
+            combination = sequence[0]
+            return (event.key() == combination.key()
+                    and event.modifiers() == combination.keyboardModifiers())
+        except (TypeError, IndexError, AttributeError):
+            return False
+
     def keyPressEvent(self, event):
         """处理删除、撤销/重做、临时平移和放弃编辑等画布快捷键。"""
         if (event.modifiers() == Qt.NoModifier and self.scene_data.selectedItems()
@@ -3006,11 +3028,13 @@ class AnnotationCanvas(QGraphicsView):
             logging.getLogger("screensnap").info("画布 Ctrl+S 按下 ⇒ 触发保存")
             self.save_requested.emit()
             event.accept()
-        elif event.key() == Qt.Key_A and event.modifiers() == Qt.NoModifier:
-            # 2026-10-11：另存为（默认单键 A）。上面的 W/A/S/D 分支只在"按住微调"语境生效（与 S 的
-            # 双语义一致：那时 A=左移，在这里之前就 return 了）⇒ 不在微调语境时才轮到这里 = 另存为。
-            # 无修饰可打印键进不了窗口级 QShortcut（ShortcutOverride）⇒ 在画布里直接发信号。
-            logging.getLogger("screensnap").info("画布 A 按下 ⇒ 触发另存为")
+        elif self._binding_matches(event, "editor_save_as_shortcut", "A"):
+            # 2026-10-11：另存为键**按配置**判定（默认 A；审查 H1 实测原来硬编码 ⇒ 改键无效 ✗）。
+            # 上面的 W/A/S/D 分支只在"按住微调"语境生效（那时 A=左移，在这里之前就 return 了）⇒
+            # 不在微调语境时才轮到这里 = 另存为；不用 QShortcut 是为了避开双语义"抢先"（D14 ✓）。
+            logging.getLogger("screensnap").info(
+                "画布另存为键按下 ⇒ 触发另存为（键=%s）",
+                self.settings.get("editor_save_as_shortcut", "A") if getattr(self, "settings", None) else "A")
             self.save_as_requested.emit()
             event.accept()
         elif (event.key() == Qt.Key_0 and event.modifiers() & Qt.ControlModifier
@@ -3021,33 +3045,28 @@ class AnnotationCanvas(QGraphicsView):
             event.accept()
         elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self.remove_selected()
-        elif event.matches(QKeySequence.Undo):
+        elif self._binding_matches(event, "editor_undo_shortcut", "Ctrl+Z"):
+            # 2026-10-11（审查 L6）：原为 event.matches(QKeySequence.Undo) **硬编码** ✗ ⇒ 改键后旧键
+            # Ctrl+Z/Y 仍照样生效（实测 ✗）⇒ 改为按配置比较（与另存为同一助手 ✓）。
             self.undo()
             event.accept()
-        elif event.matches(QKeySequence.Redo):
+        elif self._binding_matches(event, "editor_redo_shortcut", "Ctrl+Y"):
             self.redo()
             event.accept()
         else:
             super().keyPressEvent(event)
 
-    def _emit_sticker_shortcut(self):
-        """画布侧的 Space=贴图（D8 ④，2026-10-11）：文字输入时让位（那时空格是字符）。"""
-        from PySide6.QtWidgets import QApplication, QGraphicsTextItem
-
-        if QApplication.activeModalWidget() is not None:
-            return
-        scene = self.scene()
-        item = scene.focusItem() if scene is not None else None
-        if isinstance(item, QGraphicsTextItem):
-            return
-        self.sticker_shortcut.emit()
+    # 2026-10-11（审查 A#5）：删掉死方法 `_emit_sticker_shortcut` —— 它已无任何调用方 ✗（Space 走
+    # keyPressEvent 里的 sticker_shortcut.emit() ✓ 真实路径），其"模态框/文字输入让位"守卫现在只活在遮罩侧。
 
     def keyReleaseEvent(self, event):
         """松开空格后退出临时平移状态。"""
         if event.key() == Qt.Key_Space:
             self.space_pressed = False
             if not self.space_pan_active:
-                # D8 ⑤（2026-10-11）：轻按 Space（没进入拖动画布）⇒「空格=贴图」；按住拖动仍是平移（D14 双语义）。
+                # 2026-10-11（审查 A#6/L3）：`space_pressed` 已**不再被置 True**（Space 统一为「贴图」 ✗ 不再
+                # 用于按住拖动画布 ⇒ D14 的双语义已取消）⇒ 这里是纯状态清理，拖拽模式复位保留 ✓；
+                # 保留该属性是因为既有用例（tests/test_config.py）会显式设置它，删掉会误伤 ✓。
                 self.setDragMode(QGraphicsView.RubberBandDrag if self.tool == "select"
                                  else QGraphicsView.NoDrag)
         super().keyReleaseEvent(event)
