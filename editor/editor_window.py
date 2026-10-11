@@ -70,8 +70,9 @@ class EditorWindow(QMainWindow):
                 # keyPressEvent 在 W/A/S/D 微调分支**之后**处理 ⇒ 微调语境自动让位（与遮罩侧一致）。
                 (str(settings.get("capture_copy_shortcut", "Y")), "copy_only", "仅复制"),
                 (str(settings.get("editor_undo_shortcut", "Ctrl+Z")), "undo", "撤销"),
-                (str(settings.get("editor_redo_shortcut", "Ctrl+Y")), "redo", "重做"),
-                (str(settings.get("editor_zoom_reset_shortcut", "Ctrl+0")), "reset", "复位缩放")):
+                (str(settings.get("editor_redo_shortcut", "Ctrl+Y")), "redo", "重做")):
+            # 2026-10-11：**不**在这里绑定 reset —— 工具栏的 reset 是「重置当前标注参数」（不是复位缩放），
+            # 用户实测按 Ctrl+0 会把标注参数/选中清掉。Ctrl+0 现由画布 keyPressEvent 直接 set_zoom(100)。
             sequence = QKeySequence(key)
             if sequence.isEmpty():
                 continue
@@ -79,6 +80,17 @@ class EditorWindow(QMainWindow):
             shortcut.setContext(Qt.WindowShortcut)
             shortcut.activated.connect(lambda name=action: self.toolbar.command.emit(name))
             registered.append(f"{key} ⇒ {label}")   # 循环内不记日志（规则 14：多选会连开 N 个编辑器）
+        # 2026-10-11（用户澄清语义）：「复位缩放」= **画布**缩放回 100%，**不是**工具栏的「重置」
+        # （那个是"重置当前标注参数" ✗，上一版误绑它导致按 Ctrl+0 把标注参数清掉）。
+        # 画布缩放只有独立编辑器有（原地编辑器 wheel_zoom_enabled=False）⇒ 这里才注册；
+        # Ctrl+0 没有双重语义，用窗口级快捷键是安全的（D14）；画布 keyPressEvent 里那条分支保留做双保险。
+        zoom_sequence = QKeySequence(str(settings.get("editor_zoom_reset_shortcut", "Ctrl+0")))
+        if not zoom_sequence.isEmpty():
+            zoom_reset = QShortcut(zoom_sequence, self)
+            zoom_reset.setContext(Qt.WindowShortcut)
+            zoom_reset.activated.connect(lambda: self.canvas.set_zoom(100))
+            registered.append(f"{zoom_sequence.toString()} ⇒ 画布缩放复位")
+
         if registered:
             logging.getLogger("screensnap").debug(
                 "编辑器快捷键已注册（%d 个）：%s", len(registered), "；".join(registered))
@@ -355,6 +367,18 @@ class EditorWindow(QMainWindow):
         # 与「保存」一致：另存为写盘成功、通知与记忆目录都发出后退出编辑。
         self.close()
         return path
+
+    def showEvent(self, event):
+        """显示时激活窗口并把焦点交给画布（2026-10-11 用户反馈：快捷键要先点一下画布才生效）。
+
+        编辑器的快捷键是 `Qt.WindowShortcut`：只有**窗口处于活动状态**才会触发。此前没有任何
+        activateWindow/setFocus —— 从遮罩打开时活动窗口仍是遮罩，遮罩一关焦点就落在没有焦点的
+        编辑器上，于是必须先用鼠标点一下画布。这里显式激活并聚焦画布（画布是按键的实际接收者）。
+        """
+        super().showEvent(event)
+        self.activateWindow()
+        self.raise_()
+        self.canvas.setFocus(Qt.OtherFocusReason)
 
     def invalidate_rotation_reset(self):
         self.rotation_reset_state = None

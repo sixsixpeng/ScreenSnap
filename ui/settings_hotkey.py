@@ -54,7 +54,7 @@ class HotkeyPage(SettingsPage):
                  "独立编辑器与原地编辑器共用的撤销按键；默认遵循 Windows 通用约定 Ctrl+Z。"),
                 ("editor_redo_shortcut", "重做（两个编辑器）",
                  "两个编辑器共用的重做按键，默认 Ctrl+Y。"),
-                ("editor_zoom_reset_shortcut", "复位缩放（两个编辑器）",
+                ("editor_zoom_reset_shortcut", "画布缩放复位（仅独立编辑器）",
                  "把画布缩放复位到 100%，默认 Ctrl+0；滚轮缩放只在独立编辑器启用，但复位两边都可用。")):
             self.text(key, label, tip)
 
