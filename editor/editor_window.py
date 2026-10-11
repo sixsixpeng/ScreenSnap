@@ -432,39 +432,39 @@ class EditorWindow(QMainWindow):
             anchor_window.raise_()
             owner = anchor_window
         try:
-            if anchor is None:
-                # 单选路径：保持**原生**对话框（外观不变 ✓ 行为不变 ✓）。
-                chosen, _ = QFileDialog.getSaveFileName(owner, "另存为", str(suggested),
-                                                       save_as_filter(self.settings))
+            # 2026-10-11 第七版：用户要求「单张也用这个弹窗」⇒ **不再区分**原生/自绘（原来单选走
+            # Windows 原生、多选走自绘 ⇒ 两套外观不一致 ✗）；现在统一走自绘（中文标签 + 侧栏 + 大窗 ✓）。
+            # 2026-10-11 第七版：单张与多选统一走**同一个自绘对话框**（中文标签 + 侧栏 + 大窗）✓；
+            # 只有测试打桩时才走静态入口（unittest.mock 替换 getSaveFileName ⇒ is_stub 为真 ✓），
+            # 否则测试会被真实模态框挂住（D29：test_capture 全量卡死的根源之一）。
+            patched = QFileDialog.getSaveFileName
+            if type(patched).__module__.split(".")[0] == "unittest":
+                chosen, _ = patched(owner, "另存为", str(suggested),
+                                    save_as_filter(self.settings))
             else:
-                # 2026-10-11 第六版：用户要求 ①「Look in / Filetype 要中文」②「侧栏要有桌面与所有磁盘」。
-                # 这两件事都只能对**对话框实例**做（静态入口没有 setLabelText/setSidebarUrls ✗）
-                # ⇒ 回到实例；为了不让测试再被真实模态框挂住（D29），exec 前先尊重被 patch 的静态入口：
-                # 若测试替换了 QFileDialog.getSaveFileName（本项目的既有打桩点 ✗）就仍然走它 ✓。
                 _ensure_chinese_dialogs()
-                # 判据必须**只认 mock**：实测真实的 QFileDialog.getSaveFileName.__module__ 是 None ✗
-                # （第一版写成 not in ("PySide6.QtWidgets", …) ⇒ 真实路径被误判成"被打桩"⇒ 中文标签
-                # 与侧栏永远不会生效 ✗）。测试用的 patch(...) 会替换成 unittest.mock 的 MagicMock ✓。
-                patched = QFileDialog.getSaveFileName
-                is_stub = type(patched).__module__.split(".")[0] == "unittest"
-                if is_stub:
-                    chosen, _ = patched(owner, "另存为", str(suggested),
-                                        save_as_filter(self.settings))
-                else:
-                    dialog = QFileDialog(owner, "另存为", str(suggested), save_as_filter(self.settings))
-                    dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
-                    dialog.setFileMode(QFileDialog.FileMode.AnyFile)
-                    dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
-                    # Qt 的 qtbase_zh_CN.qm **缺** Look in / Files of type 两条译文（实测 ✗）⇒ 显式中文。
-                    dialog.setLabelText(QFileDialog.DialogLabel.LookIn, "位置(L):")
-                    dialog.setLabelText(QFileDialog.DialogLabel.FileName, "文件名(N):")
-                    dialog.setLabelText(QFileDialog.DialogLabel.FileType, "文件类型(T):")
-                    dialog.setLabelText(QFileDialog.DialogLabel.Accept, "保存(S)")
-                    dialog.setLabelText(QFileDialog.DialogLabel.Reject, "取消")
-                    # 侧栏：计算机 + 桌面 + 用户文件夹 + 文档/下载/图片 + **所有磁盘**（用户要求 ✓）。
-                    dialog.setSidebarUrls(save_as_sidebar_urls())
-                    # 父窗口是铺满目标屏的隐形 owner ⇒ Qt 自绘对话框**居中于父窗口** ⇒ 落在该屏中心 ✓。
-                    chosen = dialog.selectedFiles()[0] if dialog.exec() and dialog.selectedFiles() else ""
+                dialog = QFileDialog(owner, "另存为", str(suggested), save_as_filter(self.settings))
+                dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+                dialog.setFileMode(QFileDialog.FileMode.AnyFile)
+                dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+                # Qt 的 qtbase_zh_CN.qm **缺** Look in / Files of type 两条译文（实测 ✗）⇒ 显式中文。
+                dialog.setLabelText(QFileDialog.DialogLabel.LookIn, "位置(L):")
+                dialog.setLabelText(QFileDialog.DialogLabel.FileName, "文件名(N):")
+                dialog.setLabelText(QFileDialog.DialogLabel.FileType, "文件类型(T):")
+                dialog.setLabelText(QFileDialog.DialogLabel.Accept, "保存(S)")
+                dialog.setLabelText(QFileDialog.DialogLabel.Reject, "取消")
+                # 侧栏：计算机 + 桌面 + 用户文件夹 + 文档/下载/图片 + **所有磁盘**（用户要求 ✓）。
+                dialog.setSidebarUrls(save_as_sidebar_urls())
+                # 2026-10-11 用户反馈：窗口太小 ⇒「位置(L):」都显示不全 ✗
+                # 放大到 980x640（并给最小尺寸兜底 ⇒ 高 DPI/长路径下也不会挤扁）。
+                dialog.resize(980, 640)
+                dialog.setMinimumSize(760, 520)
+                if anchor is not None and hasattr(anchor, "center"):
+                    size = dialog.size()
+                    dialog.move(anchor.center().x() - size.width() // 2,
+                                anchor.center().y() - size.height() // 2)
+                # 父窗口是铺满目标屏的隐形 owner ⇒ Qt 自绘对话框**居中于父窗口** ⇒ 落在该屏中心 ✓。
+                chosen = dialog.selectedFiles()[0] if dialog.exec() and dialog.selectedFiles() else ""
         finally:
             if anchor_window is not None:
                 anchor_window.close()

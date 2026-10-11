@@ -304,6 +304,7 @@ class InlineEditor(QWidget):
     """贴在截图选区上的轻量编辑器；第一版只支持单屏单选区。"""
 
     saved = Signal(str, object)
+
     saved_silently = Signal(str, object)
     save_failed = Signal(str)
     close_all_requested = Signal()
@@ -356,19 +357,21 @@ class InlineEditor(QWidget):
                 lambda: self.toolbar.command.emit("save"))
             logging.getLogger("screensnap").debug("原地编辑器 Space 贴图已接线（canvas → 工具栏 paste）")
         # 2026-10-11 用户要求：另存为在两个编辑器都要有（默认单键 A，走工具栏同一条命令）。
-        self.save_as_shortcut = QShortcut(
-            QKeySequence(self.settings.get("editor_save_as_shortcut", "Q")), self)
-        self.save_as_shortcut.setContext(Qt.WindowShortcut)
-        self.save_as_shortcut.activated.connect(lambda: self.toolbar.command.emit("save_as"))
+        # 2026-10-11（faulthandler 取证：test_capture 全量卡死；与 D8 ④ 同款结论）：「A」是**双语义**键
+        # —— 非微调 = 另存为，微调 = 左移 ✗。QShortcut 抢在 keyPressEvent 之前吃掉 A ✗ ⇒ 微调收不到 A、
+        # 反而弹出真实"另存为"模态框把用例挂死 ✗；D16 的"合成事件回投"又会原生崩溃 ✗。
+        # ⇒ 与 S / Ctrl+S / Space 统一：**不注册快捷键**，改由**画布 keyPressEvent** 处理
+        #（画布已按微调语境让位 ✓，并经 canvas.save_as_requested → 遮罩 execute("save_as") 接回 ✓）。
         # 2026-10-11 用户要求：Ctrl+S 两个编辑器都要（与 S 并存，互为别名）。
         self.save_ctrl_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
         self.save_ctrl_shortcut.setContext(Qt.WindowShortcut)
         self.save_ctrl_shortcut.activated.connect(lambda: self.toolbar.command.emit("save"))
         # 2026-10-11 用户要求：撤销/重做/复位缩放两个编辑器都要（沿用同一批配置键，走同一条工具栏命令）。
+        # 2026-10-11（规则 7：两个编辑器都要改 —— 上一轮只在独立编辑器删了 Ctrl+0→reset ✗ 这里漏了）：
+        # 工具栏的 reset 是「重置当前标注参数」✗，与画布缩放无关；原地编辑器没有画布缩放 ⇒ 不注册。
         for _key, _action, _label in (
                 ("editor_undo_shortcut", "undo", "撤销"),
-                ("editor_redo_shortcut", "redo", "重做"),
-                ("editor_zoom_reset_shortcut", "reset", "复位缩放")):
+                ("editor_redo_shortcut", "redo", "重做")):
             _sequence = QKeySequence(self.settings.get(_key, ""))
             if _sequence.isEmpty():
                 continue
@@ -377,9 +380,10 @@ class InlineEditor(QWidget):
             _sc.activated.connect(lambda name=_action: self.toolbar.command.emit(name))
             logging.getLogger("screensnap").info(
                 "原地编辑器快捷键已注册：%s ⇒ %s", _key, _label)
+        # C8：旧文案已失效 —— 另存为键 A **不再**注册快捷键，改由画布 keyPressEvent 处理（双语义让位）。
         logging.getLogger("screensnap").info(
-            "原地编辑器另存为快捷键已注册：键=%r",
-            self.settings.get("editor_save_as_shortcut", "Q"))
+            "原地编辑器另存为键由画布 keyPressEvent 处理：键=%r",
+            self.settings.get("editor_save_as_shortcut", "A"))
         self.multi_select_shortcut = QShortcut(
             QKeySequence(self.settings.get("capture_multi_select_shortcut", "Alt+M")),
             self.canvas)
@@ -2900,6 +2904,11 @@ class MaskWindow(QWidget):
             _canvas = getattr(getattr(self.session, "inline_editor", None), "canvas", None)
             _nudging = (
                 (QApplication.mouseButtons() & Qt.LeftButton)
+                # 2026-10-11（faulthandler 取证，真机/用例都复现）：**键盘微调语境**下按 A 曾触发
+                # 「另存为」⇒ 弹出真实模态对话框把 test_capture 卡死 ✗（栈：mask_window.py:833 save_as
+                # ← execute ← <lambda> ← 用例的 QTest.keyClick(A)）。nudge_corner 正是"微调进行中"的
+                # 状态标记（画布侧同样以它为门槛 ✗ 这里漏了）⇒ 补上，让 A 让位给微调。
+                or self.selection.nudge_corner is not None
                 or self.selection.resizing is not None
                 or self.selection.dragging is not None
                 or (_canvas is not None and _canvas.active_handle() is not None)
