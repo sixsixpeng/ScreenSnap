@@ -1891,6 +1891,17 @@ class AnnotationCanvas(QGraphicsView):
 
     def mousePressEvent(self, event):
         # 按下这一刻定格手柄状态（手柄在标注区域内，必须先定手柄再判本体）。
+        # D13 留痕（2026-10-11，移到**最前面**）：左键一按下就记下三道门的原始值 —— 门开没开都看得见。
+        # 之前放在分支内部 ⇒ 门没开就完全没有日志（排查白跑一轮）。
+        if event.button() == Qt.LeftButton:
+            _press_point = self.mapToScene(event.position().toPoint())
+            _selected = self.scene_data.selectedItems()
+            logging.getLogger("screensnap").debug(
+                "左键按下: tool=%s 选中=%d 旋转手柄=%s 缩放手柄=%s",
+                self.tool, len(_selected),
+                [self.rotation_handle_at(i, _press_point) for i in _selected],
+                [self.resize_handle_at(self.item_resize_handles(i), _press_point)
+                 for i in _selected])
         self.note_active_handle(event.globalPosition().toPoint())
         if (self.space_pressed and self.start is None
                 and self.mosaic_drawing is None
@@ -1925,7 +1936,17 @@ class AnnotationCanvas(QGraphicsView):
         # 方案甲：处在【编辑态】（已被选中）的标注，任何工具下都能直接拖动；
         # 未选中的标注仍归当前工具落笔 —— 所以「在已有标注上画新图形」不受影响。
         # 注：曾试过「按在任意已有标注上就拖动」，那会压住画图（-k draw 4 失败 1 错误），已废弃。
-        if (self.tool != "select" and event.button() == Qt.LeftButton
+        # 2026-10-11（用户实测 + 按下留痕 tool=rect 选中=1 旋转手柄=[True] 却"跟着鼠标移动"）：
+        # 非选择工具下，旋转/缩放手柄压在已选中标注的包围盒上 ⇒ annotation_at() 命中它 ⇒
+        # 下面的"拖动标注"分支**抢先 return**，旋转逻辑永远到不了 ✗。
+        # 因此先在**手柄**上判定：点在旋转/缩放手柄上时，绝不当成"拖动标注"。
+        _handles_hit = False
+        if event.button() == Qt.LeftButton and self.scene_data.selectedItems():
+            _sel = self.scene_data.selectedItems()
+            _handles_hit = any(
+                self.resize_handle_at(self.item_resize_handles(i), point) is not None
+                or (len(_sel) == 1 and self.rotation_handle_at(i, point)) for i in _sel)
+        if (not _handles_hit and self.tool != "select" and event.button() == Qt.LeftButton
                 and self.scene_data.selectedItems()):
             hit = self.annotation_at(point)
             if hit is not None and hit.isSelected():
@@ -1951,6 +1972,14 @@ class AnnotationCanvas(QGraphicsView):
             self.rotating = None
             self.viewport().update()
             selected = self.scene_data.selectedItems()
+            # D13 留痕（2026-10-11 用户反馈"按住旋转手柄却移动了整个标注"）：一次按下即可看清是
+            # 哪道门挡下的 —— ① 没进这个分支（tool 非 select 且 handle_hit=False）；② 进了但选中数≠1；
+            # ③ 旋转命中为 False（命中区太小）；④ 缩放手柄抢先命中。
+            logging.getLogger("screensnap").debug(
+                "按下判定: tool=%s handle_hit=%s 选中=%d 缩放手柄=%s 旋转手柄=%s",
+                self.tool, handle_hit, len(selected),
+                [self.resize_handle_at(self.item_resize_handles(i), point) for i in selected],
+                [self.rotation_handle_at(i, point) for i in selected])
             # 先判定缩放手柄（旋转项的手柄随项转动），再判定旋转手柄，避免误触。
             for item in selected:
                 handles = self.item_resize_handles(item)
@@ -2060,6 +2089,20 @@ class AnnotationCanvas(QGraphicsView):
 
     def mouseMoveEvent(self, event):
         self._materialize_deferred_pen_at(event)
+        # 2026-10-11（用户实测：按住旋转按钮拖动时标注"跟着鼠标移动"而不是旋转）：
+        # mousePressEvent 已经调过 _begin_rotation()（按下留痕显示 旋转手柄=[True] ✓），
+        # 但移动路径里"拖动标注本体"的分支抢先 ⇒ 标注被搬走 ✗ ⇒ 这里把**旋转分支提到最前**，
+        # 旋转期间直接 return，绝不落到拖动/平移分支（D17：不要删别的守卫，只调优先级）。
+        if self.rotating is not None:
+            point = self.mapToScene(event.position().toPoint())
+            before = self.rotating.rotation()
+            self._rotate_to(point)
+            if abs(self.rotating.rotation() - before) > 0.01:   # 低频：只在角度真变化时记（规则 14）
+                logging.getLogger("screensnap").debug(
+                    "旋转中：角度 %.1f → %.1f（位置未变）",
+                    before, self.rotating.rotation())
+            event.accept()
+            return
         if self.space_pan_active:
             point = event.position().toPoint()
             distance = point - self.space_pan_start
@@ -2911,11 +2954,18 @@ class AnnotationCanvas(QGraphicsView):
                   else 1 if event.key() in (Qt.Key_S, Qt.Key_Down) else 0)
             # 按住手柄 ⇒ 等比缩放（与原地编辑一致）；否则移动图形本身。
             # 这条分支以前只写在遮罩里，导致窗口编辑（独立编辑器）按键永远是"整体移动"。
+            # 2026-10-11（用户实测：鼠标松开后手柄上下文被清空 ⇒ 方向键从"旋转"变成"移动标注"）：
+            # active_handle() 是"按下时定格"的 ✗ ⇒ 这里回落到**实时悬停**判定 pointer_handle() ✓
+            # （旋转手柄的 tooltip 承诺的就是"悬停在旋转按钮上按方向键也能旋转" ✓）。
+            handle_name = self.active_handle() or ""
+            if not handle_name:
+                hovered = self.pointer_handle()
+                handle_name = hovered[1] if hovered else ""
             logging.getLogger("screensnap").debug(
-                "画布按键去向：手柄=%s dx=%s dy=%s 分支=%s",
-                self.active_handle(), dx, dy,
-                "旋转" if self.active_handle() == "rotate" else "缩放/移动")
-            if self.active_handle() == "rotate":
+                "画布按键去向：手柄=%s（悬停=%s）dx=%s dy=%s 分支=%s",
+                self.active_handle(), handle_name, dx, dy,
+                "旋转" if handle_name == "rotate" else ("缩放" if handle_name else "移动/无手柄"))
+            if handle_name == "rotate":
                 # 旋转手柄 + 方向键：上和右 = 顺时针，下和左 = 逆时针（用户定义）。
                 spin = 1 if (dy < 0 or dx > 0) else -1
                 if self.rotate_selected(spin):
