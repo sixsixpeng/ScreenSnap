@@ -52,7 +52,11 @@ def hint_texts(settings, position, selection, inline=False,
         "coords": f"{position[0]}, {position[1]}{size}",
         "drag_move": "拖动移动" if selection and not inline else "",
         "resize": "四角/边中点缩放" if selection else "",
-                "select": "左拖松开进入快速编辑 · 右键拖选多选 · UIA点击快编" if selection is None else "",
+        # 用户 2026-10-11：原来一条写「左拖松开进入快速编辑 · 右键拖选多选 · UIA点击快编」太长，
+        # 且「UIA点击快编」是缩写不好懂 ⇒ 拆成三项（各自可在设置里开关/排序）。
+        "select": "左拖松开-快速编辑" if selection is None else "",
+        "right_select": "右键拖选-多选" if selection is None else "",
+        "uia_quick_edit": "UIA 点击-快速编辑" if selection is None else "",
         "element_cycle": ("Tab/Shift+Tab 切换窗口层级"
                   if settings.get("window_detection", True) and not inline
                   else ""),

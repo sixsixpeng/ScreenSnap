@@ -451,7 +451,7 @@ class CaptureTests(CoreTests):
             mask = MaskWindow(Image.new("RGB", (160, 100), "blue"), bounds, monitors, settings)
         try:
             items = " ".join(mask.capture_hint_items())
-            self.assertIn("左拖松开进入快速编辑", items)
+            self.assertIn("左拖松开-快速编辑", items)
             self.assertNotIn("退出取色", items)
             self.assertTrue(mask.capture_hint_items())
         finally:
@@ -947,9 +947,10 @@ class CaptureTests(CoreTests):
 
         settings = dict(DEFAULTS)
         initial = hint_texts(settings, (0, 0), None)
-        self.assertIn("左拖松开进入快速编辑", initial["select"])
-        self.assertIn("右键拖选多选", initial["select"])
-        self.assertIn("UIA点击快编", initial["select"])
+        # 2026-10-11 用户要求：原来三合一那条太长 ⇒ 拆成三个独立提示项（各自可开关/排序）。
+        self.assertIn("左拖松开-快速编辑", initial["select"])
+        self.assertIn("右键拖选-多选", initial["right_select"])
+        self.assertIn("UIA 点击-快速编辑", initial["uia_quick_edit"])
         self.assertEqual(initial["save"], "")
         self.assertEqual(initial["edit"], "")
 

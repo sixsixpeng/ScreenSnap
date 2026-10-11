@@ -26,6 +26,8 @@ HINT_ITEMS = (
     ("drag_move", "拖动移动"),
     ("resize", "四角/边中点缩放"),
     ("select", "拖拽框选"),
+    ("right_select", "右键拖选-多选"),
+    ("uia_quick_edit", "UIA 点击-快速编辑"),
     ("element_cycle", "Tab 切换窗口/控件层级"),
     ("edit", "双击/Enter 提交（编辑里双击空白保存）"),
     ("nudge", "WASD/方向键微调"),
@@ -841,7 +843,8 @@ def migrate_legacy_settings(data):
     order = migrated.get("capture_hint_order")
     if isinstance(order, list):
         # 2026-10-11：新增 picker_format（用户反馈"X 那条提示不见了"⇒ 旧配置里没有它）。
-        new_items = ["inline_edit", "inline_menu", "inline_history", "picker_format"]
+        new_items = ["inline_edit", "inline_menu", "inline_history", "picker_format",
+                     "right_select", "uia_quick_edit"]
         legacy_default = [item_id for item_id in HINT_ITEM_IDS if item_id not in new_items]
         if order == legacy_default:
             migrated["capture_hint_order"] = legacy_default + new_items
