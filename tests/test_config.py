@@ -2277,11 +2277,11 @@ class ConfigTests(CoreTests):
         self.assertEqual(len(items), len(HINT_ITEM_IDS) - 8)
         self.assertIn("F2 清除选择", items)
         self.assertIn("Alt+M 多选模式", items)
-        self.assertIn("Tab/Shift+Tab 切换窗口层级", items)
+        self.assertIn("Tab-切换窗口层级", items)
         self.assertIn("Esc取消", items)
         self.assertNotIn("拖拽框选", items)
         settings["window_detection"] = False
-        self.assertNotIn("Tab/Shift+Tab 切换窗口层级",
+        self.assertNotIn("Tab-切换窗口层级",
                  [item for item in mask.capture_hint_items() if item])
         settings["window_detection"] = True
         self.assertEqual(len(mask.capture_hint_items()), len(HINT_ITEM_IDS))

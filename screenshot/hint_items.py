@@ -57,7 +57,7 @@ def hint_texts(settings, position, selection, inline=False,
         "select": "左拖松开-快速编辑" if selection is None else "",
         "right_select": "右键拖选-多选" if selection is None else "",
         "uia_quick_edit": "UIA 点击-快速编辑" if selection is None else "",
-        "element_cycle": ("Tab/Shift+Tab 切换窗口层级"
+        "element_cycle": ("Tab-切换窗口层级"
                   if settings.get("window_detection", True) and not inline
                   else ""),
         # 双击语义取自 mouseDoubleClickEvent：原地编辑里左键双击=保存；
@@ -72,7 +72,7 @@ def hint_texts(settings, position, selection, inline=False,
         # 原地编辑里 S 也是保存（save_selection 判定）；非编辑时按收集态区分直存/快速保存。
         "save": ((f"{save_key} 保存") if inline else
              (f"{save_key}快速保存" if right_capture else
-              f"右键双击直存 | {save_key}快速保存")
+              f"右键双击-直存|{save_key}-保存")
              if selection else ""),
         # 用户 2026-10-11：与 hint_items() 保持一致（规则 8：预览与提示条同源）——统一一句「{键} 贴图」，
         # 因为先选/后选都能直接 Space 贴图；未启用该快捷键时为空。

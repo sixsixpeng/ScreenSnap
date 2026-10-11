@@ -941,7 +941,7 @@ class CaptureTests(CoreTests):
 
     def test_capture_hints_explain_left_and_right_capture_flows(self):
         # 未选择时没有任何选区：不该提示提交/保存（双击此时只关闭遮罩）；
-        # 有选区后才提示左键双击提交、右键双击直存/提交。
+        # 有选区后才提示左键双击提交、右键双击-直存/提交。
         from config.config_manager import DEFAULTS
         from screenshot.hint_items import hint_texts
 
@@ -955,14 +955,14 @@ class CaptureTests(CoreTests):
         self.assertEqual(initial["edit"], "")
 
         picked = hint_texts(settings, (0, 0), (20, 15))
-        self.assertIn("S快速保存", picked["save"])
-        self.assertIn("右键双击直存", picked["save"])
+        self.assertIn("S-保存", picked["save"])
+        self.assertIn("右键双击-直存", picked["save"])
         self.assertIn("左键双击提交", picked["edit"])
 
         collecting = hint_texts(settings, (0, 0), (20, 15), right_capture=True)
         self.assertIn("右键双击提交", collecting["edit"])
         self.assertIn("右键继续框选", collecting["multi_select"])
-        self.assertNotIn("右键双击直存", collecting["save"])
+        self.assertNotIn("右键双击-直存", collecting["save"])
 
     def test_hover_stays_alive_after_element_selection(self):
         """回归（用户 2026-10-11）：Tab/单击元素选中一层后，鼠标再移动就不再提示区域了。
