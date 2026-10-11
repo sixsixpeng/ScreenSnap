@@ -360,7 +360,11 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
         # 复用悬停同款下钻：同一线程、同一读取预算与熔断，不新增风险类型，
         # 而且 Tab 的频率远低于悬停轮询。
         deep = deepest_at(control, x, y, logger, cache=cache)
-        chain = climb(deep, handle, max_depth, logger, win_rect, cache)
+        # 2026-10-11（规则 14）：这里是**高频悬停**入口 ⇒ 显式关掉 climb 的逐元素/逐跳过日志
+        # （实测最近 2000 行里「UIA 元素[N]」54 条 + 「UIA 跳过元素」42 条 ✗）。
+        # 传 verbose=False 只影响日志：矩形链、层数、命中判定完全不变 ✓；
+        # 默认（None）仍按 DEBUG 逐条记 ⇒ 排查单点问题时可直接调用 climb() 拿到细节 ✓。
+        chain = climb(deep, handle, max_depth, logger, win_rect, cache, verbose=False)
         logger.debug("UIA 识别到 %d 层元素: %s", len(chain), chain)
         return chain
     except Exception as error:
@@ -460,7 +464,7 @@ def own_control(control, cache=None):
     return False
 
 
-def climb(control, handle, max_depth, logger, win_rect=None, cache=None):
+def climb(control, handle, max_depth, logger, win_rect=None, cache=None, verbose=None):
     """从最深控件往上收集矩形，遇到目标窗口层为止。
 
     不再把“桌面”根算进来，否则它会白占一层，导致最里面的控件被截掉。
@@ -470,7 +474,10 @@ def climb(control, handle, max_depth, logger, win_rect=None, cache=None):
     chain = []
     current = control
     # 名称与类型只用于日志；DEBUG 关闭时不再为它们付出跨进程读取的代价。
-    verbose = logger.isEnabledFor(logging.DEBUG)
+    # 2026-10-11（规则 14）：新增可选 verbose —— 高频悬停路径由调用方显式传 False ⇒ 不逐元素刷屏；
+    # 传 None（默认）保持原行为（DEBUG 开着就逐条记）⇒ test.climb.loud 等用例不受影响。
+    if verbose is None:
+        verbose = logger.isEnabledFor(logging.DEBUG)
     for _ in range(PARENT_LIMIT):
         if current is None or len(chain) >= max_depth:
             break
