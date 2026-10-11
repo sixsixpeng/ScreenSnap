@@ -855,6 +855,75 @@ class CanvasTests(CoreTests):
         self.assertEqual(horizontal.value(), 0, "Alt 不再横向移动（用户要求）")
         self.assertGreater(vertical.value(), 0, "Alt+滚轮应回落为纵向滚动")
 
+    def test_dragging_rotation_handle_rotates_without_moving_item(self):
+        """2026-10-11 用户实测回归：按住旋转按钮拖动 = **旋转**（位置不变）。
+
+        曾经的缺陷：非选择工具下"拖动标注"分支抢先 return（旋转手柄压在包围盒上必然命中它）⇒
+        标注跟着鼠标移动而不是旋转。本用例不写死手柄坐标，而是**扫描包围盒周围**找到
+        rotation_handle_at() 为真的点，再模拟按下+拖动，断言角度变化且位置不变。
+        """
+        from PIL import Image
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+        from editor.annotation_canvas import AnnotationCanvas
+
+        canvas = AnnotationCanvas(Image.new("RGB", (400, 300), "white"), dict(DEFAULTS))
+        canvas.resize(400, 300)
+        canvas.show()
+        self.app.processEvents()
+        canvas.set_tool("rect")                      # 用户当时的工具也是 rect（非选择）
+        item = canvas._add_annotation(shape("rect", QPointF(120, 100), QPointF(240, 180), "#ff0000", 2))
+        item.setSelected(True)
+        canvas.scene_data.clearSelection()
+        item.setSelected(True)
+        self.app.processEvents()
+
+        # 在标注周围一圈找旋转手柄的命中点（手柄画在包围盒外侧 ⇒ 扫描范围放宽到 ±40 像素）。
+        bounds = item.sceneBoundingRect()
+        hit = None
+        for dx in range(-40, 41, 2):
+            for dy in range(-40, 41, 2):
+                candidate = QPointF(bounds.center().x() + dx, bounds.center().y() + dy)
+                if canvas.rotation_handle_at(item, candidate):
+                    hit = candidate
+                    break
+            if hit is not None:
+                break
+        self.assertIsNotNone(hit, "扫描范围内应能命中旋转手柄")
+
+        start = canvas.mapFromScene(hit)
+        canvas.setFocus()
+        self.app.sendEvent(canvas.viewport(), QMouseEvent(
+            QEvent.MouseButtonPress, QPointF(start), QPointF(canvas.viewport().mapToGlobal(start)),
+            Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+        self.assertIs(canvas.rotating, item, "按下旋转手柄必须进入旋转态（不能被拖动标注抢先）")
+        before_rotation = item.rotation()
+        before_pos = item.pos()
+        # 注意：_rotate_to 的**第一次**移动只做标定（rotation_start_angle 初始化，delta=0）⇒ 必须拖两次。
+        def drag_to(scene_point):
+            view_point = canvas.mapFromScene(scene_point)
+            self.app.sendEvent(canvas.viewport(), QMouseEvent(
+                QEvent.MouseMove, QPointF(view_point),
+                QPointF(canvas.viewport().mapToGlobal(view_point)),
+                Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
+
+        center = bounds.center()
+        drag_to(center + QPointF(bounds.width(), 0))          # 第一次：标定起点
+        end_scene = center + QPointF(bounds.width() * 0.2, bounds.height() * 0.9)
+        drag_to(end_scene)                                   # 第二次：真正旋转
+        end = canvas.mapFromScene(end_scene)
+        self.app.sendEvent(canvas.viewport(), QMouseEvent(
+            QEvent.MouseButtonRelease, QPointF(end), QPointF(canvas.viewport().mapToGlobal(end)),
+            Qt.LeftButton, Qt.NoButton, Qt.NoModifier))
+        self.assertNotAlmostEqual(item.rotation(), before_rotation, places=3,
+                                  msg="拖动旋转手柄必须改变角度")
+        self.assertAlmostEqual(item.pos().x(), before_pos.x(), places=3,
+                               msg="旋转不得移动标注（位置 X）")
+        self.assertAlmostEqual(item.pos().y(), before_pos.y(), places=3,
+                               msg="旋转不得移动标注（位置 Y）")
+        canvas.close()
+
     def test_space_triggers_sticker_and_never_draws(self):
         """契约变更（用户 2026-10-11 定案）：**Space 一律=贴图**，不再兼作平移；平移改用右键/中键。
 
