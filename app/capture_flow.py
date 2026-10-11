@@ -335,24 +335,40 @@ class CaptureFlowMixin:
         # 而遮罩关闭后它的 C++ 对象即销毁 ⇒ 不能在遮罩侧延迟。这里只捕获**纯数据**，
         # 由本对象（应用常驻）在事件循环下一轮依次弹窗。
         payload = list(images)
+        # 每个选区各自的原生全局锚点（规则 22）：用来把"另存为"父窗口摆到**鼠标/选区所在那块屏**，
+        # 否则原生对话框会跟随活动屏幕（多半是主屏）弹出（2026-10-11 用户反馈）。
+        spots = list(positions or [])
         self.logger.info("另存为：收到 %d 块，遮罩关闭后依次弹窗", len(payload))
-        QTimer.singleShot(0, lambda: self._run_save_as_dialogs(payload))
+        QTimer.singleShot(0, lambda: self._run_save_as_dialogs(payload, spots))
         # 对话框在事件循环下一轮才弹，此刻没有已落盘路径 ⇒ 返回空列表（调用方只用信号，不取返回值）。
         return []
 
-    def _run_save_as_dialogs(self, images):
-        """依次弹出「另存为」对话框（模态 ⇒ 天然一块一块来、互不抢焦点；取消则停止后续）。"""
+    def _run_save_as_dialogs(self, images, positions=None):
+        """依次弹出「另存为」对话框（模态 ⇒ 天然一块一块来、互不抢焦点；取消则停止后续）。
+
+        每块先把父窗口摆到该选区的锚点（原生全局坐标，规则 22）⇒ 对话框跟随父窗口所在屏幕。
+        """
         saved_paths = []
         total = len(images)
+        spots = list(positions or [])
         for index, (image, alternate) in enumerate(images, start=1):
             self.logger.info("另存为：第 %d/%d 块，弹出对话框", index, total)
             editor = EditorWindow(image, self.config.data, alternate, from_capture=True)
+            spot = spots[index - 1] if index - 1 < len(spots) else None
+            if spot is not None:
+                # 2026-10-11（用户要求）：对话框显示在**该选区所在屏幕的中心**，而不是跟着鼠标点。
+                # screenAt 取 Qt 原生全局坐标（positions 本身就是原生全局 ⇒ 同一坐标空间，规则 22）。
+                screen = QGuiApplication.screenAt(spot) or QGuiApplication.primaryScreen()
+                if screen is not None:
+                    # 用**整块屏幕的几何**当 owner 占位（不可见）⇒ 原生对话框落在该屏中心（用户要求）。
+                    spot = screen.geometry()
+                self.logger.debug("另存为：对话框锚定到屏幕 %s", spot.getRect() if hasattr(spot, "getRect") else spot)
             editor.copy_done.connect(self.notify_capture_copied)
             editor.save_as_dir_chosen.connect(self.remember_save_as_dir)
             editor.image_saved.connect(
                 lambda path, image: (saved_paths.append(str(path)), self.saved(path, image))[1])
             try:
-                if editor.save_as() is None:
+                if editor.save_as(anchor=spot) is None:
                     self.logger.info("另存为：用户取消，停止后续选区")
                     break
             except OSError as error:

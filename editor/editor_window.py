@@ -22,6 +22,35 @@ from core.screen_capture import qimage_to_pillow
 from editor.image_transform import transform
 from editor.toolbar_widget import ToolbarWidget
 
+# 2026-10-11：这个模块级助手**必须放在 class 之前** —— 上一版误插进类体内（列 0）⇒ 类提前结束、
+# 之后所有方法都变成它的嵌套函数 ⇒ AttributeError（test_tools/test_zoom/test_app 共 9 条 ERROR）。
+_CHINESE_DIALOGS_READY = [False]
+
+
+def _ensure_chinese_dialogs():
+    """让 Qt **自绘**对话框显示中文（2026-10-11 用户要求：重绘的界面注意汉化）。
+
+    · 装载 Qt 自带的中文翻译（qtbase_zh_CN / qt_zh_CN）⇒ 标准按钮与标签变中文；
+    · 只做一次；把 QTranslator 挂在 app 上保住引用，避免被 GC 掉；
+    · 找不到翻译文件也不报错 —— 调用方还会显式 setLabelText 兜底。
+    """
+    if _CHINESE_DIALOGS_READY[0]:
+        return
+    _CHINESE_DIALOGS_READY[0] = True
+    from PySide6.QtCore import QLibraryInfo, QTranslator
+    from PySide6.QtWidgets import QApplication
+
+    app = QApplication.instance()
+    if app is None:
+        return
+    path = QLibraryInfo.path(QLibraryInfo.LibraryPath.TranslationsPath)
+    translator = QTranslator(app)
+    if translator.load("qtbase_zh_CN", path) or translator.load("qt_zh_CN", path):
+        app.installTranslator(translator)
+        app._screensnap_translator = translator
+        logging.getLogger("screensnap").debug("已装载 Qt 中文翻译: %s", path)
+
+
 ANNOTATION_COLOR_TOOLS = frozenset(("pen", "rect", "ellipse", "arrow", "marker", "text"))
 
 
@@ -345,12 +374,63 @@ class EditorWindow(QMainWindow):
         self.copy_done.emit(result)
         self.close()
 
-    def save_as(self):
+    def save_as(self, anchor=None):
         """另存为：可选目录与文件名（默认定位上次目录、预填当前命名），并记住该目录。"""
         # 另存为对话框允许同时改目录与文件名：默认定位上次用过的目录，并预填当前命名规则。
         suggested = self.allocate_path(directory=save_as_directory(self.settings))
-        chosen, _ = QFileDialog.getSaveFileName(self, "另存为", str(suggested),
-                                               save_as_filter(self.settings))
+        # 2026-10-11（用户实测：对话框出现在"上次另存为"的那块屏）：原生文件对话框跟随**父窗口**
+        # 所在屏幕；这里用一个 1×1 的隐形 Tool 窗口当父窗口并摆到目标锚点 ⇒ 对话框就落在那块屏。
+        # anchor=None 时行为完全不变（向后兼容）。
+        owner = self
+        anchor_window = None
+        if anchor is not None:
+            # 2026-10-11 第二版（用户实测：半透明 1×1 窗口不被 Windows 当作真实 owner，对话框仍弹在主屏）：
+            # 改成**不透明**的真实小窗（8×8、无边框、不接受焦点、几乎全透明但不设 WA_TranslucentBackground）
+            # 并 setWindowOpacity(0.01) ⇒ 仍是一个"已显示的窗口"，Windows 才会按它的显示器摆放原生对话框。
+            anchor_window = QWidget(None, Qt.Tool | Qt.FramelessWindowHint |
+                                    Qt.WindowDoesNotAcceptFocus)
+            anchor_window.setAttribute(Qt.WA_ShowWithoutActivating)
+            anchor_window.setWindowOpacity(0.01)
+            # 2026-10-11 第三版：Windows 把原生对话框摆在 **owner 的右下角/中心附近** ⇒ 8×8 的 owner 让
+            # 对话框跑到了屏幕右下角（用户实测）。改成让 owner **铺满目标屏幕**（不可见、不抢焦点）
+            # ⇒ 对话框的定位基准就是这块屏，落在它的中心。
+            if hasattr(anchor, "width") and anchor.width() > 1:
+                anchor_window.setGeometry(anchor)          # QRect = 目标屏幕几何（Qt 原生全局，规则 22）
+            else:
+                anchor_window.setGeometry(int(anchor.x()), int(anchor.y()), 8, 8)
+            anchor_window.show()
+            anchor_window.raise_()
+            owner = anchor_window
+        try:
+            if anchor is None:
+                # 单选路径：保持**原生**对话框（外观不变 ✓ 行为不变 ✓）。
+                chosen, _ = QFileDialog.getSaveFileName(owner, "另存为", str(suggested),
+                                                       save_as_filter(self.settings))
+            else:
+                # 2026-10-11 第四版（用户实测：原生对话框只能选屏、屏内位置由 Windows 决定 —— 先是右下角、
+                # 后是左上角）：要**精确居中**只能用 Qt 自绘对话框 ⇒ 只在这条多选路径上这么用。
+                # 目录/预填文件名/过滤器/记忆目录（save_as_dir_chosen）全部保持原样。
+                _ensure_chinese_dialogs()
+                dialog = QFileDialog(owner, "另存为", str(suggested), save_as_filter(self.settings))
+                dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+                # 显式中文标签兜底（万一没有 qtbase_zh_CN.qm）：位置/文件名/文件类型 + 保存/取消。
+                dialog.setLabelText(QFileDialog.DialogLabel.LookIn, "位置(L):")
+                dialog.setLabelText(QFileDialog.DialogLabel.FileName, "文件名(N):")
+                dialog.setLabelText(QFileDialog.DialogLabel.FileType, "文件类型(T):")
+                dialog.setLabelText(QFileDialog.DialogLabel.Accept, "保存(S)")
+                dialog.setLabelText(QFileDialog.DialogLabel.Reject, "取消")
+                dialog.setFileMode(QFileDialog.FileMode.AnyFile)
+                dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+                target = anchor if hasattr(anchor, "center") else QRect(anchor.x(), anchor.y(), 1, 1)
+                size = dialog.sizeHint()
+                dialog.move(target.center().x() - size.width() // 2,
+                            target.center().y() - size.height() // 2)
+                logging.getLogger("screensnap").info(
+                    "另存为：自绘对话框居中到屏幕 %s", target.getRect())
+                chosen = dialog.selectedFiles()[0] if dialog.exec() and dialog.selectedFiles() else ""
+        finally:
+            if anchor_window is not None:
+                anchor_window.close()
         if not chosen:
             return None
         path, save_settings = normalize_save_as_path(chosen, self.settings)
@@ -381,6 +461,12 @@ class EditorWindow(QMainWindow):
         self.canvas.setFocus(Qt.OtherFocusReason)
 
     def invalidate_rotation_reset(self):
+        self.rotation_reset_state = None
+        self.toolbar.reset_rotation_button.setEnabled(False)
+
+    def invalidate_rotation_reset(self):
+        # 2026-10-11：本方法曾被一次"整块替换"误删（AttributeError: no attribute invalidate_rotation_reset，
+        # test_tools 4 条 ERROR）⇒ 按 git 原文恢复，勿再整块覆盖相邻方法。
         self.rotation_reset_state = None
         self.toolbar.reset_rotation_button.setEnabled(False)
 
