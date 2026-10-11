@@ -350,6 +350,11 @@ CAPTURE_SHORTCUT_KEYS = (
     "capture_recapture_shortcut", "capture_window_edit_shortcut",
     "capture_multi_select_shortcut", "capture_copy_shortcut",
     "capture_toolbar_hide_shortcut",
+    # 2026-10-11（审查 M2）：下面 5 个键原来**不在**冲突检测表里 ✗ ⇒ 与上表任意键同键都检测不到，
+    # 而同键会在同一窗口触发 Qt 的 ambiguous ⇒ **整个应用的该键全部失效**（AGENTS D8⑤ 真机定论 ✗）。
+    "capture_picker_format_shortcut",
+    "editor_save_as_shortcut", "editor_undo_shortcut",
+    "editor_redo_shortcut", "editor_zoom_reset_shortcut",
 )
 
 
@@ -526,7 +531,12 @@ def validate(data):
                      "capture_custom_size_shortcut", "capture_recapture_shortcut",
                      "capture_window_edit_shortcut", "capture_multi_select_shortcut",
                      "capture_copy_shortcut",
-                     "capture_toolbar_hide_shortcut"):
+                     "capture_toolbar_hide_shortcut",
+                     # 2026-10-11（审查 M2）：4 个 editor_* 键原来落到 else 分支"原样保留" ✗ ⇒
+                     # 实测 validate("")→""、validate("notakey")→原样通过、repair({…:""}) 不回退 ✗，
+                     # 而空串会让 QKeySequence 为空 ⇒ 两个编辑器**静默不注册**该键 ✗。现并入同一校验。
+                     "editor_save_as_shortcut", "editor_undo_shortcut",
+                     "editor_redo_shortcut", "editor_zoom_reset_shortcut"):
             from PySide6.QtGui import QKeySequence
 
             sequence = QKeySequence(value.strip())
@@ -837,11 +847,17 @@ def migrate_legacy_settings(data):
     legacy = migrated.get("arrow_style")
     if legacy in ARROW_STYLE_LEGACY:
         migrated["arrow_style"] = ARROW_STYLE_LEGACY[legacy]
-    # 新加的原地编辑提示项：旧配置的 capture_hint_order 里没有它们。若列表仍是上一版
-    # 的完整默认（用户没自定义过），追加到末尾，升级后能直接看到；自定义过的列表不动，
-    # 也不会在用户取消勾选后再被追加回来。
+    # 2026-10-11（审查 H2/H3，用户实测）：下面两段"补齐缺失项 + 强制三项顺序"原先**每次加载都跑** ✗，
+    # 且结果不同就 `save_safely()` 回写磁盘 ✗ ⇒ 用户在设置页**取消勾选**提示项、或拖动这三项的顺序，
+    # 重启后被静默改回来 ✗（实测：3 项 → 被补成 23 项并落盘）。
+    # 现在按**一次性迁移**处理：只在"存储的 app_version ≠ 当前版本"（即真的升级了）那一轮执行 ✓；
+    # 同版本内完全尊重用户的勾选与顺序 ✓（不新增配置键 ⇒ 不扩散 schema 变更 ✓ 规则 30）。
+    from core.version import APP_VERSION as _APP_VERSION
+
+    _stored_version = str(migrated.get("app_version") or "")
+    _is_upgrade = _stored_version != str(_APP_VERSION)
     order = migrated.get("capture_hint_order")
-    if isinstance(order, list):
+    if isinstance(order, list) and _is_upgrade:
         # 2026-10-11（用户明确要求：该加配置就加、新提示项**默认全部勾选**）：旧配置保存的是上一版的
         # 顺序表，新加的提示项不在里面 ⇒ 按既有约定「不在 capture_hint_order 里的不显示」，它在提示条
         # 和设置页里都不会出现。处理：**补齐所有缺失项**（追加到末尾，保留用户已有顺序与勾选），幂等。
@@ -854,7 +870,7 @@ def migrate_legacy_settings(data):
     # 2026-10-11（用户要求）：已存顺序里这三项若相对次序不对，就地调整相对顺序——只占用它们**原本
     # 所在的那几个位置**，其余项位置一概不变（不重排用户的整体顺序）；幂等。
     order = migrated.get("capture_hint_order")
-    if isinstance(order, list):
+    if isinstance(order, list) and _is_upgrade:
         wanted = ["select", "uia_quick_edit", "element_cycle"]
         present = [item_id for item_id in order if item_id in wanted]
         if sorted(present) == sorted(wanted) and present != wanted:
