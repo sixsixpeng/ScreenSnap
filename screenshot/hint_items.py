@@ -65,7 +65,8 @@ def hint_texts(settings, position, selection, inline=False,
         "edit": (("右键双击提交" if right_capture else "左键双击提交")
              if selection and not inline else
              "左键双击空白保存" if inline else ""),
-        "nudge": "握住控制点后 WASD/方向键微调" if selection else "",
+        # 用户 2026-10-11：原句「握住控制点后 WASD/方向键微调」太长 ⇒ 精简为与其它项一致的短语。
+        "nudge": "WASD/方向键-微调" if selection else "",
         "cancel": "Esc取消" if not inline else "Esc放弃编辑",
         # 保存类提示只在**已有选区**时才有意义：没有选区时双击只是关闭遮罩。
         # 原地编辑里 S 也是保存（save_selection 判定）；非编辑时按收集态区分直存/快速保存。
