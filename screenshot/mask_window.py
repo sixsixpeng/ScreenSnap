@@ -1318,8 +1318,20 @@ class MaskWindow(QWidget):
         放大镜关闭、被模态弹窗遮挡时**仍返回按同一避让规则算出的框**，提示条因此
         仍然跟着光标显示，不会因为放大镜不画了就消失。
         """
-        return magnifier_rect(self.to_logical_point(self.position), self.rect(),
-                              self.magnifier_size())
+        point = self.to_logical_point(self.position)
+        bounds = self.rect()
+        size = self.magnifier_size()
+        frame = magnifier_rect(point, bounds, size)
+        # 组翻转（2026-10-11 用户要求：任意一个触边/触底 ⇒ 整组一起翻）：先把提示条按当前
+        # 放大镜位置算一遍拿到它的宽/高，再把它作为"预留"重算放大镜 ⇒ 两者用同一个判定。
+        bar, _rows, _align = info_bar_layout(
+            self.fontMetrics(), bounds, frame, self.capture_hint_items(),
+            warning=self.self_check_warning(), per_line=self.hint_per_line(),
+            cursor=point, gap=int(self.settings.get("capture_hint_gap", 0) or 0))
+        if not bar.isEmpty():
+            frame = magnifier_rect(point, bounds, size,
+                                   reserve_x=bar.width(), reserve_y=bar.height())
+        return frame
 
     def capture_hint_items(self):
         """提示条内容：按「设置里的顺序」给出当前阶段的提示文案。

@@ -18,14 +18,20 @@ def sample_size(size):
     return max(1, int(round(max(1, size) / MAGNIFIER_ZOOM)))
 
 
-def magnifier_rect(point, bounds, size=MAGNIFIER_DEFAULT_SIZE):
+def magnifier_rect(point, bounds, size=MAGNIFIER_DEFAULT_SIZE, reserve_x=0, reserve_y=0):
+    """放大镜框；reserve_x/reserve_y = 同侧还要放的**提示条**占位（2026-10-11 用户要求）。
+
+    用户实测：原来只有放大镜自己触边才翻，提示条更长时会被夹在边上或先单独翻上去。
+    现在把提示条的宽/高计入**同一个**翻转判定 —— 任意一个放不下 ⇒ 整组一起翻到光标另一侧。
+    注意：reserve 只参与"要不要翻"的判断，翻转后的位置仍紧贴光标（提示条再贴在它外侧）。
+    """
     width = min(size, max(1, bounds.width() - 20))
     height = min(size, max(1, bounds.height() - 20))
     x = point.x() + MAGNIFIER_OFFSET
     y = point.y() + MAGNIFIER_OFFSET
-    if x + width + 4 > bounds.width():
+    if x + width + 4 + max(0, reserve_x) > bounds.width():
         x = point.x() - width - MAGNIFIER_OFFSET
-    if y + height + 4 > bounds.height():
+    if y + height + 4 + max(0, reserve_y) > bounds.height():
         y = point.y() - height - MAGNIFIER_OFFSET
     return QRect(
         min(max(x, 2), max(2, bounds.width() - width - 2)),
