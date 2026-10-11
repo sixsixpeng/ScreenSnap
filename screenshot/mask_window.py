@@ -1289,7 +1289,10 @@ class MaskWindow(QWidget):
             # 遍历 Qt 顶层部件表 ⇒ Qt 内部碰到半构造的部件 ⇒ 原生堆损坏（Python 异常钩子收不到 ✗）。
             # 规则 18 早已规定"悬停查询必须延后到下一个事件循环轮次" —— 这里同样延后：
             # 遮罩构造完成、事件循环空闲时再查（winId()/exclude_hwnd 也在那时才有意义 ✓）。
-            QTimer.singleShot(0, self.detect_element_at_cursor)
+            # 2026-10-11 第二次修正：原来只延后**一轮事件循环**✗ ⇒ 那一轮遮罩还在 show/raise 过程中，
+            # 遍历 Qt 顶层部件照样堆损坏（crash.log：overlay_handles ← detect_element_at_cursor ✓）。
+            # 改为等 250ms（显示流程结束）+ 未真正可见时再顺延一轮 ⇒ 部件树稳定后才查 ✓。
+            QTimer.singleShot(250, self.detect_element_at_cursor)
 
 
     def _capture_action_shortcut(self, settings, key, default, slot):
@@ -3303,6 +3306,10 @@ class MaskWindow(QWidget):
         """
         if self.element_chain:
             return                      # 已有结果（例如已悬停过）⇒ 不重复查
+        if not self.isVisible():
+            # 遮罩还没真正显示（启动/多屏创建过程中）⇒ 再等一轮，绝不在部件树变动时遍历顶层部件 ✗
+            QTimer.singleShot(150, self.detect_element_at_cursor)
+            return
         settings = self.settings
         point = self.mapper.native_global_to_physical_global(QCursor.pos())
         try:

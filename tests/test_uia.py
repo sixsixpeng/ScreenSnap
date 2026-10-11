@@ -726,6 +726,9 @@ class UiaTests(CoreTests):
             # 悬停识别要求遮罩可见（截图结束时不再查询系统窗口）。
             mask.show()
             self.app.processEvents()
+            # 2026-10-11：初始识别已改为"显示完成后 250ms"才执行（避免遍历 Qt 顶层部件时堆损坏 ✗）
+            # ⇒ 这里要真等，不能只跑一轮事件循环。
+            QTest.qWait(400)
             self.assertEqual(mask.element_chain, chain)
             QTest.keyClick(mask, Qt.Key_Tab)
             self.assertEqual(mask.selection.rects, [QRect(0, 0, 100, 80)])
@@ -741,9 +744,11 @@ class UiaTests(CoreTests):
             mask.close()
             auto = MaskWindow(Image.new("RGB", (100, 80), "white"), bounds, [bounds],
                               dict(settings, window_auto_select=True))
-            # 2026-10-11 契约变更：初始识别已从 __init__ 延后到事件循环（避免构造期遍历 Qt 顶层部件
-            # 导致原生堆损坏 0xC0000374）⇒ 这里必须先跑一轮事件循环，识别才会发生。
+            auto.show()          # 初始识别在"真正可见"后才执行（未显示会一直顺延 ✗）⇒ 测试也要显示它
             self.app.processEvents()
+            # 2026-10-11 契约变更（两次）：初始识别已从 __init__ 延后到"遮罩显示完成后 250ms"
+            # （构造期/显示期遍历 Qt 顶层部件都会原生堆损坏 0xC0000374 ✗）⇒ 这里必须真等一会儿。
+            QTest.qWait(400)
             self.assertEqual(auto.selection.rects, [QRect(0, 0, 100, 80)])
             self.assertTrue(auto.auto_complete_after_show)
             auto.close()
