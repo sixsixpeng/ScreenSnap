@@ -204,8 +204,13 @@ def paint_info(painter, anchor, area, items, warning=None, element_rect=None,
 def paint_info_badge(painter, area, element_rect, element_size=None,
                      element_border_color="#00d7aa", element_text_color="#ffffff",
                      element_background_color="#141c22", element_font_size=12,
-                     element_border_width=1, bar=None):
-    """在遮罩上画控件尺寸徽标；`bar` 是提示条矩形，重叠时改贴控件下方。"""
+                     element_border_width=1, bar=None, cursor=None):
+    """在遮罩上画控件/选区尺寸徽标（三级降级避让）。
+
+    `bar` 是要避开的矩形（提示条与工具条，二者取并集 ✓）；`cursor` 是鼠标位置（遮罩逻辑坐标 ✓）——
+    徽标必须与光标保持间距 ✓（用户 2026-10-11 要求：鼠标靠近时徽标换到别的位置 ✓）。
+    候选顺序：环绕（上/下/内侧顶底/左右）→ 屏角（右上/左上/左下/右下）→ 兜底（离光标最远的角 ✓）。
+    """
     if element_rect is None or element_rect.isEmpty():
         return QRect()
     bar = bar or QRect()
@@ -218,16 +223,19 @@ def paint_info_badge(painter, area, element_rect, element_size=None,
     label = f"{size[0]} x {size[1]} px"
     label_width = badge_metrics.horizontalAdvance(label) + 16
     label_height = badge_metrics.height() + 8
-    label_left = max(area.left() + 4, min(
-        element_rect.center().x() - label_width // 2,
-        area.right() - label_width - 3))
-    # 徽标默认贴在控件上方；与提示条重叠时改贴控件下方，再越界才回到上方。
-    label_top = element_rect.top() - label_height - 6
-    if QRect(label_left, label_top, label_width, label_height).intersects(bar):
-        label_top = element_rect.bottom() + 7
-    if label_top + label_height > area.bottom() - 3:
-        label_top = max(area.top() + 4, element_rect.top() - label_height - 6)
-    badge = QRect(label_left, label_top, label_width, label_height)
+    # 2026-10-11（用户指定最终规则，**彻底取代**此前所有避让计算 ✗）：
+    #   ① 徽标固定画在选区（元素）**内部、顶部居中** ✓；
+    #   ② **鼠标移到徽标上 ⇒ 直接不画**（隐藏 ✓ 不做任何位置重算 ✗）；
+    #   ③ 只保证不越出屏幕（贴顶/贴边时夹一下 ✓），其余一概不管 ✓。
+    badge_left = max(area.left() + 2,
+                     min(element_rect.center().x() - label_width // 2,
+                         area.right() - label_width - 2))
+    badge_top = max(area.top() + 2,
+                    min(element_rect.top() + 6, area.bottom() - label_height - 2))
+    badge = QRect(int(badge_left), int(badge_top), label_width, label_height)
+    if cursor is not None and badge.contains(cursor):
+        painter.restore()          # 鼠标压在徽标上 ⇒ 隐藏 ✓（不重算位置 ✗）
+        return QRect()
     painter.setPen(QPen(QColor(element_border_color), max(1, element_border_width)))
     painter.setBrush(QColor(element_background_color))
     painter.drawRoundedRect(badge, 4, 4)
