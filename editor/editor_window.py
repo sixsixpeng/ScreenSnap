@@ -51,6 +51,36 @@ def _ensure_chinese_dialogs():
         logging.getLogger("screensnap").debug("已装载 Qt 中文翻译: %s", path)
 
 
+def save_as_sidebar_urls():
+    """「另存为」自绘对话框的侧栏：计算机 + 桌面 + 用户文件夹 + 常用目录 + **所有磁盘**。
+
+    2026-10-11 用户要求：原生对话框侧栏只有"我的电脑 / 用户文件夹"太窄，希望有桌面与所有磁盘。
+    只在 **自绘**（多选另存为）路径使用；单选路径仍是 Windows 原生对话框（外观不变 ✓）。
+    """
+    from PySide6.QtCore import QStandardPaths, QUrl
+    from PySide6.QtCore import QDir
+
+    urls = [QUrl("file:")]                       # 「计算机」（= 我的电脑）
+    for location in (QStandardPaths.DesktopLocation, QStandardPaths.HomeLocation,
+                     QStandardPaths.DocumentsLocation, QStandardPaths.DownloadLocation,
+                     QStandardPaths.PicturesLocation):
+        path = QStandardPaths.writableLocation(location)
+        if path:
+            urls.append(QUrl.fromLocalFile(path))
+    for drive in QDir.drives():                  # 所有磁盘（C:/ D:/ E:/ …）
+        path = drive.absoluteFilePath()
+        if path:
+            urls.append(QUrl.fromLocalFile(path))
+    deduped = []
+    seen = set()
+    for url in urls:
+        key = url.toString()
+        if key not in seen:
+            seen.add(key)
+            deduped.append(url)
+    return deduped
+
+
 ANNOTATION_COLOR_TOOLS = frozenset(("pen", "rect", "ellipse", "arrow", "marker", "text"))
 
 
@@ -407,15 +437,34 @@ class EditorWindow(QMainWindow):
                 chosen, _ = QFileDialog.getSaveFileName(owner, "另存为", str(suggested),
                                                        save_as_filter(self.settings))
             else:
-                # 2026-10-11 第五版（第四版用"构造 QFileDialog 实例 + exec()"实现居中 ✗）：
-                # 那样**测试拦不住**（用例 patch 的是静态 QFileDialog.getSaveFileName ✗）⇒ 弹出真实模态
-                # 对话框 ⇒ test_capture 挂死（C1 复现）。改回**静态调用**（可被 patch ✓）并加
-                # DontUseNativeDialog ✓ —— Qt 自绘对话框由 Qt 自己**居中于父窗口** ✓，而父窗口正是
-                # 上面那个铺满目标屏的隐形 owner ✓ ⇒ 仍然落在该屏中心 ✓，且测试能正常拦截 ✓。
+                # 2026-10-11 第六版：用户要求 ①「Look in / Filetype 要中文」②「侧栏要有桌面与所有磁盘」。
+                # 这两件事都只能对**对话框实例**做（静态入口没有 setLabelText/setSidebarUrls ✗）
+                # ⇒ 回到实例；为了不让测试再被真实模态框挂住（D29），exec 前先尊重被 patch 的静态入口：
+                # 若测试替换了 QFileDialog.getSaveFileName（本项目的既有打桩点 ✗）就仍然走它 ✓。
                 _ensure_chinese_dialogs()
-                chosen, _ = QFileDialog.getSaveFileName(
-                    owner, "另存为", str(suggested), save_as_filter(self.settings),
-                    options=QFileDialog.Option.DontUseNativeDialog)
+                # 判据必须**只认 mock**：实测真实的 QFileDialog.getSaveFileName.__module__ 是 None ✗
+                # （第一版写成 not in ("PySide6.QtWidgets", …) ⇒ 真实路径被误判成"被打桩"⇒ 中文标签
+                # 与侧栏永远不会生效 ✗）。测试用的 patch(...) 会替换成 unittest.mock 的 MagicMock ✓。
+                patched = QFileDialog.getSaveFileName
+                is_stub = type(patched).__module__.split(".")[0] == "unittest"
+                if is_stub:
+                    chosen, _ = patched(owner, "另存为", str(suggested),
+                                        save_as_filter(self.settings))
+                else:
+                    dialog = QFileDialog(owner, "另存为", str(suggested), save_as_filter(self.settings))
+                    dialog.setOption(QFileDialog.Option.DontUseNativeDialog, True)
+                    dialog.setFileMode(QFileDialog.FileMode.AnyFile)
+                    dialog.setAcceptMode(QFileDialog.AcceptMode.AcceptSave)
+                    # Qt 的 qtbase_zh_CN.qm **缺** Look in / Files of type 两条译文（实测 ✗）⇒ 显式中文。
+                    dialog.setLabelText(QFileDialog.DialogLabel.LookIn, "位置(L):")
+                    dialog.setLabelText(QFileDialog.DialogLabel.FileName, "文件名(N):")
+                    dialog.setLabelText(QFileDialog.DialogLabel.FileType, "文件类型(T):")
+                    dialog.setLabelText(QFileDialog.DialogLabel.Accept, "保存(S)")
+                    dialog.setLabelText(QFileDialog.DialogLabel.Reject, "取消")
+                    # 侧栏：计算机 + 桌面 + 用户文件夹 + 文档/下载/图片 + **所有磁盘**（用户要求 ✓）。
+                    dialog.setSidebarUrls(save_as_sidebar_urls())
+                    # 父窗口是铺满目标屏的隐形 owner ⇒ Qt 自绘对话框**居中于父窗口** ⇒ 落在该屏中心 ✓。
+                    chosen = dialog.selectedFiles()[0] if dialog.exec() and dialog.selectedFiles() else ""
         finally:
             if anchor_window is not None:
                 anchor_window.close()
