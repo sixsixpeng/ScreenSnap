@@ -64,6 +64,8 @@ class EditorPage(SettingsPage):
         self.preview("eraser")
         self.number("eraser_width", "橡皮擦直径", 10, 100, "只影响橡皮擦工具，范围 10–100")
         self.add_color("eraser_cursor_color", "示意圈颜色")
+        self.check("eraser_brush", "涂抹模式（自由笔刷）",
+                   "默认：按住拖动沿笔迹擦除（按住 Ctrl 或 Alt 可直线擦除）；关闭后改为拖框选矩形，擦除框内内容")
         self.check("eraser_erase_base", "同时擦除原图",
                    "开启后新擦除会同时擦掉截图原图（只影响之后的擦除）；关闭则只擦标注、露出原图（非破坏性）。已有擦除可在该处右键单独设置")
         self.group("荧光笔")

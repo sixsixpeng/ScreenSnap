@@ -19,6 +19,277 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class EraseTests(CoreTests):
+    def test_eraser_brush_mode_defaults_on_and_is_validated(self):
+        """2026-10-11 用户要求：橡皮擦对齐马赛克的用法 ⇒ 默认「涂抹模式（自由笔刷）」✓。
+
+        契约：DEFAULTS 带合理默认值 ✓；类型错误被 validate 拒绝 ✓（靠"与默认值同类型"分支 ✓）。
+        """
+        from config.config_manager import DEFAULTS, validate
+
+        self.assertTrue(DEFAULTS.get("eraser_brush", False), "橡皮擦默认应为涂抹模式")
+        self.assertTrue(validate({"eraser_brush": True})["eraser_brush"])
+        with self.assertRaises(ValueError):
+            validate({"eraser_brush": "yes"})
+
+    def test_eraser_rect_mode_erases_the_dragged_rectangle(self):
+        """关闭涂抹 ⇒ 拖框选：松手时把框内内容**整块擦除** ✓（与马赛克的矩形模式对齐 ✓）。"""
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"),
+                                  dict(DEFAULTS, eraser_brush=False))
+        canvas.resize(400, 300)
+        canvas.show()
+        canvas.set_tool("eraser")
+        self.app.processEvents()
+        self._pen_drag(canvas, (40, 40), (140, 120))
+        try:
+            item = canvas._erase_stroke_item()
+            kinds = [item._stroke_kind(stroke) for stroke in item.strokes]
+            self.assertIn("rect", kinds, "框选模式应当写入一条矩形笔迹")
+            rect_stroke = [s for s in item.strokes if item._stroke_kind(s) == "rect"][0]
+            self.assertAlmostEqual(rect_stroke[3], rect_stroke[3])       # 宽高为实数 ✓
+            self.assertGreater(rect_stroke[3], 1)
+            self.assertGreater(rect_stroke[4], 1)
+            self.assertFalse(any(k == "line" and s[5] > 0 for k, s in
+                                 zip(kinds, item.strokes)), "框选模式落笔不应擦出笔迹点")
+        finally:
+            canvas.close()
+
+    def test_base_is_restored_after_erase_layer_disappears(self):
+        """2026-10-11 复查（配套风险 ✓）：合成里改成"只隐藏底图一次"⇒ 擦除层消失后必须恢复显示 ✓。
+
+        否则撤销掉所有擦除后底图会**永远消失**（只剩棋盘格 ✗）。恢复点在 drawForeground 的
+
+        `elif not self._erase_live_active(): self.base.show()` ✓；这里断言两端都成立 ✓。
+        """
+        from editor.annotation_canvas import AnnotationCanvas
+        from PySide6.QtCore import QPointF, QEvent, Qt
+        from PySide6.QtGui import QMouseEvent
+        from PIL import Image
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (400, 300), "white"),
+                                  dict(DEFAULTS, eraser_brush=True, eraser_width=20))
+        canvas.resize(500, 400)
+        canvas.show()
+        self.app.processEvents()
+        try:
+            self.assertTrue(canvas.base.isVisible(), "初始底图应当可见")
+            canvas.set_tool("eraser")
+            canvas.erasing = True
+            canvas.eraser_group += 1
+            canvas.erase_segment(QPointF(50, 50), QPointF(120, 120))
+            self.app.processEvents()
+            self.assertTrue(canvas._erase_live_active(), "应当存在擦除层")
+            self.assertFalse(canvas.base.isVisible(), "擦除激活期间底图应被隐藏（只隐藏一次 ✓）")
+            # 撤销/删除掉擦除层 ⇒ 合成路径退出 ⇒ 底图必须恢复 ✓
+            for item in list(canvas.erase_items()):
+                canvas.scene_data.removeItem(item)
+            canvas.viewport().update()
+            self.app.processEvents()
+            self.assertFalse(canvas._erase_live_active(), "擦除层应已移除")
+            self.assertTrue(canvas.base.isVisible(), "底图必须恢复显示（否则画面永远空 ✗）")
+        finally:
+            canvas.close()
+
+    def test_erase_composite_uses_a_small_source_rect(self):
+        """2026-10-11 性能回归（真凶 ✓）：涂抹时标注层合成必须只用**小脏矩形**。
+
+        历史 —— `_paint_erased_composite` 每帧 `self.base.hide()` … `self.base.show()` ✗ ⇒
+        QGraphicsScene 判定整场景变化 ⇒ 视口整屏重绘 ⇒ 合成放大成整屏（实测 source=1184×784 ✗
+        ⇒ 39 帧里标注 paint 被调用 1560 次、占 63% 时间 ✗）。改为"只在擦除激活期间隐藏一次"后，
+        实测每次移动+重绘由 12.0/14.6/34.8 ms 降到 **1.2/1.8/4.4 ms**（标注 1/5/20 ✓ 提速约 8–10×）。
+        这里直接盯住 `scene.render` 的 source 尺寸 ✓ 防止再次退化 ✓。
+        """
+        from editor.annotation_canvas import AnnotationCanvas
+        from PySide6.QtCore import QPointF, QEvent, Qt
+        from PySide6.QtGui import QMouseEvent
+        from PIL import Image
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (1200, 800), "white"),
+                                  dict(DEFAULTS, eraser_brush=True, eraser_width=20))
+        canvas.resize(1200, 800)
+        canvas.show()
+        self.app.processEvents()
+        sources = []
+        scene = canvas.scene_data
+        original_render = scene.render
+
+        def spy_render(painter, target, source, *args, **kwargs):
+            sources.append((round(source.width()), round(source.height())))
+            return original_render(painter, target, source, *args, **kwargs)
+
+        scene.render = spy_render
+        canvas.set_tool("eraser")
+        canvas.erasing = True
+        canvas.eraser_group += 1
+        canvas.eraser_last = QPointF(200, 200)
+        canvas.eraser_point = QPointF(200, 200)
+        try:
+            # 先把"初始化/首次显示"的整屏绘制冲掉 ✓ —— 它必然是全屏 ✓ 不属于涂抹期间的成本 ✓
+            self.app.processEvents()
+            sources.clear()
+            for step in range(1, 8):
+                pt = QPointF(200 + step * 12, 200 + step * 8)
+                event = QMouseEvent(QEvent.MouseMove, QPointF(canvas.mapFromScene(pt)),
+                                    Qt.NoButton, Qt.LeftButton, Qt.NoModifier)
+                canvas.mouseMoveEvent(event)
+                self.app.processEvents()
+            self.assertTrue(sources, "涂抹过程中应当发生合成（说明擦除层是活的 ✓）")
+            # 前两帧必然偏大（第一帧是"擦除层刚加入场景"触发的整屏重绘 ✓ 不可避免）⇒ 看稳定态 ✓
+            steady = sources[2:] or sources
+            biggest = max(max(width, height) for width, height in steady)
+            self.assertLess(biggest, 200,
+                            f"合成的 source 必须是小脏矩形，实测最大 {biggest}px（整屏重绘已退化 ✗）")
+        finally:
+            scene.render = original_render
+            canvas.close()
+
+    def test_brush_cursor_follows_pointer_outside_the_canvas(self):
+        """2026-10-11 用户反馈："橡皮擦/马赛克的鼠标会被吸附在屏幕边缘与画布边缘，无法快速移动到中间" ✗。
+
+        根因：`image_point()` 按设计把**几何**夹到画布边缘（+OVERFLOW_MARGIN ✓），而涂抹光标圆环也用它
+        ⇒ 指针移出画布后圆环贴在边缘不动 ✓。契约：几何仍夹取 ✓，**圆环必须跟随真实指针** ✓。
+        """
+        from editor.annotation_canvas import AnnotationCanvas
+        from PySide6.QtCore import QPointF, QEvent
+        from PySide6.QtGui import QMouseEvent
+        from PIL import Image
+        from config.config_manager import DEFAULTS
+
+        settings = dict(DEFAULTS, eraser_brush=True, eraser_width=20, mosaic_brush=True)
+        canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"), settings)
+        canvas.resize(600, 600)
+        canvas.show()
+        self.app.processEvents()
+        try:
+            # 必须远到超出 `sceneRect + OVERFLOW_MARGIN`（否则不会被夹取 ⇒ 断言无意义 ✗）
+            far = canvas.mapFromScene(QPointF(50000, 50000))  # 远在画布之外（灰色边距/窗口边缘 ✓）
+            for tool in ("eraser", "mosaic"):
+                canvas.set_tool(tool)
+                event = QMouseEvent(QEvent.MouseMove, QPointF(far), Qt.NoButton,
+                                    Qt.NoButton, Qt.NoModifier)
+                canvas.mouseMoveEvent(event)
+                raw = canvas.eraser_point_raw if tool == "eraser" else canvas.mosaic_point_raw
+                clamped = canvas.eraser_point if tool == "eraser" else canvas.mosaic_point
+                with self.subTest(tool=tool):
+                    self.assertIsNotNone(raw, "必须记录真实指针点（供圆环绘制 ✓）")
+                    self.assertIsNotNone(clamped, "几何点仍应存在（已夹到画布边缘 ✓）")
+                    self.assertLessEqual(clamped.x(), canvas.sceneRect().right() + 1,
+                                         "几何点必须被夹在画布内 ✓")
+                    self.assertGreater(raw.x(), clamped.x() + 1,
+                                       "真实指针点必须**不被夹取** ✓（否则圆环会贴在画布边缘 ✗）")
+        finally:
+            canvas.close()
+
+    def test_eraser_preview_reflects_mode_and_erase_base(self):
+        """2026-10-11 用户反馈"预览完全不对，不是橡皮擦的预览" ✗：预览必须反映四项设置 ✓。
+
+        契约：涂抹/框选两种模式都要能渲染 ✓；「同时擦除原图」只影响是否叠棋盘格 ✓；
+        笔头示意用 `eraser_cursor_color` ✓（与画布光标一致 ✓）。两种模式 × 擦原图的四种组合都必须能出图 ✓。
+        """
+        from pathlib import Path
+        from ui.widgets.annotation_preview import AnnotationPreview
+        from PySide6.QtGui import QColor
+        from config.config_manager import ConfigManager
+
+        with tempfile.TemporaryDirectory() as folder:
+            for brush in (True, False):
+                for erase_base in (False, True):
+                    config = ConfigManager(Path(folder) / f"s_{brush}_{erase_base}.json")
+                    config.data["eraser_brush"] = brush
+                    config.data["eraser_erase_base"] = erase_base
+                    config.data["eraser_cursor_color"] = "#ff8c00"
+                    widget = AnnotationPreview(config, "eraser", 96)
+                    widget.resize(360, 120)
+                    try:
+                        widget.refresh()
+                        self.app.processEvents()
+                        with self.subTest(brush=brush, erase_base=erase_base):
+                            image = widget.grab().toImage()
+                            self.assertFalse(image.isNull(), "预览必须能出图")
+                            # 笔头示意色必须真的出现在画面里（圆环 / 虚线框 ✓ 容差匹配 ✓）
+                            hit = False
+                            for x in range(0, image.width(), 3):
+                                for y in range(0, image.height(), 3):
+                                    c = QColor(image.pixel(x, y))
+                                    if (abs(c.red() - 255) < 40 and abs(c.green() - 140) < 40
+                                            and c.blue() < 60):
+                                        hit = True
+                                        break
+                                if hit:
+                                    break
+                            self.assertTrue(hit, "应当出现 eraser_cursor_color 的笔头示意")
+                    finally:
+                        widget.close()
+
+    def test_eraser_move_repaints_only_a_small_dirty_rect(self):
+        """2026-10-11 性能回归：橡皮擦移动**只重画笔迹所在小块** ✓（原先整视口重绘 ✗）。
+
+        实测（离屏 1200x800，60 次移动）：整视口重绘 9.8/14.8/43.4 ms ⇒ 脏矩形 2.0/2.6/6.1 ms，
+        提速 4.9× / 5.7× / 7.1×（标注 1/5/20 个 ✓）。这里断言请求的重绘矩形明显小于整视口 ✓。
+        """
+        from editor.annotation_canvas import AnnotationCanvas
+        from PySide6.QtCore import QPointF, QRect
+        from PIL import Image
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (1200, 800), "white"),
+                                  dict(DEFAULTS, eraser_brush=True, eraser_width=20))
+        canvas.resize(1200, 800)
+        canvas.show()
+        canvas.set_tool("eraser")
+        self.app.processEvents()
+        canvas.erasing = True
+        canvas.eraser_group += 1
+        start = QPointF(200, 200)
+        canvas.eraser_last = start
+        canvas.eraser_point = start
+        try:
+            end = QPointF(260, 230)
+            canvas.erase_segment(start, end)
+            from PySide6.QtGui import QMouseEvent
+            from PySide6.QtCore import QEvent
+            local = canvas.mapFromScene(end)
+            event = QMouseEvent(QEvent.MouseMove, QPointF(local), Qt.NoButton,
+                                Qt.LeftButton, Qt.NoModifier)
+            canvas.mouseMoveEvent(event)
+            rect = canvas._last_eraser_update_rect
+            self.assertFalse(rect.isEmpty(), "应当请求一次重绘")
+            self.assertLess(rect.width() * rect.height(),
+                            canvas.viewport().rect().width() * canvas.viewport().rect().height() // 4,
+                            "重绘区域必须远小于整视口（脏矩形 ✓）")
+        finally:
+            canvas.close()
+
+    def test_eraser_brush_draws_straight_with_ctrl_or_alt(self):
+        """涂抹模式下按住 Ctrl/Alt ⇒ 直线擦除（起点→当前点一条 ✓ 橡皮筋中途被替换 ✓）。"""
+        from editor.annotation_canvas import AnnotationCanvas
+        from PIL import Image
+        from config.config_manager import DEFAULTS
+
+        for modifier in (Qt.ControlModifier, Qt.AltModifier):
+            canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"),
+                                      dict(DEFAULTS, eraser_brush=True))
+            canvas.resize(400, 300)
+            canvas.show()
+            canvas.set_tool("eraser")
+            self.app.processEvents()
+            self._pen_drag(canvas, (30, 30), (150, 90), modifier)
+            try:
+                item = canvas._erase_stroke_item()
+                with self.subTest(modifier=modifier):
+                    self.assertEqual(len(item.strokes), 1, "直线擦除应当只留一条笔迹")
+                    stroke = item.strokes[0]
+                    self.assertEqual(item._stroke_kind(stroke), "line")
+                    self.assertGreater(abs(stroke[3] - stroke[1]) + abs(stroke[4] - stroke[2]), 10,
+                                       "应当是从起点到终点的直线，而不是自由笔迹的多个小段")
+            finally:
+                canvas.close()
+
     def test_pen_marker_and_mosaic_draw_straight_with_ctrl_or_alt(self):
         from editor.annotation_canvas import AnnotationCanvas
         from PIL import Image

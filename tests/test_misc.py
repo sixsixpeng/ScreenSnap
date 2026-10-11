@@ -520,38 +520,37 @@ class MiscTests(CoreTests):
             finally:
                 mask.close()
 
-    def test_drag_shows_alignment_guides_when_edges_close(self):
-        from config.config_manager import DEFAULTS
-        from editor.annotation_items import shape
-        from PySide6.QtCore import QPointF
-        canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"), dict(DEFAULTS))
-        a = shape("rect", QPointF(96, 10), QPointF(136, 50), "#ff0000", 3)
-        b = shape("rect", QPointF(100, 10), QPointF(140, 50), "#0000ff", 3)
-        canvas.scene_data.addItem(a)
-        canvas.scene_data.addItem(b)
-        a.setSelected(True)
-        canvas._update_alignment_guides()
-        self.assertTrue(canvas.alignment_guides)
-        vertical = [g for g in canvas.alignment_guides if abs(g.x1() - g.x2()) < 1e-6]
-        self.assertTrue(vertical)
-        # 选中项被吸附，使其左边缘与另一标注（含线宽扩张后的）左边缘对齐。
-        self.assertAlmostEqual(a.sceneBoundingRect().left(), b.sceneBoundingRect().left(), delta=0.6)
-        self.assertAlmostEqual(vertical[0].x1(), b.sceneBoundingRect().left(), delta=0.6)
-        canvas.close()
+    def test_alignment_snap_is_gone(self):
+        """2026-10-11（用户要求删除）：拖动标注**不再吸附**到画布边缘/中心或其它标注。
 
-    def test_no_alignment_guides_when_far_apart(self):
+        现象 —— "稍微动一下鼠标就被吸附" ✗（原实现阈值 6px，把选中项的边/中心吸到画布边、画面中心
+        以及其它标注的边/中心，并画粉色虚线 ✓）。原用例（test_drag_shows_alignment_guides_when_edges_close /
+        test_no_alignment_guides_when_far_apart）测的正是这个已删除的契约 ⇒ 一并移除 ✓ 换成"确认它不再存在" ✓。
+        """
         from config.config_manager import DEFAULTS
         from editor.annotation_items import shape
         from PySide6.QtCore import QPointF
         canvas = AnnotationCanvas(Image.new("RGB", (200, 200), "white"), dict(DEFAULTS))
-        a = shape("rect", QPointF(10, 10), QPointF(50, 50), "#ff0000", 3)
-        b = shape("rect", QPointF(150, 120), QPointF(190, 160), "#0000ff", 3)
-        canvas.scene_data.addItem(a)
-        canvas.scene_data.addItem(b)
-        a.setSelected(True)
-        canvas._update_alignment_guides()
-        self.assertEqual(canvas.alignment_guides, [])
-        canvas.close()
+        try:
+            self.assertFalse(hasattr(canvas, "_update_alignment_guides"),
+                             "对齐吸附函数应当已删除")
+            self.assertFalse(hasattr(canvas, "alignment_guides"),
+                             "对齐参考线状态应当已删除")
+            # 两个几乎对齐的矩形：移动其中一个后**不应**被吸到对齐位置 ✓
+            a = shape("rect", QPointF(96, 10), QPointF(136, 50), "#ff0000", 3)
+            b = shape("rect", QPointF(100, 10), QPointF(140, 50), "#0000ff", 3)
+            canvas.scene_data.addItem(a)
+            canvas.scene_data.addItem(b)
+            a.setSelected(True)
+            before = a.sceneBoundingRect().left()
+            a.setPos(a.pos() + QPointF(1, 0))
+            self.assertAlmostEqual(a.sceneBoundingRect().left(), before + 1, delta=0.3,
+                                   msg="移动 1px 就应当真的只移动 1px（不被吸附 ✓）")
+            self.assertNotAlmostEqual(a.sceneBoundingRect().left(),
+                                      b.sceneBoundingRect().left(), delta=0.6,
+                                      msg="不应被吸到另一个标注的边缘")
+        finally:
+            canvas.close()
 
     def test_sequence_next_number_fills_gap_after_delete(self):
         from editor.annotation_canvas import AnnotationCanvas

@@ -163,7 +163,6 @@ class AnnotationCanvas(QGraphicsView):
         self.resize_transform = None
         # 文字标注边中点调整宽度时的按下基准（宽度, 位置），避免逐帧叠加导致跳跃。
         self.text_resize_origin = None
-        self.alignment_guides = []
         self.rotating = None
         self.rotation_cursor = self._create_rotation_cursor()
         self.rotation_center = None
@@ -172,6 +171,10 @@ class AnnotationCanvas(QGraphicsView):
         self.mosaic_drawing = None
         self.mosaic_preview = None
         self.mosaic_point = None
+        # 2026-10-11：光标圆环要用**未夹取**的真实指针点 ✓（`image_point()` 会把几何夹到画布边缘；
+        # 圆环若也用它，指针移出画布后就会贴在边缘不动 ✗ —— 就是用户说的"鼠标被吸附" ✓）。
+        self.mosaic_point_raw = None
+        self.eraser_point_raw = None
         # 擦除以带 z 序的 EraseMaskItem 存在于场景中；该标志表示当前是否有擦除层，
         # 供实时视图决定是否走合成路径。
         self.erase_mask_dirty = False
@@ -607,55 +610,6 @@ class AnnotationCanvas(QGraphicsView):
             smoothed.quadTo(current, mid)
         smoothed.lineTo(cleaned[-1])
         return smoothed
-
-    def _update_alignment_guides(self):
-        """拖动选中标注时，检测其边缘/中心与其它标注或画布边缘的对齐，绘制虚线参考并吸附。"""
-        self.alignment_guides = []
-        selected = self.scene_data.selectedItems()
-        if not selected:
-            return
-        # 以所有选中项的整体包围盒参与对齐，保持相对位置不变。
-        group = QRectF()
-        for item in selected:
-            group = group.united(item.sceneBoundingRect())
-        scene = self.sceneRect()
-        threshold = 6
-        candidate_x = [scene.left(), scene.center().x(), scene.right()]
-        candidate_y = [scene.top(), scene.center().y(), scene.bottom()]
-        for item in self.scene_data.items():
-            if item is self.base or item in selected:
-                continue
-            rect = item.sceneBoundingRect()
-            candidate_x.extend([rect.left(), rect.center().x(), rect.right()])
-            candidate_y.extend([rect.top(), rect.center().y(), rect.bottom()])
-        best_x = None
-        snap_x = None
-        for edge in (group.left(), group.center().x(), group.right()):
-            for candidate in candidate_x:
-                delta = candidate - edge
-                if abs(delta) <= threshold and (best_x is None or abs(delta) < abs(best_x)):
-                    best_x = delta
-                    snap_x = candidate
-        best_y = None
-        snap_y = None
-        for edge in (group.top(), group.center().y(), group.bottom()):
-            for candidate in candidate_y:
-                delta = candidate - edge
-                if abs(delta) <= threshold and (best_y is None or abs(delta) < abs(best_y)):
-                    best_y = delta
-                    snap_y = candidate
-        offset = QPointF(best_x or 0, best_y or 0)
-        if offset.x() == 0 and offset.y() == 0:
-            return
-        for item in selected:
-            item.setPos(item.pos() + offset)
-        if snap_x is not None:
-            self.alignment_guides.append(
-                QLineF(snap_x, scene.top(), snap_x, scene.bottom()))
-        if snap_y is not None:
-            self.alignment_guides.append(
-                QLineF(scene.left(), snap_y, scene.right(), snap_y))
-        self.viewport().update()
 
     def _finish_chain(self):
         """结束多段绘制：保留已画图形，复位连续绘制状态。"""
@@ -1358,7 +1312,22 @@ class AnnotationCanvas(QGraphicsView):
         items = [(item, item.base_strokes()) for item in self.erase_items()]
         items = [(item, strokes) for item, strokes in items if strokes]
         if not items:
+            self._base_mask_cache = (None, None)
             return None
+        # 2026-10-11 性能（关键 ✓）：这个函数会**新建一整幅图像大小的 QImage**（5120×1440 ≈ 29 MB ✗）
+        # 并逐笔重画 ✗，却被**每一帧**的合成调用 ⇒ 是脏矩形优化后剩下的主要成本（实测 2–6 ms/帧 ✓）。
+        # 笔迹只在 add_stroke / add_rect / drop_groups / 改标记时变化 ⇒ 用签名做缓存 ✓。
+        signature = tuple(
+            (id(item), len(strokes),
+             # 2026-10-11 复查修正：必须把"是否擦原图"的**标记集合**也算进签名 ✓ ——
+             # 否则 `set_groups_erase_base()` 改了**中间**某段笔迹的标记时签名不变 ✗ ⇒ 仍返回旧掩码 ✗。
+             tuple(sorted(item.base_flags())),
+             tuple(stroke[1:3] + stroke[5:7] for stroke in strokes[:2]),
+             tuple(stroke[1:3] + stroke[5:7] for stroke in strokes[-2:]))
+            for item, strokes in items)
+        cached_signature, cached_mask = getattr(self, "_base_mask_cache", (None, None))
+        if cached_signature == signature and cached_mask is not None:
+            return cached_mask
         union = QImage(self.image.width, self.image.height, QImage.Format_ARGB32)
         union.fill(Qt.transparent)
         painter = QPainter(union)
@@ -1370,6 +1339,7 @@ class AnnotationCanvas(QGraphicsView):
                 item.paint_stroke(painter, stroke)
             painter.restore()
         painter.end()
+        self._base_mask_cache = (signature, union)      # 供下一帧复用 ✓（笔迹一变签名就变 ✓）
         return union
 
     def render_image(self):
@@ -1467,7 +1437,12 @@ class AnnotationCanvas(QGraphicsView):
                         self.settings.get("eraser_width", self.settings["pen_width"]),
                         self.settings.get("eraser_erase_base", False))
         self.erase_mask_dirty = True
-        self.viewport().update()
+        # 2026-10-11 性能（关键 ✓）：只重画**这条笔迹**的范围 —— 原来这里是无条件整视口
+        # `viewport().update()` ✗ ⇒ 它会把 mouseMoveEvent 里算好的脏矩形**放大回整屏** ✗，
+        # 于是合成又变成整屏（实测 9.8–43 ms/帧 ✗）。
+        radius = float(self.settings.get("eraser_width", self.settings["pen_width"])) / 2 + 3
+        dirty = QRectF(start, end).normalized().adjusted(-radius, -radius, radius, radius)
+        self.viewport().update(self.mapFromScene(dirty).boundingRect().adjusted(-2, -2, 2, 2))
 
     def _erase_live_active(self):
         """实时视图是否需要按擦除层合成（存在擦除层时）。"""
@@ -1486,7 +1461,10 @@ class AnnotationCanvas(QGraphicsView):
 
     def _paint_erased_composite(self, painter):
         """仅渲染可见区域：先铺背景，再画底图（按开关决定是否擦底图），最后画被遮罩镂空的标注层。"""
-        vp = self.viewport().rect()
+        # 只合成**脏矩形**（有记录时 ✓）；没有记录（例如导出/打印路径 ✓）才退回整视口 ✓。
+        vp = getattr(self, "_dirty_viewport_rect", None)
+        if vp is None or vp.isEmpty() or not self.viewport().rect().contains(vp):
+            vp = self.viewport().rect()
         if vp.isEmpty():
             return
         visible = self.mapToScene(vp).boundingRect().intersected(self.sceneRect())
@@ -1528,9 +1506,13 @@ class AnnotationCanvas(QGraphicsView):
         ann.fill(Qt.transparent)
         ap = QPainter(ann)
         ap.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
-        self.base.hide()
+        # 2026-10-11 性能（真凶 ✓，探针实测）：这里原来**每帧**都 `self.base.hide()` … `self.base.show()` ✗
+        # ⇒ QGraphicsScene 判定"整个场景变了" ⇒ 视口发生**整屏重绘** ✗ ⇒ 合成用的脏矩形被放大成整屏
+        # （实测 scene.render 的 source = 1184×784 ✗ 而不是 42×42 ✓）⇒ 所有标注每帧都重画（1560 次/39 帧 ✗）。
+        # 改为：**只在擦除激活期间隐藏一次** ✓，恢复由 drawForeground 在擦除层消失时做一次 ✓（不再每帧翻动 ✓）。
+        if self.base.isVisible():
+            self.base.hide()
         self.scene_data.render(ap, QRectF(0, 0, w, h), QRectF(x0, y0, w, h))
-        self.base.show()
         ap.end()
         painter.drawImage(visible.topLeft(), ann)
 
@@ -1542,6 +1524,9 @@ class AnnotationCanvas(QGraphicsView):
         """
         import time as _time
 
+        # 2026-10-11 性能优化：记下本次重绘的**脏矩形**（视口像素 ✓）⇒ 擦除合成只处理这块区域 ✓
+        # （此前无论重绘多小都合成整个视口 ✗ 实测 14–36 ms/帧 ⇒ 拖动一秒要 0.8–2.1 秒 ✗）
+        self._dirty_viewport_rect = QRect(event.rect())
         started = _time.perf_counter()
         super().paintEvent(event)
         elapsed = (_time.perf_counter() - started) * 1000.0
@@ -1569,6 +1554,9 @@ class AnnotationCanvas(QGraphicsView):
         # 非破坏性橡皮擦的实时镂空效果（绘制在选区框、手柄等辅助线之下）。
         if self._erase_live_active():
             self._paint_erased_composite(painter)
+        elif self.base is not None and not self.base.isVisible():
+            # 擦除层已消失（撤销/删除 ✓）⇒ 把底图恢复显示一次 ✓（配合合成里"只隐藏一次"的改动 ✓）
+            self.base.show()
         if self.round_corner_preview and self.corner_radius > 0:
             bounds = self.sceneRect()
             radius = min(self.corner_radius, bounds.width() / 2, bounds.height() / 2)
@@ -1598,28 +1586,37 @@ class AnnotationCanvas(QGraphicsView):
                 painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
                 painter.fillRect(area, QColor(0, 173, 145, 35))
                 painter.drawRect(area)
-        if self.tool == "eraser" and self.eraser_point is not None:
+        if self.tool == "eraser" and (self.eraser_point_raw or self.eraser_point) is not None:
             color = QColor(self.settings.get("eraser_cursor_color", "#ff8c00"))
             painter.setPen(QPen(color, 1.5, Qt.SolidLine))
             painter.setBrush(Qt.NoBrush)
             radius = self.settings.get("eraser_width", self.settings["pen_width"]) / 2
-            painter.drawEllipse(self.eraser_point, radius, radius)
+            # 圆心用**真实指针**（未夹取 ✓）⇒ 指针移出画布时圆环照常跟着走 ✓（此前会贴在画布边缘 ✗）
+            painter.drawEllipse(self.eraser_point_raw or self.eraser_point, radius, radius)
         # 马赛克涂抹模式：同样用虚线圆环表示笔刷宽度，便于对齐涂抹范围。
-        if self.tool == "mosaic" and self.mosaic_point is not None \
+        if self.tool == "mosaic" and (self.mosaic_point_raw or self.mosaic_point) is not None \
             and self.settings.get("mosaic_brush", True):
             color = QColor(self.settings.get("mosaic_cursor_color", "#00c853"))
             painter.setPen(QPen(color, 1.5, Qt.SolidLine))
             painter.setBrush(Qt.NoBrush)
             radius = max(2, self.settings.get("mosaic_width", 20) / 2)
-            painter.drawEllipse(self.mosaic_point, radius, radius)
+            painter.drawEllipse(self.mosaic_point_raw or self.mosaic_point, radius, radius)
         mosaic_brush_active = (
             self.tool == "mosaic" and self.settings.get("mosaic_brush", True))
+        # 2026-10-11：橡皮擦的「框选」模式同样要显示拖动示意框 ✓（关闭涂抹时 ✓）
+        eraser_rect_active = (
+            self.tool == "eraser" and not self.settings.get("eraser_brush", True))
         if (self.start is not None and self.preview_end is not None
             and not mosaic_brush_active):
-            painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine) if self.tool == "mosaic"
-                           else self.stroke_pen())
+            if self.tool == "eraser":
+                painter.setPen(QPen(QColor(self.settings.get("eraser_cursor_color", "#ff8c00")),
+                                    1, Qt.DashLine))
+            elif self.tool == "mosaic":
+                painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
+            else:
+                painter.setPen(self.stroke_pen())
             area = QRectF(self.start, self.preview_end).normalized()
-            if self.tool in ("rect", "crop", "mosaic"):
+            if self.tool in ("rect", "crop", "mosaic") or eraser_rect_active:
                 if self.tool == "crop":
                     fill = QColor(self.crop_color)
                     fill.setAlpha(50)
@@ -1666,14 +1663,7 @@ class AnnotationCanvas(QGraphicsView):
             pixmap = self.rotation_cursor.pixmap()
             painter.drawPixmap(QPointF(handle.x() - pixmap.width() / 2,
                                        handle.y() - pixmap.height() / 2), pixmap)
-        # 拖动选中标注时显示对齐参考虚线（导出不含）。
-        if self.alignment_guides:
-            painter.save()
-            painter.setPen(QPen(QColor("#ff5fa2"), 1, Qt.DashLine))
-            painter.setBrush(Qt.NoBrush)
-            for line in self.alignment_guides:
-                painter.drawLine(line)
-            painter.restore()
+        # 2026-10-11（用户要求删除对齐吸附）：原先这里会画"对齐参考虚线" ✗ —— 随吸附功能一起移除 ✓。
 
     @staticmethod
     def resize_handles(bounds):
@@ -2028,8 +2018,16 @@ class AnnotationCanvas(QGraphicsView):
                 self.erasing = True
                 self.eraser_last = point
                 self.eraser_point = point
+                # 2026-10-11（用户要求：橡皮擦对齐马赛克 ✓）：起点要记下来 ——
+                # 涂抹模式下 Ctrl/Alt 直线擦除要用它做固定端点 ✓；框选模式下它是矩形的一角 ✓。
+                self.start = point
+                # 落笔时**锁定**直线模式：QTest.mouseMove / 真机快速移动都可能不带修饰键 ✓，
+                # 只靠移动事件的 modifiers 会漏判（其它工具同样在落笔时定格 ✓ 保持一致）。
+                self.straight_drawing = self._straight_gesture_active(event)
                 self.eraser_group += 1          # 本次拖动自成一组擦除笔迹
-                self.erase_segment(point, point)
+                if self.settings.get("eraser_brush", True):
+                    self.erase_segment(point, point)    # 涂抹模式：落笔即一个点 ✓
+                # 框选模式：落笔不擦任何东西，松手时整块擦除 ✓（见 mouseReleaseEvent ✓）
                 self.viewport().update()
             return
         if self.tool == "picker":
@@ -2138,15 +2136,49 @@ class AnnotationCanvas(QGraphicsView):
             return
         if self.tool == "eraser":
             point = self.image_point(self.mapToScene(event.position().toPoint()))
+            # 2026-10-11 修复（用户反馈："橡皮擦/马赛克的鼠标会被吸附在屏幕边缘与画布边缘，无法快速
+            # 移动到中间" ✗）：`image_point()` 按设计把**几何**夹到画布边缘 ✓（见它的文档 ✓），
+            # 而光标圆环也用了那个夹取后的点 ✗ ⇒ 指针移出画布后圆环贴在边缘不动 ✓。
+            # 这里单独记一份**未夹取**的真实指针点，只给圆环绘制用 ✓（几何仍走夹取后的 point ✓）。
+            self.eraser_point_raw = self.mapToScene(event.position().toPoint())
+            previous_point = self.eraser_point
             self.eraser_point = point
-            if self.erasing:
-                self.erase_segment(self.eraser_last, point)
+            # 2026-10-11（用户要求：橡皮擦对齐马赛克 ✓）：
+            #   · 涂抹模式（eraser_brush 默认 True ✓）：沿笔迹擦除；**按住 Ctrl 或 Alt ⇒ 直线擦除** ✓
+            #     （直线时先把本组上一次的橡皮筋线丢掉再重画"起点→当前点" ✓ 松手即定稿 ✓）
+            #   · 框选模式（关闭涂抹 ✓）：拖动只更新示意框，**松手时**在 mouseReleaseEvent 里整块擦除 ✓
+            if self.erasing and not self.settings.get("eraser_brush", True):
+                # 框选模式：更新示意框（松手时整块擦除 ✓）
+                self.preview_end = point
+            if self.erasing and self.settings.get("eraser_brush", True):
+                if (self.straight_drawing or self._straight_gesture_active(event)) \
+                        and self.start is not None:
+                    # 直线擦除：把本组已画的橡皮筋线从**所有**擦除层里丢掉（不假设只有一个层 ✓），
+                    # 再画"起点→当前点"这一条 ⇒ 松手时留下的就是一条直线 ✓。
+                    for _item in self.erase_items():
+                        _item.drop_groups({self.eraser_group})
+                    self.erase_segment(self.start, point)
+                else:
+                    self.erase_segment(self.eraser_last, point)
                 self.eraser_last = point
-            self.viewport().update()
+            # 2026-10-11 性能优化（实测合成 14–36 ms/帧 ⇒ 拖动一秒 0.8–2.1 秒 ✗）：
+            # 只重画"本次笔迹 + 本帧光标圆环（含上一帧的残留 ✓）"这一小块 ⇒ 合成随之只处理脏区 ✓
+            # （此前无条件 `viewport().update()` = 整视口重绘 ✗）。
+            radius = float(self.settings.get("eraser_width", self.settings["pen_width"])) / 2 + 3
+            dirty = QRectF(point, self.eraser_last or point).normalized()
+            for ring_point in (previous_point, point):
+                if ring_point is not None:
+                    dirty = dirty.united(QRectF(ring_point.x() - radius, ring_point.y() - radius,
+                                                radius * 2, radius * 2))
+            update_rect = self.mapFromScene(dirty).boundingRect().adjusted(-2, -2, 2, 2)
+            self._last_eraser_update_rect = QRect(update_rect)   # 供用例断言"只重画小块" ✓
+            self.viewport().update(update_rect)
             return
         if self.tool == "mosaic" and self.settings.get("mosaic_brush", True):
             # 未按住时也跟随指针，用虚线圆环显示笔刷宽度与位置。
-            point = self.image_point(self.mapToScene(event.position().toPoint()))
+            # 2026-10-11：圆环要用**未夹取**的真实指针点 ✓（否则指针移出画布后圆环贴在画布边缘 ✗）。
+            self.mosaic_point_raw = self.mapToScene(event.position().toPoint())
+            point = self.image_point(self.mosaic_point_raw)
             self.mosaic_point = point
             if self.mosaic_drawing is not None:
                 if (not self.straight_drawing and
@@ -2218,7 +2250,8 @@ class AnnotationCanvas(QGraphicsView):
             self.viewport().update()
         if self.start is None:
             super().mouseMoveEvent(event)
-            self._update_alignment_guides()
+            # 2026-10-11（用户要求删除）：这里曾调用 `_update_alignment_guides()` —— 拖动标注时把边缘/中心
+            # 吸附到画布边或其它的标注（阈值 6px ✓）⇒ 表现为"稍微动一下鼠标就被吸住" ✗。已整块移除 ✓。
             self._update_resize_cursor(event.position().toPoint())
 
     def _free_distortion(self, event=None):
@@ -2362,6 +2395,8 @@ class AnnotationCanvas(QGraphicsView):
     def leaveEvent(self, event):
         self.eraser_point = None
         self.mosaic_point = None
+        self.eraser_point_raw = None
+        self.mosaic_point_raw = None
         # 清除「上次应用键」，使重新进入时能按当前状态重新应用工具光标。
         self._applied_cursor_key = None
         self.viewport().update()
@@ -2567,9 +2602,6 @@ class AnnotationCanvas(QGraphicsView):
             self.viewport().update()
             event.accept()
             return
-        if self.alignment_guides:
-            self.alignment_guides = []
-            self.viewport().update()
         if event.button() in (Qt.RightButton, Qt.MiddleButton):
             if self.right_pan_start is not None:
                 if event.button() == self.pan_button:
@@ -2604,8 +2636,30 @@ class AnnotationCanvas(QGraphicsView):
             self.viewport().update()
             event.accept()
             return
+        if (self.tool == "eraser" and self.erasing
+                and not self.settings.get("eraser_brush", True)):
+            # 2026-10-11：橡皮擦「框选」模式（涂抹关闭 ✓）⇒ 松手时把拖出的矩形**整块擦除** ✓
+            end = self.image_point(self.mapToScene(event.position().toPoint()))
+            if self.start is not None:
+                rect = QRectF(self.start, end).normalized()
+                if rect.width() >= 1 and rect.height() >= 1:
+                    self._erase_stroke_item().add_rect(
+                        self.eraser_group, rect,
+                        self.settings.get("eraser_erase_base", False))
+                    self.erase_mask_dirty = True
+                    self.viewport().update()
+            self.erasing = False
+            self.eraser_last = None
+            self.start = None
+            self.preview_end = None          # 清掉框选示意框 ✓
+            self.eraser_point = None
+            return
         if self.tool == "eraser" and self.erasing:
-            self.erase_segment(self.eraser_last, self.mapToScene(event.position().toPoint()))
+            # 直线模式（Ctrl/Alt ✓）在移动过程中已经把"起点→当前点"画好了 ⇒ 松手**不再补一段** ✗
+            # （否则会多出一条从"上一次指针位置"到终点的自由笔迹 ✓ 用例实测为 2 段而不是 1 段 ✗）
+            if not self.straight_drawing:
+                self.erase_segment(self.eraser_last, self.mapToScene(event.position().toPoint()))
+            self.straight_drawing = False
             self.erasing = False
             self.eraser_last = None
             self.checkpoint()

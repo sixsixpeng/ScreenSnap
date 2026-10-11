@@ -171,6 +171,9 @@ class EraseMaskItem(QGraphicsItem):
         """
         path = QPainterPath()
         for stroke in self.strokes:
+            if self._stroke_kind(stroke) == "rect":
+                path.addRect(QRectF(stroke[1], stroke[2], stroke[3], stroke[4]))   # 矩形擦除的命中范围 ✓
+                continue
             segment = QPainterPath(QPointF(stroke[1], stroke[2]))
             segment.lineTo(QPointF(stroke[3], stroke[4]))
             stroker = QPainterPathStroker()
@@ -195,6 +198,22 @@ class EraseMaskItem(QGraphicsItem):
         stroke = (group, start.x(), start.y(), end.x(), end.y(), float(width), bool(erase_base))
         self.strokes.append(stroke)
         self._paint_stroke(stroke)
+
+    def add_rect(self, group, rect, erase_base=False, kind="rect"):
+        """记录并填充一块**矩形擦除**（2026-10-11 用户要求：橡皮擦支持「框选」模式 ✓）。
+
+        笔迹元组与线段同构，只多出第 8 位 `kind`（"line" / "rect" ✓）；旧笔迹没有该位时按线段处理 ✓
+        （`paint_stroke` / `shape` / `_stroke_distance` 都做了兜底 ✓ 不影响历史会话 ✓）。
+        """
+        stroke = (group, rect.x(), rect.y(), rect.width(), rect.height(), 0.0,
+                  bool(erase_base), kind)
+        self.strokes.append(stroke)
+        self._paint_stroke(stroke)
+
+    @staticmethod
+    def _stroke_kind(stroke):
+        """笔迹类型：第 8 位存在且为 "rect" 时是矩形擦除，其余按线段处理 ✓。"""
+        return stroke[7] if len(stroke) > 7 else "line"
 
     def render(self):
         """按记录的笔迹重绘遮罩，使遮罩与笔迹记录随时保持一致。"""
@@ -242,7 +261,8 @@ class EraseMaskItem(QGraphicsItem):
         updated = []
         for stroke in self.strokes:
             if stroke[0] in groups and bool(stroke[6]) != bool(erase_base):
-                stroke = stroke[:6] + (bool(erase_base),)
+                # 保留第 8 位 kind（矩形擦除 ✓）；旧笔迹没有该位 ⇒ 拼出来仍与原来一致 ✓
+                stroke = stroke[:6] + (bool(erase_base),) + tuple(stroke[7:])
                 changed = True
             updated.append(stroke)
         if changed:
@@ -251,6 +271,15 @@ class EraseMaskItem(QGraphicsItem):
 
     @staticmethod
     def _stroke_distance(stroke, point):
+        if EraseMaskItem._stroke_kind(stroke) == "rect":
+            # 矩形擦除：点在框内距离 0，框外取到四条边的最小距离 ✓
+            rect = QRectF(stroke[1], stroke[2], stroke[3], stroke[4])
+            if rect.contains(point):
+                return 0.0
+            return min(_point_to_segment(point, rect.topLeft(), rect.topRight()),
+                       _point_to_segment(point, rect.topRight(), rect.bottomRight()),
+                       _point_to_segment(point, rect.bottomRight(), rect.bottomLeft()),
+                       _point_to_segment(point, rect.bottomLeft(), rect.topLeft()))
         return _point_to_segment(point, QPointF(stroke[1], stroke[2]),
                                  QPointF(stroke[3], stroke[4]))
 
@@ -263,6 +292,12 @@ class EraseMaskItem(QGraphicsItem):
     def paint_stroke(self, painter, stroke):
         """把一段笔迹画到给定画笔上（擦除遮罩与底图镂空共用同一套几何）。"""
         width = stroke[5]
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("white"))
+        if self._stroke_kind(stroke) == "rect":
+            # 矩形擦除：整块填充 ✓（"框选"模式擦除框内内容 ✓）
+            painter.drawRect(QRectF(stroke[1], stroke[2], stroke[3], stroke[4]))
+            return
         start = QPointF(stroke[1], stroke[2])
         end = QPointF(stroke[3], stroke[4])
         painter.setPen(QPen(QColor("white"), width, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))

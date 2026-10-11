@@ -164,30 +164,82 @@ class AnnotationPreview(QWidget):
                           height / 2 - stroke_bounds.center().y())
             scene.addItem(stroke)
         elif self.kind == "eraser":
+            # 2026-10-11（用户反馈："预览完全不对，不是橡皮擦的预览" ✗）：重写为**忠实反映四项设置** ✓
+            #   ① 涂抹模式开：沿笔迹擦出一条**缺口**（宽度 = eraser_width ✓）
+            #      涂抹模式关（框选）：画虚线矩形框，框内整块被擦 ✓
+            #   ② 擦除原图开：缺口/框内额外叠加**棋盘格**，表示原图也被擦成透明 ✓
+            #      擦除原图关：只擦掉标注（露出原图底色 ✓ 非破坏性 ✓）
+            #   ③ 笔头颜色示意：涂抹 ⇒ eraser_cursor_color 的圆环（直径 = eraser_width ✓）；
+            #      框选 ⇒ 同色虚线方框 + 四角 ✓（与画布上的光标一致 ✓）
+            brush_mode = bool(settings.get("eraser_brush", True))
+            erase_base = bool(settings.get("eraser_erase_base", False))
+            cursor_color = QColor(settings.get("eraser_cursor_color", "#ff8c00"))
+            diameter = max(6.0, min(float(settings.get("eraser_width", 20)), height * 0.72))
             preview = background.copy().convertToFormat(QImage.Format_ARGB32)
             overlay_painter = QPainter(preview)
             overlay_painter.setRenderHint(QPainter.Antialiasing)
-            path = QPainterPath(QPointF(width * 0.18, height * 0.58))
-            path.quadTo(QPointF(width * 0.50, height * 0.34),
-                        QPointF(width * 0.82, height * 0.58))
-            overlay_painter.setPen(QPen(QColor(color), 7, Qt.SolidLine,
+            # 先画"待擦的标注"（用当前标注色 ✓ 与真实场景一致 ✓）
+            path = QPainterPath(QPointF(width * 0.16, height * 0.62))
+            path.quadTo(QPointF(width * 0.50, height * 0.30),
+                        QPointF(width * 0.84, height * 0.62))
+            stroke_width = max(4.0, min(9.0, height * 0.09))
+            overlay_painter.setPen(QPen(QColor(color), stroke_width, Qt.SolidLine,
                                         Qt.RoundCap, Qt.RoundJoin))
             overlay_painter.drawPath(path)
-            center = QPointF(width * 0.50, height * 0.46)
-            diameter = min(settings["eraser_width"], height * 0.72)
-            eraser_rect = QRectF(center.x() - diameter / 2, center.y() - diameter / 2,
-                                 diameter, diameter)
-            overlay_painter.setCompositionMode(QPainter.CompositionMode_Clear)
-            overlay_painter.setPen(Qt.NoPen)
-            overlay_painter.setBrush(Qt.white)
-            overlay_painter.drawEllipse(eraser_rect)
+            # 擦除：涂抹 ⇒ 圆头沿笔迹的一条；框选 ⇒ 整块矩形 ✓
+            if brush_mode:
+                eraser_path = QPainterPath(QPointF(width * 0.30, height * 0.55))
+                eraser_path.quadTo(QPointF(width * 0.50, height * 0.36),
+                                   QPointF(width * 0.70, height * 0.55))
+                overlay_painter.setCompositionMode(QPainter.CompositionMode_DestinationOut)
+                overlay_painter.setPen(QPen(Qt.white, diameter, Qt.SolidLine,
+                                            Qt.RoundCap, Qt.RoundJoin))
+                overlay_painter.setBrush(Qt.NoBrush)
+                overlay_painter.drawPath(eraser_path)
+                hole_rect = eraser_path.boundingRect().adjusted(-diameter / 2, -diameter / 2,
+                                                                diameter / 2, diameter / 2)
+                head_center = QPointF(width * 0.70, height * 0.55)
+            else:
+                hole_rect = QRectF(width * 0.28, height * 0.30, width * 0.44, height * 0.42)
+                overlay_painter.setCompositionMode(QPainter.CompositionMode_DestinationOut)
+                overlay_painter.setPen(Qt.NoPen)
+                overlay_painter.setBrush(Qt.white)
+                overlay_painter.drawRect(hole_rect)
+                head_center = QPointF(hole_rect.right(), hole_rect.bottom())
+            # 擦除原图开 ⇒ 被擦处叠一层棋盘格（示意"这里已经透明" ✓）
+            if erase_base:
+                overlay_painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+                overlay_painter.save()
+                overlay_painter.setClipRect(hole_rect)
+                tile = max(4, int(height / 14))
+                light, dark = QColor("#ffffff"), QColor("#d8dde1")
+                overlay_painter.fillRect(hole_rect, light)
+                overlay_painter.setPen(Qt.NoPen)
+                overlay_painter.setBrush(dark)
+                row = 0
+                y = hole_rect.top()
+                while y < hole_rect.bottom() + tile:
+                    x = hole_rect.left() - (tile if row % 2 else 0)
+                    while x < hole_rect.right() + tile:
+                        overlay_painter.drawRect(QRectF(x, y, tile, tile))
+                        x += tile * 2
+                    y += tile
+                    row += 1
+                overlay_painter.restore()
             overlay_painter.end()
             scene.removeItem(background_item)
             scene.addItem(QGraphicsPixmapItem(QPixmap.fromImage(preview)))
-            cursor = QGraphicsEllipseItem(eraser_rect)
-            cursor.setPen(QPen(QColor(settings.get("eraser_cursor_color", "#ff8c00")),
-                               1.5, Qt.SolidLine))
-            cursor.setBrush(Qt.NoBrush)
+            # 笔头示意（颜色取自 eraser_cursor_color ✓ 与画布光标一致 ✓）
+            if brush_mode:
+                cursor = QGraphicsEllipseItem(QRectF(head_center.x() - diameter / 2,
+                                                     head_center.y() - diameter / 2,
+                                                     diameter, diameter))
+                cursor.setPen(QPen(cursor_color, 1.5, Qt.SolidLine))
+                cursor.setBrush(Qt.NoBrush)
+            else:
+                cursor = QGraphicsRectItem(hole_rect)
+                cursor.setPen(QPen(cursor_color, 1.5, Qt.DashLine))
+                cursor.setBrush(Qt.NoBrush)
             scene.addItem(cursor)
         elif self.kind == "marker":
             # 与画布 stroke_pen 保持一致：不透明度只作用于荧光笔，宽度额外放大。

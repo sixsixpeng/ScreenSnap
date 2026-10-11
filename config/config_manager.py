@@ -313,6 +313,9 @@ DEFAULTS = {
     "line_spacing": 1.2, "mosaic_size": 10,
     "mosaic_mode": "blur", "mosaic_brush": True, "mosaic_width": 20,
     "eraser_erase_base": False,
+    # 2026-10-11 用户要求：橡皮擦对齐马赛克工具的用法 ⇒ 默认「涂抹模式（自由笔刷）」；
+    # 关闭后为**拖框选矩形**擦除 ✓（类型校验由 validate 的"与默认值同类型"分支自动覆盖 ✓）
+    "eraser_brush": True,
     # 截图取色与定位辅助增强
     "capture_picker_shortcut": "C",
     "magnifier_grid": True, "magnifier_grid_color": "#cccccc",

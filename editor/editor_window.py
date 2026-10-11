@@ -314,7 +314,7 @@ class EditorWindow(QMainWindow):
         if key in ("rect_fill_enabled", "rect_fill_opacity", "rect_fill_color",
                    "ellipse_fill_enabled", "ellipse_fill_opacity", "ellipse_fill_color",
                    "mosaic_cursor_color", "eraser_cursor_color", "mosaic_width",
-                   "eraser_width", "mosaic_brush"):
+                   "eraser_width", "mosaic_brush", "eraser_brush"):
             self.canvas.refresh_tool_cursor()
             self.canvas.viewport().update()
         if key == "editor_transparent_background":

@@ -225,7 +225,7 @@ class ToolbarWidget(QWidget):
                 "arrow": "拖动绘制箭头、线段或虚线；样式、线宽和颜色可调整",
                 "rect": "拖动绘制矩形边框；按住 Ctrl 或 Alt 任一键可绘制正方形；支持实线或虚线",
                 "ellipse": "拖动绘制椭圆边框；按住 Ctrl 或 Alt 任一键可绘制正圆；支持实线或虚线",
-                "eraser": "拖过已有标注，将经过的标注内容擦除",
+                "eraser": "默认按笔迹擦除（涂抹模式）；按住 Ctrl 或 Alt 任一键可直线擦除；关闭涂抹后拖框选区域整块擦除",
                 "mosaic": "默认按笔迹涂抹毛玻璃；涂抹时按住 Ctrl 或 Alt 任一键可直线涂抹；关闭涂抹后拖框选区域",
                 "picker": "从图片中取色，并设置为后续标注颜色",
                 "number": "单击图片放置步骤序号；号码自动递增，颜色与字号在设置中调整",
@@ -342,6 +342,15 @@ class ToolbarWidget(QWidget):
             lambda value: self.mosaic_width_label.setText(f"{value} px"))
         self.mosaic_width.valueChanged.connect(
             lambda value: self.setting_changed.emit("mosaic_width", value))
+        # 2026-10-11 用户要求：橡皮擦对齐马赛克工具的用法 ⇒ 默认「涂抹模式（自由笔刷）」✓；
+        # 关闭后为**拖框选矩形**擦除 ✓（与 mosaic_brush 完全同构 ✓ 规则 8 同源 ✓）。
+        self.eraser_brush = QCheckBox("涂抹模式（自由笔刷）")
+        self.eraser_brush.setChecked(settings.get("eraser_brush", True))
+        self.eraser_brush.setToolTip(
+            "开启后按住拖动可沿笔迹擦除；按住 Ctrl 或 Alt 任一键可直线擦除；关闭则为拖框选矩形擦除")
+        self.eraser_brush.toggled.connect(
+            lambda value: self.setting_changed.emit("eraser_brush", value))
+        self.eraser_brush.toggled.connect(lambda _value: self._refresh_option_rows())
         self.eraser_erase_base = QCheckBox("同时擦除原图")
         self.eraser_erase_base.setChecked(settings.get("eraser_erase_base", False))
         self.eraser_erase_base.setToolTip(
@@ -605,6 +614,13 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(self.text_height, 36, 1, 1, 2)
         panel_layout.addWidget(self.mosaic_brush, 30, 0, 1, 3)
         panel_layout.addWidget(self.eraser_erase_base, 31, 0, 1, 3)
+        # 2026-10-11 修复：此前误放在行 33（那是「椭圆填充色」✗）且被重复添加两次 ✗（同一控件入两次布局
+        # ⇒ 组件重叠 ✓）。改用**空闲的行 24** ✓：只添加一次 ✓，且不超过其它工具已有的最大行（36 ✓）
+        # ⇒ 面板高度不增长（行 37 会把面板撑高 6px ✗ 触发"multirow 选项要放得下"的用例上限 ✗）。
+        # 放在**已存在的最大行 36 的第 0 列**（该行已有 text_height 占 1..2 列 ✓）：不新增空行 ⇒
+        # 面板高度不变 ✓（行 37 会撑高 6px、行 24 会在 pen 的 1↔26 之间累积行距 +4px ✗ 都会被
+        # "multirow 选项要放得下"的高度预算用例抓到 ✓）。
+        panel_layout.addWidget(self.eraser_brush, 36, 0, 1, 2)
         # 序号标注专属参数：形状、填充色、文字色、字号、起始值与预设组合。
         sequence_shape_options = (
             ("圆形", "circle"), ("方形", "square"), ("三角", "triangle"),
@@ -993,7 +1009,8 @@ class ToolbarWidget(QWidget):
             tool = self.selected_tool
         rows = ({1} if tool in TOOL_WIDTH_KEYS else set())
         if tool == "eraser":
-            rows.add(31)
+            # 2026-10-11：橡皮擦对齐马赛克 ⇒ 宽度滑杆（行 1）+ 涂抹开关（行 33）+ 擦原图（行 31）✓
+            rows.update((1, 31, 33))
             self.tool_widths[tool] = max(10, min(100, self.tool_widths[tool]))
             with QSignalBlocker(self.pen_width):
                 self.pen_width.setRange(10, 100)
@@ -1119,7 +1136,8 @@ class ToolbarWidget(QWidget):
         """返回某工具在「更多设置」中展示的参数行集合（不含宽度范围等副作用）。"""
         rows = {1} if tool in TOOL_WIDTH_KEYS else set()
         if tool == "eraser":
-            rows.add(31)
+            # 2026-10-11：橡皮擦对齐马赛克 ⇒ 宽度滑杆（行 1）+ 涂抹开关（行 33）+ 擦原图（行 31）✓
+            rows.update((1, 31, 33))
         elif tool == "marker":
             rows.update((2, 27))
         elif tool == "pen":
@@ -1478,11 +1496,12 @@ class ToolbarWidget(QWidget):
                     "text_background_enabled": self.text_background_enabled,
                     "rect_fill_enabled": self.rect_fill_enabled,
                     "ellipse_fill_enabled": self.ellipse_fill_enabled,
-                    "mosaic_brush": self.mosaic_brush}.get(key)
+                    "mosaic_brush": self.mosaic_brush,
+                    "eraser_brush": self.eraser_brush}.get(key)
         if checkbox is not None:
             with QSignalBlocker(checkbox):
                 checkbox.setChecked(bool(value))
-            if key == "mosaic_brush":
+            if key in ("mosaic_brush", "eraser_brush"):
                 self._refresh_option_rows()
         elif key == "text_background":
             self.text_background.set_color(value)
