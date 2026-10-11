@@ -1269,20 +1269,13 @@ class MaskWindow(QWidget):
         self.sync_capture_save_shortcut(settings)
         self.sync_capture_action_shortcuts(settings)
         if primary and settings.get("window_detection", True):
-            point = self.mapper.native_global_to_physical_global(QCursor.pos())
-            self.element_chain = element_chain((point.x(), point.y()),
-                                               settings.get("element_depth", 8),
-                                               use_uia=bool(settings.get("window_uia_detect", False)),
-                                               exclude_hwnd=int(self.winId()),
-                                               debug_tree=bool(settings.get("uia_debug_tree", False)))
-            auto_select = bool(settings.get("window_auto_select", False))
-            logging.getLogger("screensnap").debug(
-                "截图初始识别: 鼠标物理点=(%d,%d) UIA=%s 自动选中=%s 候选=%d 层 %s",
-                point.x(), point.y(), self.uia_enabled(),
-                auto_select, len(self.element_chain), self.element_chain)
-            if self.element_chain and auto_select:
-                self.apply_element(0)
-                self.auto_complete_after_show = True
+            # 2026-10-11 **崩溃修复（堆损坏 0xC0000374，实测 19:19:27）**：这段初始识别原来在
+            # `__init__` 里**同步**执行 ✗ ⇒ UIA 查询链 window_uia.query → window_snap.top_window_at
+            # → overlay_handles → QApplication.topLevelWidgets() 会在**遮罩自身尚未构造完**时
+            # 遍历 Qt 顶层部件表 ⇒ Qt 内部碰到半构造的部件 ⇒ 原生堆损坏（Python 异常钩子收不到 ✗）。
+            # 规则 18 早已规定"悬停查询必须延后到下一个事件循环轮次" —— 这里同样延后：
+            # 遮罩构造完成、事件循环空闲时再查（winId()/exclude_hwnd 也在那时才有意义 ✓）。
+            QTimer.singleShot(0, self.detect_element_at_cursor)
 
 
     def _capture_action_shortcut(self, settings, key, default, slot):
@@ -3281,6 +3274,36 @@ class MaskWindow(QWidget):
         """悬停识别需要总识别开关和本项开关同时打开。"""
         return bool(self.settings.get("window_detection", True)
                     and self.settings.get("window_hover_detect", True))
+
+    def detect_element_at_cursor(self):
+        """遮罩构造完成后（事件循环空闲时）做一次初始识别。
+
+        2026-10-11：从 `__init__` 里搬出来 —— 构造期遍历 Qt 顶层部件会导致原生堆损坏
+        （0xC0000374，crash.log 栈顶 core/window_snap.py:overlay_handles）。
+        这里已被 QTimer.singleShot(0, …) 调度 ⇒ 部件树稳定、winId() 也已实体化 ✓。
+        """
+        if self.element_chain:
+            return                      # 已有结果（例如已悬停过）⇒ 不重复查
+        settings = self.settings
+        point = self.mapper.native_global_to_physical_global(QCursor.pos())
+        try:
+            self.element_chain = element_chain((point.x(), point.y()),
+                                               settings.get("element_depth", 8),
+                                               use_uia=bool(settings.get("window_uia_detect", False)),
+                                               exclude_hwnd=int(self.winId()),
+                                               debug_tree=bool(settings.get("uia_debug_tree", False)))
+        except RuntimeError as error:
+            # 遮罩已在查询前被关掉（快速连点截图）⇒ 静默放弃，绝不让异常穿透 ✓
+            logging.getLogger("screensnap").debug("初始识别跳过（遮罩已关闭）: %s", error)
+            return
+        auto_select = bool(settings.get("window_auto_select", False))
+        logging.getLogger("screensnap").debug(
+            "截图初始识别: 鼠标物理点=(%d,%d) UIA=%s 自动选中=%s 候选=%d 层 %s",
+            point.x(), point.y(), self.uia_enabled(),
+            auto_select, len(self.element_chain), self.element_chain)
+        if self.element_chain and auto_select:
+            self.apply_element(0)
+            self.auto_complete_after_show = True
 
     def uia_enabled(self):
         """是否优先用 UIA 读自绘界面内部控件；库没装时会自动退回句柄识别。"""

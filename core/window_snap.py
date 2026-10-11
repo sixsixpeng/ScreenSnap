@@ -138,6 +138,9 @@ def is_cloaked(handle):
         return False
 
 
+_ENUMERATING = False
+
+
 def overlay_handles(property_name):
     """收集本程序带指定属性的顶层窗口句柄（**绝不抛异常**）。
 
@@ -147,27 +150,40 @@ def overlay_handles(property_name):
     无法向上传播，直接原生崩溃**（用户连续贴 4 张图时实测崩在 collect → ignored_app_window）。
     因此改为：枚举**之前**把句柄收集成一个集合，回调里只做整数比较。
     """
+    # 第二道防线（2026-10-11 堆损坏 0xC0000374 之后补）：**禁止重入**。
+    # 真实的根治是"不要在窗口构造期发起 UIA 查询"（见 mask_window.detect_element_at_cursor），
+    # 但万一将来又有别的路径在构造/析构过程中调到这里，重入时直接返回空集合，绝不二次遍历
+    # Qt 顶层部件表（toplevel 列表在构造/析构中处于变动状态 ⇒ 遍历即可能堆损坏 ✗）。
+    global _ENUMERATING
+    if _ENUMERATING:
+        return set()
     handles = set()
     app = QApplication.instance()
     if app is None:
         return handles
+    _ENUMERATING = True
     try:
-        widgets = list(app.topLevelWidgets())
-    except RuntimeError:
-        return handles
-    for widget in widgets:
-        # 关键：必须先判活再碰它。第二版崩溃（2026-10-11 00:34，栈顶就在这里）证明仅靠 try/except
-        # 不够 —— 对已析构的 C++ 对象，property()/winId() 在 C++ 层就会崩，Python 的 except 轮不到。
         try:
-            if not shiboken6.isValid(widget):
+            widgets = list(app.topLevelWidgets())
+        except RuntimeError:
+            return handles
+        for widget in widgets:
+            # 关键：必须先判活再碰它。第二版崩溃（2026-10-11 00:34，栈顶就在这里）证明仅靠 try/except
+            # 不够 —— 对已析构的 C++ 对象，property()/winId() 在 C++ 层就会崩，Python 的 except 轮不到。
+            try:
+                if not shiboken6.isValid(widget):
+                    continue
+                if not widget.property(property_name):
+                    continue
+                handles.add(int(widget.winId()))
+                handles.add(int(widget.effectiveWinId()))
+            except Exception:  # noqa: BLE001 - 任何异常都只跳过这一个窗口
                 continue
-            if not widget.property(property_name):
-                continue
-            handles.add(int(widget.winId()))
-            handles.add(int(widget.effectiveWinId()))
-        except Exception:  # noqa: BLE001 - 任何异常都只跳过这一个窗口
-            continue
-    return handles
+        return handles
+    finally:
+        # **必须复位**：漏掉它的话第一次调用之后 _ENUMERATING 永远为 True ⇒ 之后每次都返回空集合
+        # ⇒ 窗口识别整体失效 ✗（2026-10-11 我第一版就漏了，当场补上）。
+        _ENUMERATING = False
 
 
 def ignored_app_window(handle, handles=None):

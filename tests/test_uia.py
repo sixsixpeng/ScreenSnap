@@ -741,6 +741,9 @@ class UiaTests(CoreTests):
             mask.close()
             auto = MaskWindow(Image.new("RGB", (100, 80), "white"), bounds, [bounds],
                               dict(settings, window_auto_select=True))
+            # 2026-10-11 契约变更：初始识别已从 __init__ 延后到事件循环（避免构造期遍历 Qt 顶层部件
+            # 导致原生堆损坏 0xC0000374）⇒ 这里必须先跑一轮事件循环，识别才会发生。
+            self.app.processEvents()
             self.assertEqual(auto.selection.rects, [QRect(0, 0, 100, 80)])
             self.assertTrue(auto.auto_complete_after_show)
             auto.close()
