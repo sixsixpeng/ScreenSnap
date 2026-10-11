@@ -468,10 +468,10 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `window_hover_color` | `#168cff` | 悬停识别候选框填充颜色；设置于"截图 > 窗口与控件识别"。仅在"半透明颜色填充"模式生效，默认透出原图模式下候选框没有填充、该控件置灰。 |
 | `window_hover_opacity` | `35`% | 悬停高亮填充不透明度，范围 0–100%；边框保持实色。仅在"半透明颜色填充"模式生效，透出原图模式下不参与绘制且控件置灰。 |
 | `window_hover_border_color` | `#168cff` | 候选框边线颜色；默认与填充色一致。 |
-| `window_hover_border_width` | `2` px | 候选框边线宽度，范围 1–6 px。 |
+| `window_hover_border_width` | `1` px | 候选框边线宽度，范围 1–6 px（2026-10-11 默认由 2 改为 1）。 |
 | `window_hover_text_color` | `#f4fffc` | 随高亮显示的控件尺寸标签文字颜色。 |
 | `window_hover_badge_color` | `#102a31` | 控件尺寸标签底色。 |
-| `window_hover_font_size` | `12` | 控件尺寸标签字号，范围 8–32。 |
+| `window_hover_font_size` | `8` | 控件/选区尺寸标签字号，范围 8–32（2026-10-11 默认由 12 改为 8）。 |
 | `window_hover_fill_mode` | `reveal` | 候选框显示方式：`reveal` 透出原图，`fill` 半透明填充。 |
 | `window_uia_detect` | `true` | 是否优先查询 Windows UI Automation，以识别浏览器等自绘界面的内部控件。 |
 | `uia_debug_tree` | `false` | 是否记录 UIA 目标祖先及父级组件子树；最多 60 个节点、向下 8 层，优先命中分支；只记录名称、类型和矩形。 |
@@ -1174,3 +1174,6 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 55. 修复（工具栏 tooltip 与真实绑定脱钩 ✗ 审查 H4）：现象 —— 改设置后 hover 提示里「撤销/重做」显示回硬编码的 `Ctrl+Z/Y` ✗，而「保存/另存为/仅复制」的「（快捷键: …）」**整段消失** ✗。原因 —— 构造期用 `editor_binding()`（读 settings ✓），而 `set_hotkeys()`（每次改设置都被调用）走的是**全局热键表** `shortcut_label(self.hotkeys, …)` ✗ ⇒ 两个来源。改法 —— `set_hotkeys` 的两处都改用 `self.editor_binding(action)` ✓（唯一来源 ✓ 贴图恒为「空格」的规则也由它统一 ✓）。验证 —— `test_tools 17 条 OK`；真机：改键后不重启、触发一次设置保存，hover 各按钮应显示新键 ✓。
 56. 修复（4 个 editor_* 键没有校验/冲突检测 ✗ 审查 M2）：现象 —— 实测 `validate("")→""`、`validate("notakey")` 原样通过、`repair({…:""})` 不回退，且 `{capture_save="A", editor_save_as="A"}`、`{capture_copy="Y", editor_undo="Y"}`、`{capture_save="X", picker_format="X"}` 三组**同键全部通过** ✗（空串会让两个编辑器静默不注册 ✓；同键会触发 Qt ambiguous ⇒ 全应用该键失效 ✗ AGENTS D8⑤）。改法 —— 把这 5 个键（4 个 editor_* + `capture_picker_format_shortcut`）并入 `validate` 的快捷键分支与 `CAPTURE_SHORTCUT_KEYS`（冲突检测表）✓。验证 —— `test_config 109 条 OK`。
 57. 调整（提示条迁移改为"只在升级时执行"✗ 审查 H2/H3）：现象 —— 用户取消勾选提示项、或拖动 `select/uia_quick_edit/element_cycle` 的顺序，**重启后被静默改回来并回写磁盘** ✗（实测 3 项 → 被补成 23 项 ✗）。原因 —— `migrate_legacy_settings` 里"补齐缺失项 + 校正三项顺序"两段**每次加载都跑** ✗ 且结果不同就 `save_safely()` 回写 ✗。改法 —— 加版本闸门：仅当存储的 `app_version ≠ 当前版本`（真的升级了）那一轮执行 ✓；同版本内完全尊重用户的勾选与顺序 ✓（**不新增配置键** ⇒ 不扩散 schema 变更 ✓ 规则 30）。验证 —— `test_config 109 条 OK`；真机：取消勾选两项 + 拖动顺序 ⇒ 重启两次都保持 ✓。
+58. 修复（元素/选区**尺寸徽标**：显示时机、位置与被遮挡）：现象 —— ①「左键点元素」有尺寸而「鼠标划选」没有 ✗；②按住左键**拖动过程中**徽标消失 ✗（很小区域也是 ✓）；③徽标被**原地编辑器的画布**整块盖住 ⇒ 鼠标移开也看不到 ✗；④避让算法把徽标推到很远（左上角选区却显示到右上角 ✗）。根因 —— ①`element_size_hint` 只认"元素选择/悬停"两种来源 ✗；②拖动期间选区还没落进 `selection.rects`/`active` ⇒ 没有可显示的值 ✗；③原地编辑器的画布 `AnnotationCanvas` 会被 `setParent(遮罩)`（mask_window.py:2136）⇒ **子控件永远绘制在父窗口绘制之上** ⇒ 画在遮罩 paintEvent 里的徽标必然被盖 ✅；④候选/兜底策略过复杂 ✗。改法（按用户最终指定）—— ①徽标改为**遮罩的子控件 QLabel** 并每次 `raise_()` ✓ 与画布同级但更靠上 ⇒ 不再被盖；②位置**固定**在"选区内部、**紧贴上边缘**、水平居中" ✓ 只做"不越出屏幕"的夹取 ✓ **不再做任何位置重算** ✗；③**鼠标进入徽标 ⇒ 立刻隐藏**，移出 ⇒ 恢复 ✓；④拖动期间用"起点→当前指针"算出实时矩形显示尺寸 ✓。验证 —— `test_uia 55 条 OK`、`-k mask 22 OK`、`-k hover 1 OK`、`-k inline 20 OK`；新增用例 `test_manual_selection_also_reports_size_hint`、`test_size_badge_avoids_edges_and_falls_back_to_corner`（契约已同步为"内部顶部居中"）。
+59. 修复（Shift+Tab 在真机无效）：现象 —— 悬停/选区态按 `Shift+Tab` 毫无反应 ✗（用例却一直是绿的 ✓）。根因 —— **真机键盘把 Shift+Tab 投递为 `Qt.Key_Backtab`** ✗，而不是 `Key_Tab` + ShiftModifier；原代码只判 `Qt.Key_Tab` ✗（用例用 `QTest.keyClick(..., Qt.ShiftModifier)` 恰好是后一种形式 ⇒ 测不出真机问题 ✓ C2/C5 类陷阱）。改法 —— 两种形式都接受 ✓ `if key in (Qt.Key_Tab, Qt.Key_Backtab)` ✓ 并新增真机形态用例 `test_shift_tab_arrives_as_backtab_and_cycles_layer` ✓。另：同时修掉"Tab 与鼠标悬停**两个高亮并存**"——按 Tab 时清掉悬停高亮 ✓，鼠标一移动就清掉 Tab 的选区 ✓（跨视图一起清 ✓ 双向互斥 ✓）。验证 —— `test_uia 55 条 OK`、`-k mask 22 OK`、`-k nudge 4 OK`。
+60. 调整（默认值：候选框边线宽度 2⇒1、尺寸徽标字号 12⇒8）：用户要求 ✓ 同步改 `config/config_manager.py` 的 `DEFAULTS`（校验范围不变：边线 1–6 px、字号 8–32）与 README 配置表 ✓，并更新断言默认值的用例（`test_uia::test_hover_style_presets_save_and_custom_edits_switch_style` 由 2 改为 1 ✓ C8）。注意：**已保存过该键的用户配置不受影响**（默认值只在键缺失时生效 ✓）⇒ 需要时在设置页改或点"恢复默认" ✓。验证 —— `test_config 109 条 OK`、`test_uia 55 条 OK`。
