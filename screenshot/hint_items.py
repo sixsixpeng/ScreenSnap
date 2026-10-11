@@ -90,7 +90,7 @@ def hint_texts(settings, position, selection, inline=False,
              "多选|Enter-提交" if multi_select else
                  f"{action_keys['multi_select']} 多选模式"),
         "copy": f"{action_keys['copy']} 仅复制" if selection else "",
-        "toolbar_move": "拖动-移动工具栏" if inline else "",
+        "toolbar_move": "拖动边缘/空白处移动工具栏" if inline else "",
         "toolbar_hide": (f"{hide_key} {'显示工具栏' if toolbar_hidden else '隐藏工具栏'}"
                          if inline else ""),
         # 原地编辑里可以二次编辑/删除已有标注，但只有选择工具直接支持：其它工具下
