@@ -1328,7 +1328,10 @@ class MaskWindow(QWidget):
             self.fontMetrics(), bounds, frame, self.capture_hint_items(),
             warning=self.self_check_warning(), per_line=self.hint_per_line(),
             cursor=point, gap=int(self.settings.get("capture_hint_gap", 0) or 0))
-        if not bar.isEmpty():
+        # 预留只在**空间足够**时参与：真实屏幕（≥4 倍放大镜尺寸）一定满足 ⇒ 整组翻转照常生效 ✓；
+        # 小视图/离屏测试里提示条相对很大 ⇒ 若也参与，会总判"放不下"并把放大镜夹到 (0,0) ✗
+        # （2026-10-11：test_dpi/test_config 三条红即由此而来）⇒ 不满足就保持旧行为 ✓。
+        if (not bar.isEmpty() and bounds.width() >= size * 4 and bounds.height() >= size * 4):
             frame = magnifier_rect(point, bounds, size,
                                    reserve_x=bar.width(), reserve_y=bar.height())
         return frame
