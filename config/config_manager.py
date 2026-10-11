@@ -27,8 +27,9 @@ HINT_ITEMS = (
     ("resize", "四角/边中点缩放"),
     ("select", "拖拽框选"),
     ("right_select", "右键拖选-多选"),
-    ("uia_quick_edit", "UIA 点击-快速编辑"),
     ("element_cycle", "Tab 切换窗口/控件层级"),
+    # 用户 2026-10-11：新项「UIA 点击-快速编辑」放在 Tab 提示**后面**（Tab 等既有项位置不动）。
+    ("uia_quick_edit", "UIA 点击-快速编辑"),
     ("edit", "双击/Enter 提交（编辑里双击空白保存）"),
     ("nudge", "WASD/方向键微调"),
     ("cancel", "Esc 取消"),
