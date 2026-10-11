@@ -386,14 +386,19 @@ class ConfigTests(CoreTests):
             self.assertIn(item_id, HINT_ITEM_IDS)
             self.assertIn(item_id, HINT_LABELS)
             self.assertIn(item_id, DEFAULTS["capture_hint_order"])
+        # 2026-10-11 契约变更（用户明确要求："该加配置就加，新提示项默认全部勾选"）：
+        # 迁移会**补齐所有缺失的提示项**（追加到末尾、默认勾选、保留用户已有顺序与勾选），
+        # 否则新项在提示条与设置页里都不会出现（旧行为：只有等于上一版默认时才追加）。
         legacy_default = [item_id for item_id in HINT_ITEM_IDS if item_id not in new_items]
         migrated = migrate_legacy_settings({"capture_hint_order": list(legacy_default)})
         self.assertEqual(migrated["capture_hint_order"], legacy_default + new_items)
-        # 用户自定义过的列表保持原样，不做追加。
         custom = ["coords", "cancel"]
         self.assertEqual(
             migrate_legacy_settings({"capture_hint_order": list(custom)})["capture_hint_order"],
-            custom)
+            custom + [item_id for item_id in HINT_ITEM_IDS if item_id not in custom])
+        # 幂等：再迁一次不会重复追加。
+        again = migrate_legacy_settings({"capture_hint_order": migrated["capture_hint_order"]})
+        self.assertEqual(again["capture_hint_order"], migrated["capture_hint_order"])
 
     def test_legacy_capture_round_corner_settings_migrate_to_output_settings(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -2267,7 +2272,9 @@ class ConfigTests(CoreTests):
         # 默认全部开启；有选区且未进入编辑时，不适用的项（框选/固定尺寸/工具栏两项/
         # 原地编辑三项）为空。
         items = [item for item in mask.capture_hint_items() if item]
-        self.assertEqual(len(items), len(HINT_ITEM_IDS) - 6)
+        # 2026-10-11：新增 right_select / uia_quick_edit 两项，它们只在"未选择"时才有文案，
+        # 因此"有选区"这一状态下不适用的项由 6 个变成 8 个。
+        self.assertEqual(len(items), len(HINT_ITEM_IDS) - 8)
         self.assertIn("F2 清除选择", items)
         self.assertIn("Alt+M 多选模式", items)
         self.assertIn("Tab/Shift+Tab 切换窗口层级", items)

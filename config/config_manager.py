@@ -842,12 +842,14 @@ def migrate_legacy_settings(data):
     # 也不会在用户取消勾选后再被追加回来。
     order = migrated.get("capture_hint_order")
     if isinstance(order, list):
-        # 2026-10-11：新增 picker_format（用户反馈"X 那条提示不见了"⇒ 旧配置里没有它）。
-        new_items = ["inline_edit", "inline_menu", "inline_history", "picker_format",
-                     "right_select", "uia_quick_edit"]
-        legacy_default = [item_id for item_id in HINT_ITEM_IDS if item_id not in new_items]
-        if order == legacy_default:
-            migrated["capture_hint_order"] = legacy_default + new_items
+        # 2026-10-11（用户明确要求：该加配置就加、新提示项**默认全部勾选**）：旧配置保存的是上一版的
+        # 顺序表，新加的提示项不在里面 ⇒ 按既有约定「不在 capture_hint_order 里的不显示」，它在提示条
+        # 和设置页里都不会出现。处理：**补齐所有缺失项**（追加到末尾，保留用户已有顺序与勾选），幂等。
+        missing = [item_id for item_id in HINT_ITEM_IDS if item_id not in order]
+        if missing:
+            migrated["capture_hint_order"] = list(order) + missing
+            logging.getLogger("screensnap").info(
+                "提示条顺序表补齐新增项（默认勾选）: %s", missing)
     return migrated
 
 
