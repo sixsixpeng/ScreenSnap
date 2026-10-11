@@ -1034,10 +1034,10 @@ class CaptureTests(CoreTests):
         self.assertTrue(pen_hints["inline_menu"])
         self.assertTrue(select_hints["inline_history"])
         self.assertTrue(pen_hints["inline_history"])
-        # 2026-10-11 契约变更（用户要求）：单选/原地编辑**也支持** Space 直接贴图当前选区，
-        # 因此这一态改为显示「Space 直接贴图当前选区」；未选择阶段仍是「按住 Space 后拖选」。
-        self.assertEqual(select_hints["quick_sticker"], "Space 直接贴图当前选区")
-        self.assertEqual(pen_hints["quick_sticker"], "Space 直接贴图当前选区")
+        # 2026-10-11 契约变更（用户要求）：单选/原地编辑**也支持** Space 贴图，
+        # 因此这一态改为显示「Space 贴图」；未选择阶段仍是「按住 Space 后拖选」。
+        self.assertEqual(select_hints["quick_sticker"], "Space 贴图")
+        self.assertEqual(pen_hints["quick_sticker"], "Space 贴图")
         self.assertIn("贴图", hint_texts(base, (10, 20), (80, 60))["quick_sticker"])
 
     def test_info_bar_flips_with_magnifier_and_never_covers_cursor(self):

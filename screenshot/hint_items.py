@@ -74,11 +74,9 @@ def hint_texts(settings, position, selection, inline=False,
              (f"{save_key}快速保存" if right_capture else
               f"右键双击直存 | {save_key}快速保存")
              if selection else ""),
-        # 用户 2026-10-11：原来分「按住 Space 后鼠标拖选 直接贴图」/「Space 直接贴图当前选区」两种说法，
-        # 太长且绕；实测先选/后选都能直接 Space 贴图 ⇒ 统一成一句短的。
+        # 用户 2026-10-11：与 hint_items() 保持一致（规则 8：预览与提示条同源）——统一一句「{键} 贴图」，
+        # 因为先选/后选都能直接 Space 贴图；未启用该快捷键时为空。
         "quick_sticker": f"{quick} 贴图" if quick else "",
-        "quick_sticker": (f"{quick} 直接贴图当前选区" if (quick and inline and selection)
-                          else f"按住 {quick} 后鼠标拖选 直接贴图" if (quick and not inline) else ""),
         # 取色在未选择 / 原地编辑 / 多选下都可用，提示语相应地在三种界面都显示。
         "picker": f"{picker_key} 取色",
         # 用户 2026-10-11：原来一条写「C 取色（hex）· X 切换表达式」太长 ⇒ 拆成两项。
