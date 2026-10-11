@@ -70,6 +70,15 @@
     - Delete items and branches for states that no longer exist: no dead `picker`-style branch, no parameter that is always `False`, no item that can never render.
     - Keep each sentence actionable and unique: never mention an action that cannot be performed in that state, and never repeat one sentence in two items (提交 belongs to multi-select only; the inline state 保存 rather than 提交).
     - Verify the hint bar in the real app on **both screens** (rule 26): offscreen tests cannot see it, so a green suite is not evidence about the hint bar.
+33. **一轮之内把活干完——禁止留下半成品。** 这是本项目反复出现的交付缺陷：一轮里改了配置键却没接线、加了快捷键却没接处理函数、把设置页改出语法错误就停手、或者把"修 A、修 B"拆成四五轮等用户催。**交付前的三问**，任何一问没过就不算完成：
+
+    - **能编译吗** —— 改过的每个 `.py` 都过一遍 `py_compile`；有红就是**没做完**，不许以"下一步再修"结尾。
+    - **用例过吗** —— 至少跑**受影响的模块/子集**并给出条数与结论；改了配置键必须跑 `test_config -k every_setting_has_an_entry` 与断言默认值的用例。
+    - **接线完整吗** —— 新配置键要有**读取点**（`grep -n "<key>"` 除 DEFAULTS/校验外还有生产代码 ✓）、新信号要有 `connect` ✓、新快捷键要有处理函数 ✓、新 UI 控件要能落到配置 ✓；"只有键没有行为"一律视为未完成。
+
+    **一轮做不完时的正确做法**：要么**不做**（先说清楚），要么把**最小可用闭环**做完（键 → 接线 → 默认值 → 用例 → 文档 ✓）再交付，剩下的按**明确清单**列出并立刻继续，而不是停在"半接线/编译错"的状态。**绝不允许**以 `compile=1`、孤儿续行、未消费的标记变量、无用的配置键收尾。
+
+    这一条同时约束**报告口径**：只报"已实测通过"的部分，未完成项必须逐条点名（含文件与症状），不得用"基本完成/应该可用"含糊带过。
 ## 经验与常见错误
 
 > 由规则 25 维护：只收录**真实发生过**的错误；每条含「现象 / 排查 / 避免」；新增前先询问用户。
@@ -110,6 +119,15 @@
   - 现象：write 报 cannot write "…\_t2.py": file no longer exists — re-read the file, then retry，整段程序中止，本轮白跑一次。
   - 排查：该文件名在本会话里被 Remove-Item 删过；工具按"已观察到的文件状态"校验，删除后即视为不存在。
   - 避免：临时脚本一律用**新名字**（_fix1.py、_fix2.py… 或带序号/时间戳），不要复用删过的名字；收尾清理只删本次新建的文件。
+- **A9 拿 read 的「显示文本」当锚点 —— 锚点不存在或误伤别处**
+  - 现象：`edit` 报 `old_string was not found`；或锚点看起来一模一样却命中了另一行。2026-10-11 给设置页 tooltip 换行时连续两次因此失败：屏幕上的行被截断到约 118 字符，我照抄它当锚点。
+  - 排查：把锚点长度与被改文件的实际行长度打印出来比对（实际 L575 长度=286，屏幕上只有 118）；或直接取 read 返回的 lines[i].text 本身。
+  - 避免：锚点一律取程序里的完整 read().lines[i].text（或一段足够长且唯一的片段），绝不照抄终端、日志或对话里被截断的行；改完用 grep -n 复核命中行号。
+
+- **A10 重排「多行拼接字符串」时按句子重写 —— 丢内容 + 语法错**
+  - 现象：给一条 286 字符、内部含 4 个换行转义的物理行做换行后，py_compile 报错，后半段说明文字被整段丢掉（该 tooltip 的后 3 句消失）。
+  - 排查：git diff --stat 看增删行数（正确应为 N 行到 N 行、仅拆分）；用 ast 取出该 Call 的字符串值，与改后逐字比较（本次一比就看出少了 3 句）。
+  - 避免：重排只在已有的换行边界拆物理行，拼接后的值必须完全不变；改前用 ast 记下原值、写盘后断言相等；一次只处理一个字符串（用节点的 lineno / col_offset / end_lineno / end_col_offset 精确定位，不要按看起来像的整行替换）；改坏的第一动作是 git checkout -- <文件> 回到已提交版本。
 
 ### B. 跨语言脚本与命令执行
 
@@ -216,6 +234,7 @@
     ② 多屏输入的正确解法是**让光标所在那块遮罩成为活动窗口**（core/window_focus.activate_window + 前台兜底），因为 ApplicationShortcut 只要求"本应用是前台"。
     ③ 判定/兜底（含 Esc 兜底是否安装）一律以**光标所在那块遮罩**为基准，不要以"某块遮罩（如 primary）是否活动"为准，也不要用时间戳去抖（见 D6）。
     ④ **可打印字符**（反引号等）会被 QGraphicsView 用 ShortcutOverride 吞掉：遮罩侧的键收不到，需要在**编辑器侧**再建一份（挂 canvas、context 用 \`Qt.WindowShortcut\`，如 Alt+M / 工具栏隐藏键），或把按键显式转交。
+    ⑤ **同一按键的 ambiguity 是「整个应用」级别的**：不只是"每窗口各一份同键 ApplicationShortcut"；**一个窗口里的两份同键**（如工具栏 + 画布各一份）同样会让**全应用的同键全部失效**，连别的窗口上的 ApplicationShortcut 也被拖累。定案证据（2026-10-11）：主屏按 Space 时入口日志 **0 条**（连遮罩入口都没有）；把工具栏那份删掉、只留画布那份后仍为 0 条 ⇒ 说明该键被画布用 ShortcutOverride 吞掉，最终改为**在画布 keyPressEvent 里直接处理**（Space 本来就在那里用于拖动画布，证明它收得到）才彻底解决。
 
 - **D9 涉及框架行为的假设先用最小探针证伪**
   - 现象：我断定反引号键无反应是 QKeySequence 解析为空，差点据此改错方向。
@@ -274,6 +293,55 @@
   - 排查：① `crash.log` 是**追加**写的，`Get-Content -Tail` 看到的是被截断的尾部 ⇒ 必须先按 `Current thread` / `Windows fatal exception` 标记定位**最后一次**崩溃块再读；② 栈顶若是 `winId()` / `effectiveWinId()` / `property()` 这类 Qt 调用，先怀疑**已析构对象**而不是业务逻辑；③ 用 `shiboken6.isValid(widget)` 写 5 行探针确认存活；④ **第一版只加 `try/except` 无效**（第二次崩溃的栈顶正是新加的 try 内部那行）⇒ 证明对已析构对象，`property()/winId()` 是在 **C++ 层**崩的，Python 的 `except` 根本轮不到。
   - 避免：① 遍历 `QApplication.topLevelWidgets()` / `allWidgets()`，或调用 `winId()/effectiveWinId()/property()` 之前，**先 `shiboken6.isValid(w)` 判活**（本项目 `screenshot/mask_window.py::intruding_windows` 的 `live_widget()` 早就是正确写法，照它抄）；② **ctypes 回调里绝不碰 Qt** —— 回调需要的信息要在 `EnumWindows` **之前**收集成纯 Python 数据（`set`/`list`，如 `overlay_handles()`），回调里只做整数比较；③ `try/except` 只能当**第二道**防线，不能当唯一防线；④ 出一处就**全库排查同类点**（`grep -n "topLevelWidgets|allWidgets|winId()"`），本次就是这样又补上了 `core/window_focus.py::widget_handle`；⑤ 改完必须在**真机**复现原操作序列（离屏用例覆盖不到“部件正在销毁”的时序），并为两条分支各留一条回归用例（`isValid=False` 与“取值抛异常”）。
 
+- **D21 脚本化改代码时删掉/挪走变量，留下孤立引用 ⇒ 生产代码 NameError，却被当成"测试旧契约"连改三轮测试**
+  - 现象：把剪贴板历史图片从 `%APPDATA%` 迁到保存目录时，脚本删掉了 `sticker/sticker_manager.py::persist_clipboard_history` 里的 `root = data_dir()`，而 20 行后仍有 `path = root / "clipboard_history.json"` ⇒ 该方法一调用就 `NameError: name 'root' is not defined`（**生产代码**，不是测试问题）。它表现为 5 条 ERROR + 1 条 FAIL（`test_clipboard_history_persists_across_manager_restart` / `test_rebuildable_cache_cleanup_honors_scope_flags` / `test_sticker_session_and_closed_item` 等），我却按「缓存布局变了 ⇒ 旧断言要同步（C8）」去改**测试**，连改三轮没收敛。同一轮还用 PowerShell `Set-Content` 整文件重写两个 `.py`，把项目改成**导入即失败**（全部模块各 1 条 ERROR），只能 `git checkout --` 回退。
+  - 排查：① **先看 traceback 的最后一帧** —— `File ".../sticker/sticker_manager.py", line 167, in persist_clipboard_history` 早就指名了产品文件与行号；只要最后一帧是产品代码，就不是"旧契约"而是**真 bug**。② 定位后在该函数行号区间 `grep -n "root"`，删除点与残留引用一眼可见。
+  - 避免：① 迁移/重命名路径时**保留原变量**（多一个无害的局部变量，比删掉安全）；删任何变量前先在该函数区间 `grep -n "<name>"` 确认零引用。② **测试失败先分类**：traceback 最后一帧在 `tests/` ⇒ 按 C8 改断言；在产品代码 ⇒ 修产品。③ 改 `.py` **只用 edit 工具**（长锚点、3–4 行上下文；单行锚点在同文件多处重复会直接中止），**禁止** PowerShell `Set-Content`/`Out-File` 整文件重写（A3/B4）；改坏了第一动作是 `git checkout -- <file>` 回到已提交版本再重做。④ 批量正则替换后必须**逐条读**受影响用例（本轮 `mkdir()` 漏了带参数的变体，连改三轮）。
+
+- **D22 让窗口"稍后再做事"时，接收方可能已经析构 ⇒ `RuntimeError: Signal source has been deleted`**
+  - 现象：为躲开全屏遮罩，我把 `self.save_as_requested.emit(...)` 放进 `QTimer.singleShot(0, lambda: …)`；定时器触发时遮罩已 `close()`，C++ 对象销毁 ⇒ 每次多选另存为都抛该异常（`bootstrap` 记为"未捕获异常"）✗。
+  - 排查：traceback 指向那行 lambda 即可确认；关键是**谁拥有这个对象、它什么时候销毁**。
+  - 避免：延迟回调里**不要引用可能被销毁的 Qt 窗口/信号源**；正确分工是——**存活方同步 emit 并只捕获纯数据**（list/图像），由**应用常驻对象**（`Application`）在 `QTimer.singleShot` 里做后续 UI。写延迟回调前先问："这段跑的时候，`self` 还活着吗？"
+
+- **D23 同步 `emit` 会阻塞到模态窗口全部结束 ⇒ 全屏置顶遮罩会挡住第 2 个及以后的对话框**
+  - 现象：多选按 `A`"只弹出一个"另存为；实际 N 个都弹了，但发信号是**同步**的 ⇒ emit 返回前对话框已全部走完，遮罩这时才 `close()` ⇒ 第 2、3 个被全屏置顶遮罩压在下面。
+  - 排查：看日志条数（`第 1/N` `第 2/N` …）—— 条数够但用户只看到一个 ⇒ 是**层级**问题而不是逻辑问题；反过来只有 1 条 ⇒ 才是循环/数据问题。
+  - 避免：以"全屏置顶遮罩"为背景的后续 UI（对话框、菜单、提示窗）必须排在**遮罩关闭之后**（`close()` → 事件循环下一轮 → 弹窗）；同时按 D22 保证延迟回调不引用已销毁对象。
+
+- **D24 `Popen` 不留句柄 ⇒ 子进程仍在运行时被 GC ⇒ `ResourceWarning` 刷控制台；剪贴板被占用 ⇒ Qt 内部重试刷几百行**
+  - 现象：① 通知跳转用 `subprocess.Popen(["explorer.exe", …])` 后不管句柄 ⇒ `ResourceWarning: subprocess NNNN is still running`；② 别的程序占着剪贴板时 `setMimeData` 失败 ⇒ `OleSetClipboard: Failed … OpenClipboard` + `qt.qpa.mime: Retrying to obtain clipboard` 连续约 7 秒。
+  - 排查：两条都属于"重试/回收发生在库内部"，业务日志里看不到原因，只能从**原始警告文本**反查调用点（`grep -n "Popen("`）。
+  - 避免：① "发射后不管"的进程统一走一个助手（本项目 `app/notification_flow.py::_spawn_detached`）：保留 `Popen` 句柄、顺手清理已结束项、标准流给 `DEVNULL`；② 写剪贴板前先**探测可用性**（`editor/image_effects.py::clipboard_available`，ctypes `OpenClipboard`），占用时**跳过并只记一条 WARNING**，绝不重试（规则 14）。
+
+- **D25 多屏下"只刷一份"与"只建一份"同罪：每块遮罩各自持有浮层，快捷键却只挂在其中一个视图**
+  - 现象：遮罩内按 `X` 切换取色表达式，**不动鼠标提示条就不变**，动一下立刻变。代码里明明 `update()` + `sync()` 都调了。
+  - 排查：每块遮罩各有自己的 `info_bar` / `magnifier_overlay`；`X` 的 `ApplicationShortcut` 只挂在某一个视图上 ⇒ 我刷的是那个视图的浮层，用户看的是**光标所在那块屏**的浮层。看"动鼠标就恢复"这一特征即可锁定（`mouseMoveEvent` 里会 sync 所有相关浮层）。
+  - 避免：任何"改状态后要立刻可见"的刷新，都要 `for view in session.views:` 逐视图刷新（`view.update()` + 各浮层 `sync()`），并用 `getattr(..., "sync", None)` 守卫；与 D8 的"输入源只建一份"是同一类多屏缺陷，**报告里必须写明刷了哪些视图**。
+
+- **D26 改共享绘制/组件前先核实"它到底画了什么"——否则会实现一个永远不会被画出来的参数**
+  - 现象：用户要求"放大镜下面的取色提示跟随 `X` 切换"。我准备方案 B（给 `paint_magnifier` 加 `color_text=`），先读代码才发现 `screenshot/magnifier_widget.py::paint_magnifier` **只画图像/网格/准线，没有任何 `drawText`** ⇒ 那个参数会变成死代码（规则 33 禁止）。用户看到的"提示"其实是 `InfoBar`（提示条）。
+  - 排查：动手前 `grep -n "drawText\|setText" <该组件>` 确认它是否真的渲染这段内容；对"某处文字不更新"类问题，先定位**是哪个部件画的**再改。
+  - 避免：新增参数/分支前证明它会被消费（谁读、什么条件画）；前提不成立时按 D1/D3 **明确更正**并给出证据（文件:行号），不要为了"完成任务"塞死代码。
+
+- **D27 给共享函数加防护只看了「遍历时」，没审计「谁在什么时机调用」⇒ 构造期遍历 Qt 顶层部件 = 堆损坏（0xC0000374）**
+  - 现象：用户按截图瞬间程序直接消失，crash.log 只有一块 Windows fatal exception: code 0xc0000374（堆损坏），栈顶 core/window_snap.py:155 overlay_handles（list(app.topLevelWidgets())），其下依次 top_window_at → window_uia.query/element_chain → window_elements.element_chain → **screenshot/mask_window.py:1273 MaskWindow.__init__** → capture_flow.show_mask。
+  - 排查：crash.log 是**追加**写的 ⇒ 先定位**最后一块**（Windows fatal exception 标记）再读栈；栈里出现 __init__ / closeEvent / deleteLater 这类构造或析构帧 ⇒ 说明查询发生在部件树**变动期间**；shiboken6.isValid 挡不住这种崩溃（它保护我们自己的调用，挡不住 Qt 内部遍历）。
+  - 避免：① **绝不在窗口构造/析构期间枚举 Qt 顶层部件**（topLevelWidgets / allWidgets / winId）——需要就先 QTimer.singleShot(0, …) 延后到事件循环空闲（规则 18 的同一条道理），本次即把初始识别搬到 detect_element_at_cursor()；② 延迟回调里补 try/except RuntimeError（遮罩可能已被关掉）；③ 改共享函数时**连调用时机一起审计**（规则 27），别只加固函数体。
+
+- **D28 加了「重入守卫」标志位却忘了复位 ⇒ 第一次调用之后功能整体失效**
+  - 现象：为 D27 加 _ENUMERATING 守卫时写成「置 True 后直接 return」，**没有 finally 复位** ⇒ 第二次起每次枚举都返回空集合 ⇒ 窗口识别整体失效（比崩溃更隐蔽：不报错、只是识别不到东西）。
+  - 排查：改完立刻写 5 行探针连续调用两次同一函数，并**断言标志位已复位**（assert window_snap._ENUMERATING is False）——本次探针打印「第一次=0 个句柄，第二次=0 个句柄，_ENUMERATING=False」才确认没坏。
+  - 避免：任何「标志位 + 提前 return」的守卫，一律 try/finally 复位，并在同一轮里用探针**实测复位**（只看代码「看起来会复位」不算；规则 33 的「接线完整吗」同样适用于状态位）。
+
+- **D29 把可 patch 的静态 API 换成「构造实例 + exec()」⇒ 测试拦不住 ⇒ 真实模态对话框把用例挂死（C1 复发）**
+  - 现象：为实现「另存为对话框居中」，把 QFileDialog.getSaveFileName(...) 改成 QFileDialog(...) 加 dialog.exec()；test_capture 全量从此**永不返回**（无摘要、无输出），而单跑 -k quick / -k mask 却是绿的。
+  - 排查：grep -n 找 getSaveFileName 在 tests/ 里的用法 ⇒ 用例 patch 的是**静态方法**（patch(editor.editor_window.QFileDialog.getSaveFileName, return_value=(path, 空串))）⇒ 换成实例后补丁失效、弹出真实模态框；症状是「某模块整体挂住 + 子集全绿」，与 C1 同型。
+  - 避免：凡是**测试需要拦截**的外部交互（文件对话框、消息框、系统 API），保持**静态/类方法入口**便于 patch；需要非原生行为时用**同一个静态入口的参数**（如 options=QFileDialog.Option.DontUseNativeDialog）而不是换成实例；确需实例时先把测试改成 patch 工厂函数并在同一轮更新。
+
+- **D30 往类体里插模块级代码（列 0 语句）⇒ 类提前结束，后面的方法全部变成嵌套函数**
+  - 现象：给 editor/editor_window.py 加「汉化助手」时把 _CHINESE_DIALOGS_READY = [False] 与 def _ensure_chinese_dialogs() 写在**类体中间**（列 0）⇒ 类在该行结束，之后所有 4 空格缩进的 def 都变成该函数的**嵌套函数** ⇒ AttributeError: EditorWindow object has no attribute invalidate_rotation_reset（9 条 ERROR），dir(EditorWindow) 只剩 showEvent。**过程无语法错**（缩进合法）⇒ 比 IndentationError 更难查。
+  - 排查：py_compile 通过却报 AttributeError 时，打印 dir(类)（缺方法即定位）；再用列首正则列出**列 0 行**，看类体内是否混进了模块级语句。
+  - 避免：模块级常量/函数一律放在**类之前**（或文件末尾）；往类里插入代码前先确认插入点的缩进层级；改完立刻 py_compile **并**跑一次受影响模块的用例（编译通过不等于类结构完好）。
 ## Validation
 
 - Use the project environment's `python` executable. On the expected Windows setup, `py -3` may resolve to a different interpreter without project dependencies.
