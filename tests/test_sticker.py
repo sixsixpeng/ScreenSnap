@@ -17,6 +17,74 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class StickerTests(CoreTests):
+    def test_color_card_label_modes(self):
+        """A+B（2026-10-11）：颜色贴图标签按 color_sticker_labels 出 1-4 行，off 只留色块。"""
+        from config.config_manager import DEFAULTS
+        from sticker.clipboard_source import render_color_card
+
+        def render(mode, color="#f0f8ff"):
+            return render_color_card(color, dict(DEFAULTS, color_sticker_labels=mode))
+
+        plain = render("off")
+        hex_only = render("hex")
+        everything = render("all")
+        for name, image in (("off", plain), ("hex", hex_only), ("all", everything)):
+            with self.subTest(mode=name):
+                self.assertFalse(image.isNull())
+                self.assertEqual((image.width(), image.height()), (260, 150))
+        self.assertNotEqual(plain.constBits(), hex_only.constBits(), "off 与 hex 的标签必须不同")
+        self.assertNotEqual(hex_only.constBits(), everything.constBits(), "all 要多出 rgb/hsl/色名与色阶条")
+        self.assertFalse(render("all", "#1a2b3c").isNull(), "深色底也要能渲染")
+    def test_builtin_sound_files_ship_with_the_package(self):
+        """内置提示音必须随包分发（2026-10-11）：packaging 的 `datas=[('ui/assets','ui/assets')]`
+
+        与 build.bat 的 `--add-data "ui/assets;ui/assets"` 都是整目录 ⇒ 只要文件在 ui/assets/sounds 下就会被打包；
+        这条用例防止它们被误删或挪出该目录（冻结环境靠 builtin_dir() 的 _MEIPASS 分支找到它们）。"""
+        import wave
+        from pathlib import Path
+        from core.sound import BUILTIN_FILES, builtin_dir, builtin_path
+
+        assets = Path(__file__).resolve().parents[1] / "ui" / "assets"
+        self.assertEqual(builtin_dir().resolve(), (assets / "sounds").resolve(),
+                         "内置音必须位于 ui/assets/sounds —— 打包脚本按整目录复制")
+        self.assertEqual(len(BUILTIN_FILES), 30,
+                         "内置提示音数量变化时要同步这条与设置页的 SOUND_OPTIONS")
+        for kind, name in BUILTIN_FILES.items():
+            with self.subTest(kind=kind):
+                path = builtin_path(kind)
+                self.assertIsNotNone(path, "%s 的 wav 缺失（%s）" % (kind, name))
+                self.assertTrue(str(path).startswith(str(assets)), "不能在 ui/assets 之外")
+                with wave.open(str(path), "rb") as handle:
+                    self.assertEqual(handle.getnchannels(), 1)
+                    self.assertEqual(handle.getsampwidth(), 2)
+                    self.assertGreater(handle.getnframes(), 0, "不能是空文件")
+    def test_clipboard_color_wins_over_html_and_accepts_common_formats(self):
+        """回归（2026-10-11 用户反馈「颜色贴图全是绿色」）：颜色必须**优先于 HTML** 识别，
+
+        并认得 rgb()/rgba()/裸 R,G,B/0x/#RRGGBBAA 等常见写法。
+        根因：`read_clipboard` 先判 HTML ⇒ 从浏览器等复制颜色时（剪贴板同时带 HTML）永远走不到颜色分支，
+        于是退化成「默认绿底文字卡片」。"""
+        from PySide6.QtCore import QMimeData
+        from PySide6.QtGui import QGuiApplication
+        from config.config_manager import DEFAULTS
+        from sticker.clipboard_source import parse_color, read_clipboard
+
+        for text, expected in (("#abcdef", "#abcdef"), ("ABC123", "#abc123"),
+                               ("rgb(18,52,86)", "#123456"), ("rgba(18, 52, 86, 0.5)", "#123456"),
+                               ("18,52,86", "#123456"), ("0x123456", "#123456"),
+                               ("#12345678", "#123456"), ("#abc", "#aabbcc")):
+            with self.subTest(text=text):
+                self.assertEqual(parse_color(text), expected)
+        self.assertIsNone(parse_color("hsl(210,65%,20%)"), "未支持的写法应返回 None（走文字卡片）")
+        board = QGuiApplication.clipboard()
+        self.addCleanup(board.clear)
+        mime = QMimeData()
+        mime.setHtml("<b>#123456</b>")
+        mime.setText("#123456")
+        board.setMimeData(mime)
+        source = read_clipboard(dict(DEFAULTS), board)
+        self.assertEqual(source.kind, "color",
+                         "带 HTML 的颜色也必须识别为颜色，否则渲染成绿底文字卡片")
     def test_persist_survives_deleted_window_on_quit(self):
         """回归（2026-10-11 审计 A-4，已用离屏探针证实）：退出路径下 remove() 早退，而 Qt 已经在关窗时
         析构了 C++ 对象 ⇒ item.state() 会抛 RuntimeError（libshiboken: Internal C++ object already deleted）。
@@ -1289,7 +1357,11 @@ class StickerTests(CoreTests):
         self.assertEqual(parse_color("#ff0000"), "#ff0000")
         self.assertEqual(parse_color("1a2B3c"), "#1a2b3c")
         self.assertEqual(parse_color("#abc"), "#aabbcc")
-        for value in ("", "hello", "#12", "#12345", "rgb(1, 2, 3)"):
+        # 2026-10-11 契约扩展：rgb()/rgba()/裸 R,G,B/0x/#RRGGBBAA 现在都算颜色（用户从别的工具复制常见这些写法），
+        # 否则会被当成普通文字 ⇒ 渲染成默认绿底文字卡片。
+        self.assertEqual(parse_color("rgb(1, 2, 3)"), "#010203")
+        self.assertEqual(parse_color("#12345678"), "#123456")
+        for value in ("", "hello", "#12", "#12345", "hsl(210,65%,20%)"):
             self.assertIsNone(parse_color(value))
 
     def test_clipboard_source_renders_text_color_and_file_cards(self):

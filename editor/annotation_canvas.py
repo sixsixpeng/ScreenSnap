@@ -5,7 +5,7 @@ import math
 
 from PIL import Image, ImageFilter
 from PySide6.QtCore import Qt, QPointF, QRect, QRectF, QLineF, Signal, QTimer
-from PySide6.QtGui import (QBrush, QPainter, QPainterPath, QPen, QColor, QPixmap, QImage,
+from PySide6.QtGui import (QBrush, QShortcut, QPainter, QPainterPath, QPen, QColor, QPixmap, QImage,
                              QPolygonF, QPainterPathStroker, QTextBlockFormat,
                              QTextCursor, QTransform, QCursor, QKeySequence)
 from PySide6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsItem,
@@ -74,6 +74,14 @@ class AnnotationCanvas(QGraphicsView):
     """管理底图、可编辑图元和同时覆盖图片版本的撤销历史。"""
 
     changed = Signal()
+    # 2026-10-11（D8 ④）：Space 会被 QGraphicsView 用 ShortcutOverride 吞掉（画布拿它拖动画布），
+    # 因此工具栏上那个 QShortcut 在主屏（原地编辑里画布有焦点）收不到 ⇒ 在画布侧再建一份并发这个信号。
+    sticker_shortcut = Signal()
+    # 2026-10-11：无修饰的可打印键（A / 0）会被画布用 ShortcutOverride 吞掉 ⇒ 改在画布内处理，
+    # 再让编辑器接这条信号（与 Space 的 sticker_shortcut 同一手法，D8 ④）。
+    save_as_requested = Signal()
+    # 2026-10-11：Ctrl+S 也走画布（挂窗口快捷键会因「哪块屏/哪种选区入口创建的原地编辑器」而漏 ✓）。
+    save_requested = Signal()
     color_picked = Signal(str)
     confirmed = Signal()
     cancelled = Signal()
@@ -121,6 +129,11 @@ class AnnotationCanvas(QGraphicsView):
         self.viewport().setMouseTracking(True)
         self.setAlignment(Qt.AlignCenter)
         self.setDragMode(QGraphicsView.RubberBandDrag)
+        # 2026-10-11：这里**不再**注册 Space 的 QShortcut。
+        # ① 该键会被 QGraphicsView 用 ShortcutOverride 吞掉，QShortcut 收不到（D8 ④）；
+        # ② 同键注册第二份会让**整个应用**的同键判为 ambiguous 而集体失效（D8 ⑤，真机定案）；
+        # ③ Space 现在统一在下面的 keyPressEvent 里处理（直接发 sticker_shortcut）⇒ 本份必须删。
+        # 移除后果（勿删此注释）：若恢复此快捷键，主屏/副屏的 Space 贴图会再次完全无反应。
         self.tool = "select"
         # 文字工具的双击判定：输入框是模态的，先等一小段判定窗口再弹，双击才能改成保存。
         self._pending_text_point = None
@@ -2921,9 +2934,36 @@ class AnnotationCanvas(QGraphicsView):
             self._apply_tool_cursor()
             self.cancelled.emit()
         elif event.key() == Qt.Key_Space:
-            self.space_pressed = True
-            if self.start is None and self.mosaic_drawing is None:
-                self.setDragMode(QGraphicsView.ScrollHandDrag)
+            # 用户 2026-10-11 明确要求：**Space 一律=贴图**（两个编辑器一致），不再兼作平移；
+            # 平移改用右键/中键拖动。D8 ⑤：Space 会被画布用 ShortcutOverride 吞掉，挂在上面的
+            # QShortcut 收不到（全应用同键也会一并失效）⇒ 就在画布自己的 keyPressEvent 里直接发信号。
+            if not event.isAutoRepeat():
+                logging.getLogger("screensnap").info("画布 Space 按下 ⇒ 触发贴图")
+                self.sticker_shortcut.emit()
+            event.accept()
+        elif event.key() == Qt.Key_S and event.modifiers() == Qt.NoModifier:
+            # 2026-10-11：单键 S = 保存（由画布处理；W/A/S/D 微调分支在更上面 ⇒ 微调语境先被它消费）。
+            logging.getLogger("screensnap").info("画布 S 按下 ⇒ 触发保存")
+            self.save_requested.emit()
+            event.accept()
+        elif event.key() == Qt.Key_S and (event.modifiers() & Qt.ControlModifier):
+            # Ctrl+S = 保存（2026-10-11 用户反馈原地编辑器无效）：与 A/空格 一样在画布内处理，
+            # 不依赖「哪块屏 / 哪种选区入口」创建的编辑器窗口，主副屏与三种选区入口都一致。
+            logging.getLogger("screensnap").info("画布 Ctrl+S 按下 ⇒ 触发保存")
+            self.save_requested.emit()
+            event.accept()
+        elif event.key() == Qt.Key_A and event.modifiers() == Qt.NoModifier:
+            # 2026-10-11：另存为（默认单键 A）。上面的 W/A/S/D 分支只在"按住微调"语境生效（与 S 的
+            # 双语义一致：那时 A=左移，在这里之前就 return 了）⇒ 不在微调语境时才轮到这里 = 另存为。
+            # 无修饰可打印键进不了窗口级 QShortcut（ShortcutOverride）⇒ 在画布里直接发信号。
+            logging.getLogger("screensnap").info("画布 A 按下 ⇒ 触发另存为")
+            self.save_as_requested.emit()
+            event.accept()
+        elif (event.key() == Qt.Key_0 and event.modifiers() & Qt.ControlModifier
+              and self.wheel_zoom_enabled):
+            # 复位缩放到 100%（Ctrl+0）：直接在画布内执行，避免又被吞掉。
+            logging.getLogger("screensnap").info("画布 Ctrl+0 ⇒ 复位缩放到 100%%")
+            self.set_zoom(100)
             event.accept()
         elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self.remove_selected()
@@ -2936,11 +2976,24 @@ class AnnotationCanvas(QGraphicsView):
         else:
             super().keyPressEvent(event)
 
+    def _emit_sticker_shortcut(self):
+        """画布侧的 Space=贴图（D8 ④，2026-10-11）：文字输入时让位（那时空格是字符）。"""
+        from PySide6.QtWidgets import QApplication, QGraphicsTextItem
+
+        if QApplication.activeModalWidget() is not None:
+            return
+        scene = self.scene()
+        item = scene.focusItem() if scene is not None else None
+        if isinstance(item, QGraphicsTextItem):
+            return
+        self.sticker_shortcut.emit()
+
     def keyReleaseEvent(self, event):
         """松开空格后退出临时平移状态。"""
         if event.key() == Qt.Key_Space:
             self.space_pressed = False
             if not self.space_pan_active:
+                # D8 ⑤（2026-10-11）：轻按 Space（没进入拖动画布）⇒「空格=贴图」；按住拖动仍是平移（D14 双语义）。
                 self.setDragMode(QGraphicsView.RubberBandDrag if self.tool == "select"
                                  else QGraphicsView.NoDrag)
         super().keyReleaseEvent(event)
@@ -2976,7 +3029,12 @@ class AnnotationCanvas(QGraphicsView):
             round(self.verticalScrollBar().value() - shift.y() * scale))
 
     def wheelEvent(self, event):
-        """默认纵向滚动；启用滚轮缩放时 Ctrl+滚轮缩放；Alt+滚轮横向移动。"""
+        """默认纵向滚动；启用滚轮缩放时 Ctrl+滚轮缩放；**Shift+滚轮横向**（2026-10-11 用户定案）。
+
+        · Alt 不再横向（原先 Alt+滚轮横向，用户要求取消）；
+        · 横向没有可滚动范围时**回落纵向**，避免"按了完全没反应"；
+        · Ctrl+仅在窗口编辑器启用（原地编辑画布太小，见 wheel_zoom_enabled）。
+        """
         modifiers = event.modifiers() | QApplication.keyboardModifiers()
         if self.wheel_zoom_enabled and (modifiers & Qt.ControlModifier):
             angle = event.angleDelta().y()
@@ -2989,8 +3047,12 @@ class AnnotationCanvas(QGraphicsView):
                               self.zoom_percent + (step if delta > 0 else -step))
             event.accept()
             return
-        horizontal_scroll = bool(modifiers & Qt.AltModifier)
+        horizontal_scroll = bool(modifiers & Qt.ShiftModifier)
         scrollbar = self.horizontalScrollBar() if horizontal_scroll else self.verticalScrollBar()
+        if horizontal_scroll and scrollbar.maximum() <= 0:
+            # 横向没有可滚动范围（图比视图窄）⇒ 回落纵向，别让按键像"没反应"（2026-10-11）。
+            horizontal_scroll = False
+            scrollbar = self.verticalScrollBar()
         pixel_delta = event.pixelDelta()
         delta = pixel_delta.x() if horizontal_scroll and pixel_delta.x() else pixel_delta.y()
         if not delta:

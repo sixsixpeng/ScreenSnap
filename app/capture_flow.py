@@ -153,6 +153,7 @@ class CaptureFlowMixin:
                 self.handle_capture_selection(images, positions, mode=source))
             view.edit_requested.connect(self.edit_images)
             view.save_requested.connect(self.save_capture_images)
+            view.save_as_requested.connect(self.save_as_capture_images)
             view.copy_done.connect(self.notify_capture_copied)
             view.save_failed.connect(self.initial_save_failed)
             view.save_as_dir_chosen.connect(self.remember_save_as_dir)
@@ -301,21 +302,64 @@ class CaptureFlowMixin:
 
 
     def save_capture_images(self, images, positions=None, notify=True, copy_to_clipboard=True):
-        """直接保存选区图片，但沿用编辑器最终效果与手动保存配置。"""
+        """直接保存选区图片，但沿用编辑器最终效果与手动保存配置。
+
+        返回本次真正落盘的文件路径列表（2026-10-11：快速贴图/贴图通知需要它 —— 贴图本身的
+        source 指向私有缓存，点通知应当跳到保存目录而不是缓存）。
+        """
+        saved_paths = []
         for image, alternate in images:
             editor = EditorWindow(image, self.config.data, alternate, from_capture=True)
             editor.copy_done.connect(self.notify_capture_copied)
             editor.save_as_dir_chosen.connect(self.remember_save_as_dir)
             # notify=False 时仍记录日志与历史，只是不弹保存提示（快速贴图只要贴图那一条提示）。
             editor.image_saved.connect(
-                lambda path, image, flag=notify: self.saved(path, image, notify=flag))
+                lambda path, image, flag=notify: (saved_paths.append(str(path)),
+                                                  self.saved(path, image, notify=flag))[1])
             try:
                 editor.save(automatic=True, copy_to_clipboard=copy_to_clipboard)
             except OSError as error:
                 self.initial_save_failed(f"直接保存截图失败: {error}")
             finally:
                 editor.close()
+        return saved_paths
 
+
+    def save_as_capture_images(self, images, positions=None):
+        """依次为每块选区弹出「另存为」对话框（2026-10-11 用户定案）。
+
+        QFileDialog.getSaveFileName 是模态的 ⇒ 天然一块一块弹、互不抢焦点；取消则停止后续。
+        调用方（遮罩）已先关闭遮罩再 emit，否则全屏置顶遮罩会挡住第 2、3 个对话框。
+        """
+        # 收到时遮罩仍处于关闭过程中 ⇒ 立刻弹的话第 2、3 个会被全屏置顶遮罩挡住（用户实测），
+        # 而遮罩关闭后它的 C++ 对象即销毁 ⇒ 不能在遮罩侧延迟。这里只捕获**纯数据**，
+        # 由本对象（应用常驻）在事件循环下一轮依次弹窗。
+        payload = list(images)
+        self.logger.info("另存为：收到 %d 块，遮罩关闭后依次弹窗", len(payload))
+        QTimer.singleShot(0, lambda: self._run_save_as_dialogs(payload))
+        # 对话框在事件循环下一轮才弹，此刻没有已落盘路径 ⇒ 返回空列表（调用方只用信号，不取返回值）。
+        return []
+
+    def _run_save_as_dialogs(self, images):
+        """依次弹出「另存为」对话框（模态 ⇒ 天然一块一块来、互不抢焦点；取消则停止后续）。"""
+        saved_paths = []
+        total = len(images)
+        for index, (image, alternate) in enumerate(images, start=1):
+            self.logger.info("另存为：第 %d/%d 块，弹出对话框", index, total)
+            editor = EditorWindow(image, self.config.data, alternate, from_capture=True)
+            editor.copy_done.connect(self.notify_capture_copied)
+            editor.save_as_dir_chosen.connect(self.remember_save_as_dir)
+            editor.image_saved.connect(
+                lambda path, image: (saved_paths.append(str(path)), self.saved(path, image))[1])
+            try:
+                if editor.save_as() is None:
+                    self.logger.info("另存为：用户取消，停止后续选区")
+                    break
+            except OSError as error:
+                self.initial_save_failed(f"另存为失败: {error}")
+            finally:
+                editor.close()
+        return saved_paths
 
     def initial_save_failed(self, message):
         self.logger.exception("%s", message)

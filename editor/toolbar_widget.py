@@ -818,6 +818,11 @@ class ToolbarWidget(QWidget):
                                                            ("放弃", "discard", QStyle.SP_DialogCancelButton),
                                                            ("关闭全部", "close_all_editors", QStyle.SP_DialogCloseButton)]]
         next(button for button in self.output_buttons if button.text() == "贴图").setIcon(action_icon("sticker"))
+        # D8 ①（2026-10-11 真机定案）：**同一按键绝不在一个应用里存在两份快捷键** ——
+        # 这里曾与画布那份 Space 同键共存，Qt 判为 ambiguous 后**两份都不触发**，
+        # 连遮罩上的 ApplicationShortcut 也被一并拒绝（日志表现：主屏按 Space 全无入口）。
+        # 画布会吞掉 Space（ShortcutOverride，用于拖动画布）⇒ 唯一那份必须挂在**画布**上，
+        # 见 editor/annotation_canvas.py 的 _sticker_shortcut；此处不再创建。
         self.appearance_toggle = QToolButton(self)
         self.appearance_toggle.setIcon(settings_icon())
         self.appearance_toggle.setText("外观")
@@ -1306,6 +1311,25 @@ class ToolbarWidget(QWidget):
         self.reflow(event.size().width())
         super().resizeEvent(event)
 
+    def _trigger_sticker_shortcut(self):
+        """空格 = 把当前合成图作为独立贴图（2026-10-11 用户要求；两个编辑器共用本工具栏）。
+
+        唯一需要让位的地方是**文字输入**：弹出模态对话框、或就地编辑文字（场景里有获得焦点的
+        QGraphicsTextItem）时直接忽略 —— 那时空格是字符，不是命令。
+        """
+        from PySide6.QtWidgets import QApplication, QGraphicsTextItem
+
+        if QApplication.activeModalWidget() is not None:
+            return
+        focus = QApplication.focusWidget()
+        scene_getter = getattr(focus, "scene", None)
+        if callable(scene_getter):
+            scene = scene_getter()
+            item = scene.focusItem() if scene is not None else None
+            if isinstance(item, QGraphicsTextItem):
+                return
+        self.command.emit("paste")
+
     def button(self, layout, label, action, icon):
         """常用命令同时展示 Qt 标准图标和文字，完整名称留在悬浮提示中。"""
         button = QToolButton()
@@ -1329,7 +1353,10 @@ class ToolbarWidget(QWidget):
             "custom_size": "按指定宽高重设选区，中心位置保持不变，并立即按新尺寸重新载入该区域画面",
             "recapture": "放弃当前画面并重新进入截图，可等画面变化后再框选同一区域",
         }
-        binding = shortcut_label(self.hotkeys, action)
+        # 2026-10-11：统一走 editor_binding() —— 它同时处理「贴图=空格」（不要用全局 paste 的 F3，
+        # 会误导用户）与「保存 S / 仅复制 Y / 另存为 A / 撤销 Ctrl+Z / 重做 Ctrl+Y / 复位缩放 Ctrl+0」，
+        # 这些键都不在全局热键表里，必须从 settings 取（与 set_hotkeys() 同一来源，D4）。
+        binding = self.editor_binding(action)
         tooltip = descriptions.get(action, label)
         button.setProperty("tooltip_detail", tooltip)
         button.setToolTip(rich_tooltip(label, tooltip, binding))
@@ -1577,10 +1604,31 @@ class ToolbarWidget(QWidget):
                     self.appearance_value_labels[key].setText(f"{value}{suffix}")
         self.output_preview.refresh()
 
+    def editor_binding(self, action):
+        """编辑器本地动作的快捷键标签（2026-10-11）：这些键**不在全局热键表**里，必须从 settings 取。
+
+        与 button() 用的是同一个方法，避免两处各写一套（D4/T5 的教训）。"""
+        mapping = {
+            "save": ("capture_save_shortcut", "S"),
+            "copy_only": ("capture_copy_shortcut", "Y"),
+            "save_as": ("editor_save_as_shortcut", "Q"),
+            "undo": ("editor_undo_shortcut", "Ctrl+Z"),
+            "redo": ("editor_redo_shortcut", "Ctrl+Y"),
+            "reset": ("editor_zoom_reset_shortcut", "Ctrl+0"),
+            "paste": (None, "空格"),
+        }
+        if action in mapping:
+            key, default = mapping[action]
+            if key is None:
+                return default
+            return str((self.settings or {}).get(key, default) or default)
+        return shortcut_label(self.hotkeys, action)
+
     def set_hotkeys(self, hotkeys):
         self.hotkeys = hotkeys or {}
         for button, action in self.command_buttons:
-            binding = shortcut_label(self.hotkeys, action)
+            # 与 button() 保持同一规则：贴图按钮恒显示本窗口的「空格」，不跟随全局 paste（F3）。
+            binding = {"paste": "空格"}.get(action) or shortcut_label(self.hotkeys, action)
             detail = button.property("tooltip_detail") or button.text()
             button.setToolTip(rich_tooltip(button.text(), detail, binding))
         for menu_button in self.menu_buttons:

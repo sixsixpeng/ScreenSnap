@@ -139,6 +139,32 @@ def _mask_overlay_color(settings):
     return color
 
 
+def picked_color_text(settings, holder, color):
+    """取色复制到剪贴板的文本（2026-10-11 B/C，InlineEditor 与 MaskWindow 共用）。
+
+    按 `picker_copy_format` 格式化（hex / rgb / rgba / hsl / all）；`picker_accumulate` 打开时把连续取色
+    拼成多行去重文本，历史挂在 `holder` 上（两个类各有一份状态），上限取 `history_limit`。
+    """
+    from core.color_format import FORMATS, format_color, format_color_list
+
+    mode = str(settings.get("picker_copy_format", "hex") or "hex").lower()
+    if mode not in FORMATS:
+        mode = "hex"
+    if not settings.get("picker_accumulate", False):
+        holder._picked_colors = []
+        return format_color(color, mode)
+    history = getattr(holder, "_picked_colors", None)
+    if history is None:
+        history = holder._picked_colors = []
+    history.append(color)
+    limit = int(settings.get("history_limit", 20) or 20)
+    if limit > 0 and len(history) > limit:
+        del history[:-limit]
+    logging.getLogger("screensnap").info(
+        "取色累积：%d 个颜色（格式 %s）", len(history), mode)
+    return format_color_list(history, mode)
+
+
 class MaskSession:
     """一轮截图中的共享状态；每个显示器一个 MaskWindow 共同使用。"""
 
@@ -314,6 +340,46 @@ class InlineEditor(QWidget):
                 button.hide()
         self.compact_toolbar()
         self.canvas = AnnotationCanvas(image, self.settings, alternate)
+        # D8 ④（2026-10-11）：画布会吞掉 Space ⇒ 画布侧那份快捷键转成同一条贴图命令。
+        # 注意：这里**不能**用 try/except 静默兜住 —— 一旦连不上，主屏 Space 就会毫无反应且没有任何线索（D21/A9 的教训）。
+        if not hasattr(self.canvas, "sticker_shortcut") or not hasattr(self, "toolbar"):
+            logging.getLogger("screensnap").warning(
+                "原地编辑器 Space 贴图未接线：canvas.sticker_shortcut=%s toolbar=%s",
+                hasattr(self.canvas, "sticker_shortcut"), hasattr(self, "toolbar"))
+        else:
+            self.canvas.sticker_shortcut.connect(self._on_canvas_sticker_shortcut)
+            # 2026-10-11：单键 A = 另存为（画布内处理；原地编辑器同样要 ✓ 用户反馈过没作用）。
+            self.canvas.save_as_requested.connect(
+                lambda: self.toolbar.command.emit("save_as"))
+            # 2026-10-11：Ctrl+S 也走画布（挂窗口快捷键会因「哪块屏 / 哪种选区入口创建」而漏）。
+            self.canvas.save_requested.connect(
+                lambda: self.toolbar.command.emit("save"))
+            logging.getLogger("screensnap").debug("原地编辑器 Space 贴图已接线（canvas → 工具栏 paste）")
+        # 2026-10-11 用户要求：另存为在两个编辑器都要有（默认单键 A，走工具栏同一条命令）。
+        self.save_as_shortcut = QShortcut(
+            QKeySequence(self.settings.get("editor_save_as_shortcut", "Q")), self)
+        self.save_as_shortcut.setContext(Qt.WindowShortcut)
+        self.save_as_shortcut.activated.connect(lambda: self.toolbar.command.emit("save_as"))
+        # 2026-10-11 用户要求：Ctrl+S 两个编辑器都要（与 S 并存，互为别名）。
+        self.save_ctrl_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
+        self.save_ctrl_shortcut.setContext(Qt.WindowShortcut)
+        self.save_ctrl_shortcut.activated.connect(lambda: self.toolbar.command.emit("save"))
+        # 2026-10-11 用户要求：撤销/重做/复位缩放两个编辑器都要（沿用同一批配置键，走同一条工具栏命令）。
+        for _key, _action, _label in (
+                ("editor_undo_shortcut", "undo", "撤销"),
+                ("editor_redo_shortcut", "redo", "重做"),
+                ("editor_zoom_reset_shortcut", "reset", "复位缩放")):
+            _sequence = QKeySequence(self.settings.get(_key, ""))
+            if _sequence.isEmpty():
+                continue
+            _sc = QShortcut(_sequence, self)
+            _sc.setContext(Qt.WindowShortcut)
+            _sc.activated.connect(lambda name=_action: self.toolbar.command.emit(name))
+            logging.getLogger("screensnap").info(
+                "原地编辑器快捷键已注册：%s ⇒ %s", _key, _label)
+        logging.getLogger("screensnap").info(
+            "原地编辑器另存为快捷键已注册：键=%r",
+            self.settings.get("editor_save_as_shortcut", "Q"))
         self.multi_select_shortcut = QShortcut(
             QKeySequence(self.settings.get("capture_multi_select_shortcut", "Alt+M")),
             self.canvas)
@@ -830,11 +896,18 @@ class InlineEditor(QWidget):
         if tool == "pen":
             self.view.pen_color_changed.emit(color)
 
+    def _picked_color_text(self, color):
+        """InlineEditor 的取色复制文本（共享实现见模块级 picked_color_text）。"""
+        return picked_color_text(self.settings, self, color)
+    def _on_canvas_sticker_shortcut(self):
+        """画布侧 Space 触发的贴图（D8 ④）：与工具栏「贴图」按钮走同一条命令。"""
+        logging.getLogger("screensnap").info("原地编辑器收到画布 Space ⇒ 转工具栏贴图命令")
+        self.toolbar.command.emit("paste")
     def apply_picked_color(self, color):
         self.toolbar.pen_color.set_color(color)
         self.toolbar.pen_color.setText("")
         self.set_pen_color(color)
-        QGuiApplication.clipboard().setText(color)
+        QGuiApplication.clipboard().setText(self._picked_color_text(color))
 
     def apply_canvas_setting(self, key, value):
         """画布内入口（如文字输入对话框）改配置：写入配置并同步工具栏控件。"""
@@ -1016,6 +1089,8 @@ class MaskWindow(QWidget):
     selected = Signal(object, object)
     edit_requested = Signal(object, object)
     save_requested = Signal(object, object)
+    # 2026-10-11 用户定案：另存为在多选时**依次弹出对话框**（模态 ⇒ 天然按顺序、互不抢焦点）。
+    save_as_requested = Signal(object, object)
     last_region = Signal(object)
     image_saved = Signal(str, object)
     image_saved_silently = Signal(str, object)
@@ -1030,6 +1105,9 @@ class MaskWindow(QWidget):
     tool_color_changed = Signal(str, str)
     cancel_requested = Signal()
     toolbar_hide_requested = Signal()
+    # D11（2026-10-11）：Space 在这台机器上**到不了 Qt 事件循环**（画布/遮罩三层入口日志全 0 条）⇒
+    # 改用与工具栏隐藏键同一套「全局热键」机制：钩子线程只 emit 本信号，判定在 Qt 线程做。
+    quick_sticker_hotkey_requested = Signal()
 
     def __init__(self, image, bounds, monitors, settings, mode="capture", alternate=None,
                  session=None, monitor=None, primary=True, initial_rect=None,
@@ -1112,6 +1190,7 @@ class MaskWindow(QWidget):
         self.setGeometry(self.mapper.physical_local_rect_to_native_global_rect(self.monitor_rect).toRect())
         self.quick_sticker_shortcut = None
         self.capture_picker_shortcut = None
+        self.picker_format_shortcut = None  # 只有 primary 视图创建（D8 ①：同键只留一份）
         if primary:
             self.quick_sticker_shortcut = QShortcut(
                 QKeySequence(settings.get("capture_quick_sticker_shortcut", "Space")), self)
@@ -1122,10 +1201,26 @@ class MaskWindow(QWidget):
                 QKeySequence(settings.get("capture_save_shortcut", "S")), self)
             self.capture_save_shortcut.setContext(Qt.ApplicationShortcut)
             self.capture_save_shortcut.activated.connect(self.save_selection)
+            # 2026-10-11 用户反馈：右键选区后（未进编辑器）按 Ctrl+S 没反应 ⇒ 在遮罩上也把 Ctrl+S
+            # 当保存键（与 S 同一条处理）。遮罩快捷键是 primary 单来源 + ApplicationShortcut，
+            # 因此主副屏、左键/右键单区/右键多区各种入口都一致。
+            self.capture_save_ctrl_shortcut = QShortcut(QKeySequence("Ctrl+S"), self)
+            self.capture_save_ctrl_shortcut.setContext(Qt.ApplicationShortcut)
+            # 2026-10-11：**不**在这里给 A 建 ApplicationShortcut —— 它会抢先吞掉微调用的 A（D14：
+            # 动作键与修饰性判断同键时不许用快捷键拦截）。A 改在 keyPressEvent 里判断语境后处理。
+            logging.getLogger("screensnap").info(
+                "遮罩另存为键已注册：键=%r", self.settings.get("editor_save_as_shortcut", "A"))
+            logging.getLogger("screensnap").info("遮罩 Ctrl+S 保存键已注册（与 S 同一条处理）")
             self.capture_picker_shortcut = QShortcut(
                 QKeySequence(settings.get("capture_picker_shortcut", "C")), self)
             self.capture_picker_shortcut.setContext(Qt.ApplicationShortcut)
             self.capture_picker_shortcut.activated.connect(self.sample_color_at_cursor)
+            # 2026-10-11 用户要求：遮罩内循环切换「取色复制的色值表达式」，再按取色键即用该表达式。
+            self.picker_format_shortcut = QShortcut(
+                QKeySequence(settings.get("capture_picker_format_shortcut", "X")), self)
+            self.picker_format_shortcut.setContext(Qt.ApplicationShortcut)
+            self.picker_format_shortcut.setEnabled(True)
+            self.picker_format_shortcut.activated.connect(self.cycle_picker_format)
         else:
             self.capture_save_shortcut = None
         self.magnifier_overlay = MagnifierOverlay(self)
@@ -1300,6 +1395,7 @@ class MaskWindow(QWidget):
             self.activateWindow()
             self.setFocus(Qt.ActiveWindowFocusReason)
         self._install_toolbar_hide_hotkey()
+        self._install_quick_sticker_hotkey()   # D11：Space 走全局热键（与工具栏隐藏键同一批安装）
         self._sync_escape_fallback()
 
     def _focus_capture(self):
@@ -1342,6 +1438,52 @@ class MaskWindow(QWidget):
                 bool(self.session.toolbar_hide_hotkey))
         except (ImportError, ValueError, OSError, RuntimeError) as error:
             logging.getLogger("screensnap").debug("注册工具栏隐藏键全局热键失败: %s", error)
+
+    def _install_quick_sticker_hotkey(self):
+        """给「快速贴图键」（默认 Space）注册全局热键（D11；与工具栏隐藏键同一套机制）。
+
+        suppress=False：不禁用原路径（D14 —— Space 在编辑器里还兼作拖动画布），钩子只**额外**触发一次贴图。
+        """
+        if getattr(self.session, "quick_sticker_hotkey", None) is not None:
+            return
+        from core.window_focus import offscreen
+
+        if offscreen() or not self.settings.get("capture_quick_sticker_enabled", True):
+            return
+        sequence = QKeySequence(self.settings.get("capture_quick_sticker_shortcut", "Space"))
+        binding = sequence.toString()
+        if not binding or os.environ.get("SCREENSNAP_NO_QUICK_STICKER_HOTKEY") == "1":
+            return
+        try:
+            import keyboard
+
+            self.session.quick_sticker_hotkey = keyboard.add_hotkey(
+                binding, self._global_quick_sticker, suppress=False)
+            self.quick_sticker_hotkey_requested.connect(self.trigger_quick_sticker)
+            logging.getLogger("screensnap").info(
+                "快速贴图全局热键已注册：键=%r 句柄=%s", binding,
+                bool(self.session.quick_sticker_hotkey))
+        except (ImportError, ValueError, OSError, RuntimeError) as error:
+            logging.getLogger("screensnap").warning("注册快速贴图全局热键失败: %s", error)
+
+    def _release_quick_sticker_hotkey(self):
+        """释放快速贴图全局热键（遮罩关闭时调用）。"""
+        handle = getattr(self.session, "quick_sticker_hotkey", None)
+        if handle is None:
+            return
+        self.session.quick_sticker_hotkey = None
+        try:
+            import keyboard
+
+            keyboard.remove_hotkey(handle)
+            logging.getLogger("screensnap").debug("快速贴图全局热键已释放")
+        except (ImportError, ValueError, OSError, RuntimeError) as error:
+            logging.getLogger("screensnap").debug("释放快速贴图全局热键失败: %s", error)
+
+    def _global_quick_sticker(self):
+        """全局热键回调（钩子线程）：只发信号，判定与贴图都在 Qt 线程执行（D11）。"""
+        logging.getLogger("screensnap").info("快速贴图全局热键触发（钩子线程）")
+        self.quick_sticker_hotkey_requested.emit()
 
     def _release_toolbar_hide_hotkey(self):
         handle = getattr(self.session, "toolbar_hide_hotkey", None)
@@ -1472,6 +1614,7 @@ class MaskWindow(QWidget):
         super().closeEvent(event)
 
         self._release_toolbar_hide_hotkey()
+        self._release_quick_sticker_hotkey()
 
     def update_all(self):
         # 这里曾经按 selection.nudge_index 关闭 S：那是"上次微调"留下的记忆值，
@@ -2243,6 +2386,51 @@ class MaskWindow(QWidget):
         if self.selection.rects:
             self.complete(save_direct=True)
 
+    def save_as_selection(self):
+        """A = 另存为（2026-10-11）：与 save_selection 同款的双语义 —— 微调语境下让位给「A=左移」。"""
+        import time as _time
+
+        recently_nudged = (_time.monotonic() - getattr(self, "_nudge_at", 0.0)) <= 0.3
+        _canvas = getattr(getattr(self.session, "inline_editor", None), "canvas", None)
+        nudge_active = (
+            (QApplication.mouseButtons() & Qt.LeftButton)
+            or self.selection.resizing is not None
+            or self.selection.dragging is not None
+            or (_canvas is not None and _canvas.active_handle() is not None)
+            or recently_nudged)
+        logging.getLogger("screensnap").info(
+            "另存为键按下：视图=%s 选区=%d inline=%s 微调语境=%s",
+            self.monitor_rect.getRect(), len(self.selection.rects),
+            self.inline_active(), nudge_active)
+        if nudge_active:
+            # 微调语境：把这次按键当成「左移 1 像素」（与 W/A/S/D 一致），不做另存为。
+            self.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Left, Qt.NoModifier))
+            return
+        if self._delegate_to_owner("save_as_selection"):
+            return
+        if self.inline_active():
+            editor = self.session.inline_editor
+            if editor is not None:
+                logging.getLogger("screensnap").info("另存为：转交原地编辑器 save_as")
+                editor.execute("save_as")
+            return
+        if self.selection.rects:
+            # 用户 2026-10-11 定案：多选就**依次弹出「另存为」对话框**，不做自动命名等额外处理；
+            # QFileDialog 是模态的 ⇒ 天然一个一个弹、互不抢焦点（不并行、不重复触发）。
+            payloads = self._selection_payloads()
+            logging.getLogger("screensnap").info(
+                "另存为：遮罩阶段依次弹出 %d 个另存为对话框", len(payloads))
+            # 关键（2026-10-11 用户实测：只弹出一个，其余被遮罩挡住）：emit 是**同步**的 ⇒ 若在这里直接
+            # emit，对话框会在遮罩仍然显示时弹出，全屏置顶的遮罩会挡住第 2、3 个 ⇒ 必须先关遮罩，
+            # 回到事件循环再依次弹（QTimer.singleShot(0, …)），模态对话框自然一块一块来。
+            _images = [(image, alternate) for image, alternate, _ in payloads]
+            _positions = [position for _, _, position in payloads]
+            # 必须**同步** emit（此刻遮罩的 C++ 对象还活着）；延迟 emit 会撞上
+            # "RuntimeError: Signal source has been deleted"（2026-10-11 实测）。
+            # 弹窗时机由应用侧延后到遮罩关闭之后（app/capture_flow.py）。
+            self.save_as_requested.emit(_images, _positions)
+            self.close()
+
     def focus_view_for_position(self, point):
         logical = self.mapper.physical_local_to_logical_local(point) + self.mapper.logical_bounds.topLeft()
         for view in self.session.views:
@@ -2479,6 +2667,30 @@ class MaskWindow(QWidget):
     def wheelEvent(self, event):
         super().wheelEvent(event)
 
+    def cycle_picker_format(self):
+        """循环切换「取色复制的色值表达式」（2026-10-11 用户要求：先切换、再按取色键即用该表达式）。"""
+        from core.color_format import FORMATS
+
+        order = [name for name in ("hex", "rgb", "rgba", "hsl", "all") if name in FORMATS]
+        current = str(self.settings.get("picker_copy_format", "hex") or "hex").lower()
+        index = order.index(current) if current in order else -1
+        nxt = order[(index + 1) % len(order)] if order else "hex"
+        self.settings["picker_copy_format"] = nxt   # 就地改实时配置：下一次取色立即生效
+        logging.getLogger("screensnap").info("取色表达式切换: %s → %s", current, nxt)
+        # 立刻刷新 —— 且必须刷**所有视图**（2026-10-11 用户实测：按下 X 后要动鼠标才变）：
+        # 每块遮罩各自持有 info_bar / magnifier_overlay，而 X 的快捷键只挂在某一个视图上，
+        # 只刷 self 的话，光标所在那块屏的浮层不会重画（与 D8 的多屏"只建一份/只刷一份"同一坑）。
+        for view in list(getattr(self.session, "views", []) or [self]):
+            view.update()
+            for attribute in ("magnifier_overlay", "info_bar"):
+                sync = getattr(getattr(view, attribute, None), "sync", None)
+                if callable(sync):
+                    sync()
+
+    def _picked_color_text(self, color):
+        """MaskWindow 的取色复制文本（共享实现见模块级 picked_color_text）。"""
+        return picked_color_text(self.settings, self, color)
+
     def sample_color_at(self, point):
         """在给定的**局部物理点**取样（从 mousePressEvent 原样抽出，逻辑未改）。"""
         x = point.x() + self.bounds["left"]
@@ -2489,7 +2701,7 @@ class MaskWindow(QWidget):
         if 0 <= x < self.image.width and 0 <= y < self.image.height:
             r, g, b = self.image.convert("RGB").getpixel((x, y))
             color = "#%02x%02x%02x" % (r, g, b)
-            QGuiApplication.clipboard().setText(color)
+            QGuiApplication.clipboard().setText(self._picked_color_text(color))
             self.picker_copied.emit(color)
         self.update_all()
 
@@ -2668,6 +2880,20 @@ class MaskWindow(QWidget):
 
         """处理取消、提交、固定尺寸创建与最后选区的像素微调。"""
         key = event.key()
+        # 2026-10-11：A = 另存为，但**微调语境下必须让位**给 W/A/S/D 的"左移/缩放手柄"（D14）。
+        # 判定与 save_as_selection 一致：按住左键 / 正在拖动或缩放 / 压着手柄 / 0.3 秒内刚微调过。
+        if key == Qt.Key_A and event.modifiers() == Qt.NoModifier:
+            _canvas = getattr(getattr(self.session, "inline_editor", None), "canvas", None)
+            _nudging = (
+                (QApplication.mouseButtons() & Qt.LeftButton)
+                or self.selection.resizing is not None
+                or self.selection.dragging is not None
+                or (_canvas is not None and _canvas.active_handle() is not None)
+                or (time.monotonic() - getattr(self, "_nudge_at", 0.0)) <= 0.3)
+            if not _nudging:
+                self.save_as_selection()
+                return
+            # 微调语境：不消费、不返回 ⇒ 交给下面的 W/A/S/D 分支按原语义处理（微调/缩放）。
         if key == Qt.Key_Escape and not self.inline_active():
             if self.primary:
                 self.close()
@@ -2905,9 +3131,34 @@ class MaskWindow(QWidget):
         return True
 
     def trigger_quick_sticker(self):
-        if (self.quick_sticker_consumed or not self.quick_sticker_enabled or
-                self.inline_active()):
+        # D13（2026-10-11 主屏 Space 仍在查）：入口先留痕 —— 先数「入口条数」，再谈判定。
+        # 入口 0 条 ⇒ 按键根本没到程序；有条数但没动作 ⇒ 看下面的忽略原因。
+        _logger = logging.getLogger("screensnap")
+        _logger.info("快速贴图入口：视图=%s primary=%s 选区=%d inline=%s 开关=%s 已消费=%s",
+                     getattr(self, "monitor_rect", None) and self.monitor_rect.getRect(),
+                     getattr(self, "primary", None), len(self.selection.rects),
+                     self.inline_active(), self.quick_sticker_enabled, self.quick_sticker_consumed)
+        # 2026-10-11（用户要求）：单选（左键划选必然进入原地编辑）也要能用 Space 直接贴图，
+        # 因此不再按 inline_active() 整体禁用；真正要让位的是**文字输入** —— 弹出模态对话框或
+        # 就地编辑文字（场景里有获得焦点的 QGraphicsTextItem）时空格是字符，不是命令。
+        from PySide6.QtWidgets import QApplication, QGraphicsTextItem
+
+        if self.quick_sticker_consumed:
+            _logger.info("快速贴图忽略：本次截图已消费过"); return
+        if not self.quick_sticker_enabled:
+            _logger.info("快速贴图忽略：开关未启用（capture_quick_sticker_enabled）"); return
             return
+        if QApplication.activeModalWidget() is not None:
+            return
+        if self.inline_active():
+            editor = getattr(self.session, "inline", None)
+            canvas = getattr(editor, "canvas", None)
+            scene_getter = getattr(canvas, "scene", None)
+            if callable(scene_getter):
+                scene = scene_getter()
+                item = scene.focusItem() if scene is not None else None
+                if isinstance(item, QGraphicsTextItem):
+                    return
         if any((self.selection.active is not None,
                 self.selection.dragging is not None,
                 self.selection.resizing is not None)):
@@ -2919,10 +3170,58 @@ class MaskWindow(QWidget):
             self.quick_sticker_armed = True
             return
         self.quick_sticker_consumed = True
-        region = self.selection.rects[-1].normalized()
-        position = self.mapper.physical_local_to_native_global(region.topLeft())
-        self.quick_sticker_requested.emit(self._selected_image(), position)
+        # 2026-10-11 用户要求：多选模式下**每个选区都贴一张**（原来只贴最后一个）。
+        # 规则 22：每个选区可能落在另一块屏 ⇒ 裁剪与坐标都交给**归属视图**（_region_owner_view），
+        # 绝不用本视图的 image + 别人的 rect 混算。
+        payloads = []
+        for rect in self.selection.rects:
+            payload = self._sticker_payload(rect.normalized())
+            if payload is not None:
+                payloads.append(payload)
+        _logger.info("快速贴图：选区 %d 个 ⇒ 生成 %d 张贴图", len(self.selection.rects), len(payloads))
+        for image, position in payloads:
+            self.quick_sticker_requested.emit(image, position)
         self.close()
+
+    def _selection_payloads(self):
+        """按当前选区（可能跨屏）生成 [(图像, 原图, 锚点)]，顺序=收集顺序（规则 22：图与坐标都取自归属视图）。"""
+        payloads = []
+        for rect in self.selection.rects:
+            region = rect.normalized()
+            owner = self._region_owner_view(region)
+            if owner is None or getattr(owner, "image", None) is None:
+                logging.getLogger("screensnap").warning(
+                    "另存为：找不到选区 %s 的归属视图，跳过", region.getRect())
+                continue
+            area = (region.x(), region.y(), region.right() + 1, region.bottom() + 1)
+            alternate = getattr(owner, "alternate", None)
+            payloads.append((owner.image.crop(area),
+                             alternate.crop(area) if alternate is not None else None,
+                             owner.mapper.physical_local_to_native_global(region.topLeft())))
+        return payloads
+
+    def _sticker_payload(self, region):
+        """按一个（可能属于别的屏的）逻辑选区生成 (贴图图像, 原生全局锚点)。
+
+        规则 22：裁剪用**归属视图**的 image，坐标用**归属视图**的 mapper，绝不跨视图混算。"""
+        owner = self._region_owner_view(region)
+        if owner is None or getattr(owner, "image", None) is None:
+            logging.getLogger("screensnap").warning("快速贴图：找不到选区 %s 的归属视图", region.getRect())
+            return None
+        area = (region.x(), region.y(), region.right() + 1, region.bottom() + 1)
+        image = owner.image.crop(area)
+        if getattr(owner, "alternate", None) is not None:
+            image = image.copy()
+        image = apply_output_effects(
+            image, owner.settings,
+            owner.settings.get("editor_image_round_corners", True),
+            owner.settings.get("editor_image_corner_radius", 16))
+        position = owner.mapper.physical_local_to_native_global(region.topLeft())
+        logging.getLogger("screensnap").debug(
+            "快速贴图载荷：选区=%s 归属=%s 锚点=(%d,%d)", region.getRect(),
+            getattr(owner, "monitor_rect", None) and owner.monitor_rect.getRect(),
+            position.x(), position.y())
+        return image, position
 
     def _selected_image(self):
         """按当前选区生成一个已完成圆角/边框/阴影的贴图图像。"""

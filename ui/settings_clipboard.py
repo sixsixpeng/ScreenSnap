@@ -79,8 +79,22 @@ class ClipboardPage(SettingsPage):
         self.check("clipboard_color_detection", "识别颜色值",
                    "复制 #RGB、#RRGGBB 或裸六位十六进制时贴出色块而不是这段文字；"
                    "关闭后这类内容一律按文字贴出")
+        self.group("取色复制")
+        self.choice("picker_copy_format", "复制格式",
+                [("#RRGGBB（十六进制）", "hex"), ("rgb(r, g, b)", "rgb"),
+                 ("rgba(r, g, b, 1)", "rgba"), ("hsl(h, s%, l%)", "hsl"),
+                 ("全部（三行）", "all")],
+                "取色（C 键取色）复制到剪贴板的文本表达。选「全部」时一次复制三行（hex / rgb / hsl），"
+                "粘贴到支持多行的目标即可逐行取用。")
+        self.check("picker_accumulate", "累积取色",
+                   "开启后连续取色不再互相覆盖，而是拼成多行文本一次粘贴拿到一组配色（同一颜色不重复）。")
         self.group("颜色贴图")
         self.check("color_sticker_value", "标注色值", "在颜色卡片左下角显示十六进制色值")
+        self.choice("color_sticker_labels", "标签内容",
+                [("跟随取色复制格式", "follow"), ("只显示色块", "off"),
+                 ("十六进制", "hex"), ("rgb(r, g, b)", "rgb"), ("rgba(r, g, b, 1)", "rgba"),
+                 ("hsl(h, s%, l%)", "hsl"), ("全部三行 + 色名", "all"), ("色值 + 色名", "name")],
+                "颜色贴图卡片上标注什么：跟随取色复制格式（默认）或单独指定；选「全部三行 + 色名」时还会在卡片底部画一条色阶条；文字黑白按背景亮度自动选择。")
         self.number("color_sticker_width", "色块宽度", 80, 800, "颜色贴图的卡片宽度")
         self.number("color_sticker_height", "色块高度", 60, 600, "颜色贴图的卡片高度")
         self._card_preview("color")

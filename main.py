@@ -111,6 +111,11 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         # 键盘监听在工作线程执行，Qt 信号把热键动作送回 GUI 主线程。
         self.hotkeys.triggered.connect(self.dispatch)
         self.hotkeys.failed.connect(self.hotkey_error)
+        # 图片缓存迁移（2026-10-11）：把旧位置 %APPDATA% 里的贴图缓存/剪贴板历史图搬到
+        # <保存目录>/cache 下，只搬一次；搬不动只记 WARNING，绝不阻塞启动。
+        from core.path_utils import migrate_cache_dirs
+
+        migrate_cache_dirs(self.config.data)
         self.stickers = StickerManager(self.config.data)
         self.reset_user_data_requested = False
         # 「自动清理时机」设为启动时的话，等事件循环起来再清理，别拖慢启动。

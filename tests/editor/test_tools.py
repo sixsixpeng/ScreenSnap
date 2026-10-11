@@ -325,11 +325,14 @@ class ToolsTests(CoreTests):
         editor = EditorWindow(Image.new("RGB", (30, 20), "white"), settings)
         paste = next(button for button in editor.toolbar.output_buttons if button.text() == "贴图")
         self.assertTrue(paste.toolTip().startswith("贴图\n"))
-        self.assertIn("Ctrl+Alt+P", paste.toolTip())
+        # 2026-10-11：贴图按钮显示**本窗口**的「空格」，不再显示全局热键表里的 paste
+        # （那是全局「贴上次截图」的 F3，语义完全不同，用户反馈过误导）。
+        self.assertIn("空格", paste.toolTip())
+        self.assertNotIn("Ctrl+Alt+P", paste.toolTip())
         editor.toolbar.set_hotkeys({**settings["hotkeys"], "paste": "f9"})
         self.assertTrue(paste.toolTip().startswith("贴图\n"))
-        self.assertIn("F9", paste.toolTip())
-        self.assertNotIn("Ctrl+Alt+P", paste.toolTip())
+        self.assertIn("空格", paste.toolTip())
+        self.assertNotIn("F9", paste.toolTip())
         editor.close()
 
     def test_toolbar_options_panel_shows_live_preview(self):

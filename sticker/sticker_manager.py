@@ -12,7 +12,7 @@ from PySide6.QtGui import QCursor, QGuiApplication, QImage
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 from PIL import Image as PillowImage
 
-from core.path_utils import configured_dir, data_dir
+from core.path_utils import configured_dir, data_dir, cache_dir
 from core.window_snap import window_logical_rect
 from logger.log_rate import log_every
 from sticker.clipboard_source import ClipboardSource, read_clipboard
@@ -110,7 +110,7 @@ class StickerManager(QObject):
         except (OSError, UnicodeError, ValueError) as error:
             logging.getLogger("screensnap").warning("剪贴板历史无法读取: %s", error)
             return
-        image_dir = data_dir() / "clipboard_history"
+        image_dir = self._cache_dir("clipboard_history")
         known_kinds = {"image", "text", "html", "color", "files"}
         for record in records:
             if not isinstance(record, dict):
@@ -140,11 +140,35 @@ class StickerManager(QObject):
         logging.getLogger("screensnap").info(
             "恢复剪贴板历史: %d 条", len(self.clipboard_history))
 
+    def _cache_dir(self, name):
+        """图片类缓存目录（2026-10-11）：设过保存目录时放 <保存目录>/cache/<name>，
+
+        否则退回 `<数据目录>/name` —— 退回分支必须走**本模块导入的 data_dir**，
+        这样用例 patch('sticker.sticker_manager.data_dir') 依然有效（曾经直接用
+        core.path_utils.cache_dir 导致用例的缓存写进了真实 %APPDATA%）。
+        配置 json 始终留在数据目录。
+        """
+        if self.settings.get("save_dir"):
+            try:
+                root = configured_dir(self.settings) / "cache" / name
+                root.mkdir(parents=True, exist_ok=True)
+                return root
+            except (OSError, TypeError, ValueError):
+                pass
+        root = data_dir() / name
+        try:
+            root.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return root
+
     def persist_clipboard_history(self):
         """把剪贴板历史图片和可再贴出的来源信息写入独立缓存。"""
         self._clipboard_persist_timer.stop()
+        # 图片跟随保存目录（2026-10-11：缓存不再堆在 %APPDATA%）；**json 索引仍留在数据目录**，
+        # 因此 root 仍需要（2026-10-11 修：早前删掉它导致 persist 直接 NameError）。
         root = data_dir()
-        image_dir = root / "clipboard_history"
+        image_dir = self._cache_dir("clipboard_history")
         image_dir.mkdir(parents=True, exist_ok=True)
         records = []
         referenced = set()
@@ -197,12 +221,15 @@ class StickerManager(QObject):
         return count
 
     def clear_rebuildable_cache(self):
-        """清理可重建图片缓存，不删除已保存截图或贴图会话引用的源文件。"""
-        root = data_dir()
+        """清理可重建图片缓存，不删除已保存截图或贴图会话引用的源文件。
+
+        2026-10-11：图片缓存已迁到 <保存目录>/cache 下，这里必须用同一个 cache_dir()，
+        否则清理会找不到文件（配置 json 仍在 %APPDATA%）。
+        """
         clipboard_images = history_entries = sticker_images = toast_images = 0
         # 清理范围按设置逐类勾选；未勾选的类别完全不碰。
         if self.settings.get("cache_clear_clipboard", True):
-            clipboard_dir = root / "clipboard_history"
+            clipboard_dir = self._cache_dir("clipboard_history")
             clipboard_images = len(list(clipboard_dir.glob("clipboard_*.png")))
             history_entries = self.clear_clipboard_history()
         if self.settings.get("cache_clear_sticker", True):
@@ -212,7 +239,7 @@ class StickerManager(QObject):
             sticker_images = self.cleanup_cache(referenced_sources)
         if self.settings.get("cache_clear_toast", True):
             # Toast 缩略图只是通知里的一次性预览，随时可按需重建，直接整目录清掉。
-            for image in (root / "toast_cache").glob("*.png"):
+            for image in self._cache_dir("toast_cache").glob("*.png"):
                 try:
                     image.unlink()
                     toast_images += 1
@@ -242,7 +269,7 @@ class StickerManager(QObject):
                 MAX_STICKER_IMAGE_DIMENSION, MAX_STICKER_IMAGE_DIMENSION,
                 Qt.KeepAspectRatio, Qt.SmoothTransformation)
         if source is None:
-            cache = data_dir() / "sticker_cache"
+            cache = self._cache_dir("sticker_cache")
             cache.mkdir(parents=True, exist_ok=True)
             stamp = time_ns()
             source = cache / f"sticker_{stamp}.png"
@@ -876,7 +903,7 @@ class StickerManager(QObject):
     def cleanup_cache(self, sources):
         """仅清理私有缓存中未被有效会话引用的贴图。"""
         # 贴图私有缓存：只有当前无人引用的 sticker_*.png 才可删，返回实际删除数量供上报。
-        cache = data_dir() / "sticker_cache"
+        cache = self._cache_dir("sticker_cache")
         referenced = {Path(source).resolve() for source in sources}
         removed = 0
         for file in cache.glob("sticker_*.png"):

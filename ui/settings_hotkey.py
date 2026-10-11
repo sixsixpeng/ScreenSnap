@@ -46,6 +46,17 @@ class HotkeyPage(SettingsPage):
             layout.addWidget(clear)
             self.form.addRow(label, row)
             setattr(self, f"edit_{action}", widget)
+        # 两个编辑器共用的「另存为」（2026-10-11 用户要求：单键即可）。
+        self.text("editor_save_as_shortcut", "另存为（两个编辑器）",
+                  "独立编辑器与原地编辑器共用的另存为按键，默认单键 A（例如改成 D 或 Ctrl+Shift+S）；保存与仅复制沿用截图快捷键里的那两项。")
+        for key, label, tip in (
+                ("editor_undo_shortcut", "撤销（两个编辑器）",
+                 "独立编辑器与原地编辑器共用的撤销按键；默认遵循 Windows 通用约定 Ctrl+Z。"),
+                ("editor_redo_shortcut", "重做（两个编辑器）",
+                 "两个编辑器共用的重做按键，默认 Ctrl+Y。"),
+                ("editor_zoom_reset_shortcut", "复位缩放（两个编辑器）",
+                 "把画布缩放复位到 100%，默认 Ctrl+0；滚轮缩放只在独立编辑器启用，但复位两边都可用。")):
+            self.text(key, label, tip)
 
     def reset_page(self):
         """本页恢复默认：开关与全部热键绑定一起回到出厂值。"""

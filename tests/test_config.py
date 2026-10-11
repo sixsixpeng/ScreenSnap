@@ -16,6 +16,61 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class ConfigTests(CoreTests):
+    def test_preserved_on_version_reset_keys_all_exist(self):
+        """规则 24/30：保留清单里的每个键都必须是真实配置键，且习惯类改动的键要在清单里。
+
+        这条用例在 2026-10-11 抓出过历史遗留：`image_archive_period` 已从 DEFAULTS 移除却仍在保留清单里，
+        等于版本重置时白保留一个不存在的键。"""
+        from config.config_manager import DEFAULTS, PRESERVED_ON_VERSION_RESET
+
+        missing = [k for k in PRESERVED_ON_VERSION_RESET if k not in DEFAULTS]
+        self.assertEqual(missing, [], "保留清单里存在已不存在的配置键: %s" % missing)
+        for key in ("notification_sound", "notification_sound_file", "sound_copy", "sound_save",
+                    "sound_sticker", "sound_picker", "sound_operation", "sound",
+                    "notification_backend", "open_notification_file", "operation_notification",
+                    "capture_after_selection", "hotkey_health_interval", "log_level", "log_when",
+                    "cache_cleanup_timing", "history_limit", "file_sticker_max"):
+            with self.subTest(key=key):
+                self.assertIn(key, PRESERVED_ON_VERSION_RESET,
+                              key + " 属于用户习惯/偏好，应在版本重置时保留")
+    def test_notification_sound_preview_buttons_follow_each_row(self):
+        """A+B+C（2026-10-11）：每个提示音下拉**同行**都有试听按钮，且听的是该行实际会响的音。
+
+        用户反馈过第一版只有一个独立试听按钮「听谁啊」⇒ 现在全局 + 5 个分类各一个：
+        分类行有覆盖就听覆盖，空则跟随全局；全局行听 notification_sound（custom 用文件，失效回落默认）。"""
+        import tempfile
+        from pathlib import Path
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QPushButton
+        from config.config_manager import ConfigManager
+        from ui.settings_general import GeneralPage
+
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            page = GeneralPage(manager, manager.save)
+            buttons = [b for b in page.findChildren(QPushButton) if b.text() == "试听"]
+            self.assertEqual(len(buttons), 6, "全局 + 5 个分类，各需要一个同行试听按钮")
+            for button in buttons:
+                self.assertFalse(button.icon().isNull(), "可见按钮必须同时有文字和图标")
+            # 2026-10-11：按类型默认不再是空串（默认全是内置音）⇒ 想验证「跟随全局」的分行必须显式清空。
+            manager.data.update(notification_sound="asterisk", sound_copy="hand",
+                                sound_save="", sound_sticker="", sound_picker="",
+                                sound_operation="", notification_sound_file="C:/nope.wav")
+            for category, expected in ((None, "asterisk"), ("copy_notification", "hand"),
+                                       ("save_notification", "asterisk"),
+                                       ("sticker_notification", "asterisk"),
+                                       ("picker_notification", "asterisk"),
+                                       ("operation_notification", "asterisk")):
+                with self.subTest(category=category):
+                    with patch("core.sound.play_sound") as play:
+                        page._preview_sound(category)
+                    play.assert_called_once()
+                    self.assertEqual(play.call_args.args[0], expected,
+                                     "试听必须听到该行实际会响的音（覆盖优先，空则跟随全局）")
+            manager.data["notification_sound"] = "custom"
+            with patch("core.sound.play_sound") as play:
+                page._preview_sound(None)
+            self.assertEqual(play.call_args.args[0], "default", "custom 文件缺失时试听按默认提示音播放")
     def test_sticker_snap_hint_defaults_and_repair(self):
         """吸附提示样式的新配置键：默认值 + 非法值修复（规则 30 的配置生命周期）。"""
         from config.config_manager import validate
@@ -1446,7 +1501,11 @@ class ConfigTests(CoreTests):
             manager = ConfigManager(Path(folder) / "settings.json")
             page = GeneralPage(manager, manager.save)
             backend = page.controls["notification_backend"]
-            self.assertEqual(manager.data["notification_backend"], "win11toast")
+            # 默认后端 2026-10-11 起改为 legacy（旧版应用通知，必定带缩略图）⇒ 断言引用 DEFAULTS，
+            # 不再写死取值（契约变更只需改 DEFAULTS 一处）。
+            from config.config_manager import DEFAULTS as _DEFAULTS
+
+            self.assertEqual(manager.data["notification_backend"], _DEFAULTS["notification_backend"])
             backend.setCurrentIndex(backend.findData("legacy"))
             self.assertEqual(ConfigManager(manager.path).data["notification_backend"], "legacy")
             for label, key in (("复制完成通知", "copy_notification"),

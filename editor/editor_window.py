@@ -54,6 +54,34 @@ class EditorWindow(QMainWindow):
         self.toolbar = ToolbarWidget(settings["pen_color"], settings,
                          show_capture_actions=False)
         self.canvas = AnnotationCanvas(image, settings, alternate)
+        # D8 ④（2026-10-11）：画布会吞掉 Space（拖动画布用于它）⇒ 画布侧那份快捷键转成同一条贴图命令。
+        self.canvas.sticker_shortcut.connect(lambda: self.toolbar.command.emit("paste"))
+        # 2026-10-11：单键 A = 另存为（画布内处理，避免无修饰可打印键被 ShortcutOverride 吞掉）。
+        self.canvas.save_as_requested.connect(lambda: self.toolbar.command.emit("save_as"))
+        self.canvas.save_requested.connect(lambda: self.toolbar.command.emit("save"))
+        # 2026-10-11 用户要求：独立编辑器补上「参考单图快速编辑」的快捷键（保存 / 仅复制 / 另存为）。
+        # 全部走工具栏同一条命令，避免出现第二套实现（规则 12）。
+        from PySide6.QtGui import QKeySequence, QShortcut
+
+        registered = []
+        for key, action, label in (
+                # 2026-10-11：S / Ctrl+S / A **不**在这里注册 —— 窗口级 QShortcut 会抢在画布之前，
+                # 用户按住**旋转手柄**或标注手柄微调时被误触发成"保存/另存为"。它们改由画布
+                # keyPressEvent 在 W/A/S/D 微调分支**之后**处理 ⇒ 微调语境自动让位（与遮罩侧一致）。
+                (str(settings.get("capture_copy_shortcut", "Y")), "copy_only", "仅复制"),
+                (str(settings.get("editor_undo_shortcut", "Ctrl+Z")), "undo", "撤销"),
+                (str(settings.get("editor_redo_shortcut", "Ctrl+Y")), "redo", "重做"),
+                (str(settings.get("editor_zoom_reset_shortcut", "Ctrl+0")), "reset", "复位缩放")):
+            sequence = QKeySequence(key)
+            if sequence.isEmpty():
+                continue
+            shortcut = QShortcut(sequence, self)
+            shortcut.setContext(Qt.WindowShortcut)
+            shortcut.activated.connect(lambda name=action: self.toolbar.command.emit(name))
+            registered.append(f"{key} ⇒ {label}")   # 循环内不记日志（规则 14：多选会连开 N 个编辑器）
+        if registered:
+            logging.getLogger("screensnap").debug(
+                "编辑器快捷键已注册（%d 个）：%s", len(registered), "；".join(registered))
         # 窗口编辑器支持 Ctrl+滚轮缩放（原地编辑画布太小、没有缩放控件，不启用）。
         self.canvas.wheel_zoom_enabled = True
         self.canvas.set_round_corner_preview(

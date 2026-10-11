@@ -47,15 +47,21 @@ class StickerFlowMixin:
         try:
             # notify=False：只通知“已创建贴图”，不弹“图片已保存”；
             # copy_to_clipboard=False：快速贴图不改动剪贴板（贴图本身才是产物）。
-            self.save_capture_images([(image, None)], notify=False, copy_to_clipboard=False)
+            saved_paths = self.save_capture_images([(image, None)], notify=False, copy_to_clipboard=False)
         except (OSError, TypeError, ValueError, RuntimeError) as error:
             self.logger.error("快速贴图保存失败: %s", error, exc_info=True)
             self.notify(f"快速贴图保存失败: {error}")
-        self.add_sticker(image, position)
+            saved_paths = []
+        # 通知点击应跳到「保存目录」而不是贴图私有缓存（2026-10-11 用户反馈）。
+        self.add_sticker(image, position, saved_path=saved_paths[0] if saved_paths else None)
 
 
-    def add_sticker(self, image, position=None):
-        """创建新贴图并根据独立设置决定是否显示托盘提示。"""
+    def add_sticker(self, image, position=None, saved_path=None):
+        """创建新贴图并根据独立设置决定是否显示托盘提示。
+
+        saved_path：这张贴图**已落盘**的文件路径（快速贴图与编辑器贴图都会先保存）。
+        通知的点击目标优先用它 —— 贴图自身的 source 指向私有缓存，点开缓存对用户没有意义。
+        """
         try:
             item = self.stickers.add(image, position=position)
             item.raise_()
@@ -65,8 +71,18 @@ class StickerFlowMixin:
             self.notify(f"创建贴图失败: {error}")
             return
         self.logger.info("贴图已创建并置于前台: %s", getattr(item, "source", "临时图片"))
-        self.notify("已创建贴图", "sticker_notification",
-                getattr(item, "source", None), "sticker_panel")
+        # 贴图通知带缩略图（2026-10-11 用户要求：除「复制文字」外所有通知都带图）；
+        # 点击目标优先用 saved_path（保存目录），贴图自身的 source 指向私有缓存。
+        source = getattr(item, "source", None)
+        target = saved_path or getattr(self, "_last_saved_path", None) or source
+        if self.config.data.get("bubble", True) and self.config.data.get("sticker_notification", True):
+            try:
+                self.show_image_notice(image, "已创建贴图", str(target or ""), target,
+                                       category="sticker_notification")
+                return
+            except (OSError, TypeError, ValueError, RuntimeError) as error:  # noqa: BLE001 缩略图失败退回文字
+                self.logger.warning("贴图通知缩略图失败，退回文字通知: %s", error)
+        self.notify("已创建贴图", "sticker_notification", target, "sticker_panel")
 
 
     def edit_sticker(self, image):
@@ -81,8 +97,18 @@ class StickerFlowMixin:
             self.logger.debug("剪贴板中没有可贴出的图片、文件、颜色或文字")
             self.notify("剪贴板中没有可贴出的内容")
             return
-        self.notify("已贴出剪贴板内容", "sticker_notification",
-                getattr(item, "source", None), "sticker_panel")
+        source = getattr(item, "source", None)
+        if self.config.data.get("bubble", True) and self.config.data.get("sticker_notification", True):
+            try:
+                # 贴图窗口本身就是产物：用它的位图做缩略图（CaptureNotification 同时接受 QImage/PIL）。
+                # 贴剪贴板：优先已落盘的保存路径；source 可能是私有缓存，交给 show_image_notice 净化。
+                target = getattr(self, "_last_saved_path", None) or source
+                self.show_image_notice(item.pixmap.toImage(), "已贴出剪贴板内容", str(target or ""), target,
+                                       category="sticker_notification")
+                return
+            except (OSError, TypeError, ValueError, RuntimeError) as error:  # noqa: BLE001 退回文字
+                self.logger.warning("贴图通知缩略图失败，退回文字通知: %s", error)
+        self.notify("已贴出剪贴板内容", "sticker_notification", source, "sticker_panel")
 
 
     def open_sticker_panel(self):

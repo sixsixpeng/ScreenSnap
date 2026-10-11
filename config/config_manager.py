@@ -5,6 +5,9 @@ import json
 import logging
 from time import time_ns
 import re
+
+from core.color_format import FORMATS as COLOR_FORMATS  # 取色复制格式（validate 用它校验）
+from core.sound import SOUND_KINDS  # 通知音效取值（validate 用它校验）
 from pathlib import Path
 
 # 工具线宽键的间接映射：标注画布按工具名解析对应的 *_width 配置键，
@@ -30,6 +33,7 @@ HINT_ITEMS = (
     ("save", "右键双击/快捷键保存"),
     ("quick_sticker", "快速贴图"),
     ("picker", "取色"),
+    ("picker_format", "切换取色格式"),
     ("fixed_size", "固定尺寸"),
     ("recapture", "清除选择"),
     ("window_edit", "窗口编辑"),
@@ -113,12 +117,18 @@ PRESERVED_ON_VERSION_RESET = (
     "hotkeys", "hotkeys_enabled",
     "capture_quick_sticker_shortcut", "capture_save_shortcut", "capture_custom_size_shortcut",
     "capture_recapture_shortcut", "capture_window_edit_shortcut", "capture_multi_select_shortcut",
-    "capture_copy_shortcut", "capture_toolbar_hide_shortcut", "capture_picker_shortcut",
+    "capture_copy_shortcut", "capture_toolbar_hide_shortcut", "capture_picker_shortcut", "editor_save_as_shortcut", "editor_undo_shortcut", "editor_redo_shortcut", "editor_zoom_reset_shortcut", "capture_picker_format_shortcut",
     # 输出组织习惯：与 save_dir 配套，重置会让归档方式突变
-    "filename", "save_format", "archive_by_month", "archive_by_day", "image_archive_period",
+    # 注：历史上这里还有 image_archive_period，它已不在 DEFAULTS（由 archive_by_month/day 取代）⇒
+    # 2026-10-11 移除；新用例 test_preserved_on_version_reset_keys_all_exist 会防止同类遗留再出现。
+    "filename", "save_format", "archive_by_month", "archive_by_day",
     # 打扰程度：通知开关是"被烦过才关"的偏好，不该被升级重新打开
     "bubble", "notification_timeout", "copy_notification", "picker_notification", "save_notification",
-    "sticker_notification",
+    "sticker_notification", "operation_notification", "open_notification_file", "notification_backend",
+    # 声音偏好（2026-10-11 用户明确要求）：总开关、默认音、自定义文件与按类型覆盖都是"挑好了就不想被升级改回去"的习惯；
+    # 取值不合法或文件失效时 validate/resolve_kind 会兜底，保留不会让新版本启动失败。
+    "sound", "notification_sound", "notification_sound_file",
+    "sound_copy", "sound_save", "sound_sticker", "sound_picker", "sound_operation",
     # 功能开关：用户显式关掉过的能力（识别、放大镜、标尺、诊断、回收站等）必须记住
     "window_detection", "window_hover_detect", "magnifier", "magnifier_size", "magnifier_grid",
     "cursor", "ruler_enabled", "uia_debug_tree", "sticker_recycle_enabled",
@@ -126,6 +136,14 @@ PRESERVED_ON_VERSION_RESET = (
     "logging_enabled", "log_monthly_folder",
     # 明暗主题：属于个人偏好而非版本语义（值不合法时 validate/repair 会兜底）
     "theme",
+    # 习惯类补充（2026-10-11 用户确认「都加」）：
+    #  · 划选后的默认动作与容量/清理偏好 —— 设一次就不动，重置会让行为突变；
+    #  · 热键体检周期与日志级别/时机 —— 与已保留的 logging_enabled / log_monthly_folder 同域；
+    #  · 全部有 validate() 兜底，保留不会让新版本启动失败。
+    "capture_after_selection", "hotkey_health_interval",
+    "log_level", "log_when",
+    "cache_clear_clipboard", "cache_clear_sticker", "cache_clear_toast", "cache_cleanup_timing",
+    "history_limit", "file_sticker_max",
 )
 # 明确**不保留**（走 DEFAULTS，让新版本的观感与语义生效）：
 #   * 样式类：sticker_*、editor_*、rect_*、arrow_*、pen_*、marker_*、mosaic_*、hint_bar_*、
@@ -162,12 +180,17 @@ DEFAULTS = {
     # 用户 2026-10-11 明确要求：默认 4 秒，最小可设 2 秒。
     "hotkey_health_interval": 4,
     "theme": "system",
-    "bubble": True, "notification_backend": "win11toast",
+    "bubble": True, "notification_backend": "legacy",  # 默认走旧版应用通知（自绘、必定带缩略图）
     "notification_timeout": 2,
     "copy_notification": True,
     "picker_notification": True,
     "save_notification": True, "operation_notification": True,
     "sticker_notification": True, "open_notification_file": True, "sound": True,
+    # 取值见 core/sound.py 的 SOUND_KINDS：builtin1-16 / default / asterisk / hand / custom。
+    # 用户要求（2026-10-11）：**默认全部用内置音**（不依赖 Windows 声音方案），且六类默认音互不相同便于分辨。
+    "notification_sound": "builtin1", "notification_sound_file": "",
+    "sound_copy": "builtin10", "sound_save": "builtin8", "sound_sticker": "builtin4",
+    "sound_picker": "builtin9", "sound_operation": "builtin7",
     "save_dir": "",
     "save_as_dir": "",  # 「另存为」上次选择的目录（内部记忆值，不占设置页控件）
     "archive_by_month": True, "archive_by_day": False,
@@ -197,7 +220,13 @@ DEFAULTS = {
     "editor_image_shadow_strength": 25, "editor_image_shadow_color": "#000000",
     "capture_quick_sticker_enabled": True,
     "capture_quick_sticker_shortcut": "Space",
+    "capture_picker_format_shortcut": "X",  # 遮罩内循环切换「取色复制表达式」（hex→rgb→rgba→hsl→all）
     "capture_save_shortcut": "S",
+    # 两个编辑器（独立 / 原地）共用的「另存为」快捷键（2026-10-11 用户要求）。
+    "editor_save_as_shortcut": "A",   # 单键（2026-10-11）：与 S 同样的双语义处理 —— 微调语境下让位给 A=左移，否则=另存为
+    # 两个编辑器共用的编辑快捷键（2026-10-11 用户要求；设置 → 快捷键 → 编辑快捷键 可改）。
+    "editor_undo_shortcut": "Ctrl+Z", "editor_redo_shortcut": "Ctrl+Y",
+    "editor_zoom_reset_shortcut": "Ctrl+0",
     # 截图遮罩操作键：改为可配置快捷键；多选模式默认 Alt+M。
     "capture_custom_size_shortcut": "F",
     "capture_recapture_shortcut": "R",
@@ -212,6 +241,11 @@ DEFAULTS = {
     "text_sticker_width": 420, "text_sticker_lines": 40,
     "clipboard_color_detection": True,
     "color_sticker_value": True, "color_sticker_width": 260, "color_sticker_height": 150,
+    "color_sticker_labels": "follow",   # 颜色贴图标签：follow/hex/rgb/rgba/hsl/all/name/off
+    # 颜色贴图标签内容（2026-10-11 A/B）：follow=跟随「取色复制格式」；off=只显示色块。
+    # 取色复制的文本表达（2026-10-11 用户要求）：hex / rgb / rgba / hsl / all（多行全都给）；
+    # picker_accumulate 打开后连续取色会累积成多行文本，一次粘贴拿到一组配色。
+    "picker_copy_format": "hex", "picker_accumulate": False,
     "file_sticker_path": True, "file_sticker_max": 8, "file_sticker_width": 360,
     "sticker_panel_thumb": 96,
     "sticker_snap_enabled": True, "sticker_snap_threshold": 8,
@@ -486,7 +520,7 @@ def validate(data):
             raise ValueError("裁剪框颜色必须是六位十六进制颜色")
         elif key == "crop_width" and not 1 <= value <= 12:
             raise ValueError("裁剪框线宽必须在 1 到 12 像素之间")
-        elif key in ("capture_quick_sticker_shortcut", "capture_save_shortcut",
+        elif key in ("capture_quick_sticker_shortcut", "capture_save_shortcut", "capture_picker_format_shortcut",
                      "capture_custom_size_shortcut", "capture_recapture_shortcut",
                      "capture_window_edit_shortcut", "capture_multi_select_shortcut",
                      "capture_copy_shortcut",
@@ -534,6 +568,9 @@ def validate(data):
             raise ValueError("文字贴图最大宽度必须在 160 到 1600 像素之间")
         elif key == "text_sticker_lines" and not 1 <= value <= 500:
             raise ValueError("文字贴图最大行数必须在 1 到 500 之间")
+        elif key == "color_sticker_labels" and value not in (
+                "follow", "hex", "rgb", "rgba", "hsl", "all", "name", "off"):
+            raise ValueError("未知的颜色贴图标签模式")
         elif key == "color_sticker_width" and not 80 <= value <= 800:
             raise ValueError("颜色贴图宽度必须在 80 到 800 像素之间")
         elif key == "color_sticker_height" and not 60 <= value <= 600:
@@ -567,6 +604,13 @@ def validate(data):
             raise ValueError("未知吸附提示预设")
         elif key == "notification_backend" and value not in ("win11toast", "legacy"):
             raise ValueError("未知通知方式")
+        elif key == "picker_copy_format" and value not in COLOR_FORMATS:
+            raise ValueError("未知的取色复制格式")
+        elif key == "notification_sound" and value not in SOUND_KINDS:
+            raise ValueError("未知通知音效")
+        elif key.startswith("sound_") and value not in ("",) + SOUND_KINDS:
+            # 按类型覆盖：空串表示跟随全局。
+            raise ValueError("未知的通知音效覆盖值")
         elif key == "notification_timeout" and not 0 <= value <= 60:
             raise ValueError("通知时长必须在 0 到 60 秒之间")
         elif key == "theme" and value not in ("system", "dark", "light"):
@@ -796,7 +840,8 @@ def migrate_legacy_settings(data):
     # 也不会在用户取消勾选后再被追加回来。
     order = migrated.get("capture_hint_order")
     if isinstance(order, list):
-        new_items = ["inline_edit", "inline_menu", "inline_history"]
+        # 2026-10-11：新增 picker_format（用户反馈"X 那条提示不见了"⇒ 旧配置里没有它）。
+        new_items = ["inline_edit", "inline_menu", "inline_history", "picker_format"]
         legacy_default = [item_id for item_id in HINT_ITEM_IDS if item_id not in new_items]
         if order == legacy_default:
             migrated["capture_hint_order"] = legacy_default + new_items

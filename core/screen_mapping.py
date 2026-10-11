@@ -16,6 +16,9 @@ from PySide6.QtGui import QGuiApplication
 CACHE_SECONDS = 1.0
 # 坐标换算每帧都会发生，放到比 DEBUG 更细的级别，避免刷屏。
 TRACE = 5
+
+# 上一次枚举到的显示器签名：用于把"每拍都记"改成"只在变化时记"（规则 14）。
+_last_enum_signature = [None]
 _cache = {"stamp": 0.0, "mappings": []}
 
 
@@ -93,19 +96,13 @@ def pair_screens(logical, physical):
         item = pending.pop(found)
         used.add(index)
         mappings.append(ScreenMapping(item["name"], rect, item["geometry"], item["dpr"]))
-        logger.log(TRACE, "屏幕配对[设备名]: Qt %r 逻辑(%d,%d,%dx%d) ↔ %s 物理(%d,%d,%dx%d)",
-                     item["name"], item["geometry"].left(), item["geometry"].top(),
-                     item["geometry"].width(), item["geometry"].height(), name,
-                     rect.left(), rect.top(), rect.width(), rect.height())
+        # 逐对 TRACE 已删除（规则 14）：配对结果由上方"枚举到 N 块（有变化）"这条转变日志代表。
     rest = [(name, rect) for index, (name, rect) in enumerate(ordered) if index not in used]
     ordered_pending = sorted(pending, key=lambda item: (item["geometry"].left(),
                                                         item["geometry"].top()))
     for (name, rect), item in zip(rest, ordered_pending):
         mappings.append(ScreenMapping(item["name"], rect, item["geometry"], item["dpr"]))
-        logger.log(TRACE, "屏幕配对[排列顺序]: Qt %r 逻辑(%d,%d,%dx%d) ↔ %s 物理(%d,%d,%dx%d)",
-                     item["name"], item["geometry"].left(), item["geometry"].top(),
-                     item["geometry"].width(), item["geometry"].height(), name,
-                     rect.left(), rect.top(), rect.width(), rect.height())
+        # 同上：逐对 TRACE 删除，避免空闲轮询时刷屏（规则 14）。
     for item in ordered_pending[len(rest):]:
         # 没有物理矩形可用时按缩放比例推导，保证同一屏幕内比例仍然正确。
         mappings.append(ScreenMapping(item["name"], scaled_rect(item["geometry"], item["dpr"]),
@@ -167,8 +164,14 @@ def enum_physical_monitors():
     except (OSError, ValueError) as error:
         logging.getLogger("screensnap").warning("枚举显示器失败，吸附退化为按缩放比例换算: %s", error)
         return []
-    logging.getLogger("screensnap").debug("枚举到 %d 块物理显示器: %s", len(monitors),
-                                         [name for name, _ in monitors])
+    # 只在**显示器集合变化**时记（转变点），轮询每拍调用本函数不许刷日志（规则 14）。
+    signature = [(name, rect.x(), rect.y(), rect.width(), rect.height())
+                 for name, rect in monitors]
+    if signature != _last_enum_signature[0]:
+        _last_enum_signature[0] = signature
+        logging.getLogger("screensnap").debug(
+            "枚举到 %d 块物理显示器（有变化）: %s", len(monitors),
+            [name for name, _ in monitors])
     return monitors
 
 
@@ -225,11 +228,8 @@ def physical_rect_to_logical(rect):
         round(rect.width() * scale_x),
         round(rect.height() * scale_y),
     )
-    logging.getLogger("screensnap").log(
-        TRACE,
-        "物理矩形(%d,%d,%dx%d) → 逻辑矩形(%d,%d,%dx%d) 屏幕=%s",
-        rect.left(), rect.top(), rect.width(), rect.height(),
-        result.left(), result.top(), result.width(), result.height(), mapping.name)
+    # 这里**不**打逐次 TRACE：本函数是纯换算，贴图/悬停轮询每拍会调用几十次，
+    # 逐次记录会刷满日志（规则 14：禁止按调用/迭代记录）。需要时由调用方在边界记一次。
     return result
 
 

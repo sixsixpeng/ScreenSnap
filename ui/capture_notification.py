@@ -14,7 +14,7 @@ class CaptureNotification(QWidget):
     native_failed = Signal(object)
     native_activated = Signal()
 
-    def __init__(self, image, count=1, title="截图完成", detail="", target_path=None,
+    def __init__(self, image, count=1, title="截图完成", detail="", target_path=None, settings=None,
                  backend="win11toast", close_after=4):
         super().__init__(None, Qt.Tool | Qt.FramelessWindowHint | Qt.WindowStaysOnTopHint |
                          Qt.WindowDoesNotAcceptFocus)
@@ -25,6 +25,8 @@ class CaptureNotification(QWidget):
         self.close_after = close_after
         self.target_path = None
         self.backend = backend
+        # 通知缩略图/Toast 临时图的落盘位置由 settings 里的保存目录决定（2026-10-11）。
+        self.settings = settings or {}
         self._pressed = False
         self.toast_title = f"{title} · {count} 张"
         self.toast_body = detail or "图片预览"
@@ -86,7 +88,8 @@ class CaptureNotification(QWidget):
                          show_native_toast)
 
         try:
-            image_path = cache_toast_image(self._toast_image)
+            # settings 用于把 Toast 临时图放进 <保存目录>/cache（2026-10-11）。
+            image_path = cache_toast_image(self._toast_image, self.settings)
         except (OSError, ValueError):
             image_path = None
         if image_path and show_native_toast(

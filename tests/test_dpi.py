@@ -75,7 +75,10 @@ class DpiTests(CoreTests):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "settings.json"
             config = ConfigManager(path)
-            self.assertEqual(config.data["notification_backend"], "win11toast")
+            # 本用例测的是「win11toast 失败时不得把已保存的后端降级」，因此显式设定后端，
+            # 不依赖 DEFAULTS（2026-10-11：默认已改为 legacy，写死默认值会让用例失去本意）。
+            config.data["notification_backend"] = "win11toast"
+            config.save()
             app = NotificationApp()
             app.qt = self.app
             app.config = config
@@ -87,6 +90,7 @@ class DpiTests(CoreTests):
                 app.notify("Native Toast unavailable")
             native.assert_called_once()
             app.tray.showMessage.assert_called_once()
+            # 关键断言：失败后**仍是** win11toast（不得被降级成 legacy）
             self.assertEqual(config.data["notification_backend"], "win11toast")
             self.assertEqual(ConfigManager(path).data["notification_backend"], "win11toast")
 
@@ -102,8 +106,8 @@ class DpiTests(CoreTests):
             failure_callbacks[0](RuntimeError("temporary WinRT failure"))
             self.app.processEvents()
             self.assertEqual(app.tray.showMessage.call_count, 2)
-            self.assertEqual(config.data["notification_backend"], "win11toast")
-            self.assertEqual(ConfigManager(path).data["notification_backend"], "win11toast")
+            self.assertEqual(config.data["notification_backend"], "win11toast")  # 重载后仍不得降级
+            self.assertEqual(ConfigManager(path).data["notification_backend"], "win11toast")  # 重载后仍不得降级
 
             app.config = ConfigManager(path)
             with patch("ui.native_toast.show_native_toast", return_value=True) as native, \

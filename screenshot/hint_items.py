@@ -37,6 +37,10 @@ def hint_texts(settings, position, selection, inline=False,
     """
     save_key = str(settings.get("capture_save_shortcut", "S"))
     picker_key = str(settings.get("capture_picker_shortcut", "C") or "C")
+    picker_format_key = str(settings.get("capture_picker_format_shortcut", "X") or "X")
+    picker_format = {"hex": "十六进制", "rgb": "rgb", "rgba": "rgba",
+                     "hsl": "hsl", "all": "全部三行"}.get(
+        str(settings.get("picker_copy_format", "hex") or "hex").lower(), "十六进制")
     fixed_key = str(settings.get("capture_custom_size_shortcut", "F"))
     quick = (str(settings.get("capture_quick_sticker_shortcut", "Space"))
              if settings.get("capture_quick_sticker_enabled", False) else "")
@@ -65,10 +69,15 @@ def hint_texts(settings, position, selection, inline=False,
              (f"{save_key}快速保存" if right_capture else
               f"右键双击直存 | {save_key}快速保存")
              if selection else ""),
-        # 快速贴图快捷键在原地编辑里被禁用（trigger_quick_sticker 直接返回），不要提示。
-        "quick_sticker": f"按住 {quick} 后鼠标拖选 直接贴图" if quick and not inline else "",
+        # 快速贴图（2026-10-11 用户要求）：未选择时=按住空格后拖选直接贴图；
+        # 单选/原地编辑时已放开（不再被 inline 门控整体禁用）=直接对当前选区贴图。
+        # 唯一让位场景是文字输入，那时由 trigger_quick_sticker 内部忽略。
+        "quick_sticker": (f"{quick} 直接贴图当前选区" if (quick and inline and selection)
+                          else f"按住 {quick} 后鼠标拖选 直接贴图" if (quick and not inline) else ""),
         # 取色在未选择 / 原地编辑 / 多选下都可用，提示语相应地在三种界面都显示。
         "picker": f"{picker_key} 取色",
+        # 用户 2026-10-11：原来一条写「C 取色（hex）· X 切换表达式」太长 ⇒ 拆成两项。
+        "picker_format": f"{picker_format_key} 取色格式-{picker_format}",
         # F 固定尺寸：无选区可新建、原地编辑里改尺寸、收集/多选里改最后一块 —— 各状态都可用。
         "fixed_size": f"{fixed_key} 固定尺寸",
         "recapture": (f"{action_keys['recapture']} 清除选择"

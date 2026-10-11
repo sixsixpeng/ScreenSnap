@@ -824,59 +824,59 @@ class CanvasTests(CoreTests):
                     QPointF(20, 20), (tool, modifier))
                 canvas.close()
 
-    def test_space_is_canvas_pan_not_drawing_constraint(self):
+    def test_shift_wheel_scrolls_horizontally_and_alt_does_not(self):
+        """用户 2026-10-11 定案：Shift+滚轮=横向（Windows 通用约定），Alt 不再横向。
+
+        另外：横向没有可滚动范围时回落纵向，避免"按了没反应"。"""
+        from PIL import Image
+        from PySide6.QtCore import QPoint, QPointF, Qt
+        from PySide6.QtGui import QWheelEvent
+        from config.config_manager import DEFAULTS
+        from editor.annotation_canvas import AnnotationCanvas
+
+        def wheel(canvas, modifiers):
+            canvas.wheelEvent(QWheelEvent(
+                QPointF(100, 100), QPointF(100, 100), QPoint(0, 0), QPoint(0, -120),
+                Qt.NoButton, modifiers, Qt.NoScrollPhase, False))
+
+        canvas = AnnotationCanvas(Image.new("RGB", (2000, 1500), "white"), dict(DEFAULTS))
+        canvas.resize(500, 300)
+        canvas.show()
+        self.app.processEvents()
+        horizontal = canvas.horizontalScrollBar()
+        vertical = canvas.verticalScrollBar()
+        self.assertGreater(horizontal.maximum(), 0, "大图应有横向范围")
+        wheel(canvas, Qt.ShiftModifier)
+        self.assertGreater(horizontal.value(), 0, "Shift+滚轮必须横向滚动")
+        self.assertEqual(vertical.value(), 0, "Shift+滚轮不纵向滚动")
+        horizontal.setValue(0)
+        vertical.setValue(0)
+        wheel(canvas, Qt.AltModifier)
+        self.assertEqual(horizontal.value(), 0, "Alt 不再横向移动（用户要求）")
+        self.assertGreater(vertical.value(), 0, "Alt+滚轮应回落为纵向滚动")
+
+    def test_space_triggers_sticker_and_never_draws(self):
+        """契约变更（用户 2026-10-11 定案）：**Space 一律=贴图**，不再兼作平移；平移改用右键/中键。
+
+        旧用例断言 keyPress Space ⇒ ScrollHandDrag（平移），已随需求废弃。这里改为断言：
+        按住 Space 时**不进入绘制**（原意图保留），且在画布上按 Space 会发出贴图信号。"""
         from editor.annotation_canvas import AnnotationCanvas
         from PIL import Image
-        from PySide6.QtCore import QEvent, QPointF, Qt
-        from PySide6.QtGui import QKeyEvent, QMouseEvent
-        from PySide6.QtTest import QTest
-        from PySide6.QtWidgets import QGraphicsView
+        from PySide6.QtCore import QEvent, Qt
+        from PySide6.QtGui import QKeyEvent
         from config.config_manager import DEFAULTS
 
-        for index, tool in enumerate(("pen", "marker", "mosaic", "rect", "ellipse")):
+        for tool in ("pen", "marker", "mosaic", "rect", "ellipse"):
             canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"),
                                       dict(DEFAULTS))
-            canvas.resize(160, 120)
-            canvas.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            canvas.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
-            canvas.setSceneRect(0, 0, 600, 400)
-            canvas.show()
             canvas.set_tool(tool)
-            self.app.processEvents()
-            canvas.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space,
-                                           Qt.NoModifier))
+            fired = []
+            canvas.sticker_shortcut.connect(lambda: fired.append(1))
             with self.subTest(tool=tool):
-                self.assertEqual(canvas.dragMode(), QGraphicsView.ScrollHandDrag)
-                self.assertFalse(canvas._straight_gesture_active())
-                self.assertFalse(canvas._shape_constraint_active())
-            self.assertGreater(canvas.horizontalScrollBar().maximum(), 0)
-            self.assertGreater(canvas.verticalScrollBar().maximum(), 0)
-            start = canvas.mapFromScene(QPointF(85, 70))
-            finish = canvas.mapFromScene(QPointF(60, 50))
-            before = (canvas.horizontalScrollBar().value(),
-                      canvas.verticalScrollBar().value())
-            QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=start)
-            self.app.sendEvent(canvas.viewport(), QMouseEvent(
-                QEvent.MouseMove, QPointF(finish),
-                QPointF(canvas.viewport().mapToGlobal(finish)),
-                Qt.NoButton, Qt.LeftButton, Qt.NoModifier))
-            after_drag = (canvas.horizontalScrollBar().value(),
-                          canvas.verticalScrollBar().value())
-            self.assertTrue(canvas.space_pan_active)
-            if index == 0:
-                canvas.keyReleaseEvent(QKeyEvent(QEvent.KeyRelease, Qt.Key_Space,
-                                                 Qt.NoModifier))
-                self.assertEqual(canvas.dragMode(), QGraphicsView.ScrollHandDrag)
-            QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=finish)
-            if index != 0:
-                canvas.keyReleaseEvent(QKeyEvent(QEvent.KeyRelease, Qt.Key_Space,
-                                                 Qt.NoModifier))
-            with self.subTest(tool=tool):
-                self.assertNotEqual(after_drag, before)
-                self.assertEqual(canvas.annotations(), [])
-                self.assertFalse(canvas.space_pan_active)
-                self.assertEqual(canvas.dragMode(), QGraphicsView.NoDrag)
-            canvas.close()
+                canvas.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier))
+                self.assertTrue(fired, "画布上的 Space 必须发出贴图信号")
+                self.assertFalse(canvas._straight_gesture_active(), "Space 不得进入绘制")
+                self.assertFalse(canvas._shape_constraint_active(), "Space 不得改变形状约束")
 
     def test_pen_straight_line_when_modifier_pressed_after_start(self):
         """鼠标按下之后才按住 Ctrl，拖动途中也应切换为直线（修「前几次触发不了」的时序问题）。"""

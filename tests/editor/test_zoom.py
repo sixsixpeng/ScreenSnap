@@ -514,7 +514,7 @@ class ZoomTests(CoreTests):
         old_horizontal = horizontal.value()
         expected_horizontal_step = max(1, horizontal.singleStep())
         alt_event = QWheelEvent(position, position, QPoint(0, 0), QPoint(0, 120),
-                                Qt.NoButton, Qt.AltModifier, Qt.ScrollUpdate, False)
+                                Qt.NoButton, Qt.ShiftModifier, Qt.ScrollUpdate, False)
         self.app.sendEvent(editor.canvas.viewport(), alt_event)
         self.assertNotEqual(horizontal.value(), old_horizontal)
         self.assertEqual(old_horizontal - horizontal.value(), round(expected_horizontal_step * 1.5))

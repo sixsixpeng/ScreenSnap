@@ -1033,9 +1033,10 @@ class CaptureTests(CoreTests):
         self.assertTrue(pen_hints["inline_menu"])
         self.assertTrue(select_hints["inline_history"])
         self.assertTrue(pen_hints["inline_history"])
-        # 快速贴图快捷键在原地编辑里被禁用，不提示；选区阶段仍提示
-        self.assertEqual(select_hints["quick_sticker"], "")
-        self.assertEqual(pen_hints["quick_sticker"], "")
+        # 2026-10-11 契约变更（用户要求）：单选/原地编辑**也支持** Space 直接贴图当前选区，
+        # 因此这一态改为显示「Space 直接贴图当前选区」；未选择阶段仍是「按住 Space 后拖选」。
+        self.assertEqual(select_hints["quick_sticker"], "Space 直接贴图当前选区")
+        self.assertEqual(pen_hints["quick_sticker"], "Space 直接贴图当前选区")
         self.assertIn("贴图", hint_texts(base, (10, 20), (80, 60))["quick_sticker"])
 
     def test_info_bar_flips_with_magnifier_and_never_covers_cursor(self):

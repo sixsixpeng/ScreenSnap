@@ -58,19 +58,48 @@ class ClipboardSource:
 
 
 def parse_color(text):
-    """识别 #RGB、#RRGGBB 与裸六位十六进制颜色值，其他文本返回 None。"""
-    value = text.strip()
-    if value.startswith("#"):
-        body = value[1:]
-        if LONG_HEX.fullmatch(body):
-            return "#" + body.lower()
+    """识别常见颜色写法，其他文本返回 None。
+
+    支持：#RGB、#RRGGBB、#RRGGBBAA（忽略 alpha）、裸六位十六进制、0xRRGGBB、
+    rgb(r,g,b) / rgba(r,g,b,a)、以及裸的 R,G,B（2026-10-11 扩展：用户从别的工具复制颜色时
+    常常不是纯十六进制，识别不了就会退化成"绿底文字卡片"）。
+    """
+    value = str(text or "").strip().strip('"\'')
+    if not value:
+        return None
+    lowered = value.lower().replace(" ", "")
+    body = None
+    if lowered.startswith("#"):
+        body = lowered[1:]
+    elif lowered.startswith("0x"):
+        body = lowered[2:]
+    elif LONG_HEX.fullmatch(lowered):
+        return "#" + lowered
+    if body is not None:
+        if len(body) == 8 and LONG_HEX.fullmatch(body[:6]) and re.fullmatch(r"[0-9a-f]{2}", body[6:]):
+            return "#" + body[:6]  # #RRGGBBAA：忽略 alpha（QColor 也这么处理）
+        if len(body) == 6 and LONG_HEX.fullmatch(body):
+            return "#" + body
         if SHORT_HEX.fullmatch(body):
             return "#" + "".join(char * 2 for char in body).lower()
         return None
-    if LONG_HEX.fullmatch(value):
-        return "#" + value.lower()
-    return None
-
+    numbers = re.fullmatch(r"rgba?\(([^)]*)\)", lowered)
+    if numbers is None:
+        numbers = re.fullmatch(r"(\d{1,3}),(\d{1,3}),(\d{1,3})", lowered)
+        if numbers is not None:
+            channels = numbers.groups()
+        else:
+            return None
+    else:
+        parts = [part for part in numbers.group(1).split(",") if part]
+        if len(parts) < 3:
+            return None
+        channels = parts[:3]
+    try:
+        rgb = [max(0, min(255, int(float(channel)))) for channel in channels]
+    except (TypeError, ValueError):
+        return None
+    return "#%02x%02x%02x" % tuple(rgb)
 
 def card_font(settings, key, fallback_size):
     """文字类贴图共用字体设置，未指定字体时使用系统默认中文字体。"""
@@ -155,27 +184,53 @@ def render_html_card(markup, text, settings):
 
 
 def render_color_card(color, settings):
-    """整块填充颜色，可选在左下角标注色值便于直接读取。"""
+    """整块填充颜色，并按设置标注 1-4 行色值/色名（2026-10-11 方案 A+B）。
+
+    标签内容由 `color_sticker_labels` 决定：follow（跟随取色复制格式）/ hex / rgb / rgba / hsl /
+    all（三行 + 色名）/ name（色值 + 色名）/ off（只显示色块）。文字颜色按背景亮度自动取黑或白，
+    避免浅色贴图上白字看不见；`all` 模式还会在卡片底部画一条 4 段色阶条。
+    """
+    from core.color_format import label_lines
+
     width = int(settings.get("color_sticker_width", 260))
     height = int(settings.get("color_sticker_height", 150))
     image = QImage(width, height, QImage.Format_RGB32)
     image.fill(QColor(color))
-    if not settings.get("color_sticker_value", True):
-        return image
-    font = card_font(settings, "text_sticker_font", 14)
-    metrics = QFontMetrics(font)
-    label = color.upper()
-    text_width = metrics.horizontalAdvance(label)
-    box_height = metrics.height() + 10
-    box_top = max(0, height - box_height - 10)
+    mode = str(settings.get("color_sticker_labels", "follow") or "follow").lower()
+    if mode == "follow":
+        mode = str(settings.get("picker_copy_format", "hex") or "hex").lower()
+    labels = []
+    if mode != "off" and settings.get("color_sticker_value", True):
+        base = "hex" if mode == "name" else mode
+        labels = label_lines(color, base, with_name=mode in ("all", "name"))
     painter = QPainter(image)
     painter.setRenderHint(QPainter.TextAntialiasing)
-    painter.setFont(font)
-    painter.setPen(Qt.NoPen)
-    painter.setBrush(QColor(0, 0, 0, 150))
-    painter.drawRoundedRect(10, box_top, min(width - 20, text_width + 16), box_height, 5, 5)
-    painter.setPen(QColor("white"))
-    painter.drawText(18, box_top + metrics.height() + 2, label)
+    if labels:
+        font = card_font(settings, "text_sticker_font", 14)
+        metrics = QFontMetrics(font)
+        painter.setFont(font)
+        line_height = metrics.height()
+        pad = 8
+        text_width = max(metrics.horizontalAdvance(text) for text in labels)
+        box_width = min(width - 20, text_width + pad * 2)
+        box_height = line_height * len(labels) + pad * 2
+        box_top = max(0, height - box_height - 10)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 0, 0, 150))
+        painter.drawRoundedRect(10, box_top, box_width, box_height, 5, 5)
+        # 自动对比色：浅色背景用黑字、深色背景用白字（原来的固定白字在浅色贴图上看不见）。
+        rgb = QColor(color)
+        luminance = 0.299 * rgb.red() + 0.587 * rgb.green() + 0.114 * rgb.blue()
+        painter.setPen(QColor("black") if luminance > 150 else QColor("white"))
+        for index, text in enumerate(labels):
+            painter.drawText(10 + pad, box_top + pad + line_height * index + metrics.ascent(), text)
+    if mode == "all":
+        # 色阶条：4 段同色系明度，贴在卡片底部（只在“全部”模式下画）。
+        base = QColor(color)
+        painter.setPen(Qt.NoPen)
+        for index, factor in enumerate((0.25, 0.5, 0.75, 1.0)):
+            painter.setBrush(QColor.fromHsv(max(0, base.hue()), base.saturation(), int(255 * factor)))
+            painter.drawRect(int(width * index / 4), height - 10, int(width / 4) + 1, 10)
     painter.end()
     return image
 
@@ -267,20 +322,21 @@ def read_clipboard(settings, clipboard=None):
             logger.debug("剪贴板识别为文件: %d 个 %s", len(paths), paths[:3])
             return ClipboardSource("files", render_file_card(paths, settings), paths=paths)
         logger.debug("剪贴板含 URL 但没有本地存在的文件，继续按文本识别")
+    text = plain_text(mime)
+    # 颜色**优先于 HTML**（2026-10-11 修复）：从浏览器/很多工具复制颜色时剪贴板同时带 HTML，
+    # 原先先判 HTML ⇒ 颜色分支永远到不了，颜色贴图退化成"默认绿底文字卡片"。
+    if text and settings.get("clipboard_color_detection", True):
+        color = parse_color(text)
+        if color:
+            logger.debug("剪贴板识别为颜色（优先于 HTML）: %s", color)
+            return ClipboardSource("color", render_color_card(color, settings), text=color)
     if mime.hasHtml():
         html = mime.html()
-        text = plain_text(mime)
         if html.strip() and text:
             return ClipboardSource("html", render_html_card(html, text, settings),
                                    text=text, html=html)
-    text = plain_text(mime)
     if not text:
         logger.debug("剪贴板没有可用文本: board.text()=%r 格式=%s", board.text(), mime.formats())
         return None
-    if settings.get("clipboard_color_detection", True):
-        color = parse_color(text)
-        if color:
-            logger.debug("剪贴板识别为颜色: %s", color)
-            return ClipboardSource("color", render_color_card(color, settings), text=color)
     logger.debug("剪贴板识别为文字: 长度=%d 开头=%r", len(text), text[:40])
     return ClipboardSource("text", render_text_card(text, settings), text=text)

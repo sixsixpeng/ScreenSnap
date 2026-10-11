@@ -1,6 +1,26 @@
 """导出时对编辑结果应用圆角、边框和阴影。"""
 
+import logging
+import os
+
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
+
+
+def clipboard_available():
+    """探测剪贴板能否打开：被别的程序占着时 Qt 的 setMimeData 会内部重试并刷几百行
+
+    `qt.qpa.mime: Retrying to obtain clipboard` / `OleSetClipboard: Failed … OpenClipboard`
+    （2026-10-11 真机实测：一次保存刷了 7 秒日志）。非 Windows 恒为可用。
+    """
+    if os.name != "nt":
+        return True
+    import ctypes
+
+    user32 = ctypes.windll.user32
+    if user32.OpenClipboard(None):
+        user32.CloseClipboard()
+        return True
+    return False
 
 
 def copy_saved_to_clipboard(path, image, settings, force_image=False):
@@ -15,6 +35,11 @@ def copy_saved_to_clipboard(path, image, settings, force_image=False):
     from PySide6.QtCore import QMimeData
     from PySide6.QtGui import QGuiApplication
 
+    if not clipboard_available():
+        # 只在占用时记一条 WARNING，不做重试：重试会把日志刷满（规则 14），文件本身已保存成功。
+        logging.getLogger("screensnap").warning(
+            "剪贴板被其他程序占用，本次跳过复制（文件已保存）: %s", path)
+        return False
     payload = QMimeData()
     if copy_path:
         payload.setText(str(path))

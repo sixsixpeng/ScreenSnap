@@ -16,6 +16,83 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class AppTests(CoreTests):
+    def test_every_notification_type_beeps_when_sound_enabled(self):
+        """回归（2026-10-11 用户反馈「仅复制没声音」）：带图通知与文字通知都必须发声，
+
+        且只在「音效」开关打开时发声。根因：带图通知走 show_image_notice()，而它原先从不 beep，
+        于是从 notify() 改过来的 仅复制/取色/已创建贴图/贴出剪贴板 全部静音。
+        """
+        from unittest.mock import Mock, patch
+        from PySide6.QtGui import QImage
+        from config.config_manager import DEFAULTS
+        from main import Application
+        from core.sound import BUILTIN_FILES
+
+        def make(sound=True):
+            app = Application.__new__(Application)
+            data = dict(DEFAULTS)
+            data["sound"] = sound
+            app.config = type("Cfg", (), {"data": data})()
+            app.logger = Mock()
+            # 注意：**不要**打桩 app.notify —— 文字通知那条就是要走真实的 notify() 才谈得上有没有声音。
+            app.tray = Mock()
+            app.capture_notice = None
+            return app
+
+        image = QImage(8, 8, QImage.Format_ARGB32)
+        image.fill(Qt.red)
+        for name, trigger in (("仅复制", lambda a: a.notify_capture_copied(image)),
+                              ("保存", lambda a: a.saved("capture.png", image)),
+                              ("取色", lambda a: a.notify_color_picked("#abcdef")),
+                              ("文字", lambda a: a.notify("hello"))):
+            with self.subTest(kind=name):
+                with patch("app.notification_flow.CaptureNotification"), \
+                        patch("app.notification_flow.play_sound") as beep:
+                    app = make(True)
+                    trigger(app)
+                self.assertEqual(beep.call_count, 1, name + " 通知在开启音效时应发声一次")
+                self.assertIn(beep.call_args.args[0], BUILTIN_FILES,
+                              name + " 默认应播内置提示音（2026-10-11 起默认全部用内置音）")
+                with patch("app.notification_flow.CaptureNotification"), \
+                        patch("app.notification_flow.play_sound") as beep:
+                    app = make(False)
+                    trigger(app)
+    def test_notification_sound_resolves_per_category(self):
+        """A+B+C（2026-10-11）：按类型覆盖 sound_<category> → 全局 notification_sound → default。"""
+        from unittest.mock import Mock, patch
+        from PySide6.QtGui import QImage
+        from config.config_manager import DEFAULTS
+        from main import Application
+
+        image = QImage(8, 8, QImage.Format_ARGB32)
+        image.fill(Qt.red)
+
+        def make(**over):
+            app = Application.__new__(Application)
+            data = dict(DEFAULTS)
+            data.update(over)
+            app.config = type("Cfg", (), {"data": data})()
+            app.logger = Mock()
+            app.tray = Mock()
+            app.capture_notice = None
+            return app
+        cases = (("按类型覆盖", dict(sound_copy="hand"), "hand", ()),
+                 ("空值跟随全局", dict(notification_sound="asterisk", sound_copy=""), "asterisk", ()),
+                 ("出厂默认（仅复制分类）", dict(), DEFAULTS["sound_copy"], ()),
+                 ("自定义但文件缺失回落默认", dict(notification_sound="custom", sound_copy="",
+                                                notification_sound_file="C:/nope.wav"), "default", ()),
+                 ("音效总开关关闭", dict(sound=False), None, ()))
+        for name, over, expected, _unused in cases:
+            with self.subTest(case=name):
+                app = make(**over)
+                with patch("app.notification_flow.CaptureNotification"), \
+                        patch("app.notification_flow.play_sound") as play:
+                    app.notify_capture_copied(image)
+                if expected is None:
+                    play.assert_not_called()
+                else:
+                    play.assert_called_once()
+                    self.assertEqual(play.call_args.args[0], expected, name)
     def test_notification_identity_registration_is_idempotent(self):
         """回归（2026-10-11 用户反馈「Windows 通知设置里没有独立的 ScreenSnap 入口」）：
         Windows 只在系统里存在「带 ScreenSnap AUMID 的开始菜单快捷方式」时，才允许原生通知使用
@@ -115,14 +192,19 @@ class AppTests(CoreTests):
             preview.assert_not_called()
             app.config.data["bubble"] = True
 
-            # 取色通知有独立开关（设置 > 通知 > 取色通知）
+            # 取色通知有独立开关（设置 > 通知 > 取色通知）；2026-10-11 起取色通知也带色块缩略图，
+            # 因此断言点在 show_image_notice（预览）而不是 tray.showMessage，开关仍必须生效。
             app.config.data["picker_notification"] = False
             app.tray.reset_mock()
+            preview.reset_mock()
             app.notify_color_picked("#abcdef")
             app.tray.showMessage.assert_not_called()
+            preview.assert_not_called()
             app.config.data["picker_notification"] = True
             app.notify_color_picked("#abcdef")
-            self.assertIn("#abcdef", app.tray.showMessage.call_args.args[1])
+            preview.assert_called_once()
+            _title = preview.call_args.kwargs.get("title") or (preview.call_args.args[1] if len(preview.call_args.args) > 1 else "")
+            self.assertIn("#abcdef", _title)
             app.tray.reset_mock()
             app.config.data["operation_notification"] = False
             app.notify("status")
@@ -157,8 +239,13 @@ class AppTests(CoreTests):
                     ("capture.png", None))
             app.config.data["notification_backend"] = "legacy"
             app.config.data["sticker_notification"] = True
-            app.add_sticker(object())
-            self.assertIn("已创建贴图", app.tray.showMessage.call_args.args[1])
+            # 2026-10-11：贴图通知也带缩略图（除「复制文字」外所有通知带图）⇒ 断言点在预览窗口。
+            preview.reset_mock()
+            app.add_sticker(Image.new("RGB", (12, 8), "red"))
+            preview.assert_called_once()
+            _title = preview.call_args.kwargs.get("title") or (preview.call_args.args[1] if len(preview.call_args.args) > 1 else "")
+            self.assertIn("已创建贴图", _title)
+            app.tray.showMessage.assert_not_called()
             app.tray.reset_mock()
             app.dispatch("paste")
             self.assertIn("已贴上次截图", app.tray.showMessage.call_args.args[1])
@@ -195,7 +282,11 @@ class AppTests(CoreTests):
             app._notification_fallback = None
             with patch("app.notification_flow.subprocess.Popen") as launch:
                 self.assertTrue(app.open_notification_target())
-            launch.assert_called_once_with(["explorer.exe", f"/select,{target.resolve()}"])
+            # 2026-10-11：改为经 _spawn_detached 启动（额外带 DEVNULL 标准流参数）⇒ 只断言命令本身，
+            # 不再锁死关键字参数（C8：契约变了就同步断言，别让断言比实现更脆）。
+            launch.assert_called_once()
+            self.assertEqual(launch.call_args.args[0],
+                             ["explorer.exe", f"/select,{target.resolve()}"])
 
             app.config.data["open_notification_file"] = False
             with patch("app.notification_flow.subprocess.Popen") as launch:

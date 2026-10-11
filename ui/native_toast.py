@@ -10,7 +10,7 @@ from PySide6.QtGui import QImage
 from PIL import Image as PillowImage
 
 from core.constants import APP_USER_MODEL_ID
-from core.path_utils import data_dir
+from core.path_utils import cache_dir, data_dir
 from core.screen_capture import to_qimage
 
 
@@ -23,13 +23,17 @@ def native_toast_duration(timeout_seconds):
     return "short" if 0 < timeout_seconds <= 7 else "long"
 
 
-def cache_toast_image(image):
-    """Write a toast image to a durable local path understood by WinRT."""
+def cache_toast_image(image, settings=None):
+    """Write a toast image to a durable local path understood by WinRT.
+
+    2026-10-11：缓存位置跟随统一保存目录（<保存目录>/cache/toast_cache），不再落在 %APPDATA%；
+    settings 省略时退回旧位置，保证独立调用仍可用。
+    """
     if isinstance(image, PillowImage.Image):
         image = to_qimage(image)
     if not isinstance(image, QImage) or image.isNull():
         raise ValueError("native toast image is empty")
-    folder = data_dir() / "toast_cache"
+    folder = cache_dir("toast_cache", settings)
     folder.mkdir(parents=True, exist_ok=True)
     path = folder / f"toast_{uuid4().hex}.png"
     if not image.save(str(path), "PNG"):
