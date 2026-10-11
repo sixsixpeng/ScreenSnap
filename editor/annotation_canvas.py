@@ -2256,8 +2256,9 @@ class AnnotationCanvas(QGraphicsView):
                 self.setCursor(self.rotation_cursor)
                 QToolTip.showText(
                     self.viewport().mapToGlobal(position),
-                    "拖动旋转按钮旋转标注；按住方向键或 WASD 也可旋转"
-                    "（↑/→ 顺时针，↓/← 逆时针，每次 1°）",
+                    # 用户 2026-10-11：手柄提示太长 ⇒ 按语义换行（纯文本 \n，规则 9）。
+                    "拖动旋转按钮旋转标注\n"
+                    "按住方向键或 WASD 也可旋转（↑/→ 顺时针，↓/← 逆时针，每次 1°）",
                     self)
                 return
             handle = self.resize_handle_at(self.item_resize_handles(item), point)
@@ -2269,21 +2270,24 @@ class AnnotationCanvas(QGraphicsView):
                         self.setCursor(cursor)
                         QToolTip.showText(
                             self.viewport().mapToGlobal(position),
-                            "拖动左右边中点调整文本框宽度（文字自动换行）；四角仍是缩放；"
+                            "拖动左右边中点调整文本框宽度（文字自动换行）\n"
+                            "四角仍是缩放\n"
                             "按住方向键或 WASD 可等比缩放微调",
                             self)
                     else:
                         self.setCursor(cursor)
                         QToolTip.showText(
                             self.viewport().mapToGlobal(position),
-                            "拖动上下边中点调整文本框高度（超出部分裁剪）；四角仍是缩放；"
+                            "拖动上下边中点调整文本框高度（超出部分裁剪）\n"
+                            "四角仍是缩放\n"
                             "按住方向键或 WASD 可等比缩放微调",
                             self)
                 else:
                     self.setCursor(cursor)
                     QToolTip.showText(
                         self.viewport().mapToGlobal(position),
-                        "拖动控制点等比缩放；按住 Ctrl / Alt / Shift / Space 任意键可自由拉伸变形；"
+                        "拖动控制点等比缩放\n"
+                        "按住 Ctrl / Alt / Shift / Space 任意键可自由拉伸变形\n"
                         "按住方向键或 WASD 可等比缩放微调（以标注中心为基准）",
                         self)
                 return
