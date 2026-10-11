@@ -949,7 +949,6 @@ class CaptureTests(CoreTests):
         initial = hint_texts(settings, (0, 0), None)
         # 2026-10-11 用户要求：原来三合一那条太长 ⇒ 拆成三个独立提示项（各自可开关/排序）。
         self.assertIn("左拖编辑-右拖多选", initial["select"])
-        self.assertIn("右键拖选-多选", initial["right_select"])
         self.assertIn("点击选择UIA识别", initial["uia_quick_edit"])
         self.assertEqual(initial["save"], "")
         self.assertEqual(initial["edit"], "")

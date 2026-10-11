@@ -2272,9 +2272,9 @@ class ConfigTests(CoreTests):
         # 默认全部开启；有选区且未进入编辑时，不适用的项（框选/固定尺寸/工具栏两项/
         # 原地编辑三项）为空。
         items = [item for item in mask.capture_hint_items() if item]
-        # 2026-10-11：新增 right_select / uia_quick_edit 两项，它们只在"未选择"时才有文案，
+        # 2026-10-11：新增的 uia_quick_edit（以及并入 select 的右拖说明）只在"未选择"时才有文案，
         # 因此"有选区"这一状态下不适用的项由 6 个变成 8 个。
-        self.assertEqual(len(items), len(HINT_ITEM_IDS) - 8)
+        self.assertEqual(len(items), len(HINT_ITEM_IDS) - 7)
         self.assertIn("F2 清除选择", items)
         self.assertIn("Alt+M 多选模式", items)
         self.assertIn("tab+shift切换层级", items)

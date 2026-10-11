@@ -55,7 +55,6 @@ def hint_texts(settings, position, selection, inline=False,
         # 用户 2026-10-11：原来一条写「左拖松开进入快速编辑 · 右键拖选多选 · UIA点击快编」太长，
         # 且「UIA点击快编」是缩写不好懂 ⇒ 拆成三项（各自可在设置里开关/排序）。
         "select": "左拖编辑-右拖多选" if selection is None else "",
-        "right_select": "右键拖选-多选" if selection is None else "",
         "uia_quick_edit": "点击选择UIA识别" if selection is None else "",
         "element_cycle": ("tab+shift切换层级"
                   if settings.get("window_detection", True) and not inline

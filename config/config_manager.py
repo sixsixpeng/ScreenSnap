@@ -29,7 +29,6 @@ HINT_ITEMS = (
     ("select", "拖拽框选"),
     ("uia_quick_edit", "点击选择UIA识别"),
     ("element_cycle", "Tab 切换窗口/控件层级"),
-    ("right_select", "右键拖选-多选"),
     ("edit", "双击/Enter 提交（编辑里双击空白保存）"),
     ("nudge", "WASD/方向键微调"),
     ("cancel", "Esc 取消"),
@@ -846,6 +845,8 @@ def migrate_legacy_settings(data):
         # 2026-10-11（用户明确要求：该加配置就加、新提示项**默认全部勾选**）：旧配置保存的是上一版的
         # 顺序表，新加的提示项不在里面 ⇒ 按既有约定「不在 capture_hint_order 里的不显示」，它在提示条
         # 和设置页里都不会出现。处理：**补齐所有缺失项**（追加到末尾，保留用户已有顺序与勾选），幂等。
+        # 同时丢掉已不再注册的提示项（例如本次并入「左拖编辑-右拖多选」的 right_select）。
+        order = [item_id for item_id in order if item_id in HINT_ITEM_IDS]
         missing = [item_id for item_id in HINT_ITEM_IDS if item_id not in order]
         if missing:
             migrated["capture_hint_order"] = list(order) + missing
