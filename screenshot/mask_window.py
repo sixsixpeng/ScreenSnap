@@ -2725,53 +2725,6 @@ class MaskWindow(QWidget):
                 self.session.element_selected,
                 (self.hover_rect.getRect() if self.hover_rect is not None else None),
                 monitor_area.getRect())
-        # 2026-10-11（用户反馈：①选区与工具条重合时徽标"消失"✗ —— 其实是被子控件盖住 ✓；
-        # ②鼠标靠近时徽标应换位 ✓）：把提示条与工具条一起当作要避开的矩形 ✓（同一逻辑空间 ✓ 规则 22），
-        # 并把光标位置传进去 ⇒ 候选位置必须与光标保持间距 ✓，实在放不下就挑"离光标最远"的角 ✓。
-        obstacles = QRect(self.info_bar.bar) if (self.info_bar is not None
-                                                and not self.info_bar.bar.isEmpty()) else QRect()
-        # 2026-10-11（用户实测："左键划选 ⇒ 出现编辑工具栏 ⇒ 尺寸条被它盖住/消失" ✗）：
-        # 遮罩自己的 `self.toolbar` 只是一部分 ✗ —— **原地编辑器的工具栏**才是划选后立刻出现在
-        # 选区附近、盖住徽标的那个子控件 ✓。这里把它（以及遮罩自身的工具条）都换算到遮罩局部
-        # 坐标后并入避让矩形 ✓（用 mapTo(self, 0,0) 取偏移 ⇒ 同一逻辑空间 ✓ 规则 22）。
-        # 2026-10-11（用户实测："徽标计算出来的位置和工具栏一样 ⇒ 一直被工具栏遮挡" ✗）：
-        # 之前只猜了两三个属性名（self.toolbar / inline_editor.toolbar）✗，真正的工具条并不在其中 ✓。
-        # 改为**不猜**：把本遮罩的全部**可见子控件**矩形都换算到遮罩局部坐标后并入避让 ✓；
-        # 再把避让区整体**外扩 8px 安全间距** ✓ —— 徽标因此不会贴着工具栏边缘、也不会与它重合 ✓。
-        from PySide6.QtWidgets import QWidget as _QWidget
-
-        # 2026-10-11（用户指出："就是**编辑菜单栏**啊"）：原地编辑器的菜单/工具栏是**独立顶层窗口**
-        # （不是遮罩的子控件 ✗）⇒ 上面的 findChildren 扫不到它 ✓ ⇒ 这里显式补上它（以及编辑器本体 ✓）。
-        _editor = getattr(self.session, "inline_editor", None)
-        _extra_widgets = []
-        if _editor is not None:
-            _extra_widgets.append(getattr(_editor, "toolbar", None))
-        for _widget in list(self.findChildren(_QWidget)) + _extra_widgets:
-            if _widget is None:
-                continue
-            try:
-                if not _widget.isVisible() or _widget.geometry().isEmpty():
-                    continue
-                _offset = _widget.mapTo(self, QPoint(0, 0))   # 子控件 → 本遮罩局部坐标 ✓（同一空间 ✓ 规则 22）
-                _rect = QRect(_offset, _widget.size())
-            except (RuntimeError, TypeError):
-                continue                                     # 控件已析构 ⇒ 跳过（D20 教训 ✓）
-            if _rect.isEmpty():
-                continue
-            # 2026-10-11（用户反馈：左上角选区仍被推到右上角 ✗）：遍历子控件会把**占满整屏的浮层**
-            # （例如覆盖全窗口的 InfoBar/画布容器 ✗）也算成"要避开的工具栏" ⇒ 所有候选都被判为压住它 ✗
-            # ⇒ 只能落到兜底位 ✓。这里过滤掉"面积超过屏幕 40%"的巨型控件（真正的菜单栏/工具条都很小 ✓），
-            # 只保留**局部小控件**作为避让目标 ✓。
-            _mask_area = max(1, self.rect().width() * self.rect().height())
-            if _rect.width() * _rect.height() > _mask_area * 0.4:
-                continue
-            obstacles = obstacles.united(_rect.intersected(self.rect()))
-        if not obstacles.isEmpty():
-            obstacles = obstacles.adjusted(-8, -8, 8, 8).intersected(self.rect())   # 安全间距 ✓
-            if element_rect is not None and obstacles.contains(element_rect):
-                obstacles = obstacles.adjusted(8, 8, -8, -8)   # 极端：整块屏都被占 ⇒ 别把可用区全消掉 ✓
-        # 2026-10-11（用户实测："尺寸条更像被画布遮挡了"——选区内未压暗的原图/悬停块是在这之后画的 ✗）：
-        # 徽标必须画在**整个绘制流程的最后** ⇒ 永远在最上层 ✓。这里只定义绘制闭包，真正调用放到末尾 ✓。
         # 2026-10-11（用户确认徽标"被画布遮挡" ✗）：不再用画家绘制 ✗（会被子控件画布盖住 ✓），
         # 改由**子控件 QLabel** 呈现（见 _sync_size_badge ✓ 与画布同级 + raise_() ⇒ 始终最上 ✓）。
         def draw_size_badge():
@@ -2796,15 +2749,6 @@ class MaskWindow(QWidget):
                 painter.setBrush(Qt.NoBrush)
         self._draw_ruler(painter)
         self.info_bar_rect = draw_size_badge()      # 最后画 ⇒ 不被选区/悬停/刻度尺盖住 ✓
-        # 2026-10-11 留痕（用户反馈"徽标还是跑到右上角"）：把最终落点与避让区记下来 ⇒ 一次复现即可定位 ✓
-        # 仅在"有元素/选区但徽标明显不在其附近"时记一条 ✓（避免刷屏 ✓ 规则 14）。
-        if element_rect is not None and not obstacles.isEmpty():
-            _far = (abs(self.info_bar_rect.center().x() - element_rect.center().x()) > 260
-                    or abs(self.info_bar_rect.center().y() - element_rect.center().y()) > 200)
-            if _far:
-                logging.getLogger("screensnap").debug(
-                    "尺寸徽标落点偏远: 徽标=%s 元素=%s 避让区=%s",
-                    self.info_bar_rect.getRect(), element_rect.getRect(), obstacles.getRect())
         ended = time.perf_counter()
         self._record_paint_cost(ended - started, ended)
 
