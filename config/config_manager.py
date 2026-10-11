@@ -274,7 +274,8 @@ DEFAULTS = {
     "window_hover_border_color": "#168cff",
     "window_hover_text_color": "#f4fffc",
     "window_hover_badge_color": "#102a31",
-    "window_hover_border_width": 2, "window_hover_font_size": 12,
+    # 2026-10-11 用户要求：候选框边线宽度默认 1（原 2）、尺寸徽标默认字号 8（原 12）
+    "window_hover_border_width": 1, "window_hover_font_size": 8,
     "window_hover_opacity": 35, "window_hover_fill_mode": "reveal",
     "anchor_style": "border", "selection_border_color": "#168cff",
     "cursor": False, "history_limit": 10,

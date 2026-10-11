@@ -142,7 +142,9 @@ class UiaTests(CoreTests):
 
         self.assertEqual(painter.drawRoundedRect.call_count, 2)
         badge = painter.drawRoundedRect.call_args_list[1].args[0]
-        self.assertLess(badge.bottom(), element_rect.top())
+        # 2026-10-11 契约变更（用户指定）：徽标固定画在**元素内部、顶部居中** ✓
+        # （旧契约是"贴在元素上方"，已废弃 ✗；位置不再做任何避让重算 ✓）
+        self.assertLess(abs(badge.center().x() - element_rect.center().x()), 3, "水平应居中")
         label_calls = [call.args[-1] for call in painter.drawText.call_args_list]
         self.assertIn("160 x 60 px", label_calls)
         self.assertEqual(painter.setFont.call_args.args[0].pixelSize(), 18)
@@ -175,7 +177,8 @@ class UiaTests(CoreTests):
             self.assertEqual(config.data["window_hover_text_color"], "#e4f0ff")
             page.reset_page()
             self.assertEqual(page.hover_style_combo.currentData(), "custom")
-            self.assertEqual(config.data["window_hover_border_width"], 2)
+            # 2026-10-11 契约同步（C8）：候选框边线宽度默认值由 2 改为 1（用户要求）
+            self.assertEqual(config.data["window_hover_border_width"], 1)
 
     def test_capture_hovered_component_size_hint_uses_candidate_rect(self):
         from config.config_manager import DEFAULTS
@@ -802,6 +805,97 @@ class UiaTests(CoreTests):
                 self.assertEqual(len(edited), 1)
                 self.assertEqual(edited[0][0][0][0].size, (50, 40))
                 self.assertFalse(mask.isVisible())
+            finally:
+                mask.close()
+
+    def test_manual_selection_also_reports_size_hint(self):
+        """2026-10-11 用户反馈：左键点元素会显示尺寸徽标，而**手动画的选区**不显示 ✗（不对称）。
+
+        契约：手动画出的选区同样要给出尺寸（截图工具的常规预期 ✓），位置沿用同一套三级降级 ✓。
+        """
+        from PySide6.QtCore import QRect
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 160}
+        settings = dict(DEFAULTS, inline_edit=False, magnifier=False, window_detection=False)
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (200, 160), "white"), bounds, [bounds], settings)
+        try:
+            view = mask.session.views[0]
+            view.hover_rect = None
+            view.session.element_selected = False
+            view.selection.active = None
+            view.selection.rects = [QRect(10, 20, 60, 40)]     # 模拟鼠标划出的选区
+            rect, size = view.element_size_hint(view.selection.rects[-1])
+            self.assertIsNotNone(rect, "手动画的选区也应有徽标矩形")
+            self.assertEqual(size, (60, 40), "徽标尺寸必须等于选区尺寸")
+        finally:
+            mask.close()
+
+    def test_size_badge_avoids_edges_and_falls_back_to_corner(self):
+        """2026-10-11：尺寸徽标必须**完整可见**（三级降级）。
+
+        原实现固定贴顶部 ✗ ⇒ 元素贴顶时徽标跑到屏外看不见 ✗；元素铺满整屏时更无处可放 ✗。
+        现在：环绕（上/下/内侧/左右）→ 屏角 →（极端）强制贴顶 ✓。
+        本用例直接调 `paint_info_badge`（唯一绘制处 ✓），断言三种极端下徽标都完整落在屏内 ✓。
+        """
+        from PySide6.QtCore import QPoint, QRect
+        from PySide6.QtGui import QImage, QPainter
+        from screenshot.overlay_info import paint_info_badge
+
+        canvas = QImage(400, 300, QImage.Format_RGB32)
+        area = QRect(0, 0, 400, 300)
+        bar = QRect(0, 270, 400, 30)          # 模拟底部提示条
+        painter = QPainter(canvas)
+        try:
+            cases = {
+                "贴顶": QRect(100, 0, 120, 80),
+                "贴底": QRect(100, 220, 120, 80),
+                "贴左": QRect(0, 100, 90, 90),
+                "铺满整屏": QRect(0, 0, 400, 300),
+            }
+            for name, element in cases.items():
+                badge = paint_info_badge(painter, area, element, (element.width(), element.height()),
+                                         bar=bar)
+                self.assertFalse(badge.isEmpty(), name + "：应当画出徽标")
+                self.assertEqual(badge.intersected(area), badge, name + "：徽标必须完整可见")
+                self.assertFalse(badge.intersects(bar), name + "：徽标不应压住提示条")
+            # 2026-10-11（用户反馈）：① 与工具条重合时徽标会被子控件盖住 ⇒ 避让矩形必须被遵守 ✓；
+            # ② 鼠标靠近时徽标要换位 ⇒ 候选位置须与光标保持间距 ✓。
+            toolbar = QRect(0, 0, 400, 40)          # 模拟顶部工具条
+            for cursor in (QPoint(150, 20), QPoint(200, 150), QPoint(390, 290)):
+                badge = paint_info_badge(painter, area, QRect(60, 60, 120, 90), (120, 90),
+                                         bar=toolbar, cursor=cursor)
+                self.assertEqual(badge.intersected(area), badge, "有光标时徽标仍须完整可见")
+                self.assertFalse(badge.intersects(toolbar), "徽标不得压住工具条")
+        finally:
+            painter.end()
+
+    def test_shift_tab_arrives_as_backtab_and_cycles_layer(self):
+        """2026-10-11 真机回归：Shift+Tab 在真机上以 **Qt.Key_Backtab** 投递（不是 Key_Tab+Shift ✗）。
+
+        原来只判 Key_Tab ⇒ 真机按 Shift+Tab 毫无反应（用例却绿 ⇒ C2/C5 类陷阱）。
+        这里直接投递 Backtab，只断言"确实选出了一层"（不耦合具体层号 ✓ 避免脆断言 ✓）。
+        """
+        from PySide6.QtCore import Qt
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 160}
+        settings = dict(DEFAULTS, inline_edit=False, magnifier=False, window_detection=True)
+        chain = [(0, 0, 200, 160), (20, 20, 120, 100)]
+        with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+             patch("screenshot.mask_window.element_chain", return_value=chain):
+            mask = MaskWindow(Image.new("RGB", (200, 160), "white"), bounds, [bounds], settings)
+            mask.show()
+            self.app.processEvents()
+            QTest.qWait(400)          # 初始识别已延后到"可见后 250ms" ✓
+            try:
+                mask.selection.rects.clear()
+                QTest.keyClick(mask, Qt.Key_Backtab)
+                self.assertTrue(mask.selection.rects, "Shift+Tab（Backtab）应当选中一层元素")
             finally:
                 mask.close()
 
