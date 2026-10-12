@@ -45,6 +45,13 @@ class SaveOutputPage(SettingsPage):
         widget.setToolTip("截图自动保存、手动保存和历史图片共用此目录；留空使用图片文件夹中的 ScreenSnap。\n"
                           "自动/手动保存均遵守下方归档设置。")
         self.controls["save_dir"] = widget
+        # 2026-10-12（同日志目录 ✓）：未设置时也显示**当前实际会用的目录** ✓
+        #   （只改占位文字 ✓ 不写回配置 ✗）。
+        if not str(config.data.get("save_dir") or ""):
+            try:
+                widget.setPlaceholderText("未设置 ⇒ 使用默认保存目录（首次保存时按默认位置写入）")
+            except AttributeError:
+                pass
         self.form.addRow("图片保存目录", widget)
         self.group("图片归档")
         archive_month = self.check(
