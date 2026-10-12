@@ -467,14 +467,15 @@ class ToolbarWidget(QWidget):
         self.ellipse_fill_opacity_label = QLabel(f"{self.ellipse_fill_opacity.value()}%")
         self.ellipse_fill_opacity.valueChanged.connect(lambda value: self.ellipse_fill_opacity_label.setText(f"{value}%"))
         self.ellipse_fill_opacity.valueChanged.connect(lambda value: self.setting_changed.emit("ellipse_fill_opacity", value))
-        # 填充颜色：默认与对应线条颜色一致，可单独指定。
+        # 填充颜色：与线条颜色**各自独立** ✓（2026-10-12 规则 35 全量对照发现 ✗：原先这里会回退到线色
+        # `settings.get("rect_color", …)` ⇒ 一旦键缺失就"看起来像联动" ✗ ⇒ 改为独立的字面默认值 ✓）。
         self.rect_fill_color = ColorButton(
-            settings.get("rect_fill_color", settings.get("rect_color", "#ff0000")),
+            settings.get("rect_fill_color", "#ff0000"),
             lambda color: self.setting_changed.emit("rect_fill_color", color),
             compact=True, purpose="矩形填充颜色")
         self.rect_fill_color.setMinimumHeight(34)
         self.ellipse_fill_color = ColorButton(
-            settings.get("ellipse_fill_color", settings.get("ellipse_color", "#ff0000")),
+            settings.get("ellipse_fill_color", "#ff0000"),   # 同上：与线色各自独立 ✓
             lambda color: self.setting_changed.emit("ellipse_fill_color", color),
             compact=True, purpose="椭圆填充颜色")
         self.ellipse_fill_color.setMinimumHeight(34)

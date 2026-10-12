@@ -2536,12 +2536,38 @@ class MaskWindow(QWidget):
         top = max(2, min(element_rect.top(), area.bottom() - height - 2))
         cursor_logical = self.to_logical_point(self.position)
         rect = QRect(int(left), int(top), width, height)
-        if rect.contains(cursor_logical):
-            widget.hide()          # 鼠标进入徽标 ⇒ 隐藏 ✓（用户指定规则 ✓）
+
+        # 2026-10-12 修复（用户反馈："只有截取**整个屏幕**时，松开前一直能看到尺寸标签，松开后就不见了" ✗）
+        #   + 加固（上一次直接在**绘制期** show/hide 子控件，触发过 test_capture 原生崩溃 ✗ C7 已对照确认 ✓）
+        # ① 已确认的选区（松开后：有 rects 且没有正在拖的 active ✓）⇒ **强制显示** ✓：
+        #    全屏选区时标签落在屏幕顶部居中 ✓ 而拖到全屏鼠标必然停在顶部 ⇒ 标签被压住而隐藏 ✓，
+        #    松开后 `selection.active` 变 None、又没有新的移动事件 ⇒ 没有任何时机显示回来 ✗。
+        # ② 子控件的可见性/几何/文本一律**推迟到事件循环下一轮**再改 ✓：Qt 不允许在绘制期改子控件 ✗。
+        # ③ 目标状态在**绘制期只做纯读计算** ✓，只有"和当前不一样"时才安排一次更新 ✓
+        #    （避免每帧都排一个 singleShot ⇒ 上一次就是这样把异常刷满日志的 ✗ 见 2026-10-12 的 AttributeError ✓）。
+        # ④ 这里**不得**引用画布属性 `erasing` ✗ —— 它属于 `AnnotationCanvas`，遮罩 `MaskWindow` 上没有 ✗
+        #    （曾经的写法 `and not self.erasing` 直接抛 AttributeError ✓ 每帧一次 ⇒ 日志刷屏 ✓）。
+        force_visible = bool(self.selection.rects) and self.selection.active is None
+        want_visible = force_visible or not rect.contains(cursor_logical)
+        needs_update = widget.isVisible() != want_visible or (
+            want_visible and (widget.geometry() != rect or widget.text() != label))
+        if not needs_update:
             return
-        widget.setGeometry(rect)
-        widget.show()
-        widget.raise_()            # 与画布同级但更靠上 ⇒ 不再被画布/工具栏盖住 ✓
+
+        def apply_badge():
+            if not want_visible:
+                if widget.isVisible():
+                    widget.hide()
+                return
+            if widget.text() != label:
+                widget.setText(label)
+            if widget.geometry() != rect:
+                widget.setGeometry(rect)
+            if not widget.isVisible():
+                widget.show()
+            widget.raise_()        # 与画布同级但更靠上 ⇒ 不再被画布/工具栏盖住 ✓
+
+        QTimer.singleShot(0, apply_badge)
 
     def element_size_hint(self, current_selection):
         source = None

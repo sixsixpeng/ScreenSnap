@@ -833,6 +833,46 @@ class UiaTests(CoreTests):
         finally:
             mask.close()
 
+    def test_mask_size_badge_sync_avoids_canvas_only_attributes(self):
+        """2026-10-12 真机报错回归（用户贴出日志 ✓）：遮罩侧尺寸标签的**延迟回调**里读了 `self.erasing` ✗，
+
+        而 `erasing` 属于画布 `AnnotationCanvas`、遮罩 `MaskWindow` 上没有 ✗ ⇒ 每帧抛
+        `AttributeError: MaskWindow object has no attribute erasing` ✓，而且当时**每帧都排一个 singleShot**
+        ⇒ 异常刷满日志（bootstrap 的"未捕获异常"成百上千条 ✓）。
+        契约：① 遮罩侧代码**不得**引用画布专属属性（只能出现在注释里 ✓）；
+              ② 只有在状态真的变化时才安排一次延迟更新 ✓。
+        """
+        import inspect
+        from PySide6.QtCore import QPoint, QRect
+        from unittest.mock import patch as _patch
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        source = inspect.getsource(MaskWindow._sync_size_badge)
+        code_lines = [line for line in source.splitlines() if not line.strip().startswith("#")]
+        self.assertNotIn("self.erasing", "\n".join(code_lines),
+                         "遮罩侧不得引用画布属性 erasing（只允许出现在注释里 ✓）")
+        self.assertIn("singleShot", source, "更新必须推迟到事件循环下一轮 ✓")
+
+        bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+        settings = dict(DEFAULTS, inline_edit=False, magnifier=False, window_detection=False)
+        with _patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (320, 240), "white"), bounds, [bounds], settings)
+        try:
+            mask.show()          # 子控件的 isVisible() 依赖父窗口可见 ✓（不 show 会恒为 False ✗）
+            self.app.processEvents()
+            view = mask.session.views[0]
+            view.position = QPoint(160, 120)
+            view.selection.active = None
+            view.selection.rects = [QRect(0, 0, 320, 240)]                     # 全屏选区（出问题的场景 ✓）
+            view._sync_size_badge(QRect(0, 0, 320, 240), (320, 240))           # 不得抛异常 ✓
+            self.app.processEvents()
+            badge = getattr(view, "_size_badge", None)
+            self.assertIsNotNone(badge, "应当已创建尺寸标签子控件 ✓")
+            self.assertTrue(badge.isVisible(), "已确认的全屏选区 ⇒ 标签必须显示 ✓（本次修复点 ✓）")
+        finally:
+            mask.close()
+
     def test_size_badge_avoids_edges_and_falls_back_to_corner(self):
         """2026-10-11：尺寸徽标必须**完整可见**（三级降级）。
 
