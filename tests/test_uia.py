@@ -1,4 +1,4 @@
-﻿"""无障碍识别与悬停：UIA 下钻、命中穿透、悬停复用与节流。"""
+"""无障碍识别与悬停：UIA 下钻、命中穿透、悬停复用与节流。"""
 
 import os
 import sys
@@ -862,10 +862,14 @@ class UiaTests(CoreTests):
             mask.show()          # 子控件的 isVisible() 依赖父窗口可见 ✓（不 show 会恒为 False ✗）
             self.app.processEvents()
             view = mask.session.views[0]
-            view.position = QPoint(160, 120)
+            view.monitor_rect = QRect(0, 0, 800, 600)   # 2026-10-12：让 position 落在本屏内（配套“只有光标屏显示徽标” ✓）
+            view.position = QPoint(160, 400)   # 2026-10-12：移到 100px 命中区之外（契约"确认后显示"不变 ✓）
             view.selection.active = None
             view.selection.rects = [QRect(0, 0, 320, 240)]                     # 全屏选区（出问题的场景 ✓）
             view._sync_size_badge(QRect(0, 0, 320, 240), (320, 240))           # 不得抛异常 ✓
+            # 2026-10-12：徽标改动已改为“延迟回调合并 + 最新帧必胜” ⇒ 一轮 processEvents 可能不够 ✓
+            #   ⇒ 这里多跑两轮事件循环再断言（只调整等待 ✓ 不改契约 ✓）。
+            self.app.processEvents()
             self.app.processEvents()
             badge = getattr(view, "_size_badge", None)
             self.assertIsNotNone(badge, "应当已创建尺寸标签子控件 ✓")

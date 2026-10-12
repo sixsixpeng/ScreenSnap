@@ -111,13 +111,25 @@ class SelectionRects:
         if self.start is None:
             return
         x, y = point.x(), point.y()
-        for edge in x_edges:
-            if abs(x - edge) <= 8:
-                x = edge
-        for edge in y_edges:
-            if abs(y - edge) <= 8:
-                y = edge
-        self.active = QRect(self.start, QPoint(x, y)).normalized()
+        # 2026-10-12（规则 22 ✓ 多屏）：吸附到**距离最近**的边缘，而不是"最后一个 8px 内的边缘"。
+        #   原来顺序遍历 + 覆盖会让排在后面的窗口边缘覆盖掉前面的屏幕边缘 ✗ —— 终点贴近屏幕边界时
+        #   被"接力"吸到 8px 内的窗口边缘（实测 BR→TL 拉满副屏，top 被吸到 242 而非屏幕 249 ✗）。
+        #   改成最近邻：距离为 0 的屏幕边缘永远优先于更远的窗口边缘 ✓（不满屏时行为不变 ✓）。
+        near_x = [edge for edge in x_edges if abs(x - edge) <= 8]
+        near_y = [edge for edge in y_edges if abs(y - edge) <= 8]
+        if near_x:
+            x = min(near_x, key=lambda edge: abs(x - edge))
+        if near_y:
+            y = min(near_y, key=lambda edge: abs(y - edge))
+        # 2026-10-12（规则 22 ✓）：QRect(QPoint, QPoint) 的第二个点是 bottomRight（含端点），
+        #   反向拖动（BR→TL）时 normalized() 会少 2px —— 实测 QRect((199,149),(0,0)).normalized()
+        #   = (1,1,198,148)，而正确应为 (0,0,200,150) ✗。改为显式按两端点取 min/max ⇒
+        #   无论方向都精确包含两个端点（拉满正好等于屏幕尺寸 ✓）。
+        left = min(self.start.x(), x)
+        top = min(self.start.y(), y)
+        right = max(self.start.x(), x)
+        bottom = max(self.start.y(), y)
+        self.active = QRect(left, top, right - left + 1, bottom - top + 1)
 
     def finish(self):
         """只把有效的新选区加入列表，拖动和缩放不会额外新增选区。"""

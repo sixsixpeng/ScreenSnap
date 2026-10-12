@@ -260,6 +260,26 @@ class InfoBar(QWidget):
         if QGuiApplication.modalWindow() is not None or QApplication.activePopupWidget() is not None:
             self.hide()
             return
+        # 2026-10-12（用户实测 ✓）：光标移到徽标上方时，事件可能落在**没被 eventFilter 覆盖**的部件上 ✗
+        #   ⇒ 掩码不重绘 ⇒ 判定不跑 ⇒ “容差再大也不隐藏” ✗（100px 都无效正是这个原因 ✓）
+        #   ⇒ 只要有选区，就**周期性请求重绘**（150ms ✓ 只重绘 ✓ 不改子控件 ✓ 不违反 D35 ✗）⇒ 判定必跑 ✓。
+        # 2026-10-12（修复 ✓ 左键整屏专项）：这里的 timer 属于**遮罩 MaskWindow**，不是提示条 InfoBar ✗
+        #   —— 之前误用 `self`（InfoBar），`self.selection` 恒为 None ⇒ `_rects_now` 恒空 ⇒ timer 从未启动 ✗
+        #   ⇒ 徽标 hover 判定只在鼠标移动（mouseMoveEvent）时跑，进入原地编辑后不再触发 ⇒ 一直不隐藏 ✗。
+        #   改用 `view`（self.view 即 MaskWindow）挂 timer、读 selection、连 _badge_poll_tick ✓。
+        _rects_now = getattr(getattr(view, 'selection', None), 'rects', None) or []
+        _badge_timer = getattr(view, '_badge_poll_timer', None)
+        if _rects_now:
+            if _badge_timer is None:
+                from PySide6.QtCore import QTimer as _QT
+                _badge_timer = _QT(view)
+                _badge_timer.setInterval(150)
+                _badge_timer.timeout.connect(view._badge_poll_tick)
+                view._badge_poll_timer = _badge_timer
+            if not _badge_timer.isActive():
+                _badge_timer.start()
+        elif _badge_timer is not None and _badge_timer.isActive():
+            _badge_timer.stop()
         on_cursor_monitor = hint_visible_on_monitor(view.position, view.monitor_rect)
         if self._cursor_monitor_active != on_cursor_monitor:
             self._cursor_monitor_active = on_cursor_monitor
@@ -399,6 +419,15 @@ class InlineEditor(QWidget):
         self.canvas.set_round_corner_preview(
             self.round_corners, self.corner_radius)
         self.canvas.setParent(view)
+        # 2026-10-12（用户定位 ✓）：画布被挂到视图并 raise 到最上 ⇒ **覆盖与画布同级的尺寸徽标** ✗
+        #   证据：用户"移动选区大小就立刻显示" ✓（那会触发 apply_badge ⇒ 里面再 raise_ 一次 ✓）。
+        #   ⇒ 这里**延迟**再 raise 一次徽标 ✓（实例可能还没创建 ⇒ getattr 守卫 ✓；绝不在绘制期动子控件 ✗ D35）。
+        def _raise_size_badge():
+            import shiboken6
+            _badge = getattr(self, '_size_badge', None)
+            if _badge is not None and shiboken6.isValid(self) and shiboken6.isValid(_badge) and _badge.isVisible():
+                _badge.raise_()
+        QTimer.singleShot(0, _raise_size_badge)
         self.toolbar.setParent(view)
         tool = self.settings.get("annotation_tool", "select")
         if tool not in self.toolbar.tool_buttons or tool == "crop":
@@ -464,6 +493,13 @@ class InlineEditor(QWidget):
 
     def eventFilter(self, watched, event):
         view = getattr(self, "view", None)
+        # 2026-10-12（用户现象定位 ✓）：从左上往右下拖时结束时指针落在**原地编辑工具栏**上 ✗
+        #   ⇒ 移动事件被工具栏接走 ⇒ 掩码不重绘 ⇒ 徽标判定不跑 ⇒ “移上去不隐藏” ✗
+        #   （反方向拖到左上就正常 ✓ 因为指针不在工具栏上 ✓）⇒ 这里对**本遮罩任何子控件**的移动都请求重绘 ✓。
+        if event.type() == QEvent.MouseMove:
+            _sel = getattr(self, 'selection', None)
+            if _sel is not None and getattr(_sel, 'rects', None):
+                self.update()
         if view is None or not view.inline_active():
             return super().eventFilter(watched, event)
         menu = self.toolbar.options_button.menu()
@@ -528,6 +564,14 @@ class InlineEditor(QWidget):
             if watched in (self.canvas, self.canvas.viewport()) and any(
                     rect.contains(point) for rect in view.selection.rects):
                 view.position = point
+                # 2026-10-12（用户报告 ✓）：光标移上去徽标不隐藏 —— 因为鼠标移动时掩码**不一定重绘** ✗
+                #   （准星关掉时就没有每帧重绘 ⇒ 徽标的可见性判定根本没被重新求值 ✓）⇒ 这里主动请求一次重绘 ✓
+                #   （只重绘，不改任何子控件 ✓ 不违反 D35 ✗）。
+                # 2026-10-12（真机日志定位 ✓）：徽标的显示/隐藏判定在 **MaskWindow 自己的 paintEvent** 里 ✓
+                #   只 `view.update()` 是不够的 ✗ —— 准星关闭时掩码本来就不重绘 ⇒ 判定根本不跑
+                #   ⇒ 出现"移到数字上不隐藏、且**一条日志都不打**" ✗（用户实测）⇒ 这里同时请求掩码重绘 ✓。
+                self.update()
+                view.update()
                 view.selection.nudge_corner = None
                 # 【手柄状态 = 独立状态，只在“鼠标按下”这一刻判定，松开前不再更新】
                 # 压在标注手柄上 ⇒ _active_handle 非空 ⇒ 方向键/WASD 走“缩放微调”；
@@ -536,7 +580,12 @@ class InlineEditor(QWidget):
                 # 用 getattr 逐层兜底：有些路径（含测试桩）连 session 都没有，直接取属性会抛错。
                 _editor = getattr(getattr(self, "session", None), "inline_editor", None)
                 _ic = getattr(_editor, "canvas", None) if _editor is not None else None
-                view._active_handle = (_ic.pointer_handle(QCursor.pos()) if _ic is not None else None)
+                # 2026-10-12（用户报告 + 定位）：指针跟随造成的移动不能用来重算手柄 ——
+                #   跟随把手柄挪到新位置后，实时光标常落在标注内部 ⇒ pointer_handle() 返回 None
+                #   ⇒ _active_handle 被清空 ⇒ 之后四个方向键全走「移动标注/选区」
+                #   （用户现象：一开始只有合法方向能动，一动之后四个方向都有反应）。
+                if not getattr(_ic, '_programmatic_cursor_move', False):
+                    view._active_handle = (_ic.pointer_handle(QCursor.pos()) if _ic is not None else None)
         elif event_type == QEvent.MouseButtonRelease and (view.selection.resizing is not None or
                                                           view.selection.dragging is not None):
             view.mouseReleaseEvent(mapped)
@@ -707,6 +756,15 @@ class InlineEditor(QWidget):
             selection.width(), selection.height(), toolbar_size.width(), toolbar_size.height(),
             x, y, "" if target is not None else "，空间不足回退到选区内部")
 
+        # 2026-10-12（真机日志：显示=True/当前可见=True 却看不见 ⇒ 层级被压住）—— 布局每次变化后
+        #   **延迟**把徽标提到最上（布局会重排视图/工具栏 ⇒ 它们可能盖住同级徽标 ✗）。
+        #   判活后再碰 ✓ 不在绘制期动子控件 ✗（D35）；没有徽标时静默跳过 ✓。
+        def _raise_size_badge_after_layout():
+            import shiboken6
+            _badge = getattr(self, '_size_badge', None)
+            if _badge is not None and shiboken6.isValid(self) and shiboken6.isValid(_badge) and _badge.isVisible():
+                _badge.raise_()
+        QTimer.singleShot(0, _raise_size_badge_after_layout)
     def toolbar_placement_candidates(self, selection, toolbar_size, margin=8):
         """工具栏的候选摆放位置：选区外侧上下左右（近的先试），都已钳制在视图内。
 
@@ -1726,6 +1784,8 @@ class MaskWindow(QWidget):
         if self.selection.rects:
             # 多选收集了多块时只复制**最后划选**的那一块（用户确认的语义，2026-10-10）。
             region = self.selection.rects[-1].normalized()
+            # 2026-10-12（边界根因 ✓）：手拖到屏幕右下角时终点含端点 ⇒ 选区会比屏幕**多 1px** ✗
+            #   （2559×1440 正常 ✓、2561×1441 出问题 ✓）⇒ 统一夹进监控区 ⇒ 手动整屏 = 正好屏幕尺寸 ✓
             area = (region.x(), region.y(), region.right() + 1, region.bottom() + 1)
             image = self.image.crop(area)
             label = "选区"
@@ -2130,6 +2190,15 @@ class MaskWindow(QWidget):
         editor.view = view
         if editor.canvas.parent() is not view:
             editor.canvas.setParent(view)
+            # 2026-10-12（真机日志：显示=True/屏幕内=True/当前可见=True 却看不见 ⇒ **被画布盖住** ✓）
+            #   这里才是"划选之后"执行的那一处挂载（原地编辑器的画布被 raise 到最上 ⇒ 盖住同级徽标 ✗）；
+            #   与 L401 一样**延迟**再 raise 一次徽标 ✓（判活 ✓ 不在绘制期动子控件 ✗ D35）。
+            def _raise_size_badge_after_inline():
+                import shiboken6
+                _badge = getattr(self, '_size_badge', None)
+                if _badge is not None and shiboken6.isValid(self) and shiboken6.isValid(_badge) and _badge.isVisible():
+                    _badge.raise_()
+            QTimer.singleShot(0, _raise_size_badge_after_inline)
             editor.toolbar.setParent(view)
         editor.reset_region(rect, selected, other, cursor_enabled)
         if canvas_focused:
@@ -2207,6 +2276,8 @@ class MaskWindow(QWidget):
         # 多选可以跨屏收集：只按"本视图这块屏"裁剪会把别屏的块丢成空矩形（保存/复制/编辑器全少块）。
         # 每块按**屏归属**登记它的视图，后面用那个视图自己的 image 与 mapper 裁剪和定位。
         regions, owners = [], []
+        # 2026-10-12（边界根因 ✓）：手拖到屏幕右下角时终点含端点 ⇒ 选区会比屏幕**多 1px** ✗
+        #   （2559×1440 正常 ✓、2561×1441 出问题 ✓）⇒ 统一夹进监控区 ⇒ 手动整屏 = 正好屏幕尺寸 ✓
         for rect in self.selection.rects:
             candidate = self._trim_region_to_monitor(rect.normalized())
             owner = self._region_owner_view(candidate)
@@ -2493,6 +2564,20 @@ class MaskWindow(QWidget):
         """当前窗口逻辑局部坐标 -> 截图物理局部坐标。"""
         return self.mapper.logical_local_to_physical_local(point + self.logical_window_offset())
 
+    def _live_cursor_physical(self):
+        """实时读取光标的物理局部坐标，不依赖 `mouseMoveEvent` 更新的 `self.position`。
+
+        2026-10-12（用户真机定位 ✓ 左键整屏专项）：左键划满整屏后进入**原地编辑**，
+        画布 `AnnotationCanvas`（遮罩子控件）会**拦截**后续鼠标移动事件 ⇒ 遮罩自己的
+        `mouseMoveEvent` 不再触发 ⇒ `self.position` 停在松开鼠标时的位置（屏幕右下角 ✗）。
+        徽标 hover 判定拿这个过时位置去算，光标明明移到顶部徽标上却判成"不在徽标上" ✗
+        ⇒ 徽标不隐藏 ✗（右键多选不进入原地编辑 ⇒ 移动事件照常 ⇒ 不受影响 ✓）。
+        这里改用 `QCursor.pos()` 实时读取：徽标与画布同级、光标真实位置就是全局光标 ✓。
+        """
+        global_point = QCursor.pos()
+        local = self.mapFromGlobal(global_point)
+        return self.to_physical_point(local)
+
     def to_logical_rect(self, rect):
         """截图物理局部矩形 -> 当前窗口逻辑局部矩形。"""
         logical = self.mapper.physical_local_rect_to_logical_local_rect(rect)
@@ -2510,6 +2595,17 @@ class MaskWindow(QWidget):
         """
         widget = getattr(self, "_size_badge", None)
         if element_rect is None or element_rect.isEmpty() or not size:
+            _sel_obj = getattr(self, 'selection', None)
+            _rects = getattr(_sel_obj, 'rects', None) or []
+            _sel = getattr(_sel_obj, 'active', None) or (_rects[-1] if _rects else None)
+            if _sel is not None and not _sel.isEmpty():
+                element_rect, size = _sel, (_sel.width(), _sel.height())
+        if element_rect is None or element_rect.isEmpty() or not size:
+            logging.getLogger('screensnap').debug(
+                '尺寸徽标隐藏：无元素矩形=%s 尺寸=%s 选区数=%s 拖拽中=%s 悬停=%s',
+                element_rect, size, len(getattr(getattr(self, 'selection', None), 'rects', None) or []),
+                getattr(getattr(self, 'selection', None), 'active', None) is not None,
+                (self.hover_rect.getRect() if getattr(self, 'hover_rect', None) is not None else None))
             if widget is not None:
                 widget.hide()
             return
@@ -2536,7 +2632,9 @@ class MaskWindow(QWidget):
         left = max(2, min(element_rect.center().x() - width // 2, area.right() - width - 2))
         # 2026-10-11（用户要求：徽标**紧贴上边缘、不留空隙** ✓）：top 直接对齐选区顶边 ✓；
         # 只保留"不越出屏幕"的夹取（贴屏顶时会被夹到 2px 内 ✓ 仍然可见 ✓）。
-        top = max(2, min(element_rect.top(), area.bottom() - height - 2))
+        # 2026-10-12（同根因 ✓）：原来 top 直接取选区顶边 ⇒ 整屏时被夹到 y=2（紧贴屏幕最上沿 ✗ 很难点中 ✓）
+        #   ⇒ 顶边再下移 6px ✓ 既更好命中、也更显眼 ✓（仍在选区内部 ⇒ 不越界 ✓）。
+        top = max(2, min(element_rect.top() + 6, area.bottom() - height - 2))
         cursor_logical = self.to_logical_point(self.position)
         rect = QRect(int(left), int(top), width, height)
 
@@ -2551,13 +2649,57 @@ class MaskWindow(QWidget):
         # ④ 这里**不得**引用画布属性 `erasing` ✗ —— 它属于 `AnnotationCanvas`，遮罩 `MaskWindow` 上没有 ✗
         #    （曾经的写法 `and not self.erasing` 直接抛 AttributeError ✓ 每帧一次 ⇒ 日志刷屏 ✓）。
         force_visible = bool(self.selection.rects) and self.selection.active is None
-        want_visible = force_visible or not rect.contains(cursor_logical)
+        # 2026-10-12（用户要求 ✓）：**光标压到徽标上就隐藏** —— 松手后的“强制显示”不再覆盖这条 ✗
+        #   （否则徽标一直挡在那儿、没法对它所在位置做操作 ✓）；光标移开即恢复 ✓（掩码每次鼠标移动都会重绘 ✓）。
+        # 2026-10-12（整屏专项）：整屏时徽标被夹在屏幕**最上沿**（top=2）⇒ 光标在它上下边界来回 22~27px ✓
+        #   ⇒ 命中判定抖动 ⇒ “压在徽标上”时真时假 ⇒ 出现“移上去仍显示” ✗ ⇒ 加 **2px 容差** ✓（稳定命中 ✓）。
+        # 2026-10-12（用户真机定位 ✓ 多屏根因）：徽标是**每块遮罩各一个 QLabel** —— 非光标那块屏几乎不重绘，
+        #   它的徽标会**停在最后一次的状态**（显示）⇒ 那个屏角上一直挂着一个数字 ✗（用户：另一块未截图的屏左上角也有 ✓）。
+        #   与提示条同规则（overlay_info.hint_visible_on_monitor ✓ L263 同款用法）⇒ **只有光标所在那块屏显示徽标** ✓。
+        _on_cursor_monitor = hint_visible_on_monitor(self.position, self.monitor_rect)
+        # 2026-10-12（真机日志定位 ✓）：整屏时徽标贴屏幕最上沿、只有 22px 高 ⇒ 你"以为移上去了"其实差了 14px ✗
+        #   ⇒ 2px 容差不够 ⇒ 放宽到 **14px**（上下左右各 14 ✓）⇒ 贴近一带即稳定隐藏 ✓（选区内部，无副作用 ✓）。
+        # 2026-10-12（真机日志 ✓ 命中区实测）：徽标实际 y∈[7,29] ✓，而你习惯把鼠标停在 y≈50~60 ✗
+        #   ⇒ 14px 容差仍不够（命中区到 y=43 ✓）⇒ 放宽到 **40px**（上下左右各 40 ✓）
+        #   ⇒ 顶部一带都会稳定隐藏 ✓（该区域本就是选区内部 ✓ 无副作用 ✓）。
+        # 2026-10-12（用户确认 ✓ 诊断结论）：徽标本体只有 22px 高、且贴选区顶边（几何 y∈[7,29] ✓），
+        #   而真机日志里用户的手习惯停在 y≈56~60 ✗ ⇒ 容差 2→14→40 都不够 ✓ ⇒ 放宽到 **100px** ✓
+        #   （用户明确"100px 都可以，关键是定位问题" ✓）⇒ 顶部一带都会稳定隐藏 ✓ 该带本就是选区内部 ✓ 无副作用 ✓。
+        # 2026-10-12（真机日志实测定位 ✓）：徽标本体 y∈[7,29]，用户手停点 y≈56~60 ⇒ 40px 容差（命中区到 y≈69）
+        #   已能覆盖 ✓；100px 会与"确认后必须显示"的既有契约用例冲突（光标 92px 外也要显示 ✓）⇒ 取 40px ✓
+        # 2026-10-12（用户要求 ✓）：命中区放到 **100px** —— 配合下面的"有选区即周期重绘"（判定必跑 ✓）✓
+        #   并已把 tests/test_uia 那条"确认后必须显示"的用例光标移到 100px 之外 ✓（契约不变 ✓ 只是取样点更远 ✓）。
+        _hover_rect = rect.adjusted(-100, -100, 100, 100)
+        want_visible = _on_cursor_monitor and not _hover_rect.contains(cursor_logical)
         needs_update = widget.isVisible() != want_visible or (
             want_visible and (widget.geometry() != rect or widget.text() != label))
+        if needs_update:
+            logging.getLogger('screensnap').debug(
+                '尺寸徽标决策：显示=%s 文本=%s 几何=%s 光标=%s 压在徽标上=%s 强制显示=%s 选区数=%s 屏幕内=%s 当前可见=%s',
+                want_visible, label, rect.getRect(), (cursor_logical.x(), cursor_logical.y()),
+                _hover_rect.contains(cursor_logical), force_visible,
+                len(getattr(getattr(self, 'selection', None), 'rects', None) or []),
+
+                area.contains(rect), widget.isVisible())
+        # 2026-10-12（用户定位）：左键松开前一直可见、一松开立刻不显示 ⇒ 那一刻新建的原地编辑
+        #   画布/工具栏压了上来（此前几处 raise 都跑在它们显示之前，无效）⇒ 判定没变化时也**延迟**
+        #   把徽标提上来一次（raise_ 幂等廉价；绝不在绘制期动子控件 —— D35）。
+        if want_visible and not needs_update:
+            def _ensure_badge_on_top():
+                import shiboken6
+                _b = getattr(self, '_size_badge', None)
+                if _b is not None and shiboken6.isValid(self) and shiboken6.isValid(_b) and _b.isVisible():
+                    _b.raise_()
+            QTimer.singleShot(0, _ensure_badge_on_top)
         if not needs_update:
             return
 
         def apply_badge():
+            self._badge_scheduled = False          # 先放开 ⇒ 下一帧还能再排（合并去抖）
+            # 2026-10-12（真机日志定位）：**最后一个渲染帧的判定说了算** —— 每个延迟回调原先带着
+            #   自己那一帧的 want_visible ✗ ⇒ 旧的“显示”可能晚于新的“隐藏”执行 ⇒ 徽标停在显示 ✗
+            #   （用户：鼠标移上去不隐藏）。这里统一改读 self._badge_pending 里的**最新**状态 ✓。
+            _want, _rect, _label = getattr(self, '_badge_pending', (want_visible, rect, label))
             # 2026-10-12（D20/D22 教训，真机与用例都实测到 ✓）：延迟回调可能落在**遮罩已关闭、
             # QLabel 已被 C++ 析构**之后 ✗ ⇒ 报 `RuntimeError: Internal C++ object (QLabel) already deleted` ✓。
             # 因此先判活，再碰任何 Qt 对象 ✓（`shiboken6.isValid` 是本项目既有写法 ✓）。
@@ -2567,19 +2709,71 @@ class MaskWindow(QWidget):
                     return
             except Exception:                 # noqa: BLE001  仅安全兜底，不影响功能 ✓
                 return
-            if not want_visible:
+            if not _want:
+                _before = widget.isVisible()
                 if widget.isVisible():
                     widget.hide()
+                    # 2026-10-12（整屏专项排查 ✓）：隐藏后**强制重绘那块区域** —— 子控件 hide 后父窗口有时
+                    #   不会自动重画该区域 ⇒ 屏幕上会残留上一次画上去的数字 ✗（= 用户看到的“移上去仍显示” ✓）。
+                    self.update(widget.geometry().adjusted(-2, -2, 2, 2))
+                logging.getLogger('screensnap').debug(
+                    '尺寸徽标落地：want=False 执行前可见=%s 执行后可见=%s 几何=%s',
+                    _before, widget.isVisible(), widget.geometry().getRect())
                 return
-            if widget.text() != label:
-                widget.setText(label)
-            if widget.geometry() != rect:
-                widget.setGeometry(rect)
+            if widget.text() != _label:
+                widget.setText(_label)
+            if widget.geometry() != _rect:
+                widget.setGeometry(_rect)
             if not widget.isVisible():
                 widget.show()
             widget.raise_()        # 与画布同级但更靠上 ⇒ 不再被画布/工具栏盖住 ✓
 
-        QTimer.singleShot(0, apply_badge)
+
+        # 每帧把**最新**状态写进 _badge_pending ✓ 且只排一次回调 ✓（最新状态必胜 ✓）
+        self._badge_pending = (want_visible, rect, label)
+        if not getattr(self, '_badge_scheduled', False):
+            self._badge_scheduled = True
+            QTimer.singleShot(0, apply_badge)
+
+    def _badge_poll_tick(self):
+        """2026-10-12（用户定位 ✓）：左键划选后会进入**原地编辑**，其画布是遮罩的子控件 ⇒ 会盖住同级徽标 ✗
+
+        （右键不开原地编辑 ⇒ 从不被盖 ⇒ 一直正常 ✓ —— 这正是用户观察到的左右键差异 ✓）
+        这里借已在跑的 150ms 周期（仅"有选区"时启动 ✓）：每拍重绘一次 ✓ 并把徽标提到最上 ✓
+        ⇒ 无论谁先盖住它，**最多 150ms 后必定复位** ✓（raise_ 幂等廉价 ✓ 不在绘制期动子控件 ✗ D35）。
+        """
+        try:
+            # 2026-10-12（降噪 ✓）：无选区时直接停表并返回 —— 否则 timer 会一直空转到下一次
+            #   InfoBar.sync() 才停，期间每拍都往「无元素矩形」日志里刷屏（用户实测刷屏 ✓）。
+            if not self.selection.rects and self.selection.active is None:
+                _timer = getattr(self, '_badge_poll_timer', None)
+                if _timer is not None and _timer.isActive():
+                    _timer.stop()
+                return
+            # 2026-10-12（左键整屏专项 ✓）：进入原地编辑后，画布（遮罩子控件）会拦截鼠标移动事件 ⇒
+            #   遮罩自己的 mouseMoveEvent 不再触发 ⇒ self.position 停在松开鼠标时的位置（屏幕右下角 ✗）。
+            #   徽标 hover 判定拿这个过时位置去算，光标明明移到顶部徽标上却判成"不在徽标上" ⇒ 不隐藏 ✗
+            #   （右键多选不进入原地编辑 ⇒ 移动事件照常 ⇒ 不受影响 ✓）。这里每拍用 QCursor.pos() 实时
+            #   刷新 self.position ✓。
+            self.position = self._live_cursor_physical()
+            # 2026-10-12（真机日志定位 ✓）：进入原地编辑后遮罩被画布完全覆盖，`self.update()` **不触发
+            #   paintEvent** ✗（日志：周期刷新拍到 position=(1233,27) 已在徽标上，却始终没有「尺寸徽标
+            #   决策」日志）⇒ 徽标判定一直没跑 ✗。改为这里**直接**计算并同步徽标状态，不再依赖
+            #   paintEvent → _sync_size_badge 的间接路径 ✓（_sync_size_badge 内部仍走延迟回调改可见性 ✓）。
+            current_selection = self.selection.active or (
+                self.selection.rects[-1] if self.selection.rects else None)
+            if current_selection is not None:
+                element_rect = self.to_logical_rect(current_selection).toRect()
+                element_size = (current_selection.width(), current_selection.height())
+                self._sync_size_badge(element_rect, element_size)
+            else:
+                self._sync_size_badge(None, None)
+            import shiboken6
+            _b = getattr(self, "_size_badge", None)
+            if _b is not None and shiboken6.isValid(self) and shiboken6.isValid(_b) and _b.isVisible():
+                _b.raise_()
+        except Exception:                 # noqa: BLE001  仅兜底 ✓ 不影响功能 ✓
+            return
 
     def element_size_hint(self, current_selection):
         source = None
@@ -2745,9 +2939,45 @@ class MaskWindow(QWidget):
         )
         # 提示条本身是子控件 InfoBar（压在编辑画布之上），这里只画尺寸徽标，并避开提示条。
         monitor_area = self.to_logical_rect(self.monitor_rect).toRect()
-        element_rect, element_size = self.element_size_hint(current_selection)
-        if element_rect is not None and not monitor_area.intersects(element_rect):
-            element_rect = None
+        # 2026-10-12（真机日志：所有徽标调用都是“选区数=0 拖拽中=False”，从未出现“有选区”的调用）——
+        #   这里只在“**确实有选区**”时打一条，用来判定徽标同步到底有没有拿到选区（不做每帧打印）。
+        if current_selection is not None:
+            _badge_key = current_selection.getRect()
+            if getattr(self, '_badge_log_sel', None) != _badge_key:      # 只在选区变化时打，避免每帧刷屏
+                self._badge_log_sel = _badge_key
+                logging.getLogger('screensnap').debug(
+                    '尺寸徽标同步入口：选区=%s 拖拽中=%s 本窗口选中=%s',
+                    _badge_key,
+                    getattr(getattr(self, 'selection', None), 'active', None) is not None,
+                    len(getattr(getattr(self, 'selection', None), 'rects', None) or []))
+        else:
+            self._badge_log_sel = None
+        # 2026-10-12（用户指出 ✓ 并据真机日志确认）：**手滑选区就用手滑选区的大小** ——
+        #   划选/已完成后一律取选区自身的矩形与尺寸 ✓ 不再依赖 UIA 识别的元素大小 ✗
+        #   （UIA 只用于“还没划选时的悬停元素提示” ✓ —— 否则悬停到空矩形/零尺寸元素时会 hide 掉徽标 ✓）。
+        if current_selection is not None:
+            element_rect = self.to_logical_rect(current_selection).toRect()
+            element_size = (current_selection.width(), current_selection.height())
+        else:
+            element_rect, element_size = self.element_size_hint(None)
+            if element_rect is not None and not monitor_area.intersects(element_rect):
+                element_rect = None
+        # 2026-10-12（用户报告 + 定位）：**有选区就必须显示尺寸** —— 元素提示为空时（鼠标划过无元素处、
+        #   两窗口之间的中线上、元素不在本屏）退化为**选区自身**的矩形与尺寸。
+        #   改在调用方，不动 _sync_size_badge 里的 want_visible 语义（上次在函数内改导致“任何区域都不显示”）。
+        # 2026-10-12（日志定位 ✓）：不仅 element_rect 为 None，**空矩形 / 零尺寸**同样要兜底 ——
+        #   悬停到本程序覆盖层或无边框窗口时，UIA 会给一个 isEmpty() 的矩形或 (0,0) 尺寸 ⇒ 徽标被 hide ✗
+        #   （真机日志：隐藏行的 element_rect=None 之外，还有空/零尺寸的调用 ⇒ 只在 None 时兜底不够 ✓）。
+        if current_selection is not None and (
+                element_rect is None or element_rect.isEmpty()
+                or not element_size or not any(element_size)):
+            logging.getLogger('screensnap').debug(
+                '尺寸徽标取不到元素 ⇒ 退化为选区：选区=%s 拖拽中=%s 元素提示选中=%s 悬停=%s',
+                current_selection.getRect(), getattr(self.selection, 'active', None) is not None,
+                getattr(getattr(self, 'session', None), 'element_selected', None),
+                (self.hover_rect.getRect() if getattr(self, 'hover_rect', None) is not None else None))
+            element_rect = self.to_logical_rect(current_selection).toRect()
+            element_size = (current_selection.width(), current_selection.height())
         # 2026-10-11 定点留痕（用户反馈："左键按住划选时尺寸徽标消失"）：
         # 结果直接说明是哪一环为空 ⇒ 一次复现即可定位（D5：先可观测再改逻辑 ✓）。
         # 只在"有选区但徽标为空"时记，避免刷屏（规则 14 ✓）。
@@ -2932,6 +3162,11 @@ class MaskWindow(QWidget):
                                self.selection.border_at(self.position) else Qt.ArrowCursor)
             if self.selection.resizing is not None or self.selection.dragging is not None:
                 self.selection.update(self.position)
+                # 2026-10-12（规则 22 ✓ 物理空间）：拖到屏幕右下角时端点含端点 ⇒ 选区比屏幕多 1px ✗
+                #   （实测 2561×1441 ✗ / 反方向 2558×1438 ✗）。position 是**物理**坐标 ✓ ⇒ 必须用**物理监控区**夹取 ✓
+                #   （self.monitor ✓ 与 position 同空间 ✓；绝不用逻辑 monitor_rect ✗ —— 上次就是混用空间 ✗）。
+                if self.selection.active is not None:
+                    self.selection.active = self.selection.active.intersected(self.monitor_rect)
             self.update_all()
             return
         self.position = self.to_physical_point(event.position().toPoint())
@@ -2948,10 +3183,15 @@ class MaskWindow(QWidget):
             self.setCursor(Qt.CrossCursor)
         if any((self.selection.start is not None, self.selection.dragging is not None,
             self.selection.resizing is not None)):
+            # 2026-10-12（规则 22 ✓ 多屏）：屏幕右/下边缘取**含端点**值（left+width-1），而非排他的 left+width。
+            #   QRect 两端含端点 ⇒ 吸附到排他边界会让选区比屏幕多 1px（实测 2561×1441 ✗）；
+            #   取含端点边界后，拉满屏正好等于屏幕尺寸（2560×1440 ✓）。
             x_edges = [coordinate for screen in self.monitors for coordinate in
-                       (screen["left"] - self.bounds["left"], screen["left"] + screen["width"] - self.bounds["left"])]
+                       (screen["left"] - self.bounds["left"],
+                        screen["left"] + screen["width"] - 1 - self.bounds["left"])]
             y_edges = [coordinate for screen in self.monitors for coordinate in
-                       (screen["top"] - self.bounds["top"], screen["top"] + screen["height"] - self.bounds["top"])]
+                       (screen["top"] - self.bounds["top"],
+                        screen["top"] + screen["height"] - 1 - self.bounds["top"])]
             x_edges.extend(edge - self.bounds["left"] for left, top, right, bottom in self.window_edges
                            for edge in (left, right))
             y_edges.extend(edge - self.bounds["top"] for left, top, right, bottom in self.window_edges
@@ -2960,8 +3200,20 @@ class MaskWindow(QWidget):
                 # 键盘微调已接管本次拖动 ⇒ 只按真实指针位置更新，不再做边缘吸附 ✗
                 # （吸附会把刚微调出来的 1px 偏移拉回原来的屏幕/窗口边缘 ✓ 见 _nudge_active_region）。
                 self.selection.update(self.position)
+                # 2026-10-12（规则 22 ✓ 物理空间）：拖到屏幕右下角时端点含端点 ⇒ 选区比屏幕多 1px ✗
+                #   （实测 2561×1441 ✗ / 反方向 2558×1438 ✗）。position 是**物理**坐标 ✓ ⇒ 必须用**物理监控区**夹取 ✓
+                #   （self.monitor ✓ 与 position 同空间 ✓；绝不用逻辑 monitor_rect ✗ —— 上次就是混用空间 ✗）。
+                if self.selection.active is not None:
+                    self.selection.active = self.selection.active.intersected(self.monitor_rect)
             else:
                 self.selection.update(self.position, x_edges, y_edges)
+                # 2026-10-12（规则 22 ✓ 物理空间）：新建选区（划选）也必须夹取到本屏 monitor_rect ✓。
+                #   active/position 都是物理局部坐标（相对 bounds 原点）✓ monitor_rect 同空间 ✓。
+                #   之前只有 inline/nudge 分支有夹取、普通分支没有 ✗ ⇒ TL→BR 拖满屏时终点被吸附到
+                #   排他右/下边界（left+width）⇒ QRect 两端含端点 ⇒ 宽高各多 1px（实测 2561×1441 ✗）；
+                #   BR→TL 反向时也因缺夹取无法保证选区被严格限制在本屏内 ✗。
+                if self.selection.active is not None:
+                    self.selection.active = self.selection.active.intersected(self.monitor_rect)
         # 正在手绘或拖动时不显示悬停高亮，避免和选区抢视觉焦点。
         if (self.selection.start is None and self.selection.dragging is None
                 and self.selection.resizing is None):
@@ -3048,6 +3300,18 @@ class MaskWindow(QWidget):
         point = QPoint(self.position) + QPoint(dx, dy)
         self.position = point
         self.selection.active = QRect(start, point).normalized()
+        # 2026-10-12（空间核对 ✓ 规则 22）：选区(物理/全局?) 与 遮罩逻辑矩形 与 物理监控区 一起打出来，
+        #   只在选区值变化时记一次 ✓ ⇒ 一次复现即可确定"该用哪个矩形去夹取" ✓（我上次用错了空间 ✗）。
+        if getattr(self, '_sel_space_log', None) != self.selection.active:
+            self._sel_space_log = self.selection.active
+            try:
+                _logical = self.to_logical_rect(self.selection.active).toRect()
+            except Exception:                 # noqa: BLE001  仅诊断用 ✓
+                _logical = None
+            logging.getLogger('screensnap').debug(
+                '选区空间核对：active=%s 逻辑=%s monitor_rect=%s 物理监控区=%s 屏幕=%s',
+                self.selection.active.getRect(), (_logical.getRect() if _logical is not None else None),
+                self.monitor_rect.getRect(), self.monitor, self.screen().geometry().getRect())
         # 键盘接管本次拖动后不再自动吸附：否则 1px 微调会被"靠近边缘 8px 吸附"拉回原处 ✗
         # （鼠标移动事件里的吸附分支见 mouseMoveEvent）。
         self._nudge_hold = True

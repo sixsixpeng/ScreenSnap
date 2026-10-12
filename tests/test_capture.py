@@ -375,6 +375,130 @@ class CaptureTests(CoreTests):
         finally:
             mask.close()
 
+    def test_drag_to_screen_edges_clips_to_monitor_size(self):
+        """2026-10-12 用户报告（双 2K 屏 + 拉满全屏）：TL→BR 拉满选区比屏幕多 1px、
+        BR→TL 拉满达不到屏幕尺寸。根因是屏幕右/下边缘用排他值（left+width）+ 窗口边缘
+        吸附干扰了屏幕边缘。修复后拖到屏幕边缘选区精确等于屏幕尺寸。"""
+        from PySide6.QtCore import QPoint, QPointF, QEvent, QSize
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 150}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (200, 150)), bounds, [bounds], DEFAULTS)
+        mask.show()
+        self.app.processEvents()
+
+        def press(pos):
+            mask.mousePressEvent(QMouseEvent(
+                QEvent.MouseButtonPress, QPointF(pos), QPointF(pos),
+                Qt.LeftButton, Qt.LeftButton, Qt.NoModifier))
+
+        def move(pos):
+            mask.mouseMoveEvent(QMouseEvent(
+                QEvent.MouseMove, QPointF(pos), QPointF(pos),
+                Qt.NoButton, Qt.NoButton, Qt.NoModifier))
+
+        try:
+            # TL→BR 拉满：起点 (0,0)，终点 (199,149)（屏幕右下角含端点）⇒ 正好 200×150，不多 1px
+            press(QPoint(0, 0))
+            move(QPoint(199, 149))
+            self.assertEqual(mask.selection.active.size(), QSize(200, 150))
+            mask.selection.active = None
+            mask.selection.start = None
+
+            # BR→TL 拉满：起点 (199,149)，终点 (0,0) ⇒ 正好 200×150（不被窗口边缘干扰拉不满）
+            press(QPoint(199, 149))
+            move(QPoint(0, 0))
+            self.assertEqual(mask.selection.active.size(), QSize(200, 150))
+        finally:
+            mask.close()
+
+    def test_badge_poll_refreshes_position_from_live_cursor(self):
+        """2026-10-12 左键整屏专项：左键划满整屏进入原地编辑后，画布（遮罩子控件）拦截鼠标移动
+        事件 ⇒ 遮罩 mouseMoveEvent 不再触发 ⇒ self.position 停在松开处（右下角）⇒ 徽标 hover 判定
+        拿过时位置算，光标移到顶部徽标上却不隐藏。修复：_badge_poll_tick 每拍用 QCursor.pos() 刷新
+        self.position（实时光标），保证 hover 判定正确。"""
+        from PySide6.QtCore import QPoint, QRect
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (320, 240), "white"), bounds, [bounds], DEFAULTS)
+        try:
+            view = mask.session.views[0]
+            view.selection.active = None
+            view.selection.rects = [QRect(0, 0, 320, 240)]   # 整屏选区（松开后）
+            view.position = QPoint(319, 239)   # 松开鼠标时停在屏幕右下角（过时位置）
+            with patch.object(view, "_live_cursor_physical", return_value=QPoint(160, 20)) as live:
+                view._badge_poll_tick()        # 周期刷新 ⇒ 应从实时光标处取位置
+                live.assert_called_once()
+                self.assertEqual(view.position, QPoint(160, 20))
+        finally:
+            mask.close()
+
+    def test_info_bar_sync_starts_badge_poll_timer_on_view(self):
+        """2026-10-12 左键整屏专项（根因 ✓）：徽标周期重绘 timer 之前误挂在 InfoBar（`self`）上 ✗
+        —— InfoBar 没有 `selection` 属性 ⇒ `_rects_now` 恒为空 ⇒ timer 从未启动 ⇒ 进入原地编辑后
+        徽标 hover 判定只靠鼠标移动事件触发，画布一拦截就再也不跑 ⇒ 一直不隐藏 ✗。修复：timer 挂在
+        view（MaskWindow）上，读 view.selection、连 view._badge_poll_tick ✓。"""
+        from PySide6.QtCore import QRect
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (320, 240), "white"), bounds, [bounds], DEFAULTS)
+        try:
+            mask.show()
+            self.app.processEvents()
+            view = mask.session.views[0]
+            view.monitor_rect = QRect(0, 0, 320, 240)
+            view.position = QPoint(160, 120)
+            view.selection.rects = [QRect(0, 0, 320, 240)]   # 全屏选区（有选区）
+            view.info_bar.sync()                             # 应启动挂在 view 上的 timer
+            timer = getattr(view, "_badge_poll_timer", None)
+            self.assertIsNotNone(timer, "有选区时应创建徽标周期重绘 timer ✓")
+            self.assertTrue(timer.isActive(), "有选区时 timer 应运行 ✓")
+            view.selection.rects = []                        # 清空选区
+            view.info_bar.sync()                             # 应停止 timer
+            self.assertFalse(timer.isActive(), "无选区时 timer 应停止 ✓")
+        finally:
+            mask.close()
+
+    def test_badge_hides_when_cursor_moves_over_after_inline_edit(self):
+        """2026-10-12 左键整屏专项（端到端）：整屏选区进入原地编辑后，画布拦截 mouseMoveEvent，
+        self.position 只能靠 _badge_poll_tick 刷新。这里模拟「鼠标移到顶部徽标上」⇒ 徽标应隐藏。"""
+        from PySide6.QtCore import QPoint, QRect
+        from unittest.mock import patch as _patch
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 2560, "height": 1440}
+        settings = dict(DEFAULTS, inline_edit=False, magnifier=False, window_detection=False)
+        with _patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (2560, 1440), "white"), bounds, [bounds], settings)
+        try:
+            mask.show()
+            self.app.processEvents()
+            view = mask.session.views[0]
+            view.monitor_rect = QRect(0, 0, 2560, 1440)
+            view.selection.active = None
+            view.selection.rects = [QRect(0, 0, 2560, 1440)]   # 整屏选区（松开后）
+            # 模拟光标移到徽标上（顶部居中 (1280, 17)）；dpr=1 时 mapFromGlobal 直接返回窗口局部。
+            with _patch("screenshot.mask_window.QCursor.pos", return_value=QPoint(1280, 17)), \
+                    _patch.object(view, "mapFromGlobal", return_value=QPoint(1280, 17)):
+                view._badge_poll_tick()      # 刷新 position + 请求重绘
+                view._sync_size_badge(QRect(0, 0, 2560, 1440), (2560, 1440))   # 判定 + 排延迟回调
+                self.app.processEvents()     # 执行 apply_badge 隐藏
+                self.app.processEvents()
+                badge = getattr(view, "_size_badge", None)
+                self.assertIsNotNone(badge, "应创建尺寸标签 ✓")
+                self.assertFalse(badge.isVisible(), "光标移到徽标上 ⇒ 徽标应隐藏 ✓")
+        finally:
+            mask.close()
+
     def test_mask_drag_resizes_from_each_edge_midpoint(self):
         from PySide6.QtCore import QPoint, QPointF, QEvent
         from PySide6.QtGui import QMouseEvent
