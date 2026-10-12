@@ -88,6 +88,22 @@
       ① `DEFAULTS` 默认值（含注释说明）② 遗留/缺失键的初始化与迁移（是否**幂等**、是否是**一次性闸门**、会不会把用户的取消勾选/排序/自定义改回去并回写磁盘 ✗）③ `validate()` 校验与 `repair()` 修复 ④ 快捷键冲突检测表 ⑤ `PRESERVED_ON_VERSION_RESET`（升级保留清单）⑥ 版本闸门的**重置/恢复默认/回滚**路径（会不会误删用户数据、能否在删除失败时仍完成重建，规则 24）⑦ 导入/导出（导出含新键 ✓、导入旧文件时缺键如何补 ✓）⑧ 设置页控件 + **实时刷新接线**（改了设置当下是否生效，而不是重启才生效）⑨ **每一个读取点**（`grep -n "<key>"` 除 DEFAULTS/校验外必须在生产代码里有消费 ✓ 否则就是"只有键没有行为"✗ 规则 33）⑩ 相关用例（含默认值断言与 `every_setting_has_an_entry`）⑪ `README` 配置表与「按键习惯/不保留」清单。**新增的键要 ①–⑪ 全部走一遍**，任何一格缺失都要在报告里点名。
     - **D. 提交面梳理**：列出未推送的提交与未提交的文件，给出**按 feature 分组的提交建议**（含 AGENTS 需单独提交，规则 28），但**不擅自提交** ✗（规则 21）。
     - **E. 报告口径**：已实测通过 / 未验证 / 已知未完成，三者分开写清楚；禁止用"基本没问题/应该可以"糊过去（规则 33）。
+35. **配置键必须"一一对应"，且每次涉及配置的改动都要做一次全量对照；两个本应独立的键绝不允许被暗中联动。** 这条来自一次真实事故：`config/config_manager.py` 里曾有一张 `LINKED_FILL_COLORS` 联动表 + 助手 `fill_colors_following_stroke()`，改「矩形/椭圆线条颜色」时会把「填充颜色」**自动改成同一个值** ✗ ⇒ 用户最终发现"填充色与边框色变成了一个值，之前是分开的" ✓（两个设置项在界面上明明是两项 ✓）。要求：
+
+    - **一一对应**：每一个 `DEFAULTS` 键都必须同时满足 —— ① 有设置页控件（或明确属于"记忆状态"类并在报告中点名 ✓ 例如 `last_capture_rect` / `save_as_dir` ✓）；② 至少有一个**生产读取点**（不是只出现在 DEFAULTS / validate / 设置页 ✓）；③ 在 README 配置表中可查（默认值 + 取值范围 ✓）；④ `validate()` 覆盖其类型或取值域 ✓。任一条缺失都要在报告里点名 ✗。
+    - **每次涉及配置的改动都跑一次全量对照**（新增/改名/删除键、改默认值、改校验、改设置页、改联动逻辑均算 ✓）：用脚本遍历 `DEFAULTS`，逐键检查上面四条，并额外报告"默认值相同 / 名称成对（如 `X_color` 与 `X_fill_color`）"的键组，逐一确认它们**本应独立**还是**确实联动** ✓。
+    - **禁止暗中联动**：不得让改 A 键的代码顺手改 B 键 ✗（无论叫"跟随""同步""默认一致" ✓）。若产品上确需联动，必须**显式**满足：在 README 的配置表与调整记录里写明"改 A 会同时改 B" ✓ + 在设置页该控件的说明里写明 ✓ + 有用例钉住联动条件（例如"仅当 B 仍等于旧 A 时才跟随" ✓）。否则一律按独立处理 ✓。
+    - **报告口径**：每次配置相关改动的报告都要写清"跑了哪些键、发现哪些不一致、修了什么、还剩哪些有意为之的例外" ✓。
+
+- **D35 绘制期绝不改可见性（子控件与场景图元都不行）**
+  - 现象：给"全屏截图松开后尺寸标签消失"做修复时，我在 `drawForeground`（绘制期）里直接 `show()` 一个子控件 `QLabel` ✗ ⇒ `tests.test_capture -k mask` 由 **Ran 22 OK** 变成**摘要前原生崩溃**（`exit=-1073740791` / `0xC0000409` ✓ 无 Ran ✓）。另一次同族隐患：`_paint_erased_composite` → `_cached_annotation_layer` 在绘制期 `base.hide() … scene.render() … base.show()` ✗（改的是**场景图元**可见性 ✓ 同样属风险族 ✓）。
+  - 排查：`git stash push <改动文件>` 后跑同一子集（HEAD 版本 **Ran 22 OK** ✓）⇒ 确认是本次改动触发 ✓（C7）；把 `show()` 换成 `QTimer.singleShot(0, …)` 后同子集恢复 **Ran 22 OK** ✓。
+  - 避免：① 绘制函数（`paintEvent` / `drawForeground` / `drawBackground` / `paint` / `paintGL`）里**只允许读**，一律不得 `show/hide/setGeometry/setText/raise_/setVisible` ✗；② 需要改子控件就**推迟到事件循环下一轮**（`QTimer.singleShot(0, …)` ✓），并且**只在状态真的变化时**排一次 ✓（否则每帧排队 ⇒ 异常/重绘刷屏 ✓ 本会话真发生过 ✓）；③ 绘制期只做纯读计算，把"目标状态"算好交给延迟回调执行 ✓；④ 改完必跑该模块子集（本例 `-k mask` / `test_uia -k badge` ✓）确认仍是 `Ran N / OK` ✓。
+- **D36 遮罩侧代码不得引用画布专属属性（跨类属性误用）**
+  - 现象：真机日志被 `AttributeError: MaskWindow object has no attribute erasing` ✗ 刷满（`bootstrap` 的"未捕获异常"成百上千条 ✓）—— 我在遮罩侧写了 `and not self.erasing` ✗，而 `erasing` 属于画布 `AnnotationCanvas` ✓。
+  - 排查：`grep -n "self.erasing" screenshot/mask_window.py` 命中非注释行即可定位 ✓；AST 扫描"`self.X` 被读取但本类及项目内基类从未定义"也能提前发现 ✓（注意 `app/*_flow.py` 的 **Mixin** 属性由组装类提供 ✓ 规则 16 ✓ 属误报，需跳过 ✓）。
+  - 避免：① 写 `self.X` 前先确认 X 属于**当前这个类**（画布属性只能在 `AnnotationCanvas` 里用 ✓ 遮罩用 `session`/`canvas` 去取 ✓）；② 真机报错一律**先看 traceback 最后一帧的文件与行号** ✓ 本类问题一眼可辨 ✓；③ 同一模式在本会话出现过两次（`erasing` 与更早的 `view` 自由变量 D12 ✓）⇒ 跨类复制代码后逐行核对 `self.X` 归属 ✓。
+
 ## 经验与常见错误
 
 > 由规则 25 维护：只收录**真实发生过**的错误；每条含「现象 / 排查 / 避免」；新增前先询问用户。
@@ -200,6 +216,11 @@
   - 现象：AssertionError: ['escape-handle', 'escape-handle'] != ['escape-handle']（关闭路径多同步一次）；把桩改成幂等后仍红，两轮都耗在这条脆断言上。
   - 排查：让断言把**实际列表**打出来（本次就是列表差异一行定位），并检查桩是否幂等（句柄为空应早退）。
   - 避免：对"安装/释放/幂等/去抖"这类资源，断言**性质**——可见期间**不**释放、不可见后**至少**释放一次、不重复安装；桩必须幂等。
+
+- **C10 改完文件、以及做全面检查时，都要主动做一次「全量导入自检」，防止误删（文件或 import 行）✗**
+  - 现象：改动一轮之后，问题常常出在"**别人**"身上 —— ① 某个文件被脚本误删/覆盖后没人发现（A6/A7/A10 都是这一类）✗；② 某个模块少了一行 import ⇒ 只有真正跑到那行时才 `NameError`（本会话真实发生两次：`sticker/sticker_manager.py` 少了 `root` ⇒ `persist_clipboard_history` 一调用就崩 ✗；`editor/annotation_canvas.py` 少了 `QPoint` ⇒ 新写的指针跟随一跑就 `NameError` ✗）。而"只跑受影响的 `-k` 子集 + `py_compile`" **发现不了**这两类 ✗ —— py_compile 只查**指定文件**的语法，不查它引用的名字与文件是否存在 ✓；子集也只覆盖它自己那条路径 ✓。
+  - 排查：三件事一起看 —— ① `git status --short --untracked-files=all` 与 `git diff --stat` ✓（出现 ` D <file>` 或意外消失的文件就是误删 ✗）；② **逐个模块导入**自检：把 `app/core/editor/screenshot/sticker/ui/config/logger` 与 `main` 下所有 `.py` 转成模块名，**每个模块用一个独立进程**导入（这样 C6 那类"导入期原生崩溃"只会打断那一个 ✓ 不会掩盖其余 ✓）：`.venv\Scripts\python.exe -c "import importlib,sys; importlib.import_module(sys.argv[1])" <模块名>` ✓；③ 导入失败/退出码非 0 的模块逐个读 traceback 最后一帧 ✓（在产品代码 ⇒ 真 bug ✓ 按 D21 修产品 ✓，不要先改测试 ✓）。
+  - 避免：把"全量导入自检"固定成一轮改动的**收尾动作**（与 `py_compile` 同级 ✓），尤其在：批量脚本改过多个文件之后 ✓、删除/重命名过文件或函数之后 ✓、以及规则 34 的"最终总检查"里 ✓。报告里要写清"自检覆盖了多少个模块、有几个失败、失败的是谁" ✓ —— 只报"子集全绿"不算覆盖到这一层 ✗（本会话多次吃过这个亏 ✓）。
 
 ### D. 判断与流程
 
@@ -401,3 +422,13 @@
 - `main.py`: the `Application` composition root (mixin assembly, tray, hotkeys, config, dispatch) and process entry point.
 - `tests/`: regression coverage split by feature — `base.py` (shared imports, `QApplication` fixture, assertion helpers), `test_config`, `test_capture`, `test_sticker`, `test_uia`, `test_dpi`, `test_ui`, `test_app`, `test_misc`, and the `editor/` subpackage (`test_canvas`, `test_tools`, `test_text`, `test_erase`, `test_zoom`).
 - `README.md`: user instructions, developer notes, and chronological adjustment log.
+
+- **D37 画布绝不"吸附/移动"鼠标指针 —— 只有显式的键盘微调跟随例外**
+  - 现象：历史上有一版改动让画布在拖动/绘制时把指针"吸"住 ✗（用户明确要求修掉 ✓ 现已修复 ✓），用户特别提醒"要注意这一点" ✓；本会话我又新加了"键盘微调时指针跟随"✗ ⇒ 两者很容易被混为一谈 ✗。
+  - 排查：全库列出会移动指针的地方：`grep -n "QCursor.setPos"` + 打印每个调用点的所属函数 ✓（本次实测只剩 5 处 ✓：`_follow_handle_cursor` / `_follow_move_cursor` / `MaskWindow.__init__`（遮罩打开时摆初始位置 ✓）/ `_nudge_active_region` / 遮罩 `keyPressEvent` 两处 ✓）⇒ 逐条判定它属于"键盘动作"还是"鼠标拖动/绘制" ✓。
+  - 避免：① 指针只能在**用户按了键盘微调键**（WASD/方向键）时被程序移动 ✓，并且必须**同步跟随选区/标注/手柄**✓；② 任何鼠标拖动、绘制、悬停、绘制期路径都**不得** `QCursor.setPos` ✗；③ `_follow_move_cursor` 还要求"左键确实按着" ✓ 否则一律不动指针 ✓；④ 跟随统一走 `_apply_cursor_follow()` ✓（立刻设 + 事件循环下一轮读回 `QCursor.pos()` 差 > 2px 再设一次 ✓ 解决"不及时/不同步" ✓）；⑤ 改输入路径后按上面那条 grep 复核一次 ✓。
+
+- **D38 被覆盖的子控件判定不能依赖「父窗口 paintEvent 会被 update() 触发」—— 左键整屏徽标不隐藏连修三轮才定位到**
+  - 现象：左键划满整屏进入原地编辑后，尺寸徽标移到鼠标上**不隐藏**；右键多选（不进原地编辑）却正常 ✓。反复修了三轮（容差 2→14→40→100、周期重绘、实时光标）都没彻底解决 ✓。
+  - 排查：三环断点逐环定位（靠加可观测点，不靠猜）—— ① 徽标周期刷新的 `QTimer` **从未启动** ✗：启动逻辑放在 `InfoBar.sync()` 里误用 `self`（InfoBar），`self.selection` 恒为 `None` ⇒ `_rects_now` 恒空 ⇒ timer 从不 `start()` ✓（改 `self`→`view` 即 MaskWindow ✓）；② 进入原地编辑后画布（遮罩子控件）拦截 `mouseMoveEvent` ⇒ `self.position` 停在松开处，hover 判定用过时坐标 ✓（改每拍 `QCursor.pos()` 刷新 ✓）；③ **最终根因** ✗：即使 timer 启动、position 也刷新了（日志 `周期刷新第 21 拍: position=(1233,27)` 已在徽标上），`_badge_poll_tick` 里的 `self.update()` 在遮罩被画布**完全覆盖**后**不触发 paintEvent**（Qt 跳过被遮挡窗口的重绘）⇒ 依赖 `paintEvent → _sync_size_badge` 的判定链路断掉，徽标判定始终没跑 ✓（改为 tick 里**直接**算 `element_rect/size` 并调 `_sync_size_badge` ✓）。
+  - 避免：① 覆盖层/多屏下，子控件的可见性/几何/判定**不得**依赖「父窗口 `paintEvent` 会被 `update()` 触发」✗ —— 被另一个（子）控件完全遮挡时 Qt 会跳过重绘 ⇒ 周期任务里要**直接**计算目标状态并调用同步函数（可见性仍走延迟回调，D35 ✓），而不是 `self.update()` 间接触发 ✗；② 定时器/共享状态挂载时先确认 `self` 归属（InfoBar vs MaskWindow）—— 跨类引用不存在的属性会静默返回 `None`，逻辑空转还不报错 ✗；③ 这种「多环断点」问题**先加可观测点逐环定位**（timer 是否启动 / 周期 tick 是否刷新 position / 判定是否出「决策」日志），而不是反复猜测修同一处 ✓。
