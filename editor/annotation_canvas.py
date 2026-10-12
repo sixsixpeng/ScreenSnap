@@ -175,6 +175,14 @@ class AnnotationCanvas(QGraphicsView):
         # 圆环若也用它，指针移出画布后就会贴在边缘不动 ✗ —— 就是用户说的"鼠标被吸附" ✓）。
         self.mosaic_point_raw = None
         self.eraser_point_raw = None
+        # 2026-10-12 标注层缓存（**纯计算** ✓ 不碰任何重绘调用 ✓）：
+        # 实测有擦除层时每帧都要 scene.render 全部标注（26.9 ms / 20 个 ✗ ⇒ 整帧 68.7 ms ✓）。
+        # 这里缓存"隐藏擦除层后的标注渲染" ✓，每帧只把擦除遮罩按 DestinationOut 叠上去 ✓ ⇒ 逐像素等价 ✓。
+        self._annotation_layer_stamp = 0
+        self._annotation_layer_cache = (None, None)
+        self._building_annotation_cache = False
+        self._eraser_layer_locked = False
+        self.scene_data.changed.connect(self._bump_annotation_layer_stamp)
         # 擦除以带 z 序的 EraseMaskItem 存在于场景中；该标志表示当前是否有擦除层，
         # 供实时视图决定是否走合成路径。
         self.erase_mask_dirty = False
@@ -568,8 +576,18 @@ class AnnotationCanvas(QGraphicsView):
         modifiers = QApplication.keyboardModifiers()
         if event is not None:
             modifiers |= event.modifiers()
-        ctrl_or_alt = bool(modifiers & (Qt.ControlModifier | Qt.AltModifier))
-        return ctrl_or_alt or self._chain_tool() or self.chain_active
+        # 2026-10-12（用户要求加配置 ✓）：触发修饰键由 `editor_straight_modifier` 决定 ✓
+        #   either（默认 ✓ Ctrl 或 Alt 任一）/ ctrl / alt / off（关闭直线 ⇒ 全部自由笔迹 ✓）
+        mode = str(self.settings.get("editor_straight_modifier", "either") or "either")
+        if mode == "off":
+            straight_by_key = False
+        elif mode == "ctrl":
+            straight_by_key = bool(modifiers & Qt.ControlModifier)
+        elif mode == "alt":
+            straight_by_key = bool(modifiers & Qt.AltModifier)
+        else:
+            straight_by_key = bool(modifiers & (Qt.ControlModifier | Qt.AltModifier))
+        return straight_by_key or self._chain_tool() or self.chain_active
 
     def _straight_preview_path(self, end):
         """由已提交段与当前橡皮筋段拼出直线折线的预览路径。"""
@@ -1442,6 +1460,11 @@ class AnnotationCanvas(QGraphicsView):
 
     def _paint_erased_composite(self, painter):
         """仅渲染可见区域：先铺背景，再画底图（按开关决定是否擦底图），最后画被遮罩镂空的标注层。"""
+        # 2026-10-12 复查加固（规则 34-B）：擦除拖动期间会锁住标注层缓存 ✓；
+        # 若某次按下之后既没有移动也没有 release（例如按下后直接 Esc / 焦点被夺 ✓），锁会一直扣着 ✗
+        # ⇒ 之后新画的标注无法让缓存失效 ✗。这里每次合成时自愈 ✓（成本一次布尔判断 ✓）。
+        if not self.erasing and self._eraser_layer_locked:
+            self._eraser_layer_locked = False
         # 只合成**脏矩形**（有记录时 ✓）；没有记录（例如导出/打印路径 ✓）才退回整视口 ✓。
         # 2026-10-12（用户要求）：**性能优化已回退** ✓ —— 这里恢复为整视口合成 ✓
         # （此前为省时间引入了"脏矩形/强制脏区" ✗ ⇒ 与 Qt 的碎块 paintEvent 相互干扰，
@@ -1483,20 +1506,88 @@ class AnnotationCanvas(QGraphicsView):
                     mp.drawImage(-x0, -y0, base_mask)
                     mp.end()
                 painter.drawImage(visible.topLeft(), base_sub)
-        # 标注层：擦除层已按 z 序镂空其下方内容。
-        ann = QImage(w, h, QImage.Format_ARGB32)
-        ann.fill(Qt.transparent)
-        ap = QPainter(ann)
-        ap.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
-        # 2026-10-11 性能（真凶 ✓，探针实测）：这里原来**每帧**都 `self.base.hide()` … `self.base.show()` ✗
-        # ⇒ QGraphicsScene 判定"整个场景变了" ⇒ 视口发生**整屏重绘** ✗ ⇒ 合成用的脏矩形被放大成整屏
-        # （实测 scene.render 的 source = 1184×784 ✗ 而不是 42×42 ✓）⇒ 所有标注每帧都重画（1560 次/39 帧 ✗）。
-        # 改为：**只在擦除激活期间隐藏一次** ✓，恢复由 drawForeground 在擦除层消失时做一次 ✓（不再每帧翻动 ✓）。
-        if self.base.isVisible():
-            self.base.hide()
-        self.scene_data.render(ap, QRectF(0, 0, w, h), QRectF(x0, y0, w, h))
-        ap.end()
-        painter.drawImage(visible.topLeft(), ann)
+        # 标注层：擦除层按 **z 序**镂空其下方内容 ✓。
+        # 2026-10-12 性能（缓存 ✓）+ 语义修正（用户反馈"反复涂抹后新画的内容没有被擦/被越权擦" ✗）：
+        #   · **只有一个擦除层**时：擦除层的 z 必在全部标注之上（`_erase_stroke_item` ✓）⇒
+        #     缓存"隐藏擦除层时的标注渲染" + 最后叠一次遮罩 = 与原整场景渲染**逐像素等价** ✓；
+        #   · **≥2 个擦除层**时（擦除 → 画新标注 → 再擦除 ⇒ 会新开一层 ✓）：z 序必须保留 ✗
+        #     ⇒ 一次性叠加会破坏"后画的标注位于旧擦除层之上"的语义 ✗ ⇒ 退回整场景渲染 ✓（正确优先 ✓）。
+        # 2026-10-12 二修（用户实测："实时预览里后画的内容仍在橡皮擦下面 ✗ 但导出是对的" ✓）：
+        # 上一次我按"擦除层数量 ≤1"决定是否用缓存 ✗ —— 漏了这种情况：**只有一个擦除层、但它已被
+        # 后来画的标注压住**（`_next_annotation_z` 让新标注 z = max+1 ✓）⇒ 此时擦除层**不再是最高层** ✗，
+        # 而缓存会把擦除遮罩叠加到**全部**标注之上 ⇒ 连新标注一起擦掉 ✗（导出路径不受影响 ⇒ 所以导出正确 ✓）。
+        # 正确条件（与 `_erase_stroke_item` 同一判据 ✓）：**擦除层仍位于全部标注之上** 时才可走缓存 ✓。
+        erase_layers = self.erase_items()
+        annotation_levels = [item.zValue() for item in self.annotations()]
+        top_erase_above_all = bool(erase_layers) and (
+            not annotation_levels or erase_layers[-1].zValue() > max(annotation_levels))
+        if len(erase_layers) == 1 and top_erase_above_all:
+            ann = self._cached_annotation_layer(w, h, x0, y0)
+            ap = QPainter(ann)
+            ap.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+            for erase_item in erase_layers:
+                erase_item.paint(ap, None, None)
+            ap.end()
+            painter.drawImage(visible.topLeft(), ann)
+        else:
+            ann = QImage(w, h, QImage.Format_ARGB32)
+            ann.fill(Qt.transparent)
+            ap = QPainter(ann)
+            ap.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+            base_was_visible = self.base is not None and self.base.isVisible()
+            if base_was_visible:
+                self.base.hide()
+            try:
+                self.scene_data.render(ap, QRectF(0, 0, w, h), QRectF(x0, y0, w, h))
+            finally:
+                if base_was_visible:
+                    self.base.show()
+                ap.end()
+            painter.drawImage(visible.topLeft(), ann)
+
+    def _bump_annotation_layer_stamp(self, *_regions):
+        """场景内容变化 ⇒ 标注层缓存失效 ✓（只自增计数 ✓ 绝不触发任何重绘调用 ✓）。
+
+        构建缓存本身会临时隐藏擦除层 ✓ 那也会发 changed ⇒ 用 `_building_annotation_cache` 跳过 ✓。
+        """
+        # 2026-10-12 修正（探针实测：拖动 30 次里缓存重建 29 次 ✗ ⇒ 缓存对"拖动中"几乎无效 ✓）：
+        # 擦除拖动期间标注层**不可能变化**（用户正在擦除 ✓ 不在编辑标注 ✓）⇒ 此时锁住缓存 ✓；
+        # 否则擦除自身的重绘也会把 changed 打进来 ⇒ 每帧重建 ⇒ 缓存形同虚设 ✗。
+        if not self._building_annotation_cache and not self._eraser_layer_locked:
+            self._annotation_layer_stamp += 1
+
+    def _cached_annotation_layer(self, w, h, x0, y0):
+        """返回"隐藏擦除层后的标注渲染"的**副本**（纯计算缓存 ✓ 不改重绘语义 ✓）。
+
+        失效键：视口尺寸、可见区原点、缩放、场景条目数、标注变更计数 ✓。
+        """
+        key = (w, h, x0, y0, round(float(self.transform().m11()), 6),
+               len(self.scene_data.items()), self._annotation_layer_stamp)
+        cached_key, cached = self._annotation_layer_cache
+        if cached_key == key and cached is not None and not cached.isNull():
+            return cached.copy()
+        image = QImage(w, h, QImage.Format_ARGB32)
+        image.fill(Qt.transparent)
+        cache_painter = QPainter(image)
+        cache_painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
+        hidden = [item for item in self.erase_items() if item.isVisible()]
+        base_was_visible = self.base is not None and self.base.isVisible()
+        self._building_annotation_cache = True
+        try:
+            for item in hidden:
+                item.setVisible(False)
+            if base_was_visible:
+                self.base.hide()          # 底图由合成单独绘制 ✓ 不能进这层缓存 ✗
+            self.scene_data.render(cache_painter, QRectF(0, 0, w, h), QRectF(x0, y0, w, h))
+        finally:
+            if base_was_visible:
+                self.base.show()
+            for item in hidden:
+                item.setVisible(True)
+            cache_painter.end()
+            self._building_annotation_cache = False
+        self._annotation_layer_cache = (key, image)
+        return image.copy()
 
     def paintEvent(self, event):
         """慢帧探针（性能，2026-10-11）：只在整屏重绘超过 8 ms 时记一条 DEBUG。
@@ -2003,6 +2094,7 @@ class AnnotationCanvas(QGraphicsView):
                 # 落笔时**锁定**直线模式：QTest.mouseMove / 真机快速移动都可能不带修饰键 ✓，
                 # 只靠移动事件的 modifiers 会漏判（其它工具同样在落笔时定格 ✓ 保持一致）。
                 self.straight_drawing = self._straight_gesture_active(event)
+                self._eraser_layer_locked = True     # 拖动期间锁住标注层缓存 ✓（见 _bump_annotation_layer_stamp）
                 self.eraser_group += 1          # 本次拖动自成一组擦除笔迹
                 if self.settings.get("eraser_brush", True):
                     self.erase_segment(point, point)    # 涂抹模式：落笔即一个点 ✓
@@ -2129,6 +2221,8 @@ class AnnotationCanvas(QGraphicsView):
             if self.erasing and not self.settings.get("eraser_brush", True):
                 # 框选模式：更新示意框（松手时整块擦除 ✓）
                 self.preview_end = point
+            if not self.erasing and self._eraser_layer_locked:
+                self._eraser_layer_locked = False      # 兜底：没有走 release 也要解锁 ✓
             if self.erasing and self.settings.get("eraser_brush", True):
                 if (self.straight_drawing or self._straight_gesture_active(event)) \
                         and self.start is not None:
@@ -2621,6 +2715,7 @@ class AnnotationCanvas(QGraphicsView):
                     self.erase_mask_dirty = True
                     self.viewport().update()
             self.erasing = False
+            self._eraser_layer_locked = False      # 松手解锁标注层缓存 ✓
             self.eraser_last = None
             self.start = None
             self.preview_end = None          # 清掉框选示意框 ✓
@@ -2633,6 +2728,7 @@ class AnnotationCanvas(QGraphicsView):
                 self.erase_segment(self.eraser_last, self.mapToScene(event.position().toPoint()))
             self.straight_drawing = False
             self.erasing = False
+            self._eraser_layer_locked = False      # 松手解锁标注层缓存 ✓
             self.eraser_last = None
             self.checkpoint()
             return

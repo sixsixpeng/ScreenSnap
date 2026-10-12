@@ -64,6 +64,10 @@ class EditorPage(SettingsPage):
         self.preview("eraser")
         self.number("eraser_width", "橡皮擦直径", 10, 100, "只影响橡皮擦工具，范围 10–100")
         self.add_color("eraser_cursor_color", "示意圈颜色")
+        self.choice("editor_straight_modifier", "直线绘制修饰键", [
+            ("Ctrl 或 Alt（任一）", "either"), ("仅 Ctrl", "ctrl"), ("仅 Alt", "alt"),
+            ("关闭（全部按自由笔迹）", "off")],
+            "画笔 / 荧光笔 / 马赛克 / 橡皮擦**按住拖动**时，按住所选修饰键即切换为直线；选「关闭」则始终为自由笔迹")
         self.check("eraser_brush", "涂抹模式（自由笔刷）",
                    "默认：按住拖动沿笔迹擦除（按住 Ctrl 或 Alt 可直线擦除）；关闭后改为拖框选矩形，擦除框内内容")
         self.check("eraser_erase_base", "同时擦除原图",

@@ -316,6 +316,9 @@ DEFAULTS = {
     # 2026-10-11 用户要求：橡皮擦对齐马赛克工具的用法 ⇒ 默认「涂抹模式（自由笔刷）」；
     # 关闭后为**拖框选矩形**擦除 ✓（类型校验由 validate 的"与默认值同类型"分支自动覆盖 ✓）
     "eraser_brush": True,
+    # 2026-10-12 用户要求：直线绘制（画笔 / 荧光笔 / 马赛克 / 橡皮擦按住拖动）的触发修饰键做成配置 ✓
+    # 取值：either（Ctrl 或 Alt 任一 ✓ 默认）/ ctrl / alt / off（关闭直线 ✓ 全部按自由笔迹 ✓）
+    "editor_straight_modifier": "either",
     # 截图取色与定位辅助增强
     "capture_picker_shortcut": "C",
     "magnifier_grid": True, "magnifier_grid_color": "#cccccc",
@@ -472,6 +475,8 @@ def validate(data):
             raise ValueError("截图选区边框颜色必须是六位十六进制颜色")
         elif key == "window_hover_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("控件识别高亮颜色必须是六位十六进制颜色")
+        elif key == "editor_straight_modifier" and value not in ("either", "ctrl", "alt", "off"):
+            raise ValueError("直线绘制修饰键选项无效（either / ctrl / alt / off）")
         elif key == "window_hover_fill_mode" and value not in ("fill", "reveal"):
             raise ValueError("控件候选框显示模式无效")
         elif key in ("window_hover_border_color", "window_hover_text_color",

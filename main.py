@@ -356,7 +356,8 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
             for key in ("rect_fill_enabled", "rect_fill_opacity", "rect_fill_color",
                         "ellipse_fill_enabled", "ellipse_fill_opacity", "ellipse_fill_color",
                         "mosaic_cursor_color", "eraser_cursor_color", "mosaic_width",
-                        "mosaic_brush", "eraser_width", "eraser_brush"):
+                        "mosaic_brush", "eraser_width", "eraser_brush",
+                        "editor_straight_modifier"):
                 value = self.config.data[key]
                 editor.settings[key] = value
                 editor.canvas.settings[key] = value

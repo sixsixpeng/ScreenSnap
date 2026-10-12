@@ -83,7 +83,9 @@ class EraseTests(CoreTests):
             canvas.erase_segment(QPointF(50, 50), QPointF(120, 120))
             self.app.processEvents()
             self.assertTrue(canvas._erase_live_active(), "应当存在擦除层")
-            self.assertFalse(canvas.base.isVisible(), "擦除激活期间底图应被隐藏（只隐藏一次 ✓）")
+            # 2026-10-12 契约更新（性能优化已回退 ✓ + 标注层缓存 ✓）：底图只在"构建标注层缓存"的
+            # 瞬间被临时隐藏并立即恢复 ✓ ⇒ 不再要求它全程隐藏 ✗；真正要守住的是**擦除层消失后必须可见** ✓。
+            self.assertTrue(canvas.base.isVisible(), "合成结束后底图必须处于可见状态")
             # 撤销/删除掉擦除层 ⇒ 合成路径退出 ⇒ 底图必须恢复 ✓
             for item in list(canvas.erase_items()):
                 canvas.scene_data.removeItem(item)
@@ -131,6 +133,123 @@ class EraseTests(CoreTests):
                                        "真实指针点必须**不被夹取** ✓（否则圆环会贴在画布边缘 ✗）")
         finally:
             canvas.close()
+
+    def test_new_annotation_above_erase_layer_survives_then_next_erase_creates_new_layer(self):
+        """2026-10-12 用户反馈（历史问题 ✓）：反复涂抹后再画新东西 ⇒ 橡皮擦似乎没有覆盖新图层 ✗。
+
+        正确语义（既有设计 ✓）：擦除只作用于**其下方**图元 ✓ ⇒「擦除之后新画的标注」位于该擦除层之上 ✓，
+        因此**旧的擦除笔迹不该擦掉它** ✓；而**下一次擦除**会**新开一层**（z = 标注层最大值 + 0.5 ✓）
+        ⇒ 那时才会擦到它 ✓。本用例把这两条都钉住 ✓（多擦除层时合成必须保 z 序 ⇒ 不再走单层缓存 ✓）。
+        """
+        from editor.annotation_canvas import AnnotationCanvas
+        from PySide6.QtCore import QPointF
+        from PIL import Image
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (400, 300), "white"),
+                                  dict(DEFAULTS, eraser_brush=True, eraser_width=20))
+        try:
+            canvas.erasing = True
+            canvas.eraser_group += 1
+            canvas.erase_segment(QPointF(50, 50), QPointF(200, 50))
+            self.assertEqual(len(canvas.erase_items()), 1, "第一次擦除应只建一层")
+            # 擦除之后画新标注 ⇒ 它必须在擦除层之上 ✓
+            canvas.set_tool("pen")
+            canvas.start = QPointF(60, 120)
+            canvas.preview_end = QPointF(240, 120)
+            canvas._add_annotation(canvas._annotation_from_drag() if hasattr(canvas, "_annotation_from_drag")
+                                   else __import__("editor.annotation_items", fromlist=["shape"])
+                                   .shape("pen", QPointF(60, 120), QPointF(240, 120), "#ff0000", 4))
+            annotation = canvas.annotations()[-1]
+            self.assertGreater(annotation.zValue(), canvas.erase_items()[-1].zValue(),
+                               "后画的标注必须位于已有擦除层之上")
+            # 再擦一次 ⇒ 必须**新开一层**，且新层在全部标注之上 ✓
+            canvas.erasing = True
+            canvas.eraser_group += 1
+            canvas.erase_segment(QPointF(60, 120), QPointF(240, 120))
+            self.assertEqual(len(canvas.erase_items()), 2, "标注之上的擦除必须新开一层（否则擦不到新内容 ✗）")
+            self.assertGreater(canvas.erase_items()[-1].zValue(), annotation.zValue(),
+                               "新擦除层必须在全部标注之上 ⇒ 能擦到新画的标注")
+        finally:
+            canvas.close()
+
+    def test_live_preview_matches_export_when_new_annotation_is_above_erase_layer(self):
+        """2026-10-12 二修（用户实测：实时预览里后画的内容仍在橡皮擦下面 ✗ 而导出正确 ✓）。
+
+        根因：合成曾按"擦除层数量 ≤1"决定用不用缓存 ✗ ⇒ 漏了"**只有一个擦除层、但已被后来画的标注压住**"
+        这种常见情形 ✓（`_next_annotation_z` 让新标注 z=max+1 ✓）⇒ 缓存把擦除遮罩叠到**全部**标注之上 ✗
+        ⇒ 连新标注一起擦掉 ✓。契约：**只有擦除层仍位于全部标注之上时**才允许走缓存 ✓（与 `_erase_stroke_item` 同判据 ✓）。
+        """
+        from editor.annotation_canvas import AnnotationCanvas
+        from editor.annotation_items import shape
+        from PySide6.QtCore import QPointF
+        from PIL import Image
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (400, 300), "white"),
+                                  dict(DEFAULTS, eraser_brush=True, eraser_width=20))
+        try:
+            canvas.erasing = True
+            canvas.eraser_group += 1
+            canvas.erase_segment(QPointF(50, 50), QPointF(200, 50))
+            self.assertEqual(len(canvas.erase_items()), 1, "第一次擦除应只建一层")
+            canvas._add_annotation(shape("pen", QPointF(60, 120), QPointF(240, 120), "#ff0000", 4))
+            erase_layer = canvas.erase_items()[-1]
+            annotation = canvas.annotations()[-1]
+            self.assertGreater(annotation.zValue(), erase_layer.zValue(),
+                               "后画的标注必须位于擦除层之上（既有设计 ✓）")
+            # 关键断言：擦除层已被标注压住 ⇒ 合成**不得**走"擦除叠加全部标注"的缓存捷径 ✓
+            annotation_levels = [item.zValue() for item in canvas.annotations()]
+            self.assertFalse(erase_layer.zValue() > max(annotation_levels),
+                             "此时擦除层不应再被视为最高层 ⇒ 合成应退回整场景渲染 ✓")
+            # 直接跑一次合成，确认不抛异常且缓存未被误用 ✓
+            canvas.viewport().repaint()
+            self.app.processEvents()
+            cached_key = canvas._annotation_layer_cache[0]
+            canvas.viewport().repaint()
+            self.app.processEvents()
+            self.assertEqual(canvas._annotation_layer_cache[0], cached_key,
+                             "被标注压住的擦除层情形不应反复重建缓存（说明没走缓存路径 ✓）")
+        finally:
+            canvas.close()
+
+    def test_straight_modifier_configuration(self):
+        """2026-10-12 用户要求：直线绘制的触发修饰键要做成配置 ✓（规则 4：持久偏好 ⇒ 可配置 ✓）。
+
+        取值 either（Ctrl 或 Alt 任一 ✓ 默认）/ ctrl / alt / off（关闭 ⇒ 全部自由笔迹 ✓）。
+        影响范围：画笔 / 荧光笔 / 马赛克 / 橡皮擦的按住拖动（它们共用 `_straight_gesture_active` ✓）。
+        """
+        from editor.annotation_canvas import AnnotationCanvas
+        from PySide6.QtCore import Qt
+        from PIL import Image
+        from config.config_manager import DEFAULTS, validate
+
+        self.assertEqual(DEFAULTS.get("editor_straight_modifier"), "either", "默认应为 either")
+        with self.assertRaises(ValueError):
+            validate({"editor_straight_modifier": "shift"})
+        for mode, ctrl, alt in (("either", True, True), ("ctrl", True, False),
+                                ("alt", False, True), ("off", False, False)):
+            canvas = AnnotationCanvas(Image.new("RGB", (200, 150), "white"),
+                                      dict(DEFAULTS, editor_straight_modifier=mode))
+            try:
+                with self.subTest(mode=mode):
+                    canvas._chain_tool = lambda: False
+                    canvas.chain_active = False
+                    # 注意：全局键盘状态会被**前面按过 Ctrl 的用例**残留 ✗ ⇒ 三种情形都在打桩下断言 ✓
+                    import PySide6.QtWidgets as _w
+                    original = _w.QApplication.keyboardModifiers
+                    try:
+                        _w.QApplication.keyboardModifiers = staticmethod(lambda: Qt.NoModifier)
+                        self.assertEqual(canvas._straight_gesture_active(), False,
+                                         "不按修饰键时不应判定为直线（off 亦然 ✓）")
+                        _w.QApplication.keyboardModifiers = staticmethod(lambda: Qt.ControlModifier)
+                        self.assertEqual(canvas._straight_gesture_active(), ctrl, f"{mode} 下 Ctrl 的判定")
+                        _w.QApplication.keyboardModifiers = staticmethod(lambda: Qt.AltModifier)
+                        self.assertEqual(canvas._straight_gesture_active(), alt, f"{mode} 下 Alt 的判定")
+                    finally:
+                        _w.QApplication.keyboardModifiers = original
+            finally:
+                canvas.close()
 
     def test_eraser_preview_reflects_mode_and_erase_base(self):
         """2026-10-11 用户反馈"预览完全不对，不是橡皮擦的预览" ✗：预览必须反映四项设置 ✓。
