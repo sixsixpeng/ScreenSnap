@@ -2538,10 +2538,19 @@ class ConfigTests(CoreTests):
         finally:
             canvas.close()
 
-    def test_fill_color_config_default_matches_stroke_and_is_validated(self):
-        from config.config_manager import DEFAULTS, validate, fill_colors_following_stroke
+    def test_fill_color_config_is_independent_from_stroke_color(self):
+        """2026-10-12 用户报告 ✓：矩形/椭圆的**填充色与边框色变成了同一个值** ✗。
 
-        # 默认填充色与对应线色一致。
+        根因是 `config/config_manager.py` 里的一张联动表 `LINKED_FILL_COLORS` + 助手
+        `fill_colors_following_stroke()` —— 改线色会把填充色自动改成同值 ✗（已移除 ✓）。
+        契约：两个键**各自独立** ✓（默认值恰好相同只是巧合 ✓），改一个不影响另一个 ✓。
+        """
+        import pathlib
+
+        import config.config_manager as config_module
+        from config.config_manager import DEFAULTS, validate
+
+        # 默认填充色与对应线色恰好一致（只是默认值 ✓ 不代表联动 ✓）。
         self.assertEqual(DEFAULTS["rect_fill_color"], DEFAULTS["rect_color"])
         self.assertEqual(DEFAULTS["ellipse_fill_color"], DEFAULTS["ellipse_color"])
         # 颜色格式纳入校验。
@@ -2550,13 +2559,21 @@ class ConfigTests(CoreTests):
             validate({"rect_fill_color": "green"})
         with self.assertRaises(ValueError):
             validate({"ellipse_fill_color": 12})
-        # 线色变化时：未自定义则跟随，已自定义则保留。
+        # 联动机制必须已彻底移除 ⇒ 改线色不再动填充色 ✓
+        self.assertFalse(hasattr(config_module, "fill_colors_following_stroke"),
+                         "填充色跟随线色的助手应已删除（用户要求两值独立 ✓）")
+        self.assertFalse(hasattr(config_module, "LINKED_FILL_COLORS"),
+                         "填充色联动表应已删除 ✓")
+        # 功能级验证（规则 31 Gate 3 ✓）：两个键在数据层必须互不影响 ✓
         settings = dict(DEFAULTS)
-        self.assertEqual(fill_colors_following_stroke(settings, "rect_color", "#168cff"),
-                         {"rect_fill_color": "#168cff"})
-        settings["rect_fill_color"] = "#00ff00"
-        self.assertEqual(fill_colors_following_stroke(settings, "rect_color", "#168cff"), {})
-        self.assertEqual(fill_colors_following_stroke(settings, "pen_color", "#123456"), {})
+        before_fill = settings["rect_fill_color"]
+        settings["rect_color"] = "#123456"          # 只改线色 ✓（联动已移除 ⇒ 无人再去改填充色 ✓）
+        self.assertEqual(settings["rect_fill_color"], before_fill,
+                         "改线色不得连带改填充色 ✓")
+        # 两个编辑器入口也必须不再有联动代码 ✓（否则 hasattr 断言会被绕过 ✓）
+        for path in ("editor/editor_window.py", "screenshot/mask_window.py"):
+            text = (pathlib.Path(path)).read_text(encoding="utf-8", errors="ignore")
+            self.assertNotIn("fill_colors_following_stroke", text, f"{path} 仍有联动调用 ✗")
 
     def test_select_mode_more_settings_follows_selected_annotation(self):
         from config.config_manager import DEFAULTS

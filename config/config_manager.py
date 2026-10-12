@@ -372,16 +372,10 @@ def _save_formats():
     return SAVE_FORMATS
 
 
-# 形状填充色默认与对应的线条颜色一致：用户自定义过填充色后不再跟随。
-LINKED_FILL_COLORS = {"rect_color": "rect_fill_color", "ellipse_color": "ellipse_fill_color"}
-
-
-def fill_colors_following_stroke(settings, key, value):
-    """线色变化时返回需一并跟随的填充色项；未联动时返回空字典。"""
-    fill_key = LINKED_FILL_COLORS.get(key)
-    if fill_key and settings.get(fill_key) == settings.get(key):
-        return {fill_key: value}
-    return {}
+# 2026-10-12 移除（用户报告 ✓）：原先这里有一张 `LINKED_FILL_COLORS` 联动表 + 助手
+# `fill_colors_following_stroke()` —— 改「矩形/椭圆线条颜色」时会把「填充颜色」**自动改成同一个值** ✗
+# ⇒ 用户看到"填充色与边框色变成了一个值" ✗（这两个设置项**本应各自独立** ✓）。
+# 现在两个键完全独立 ✓：改线色只改线色 ✓ 改填充色只改填充色 ✓（各自的读取点见 editor/annotation_canvas.py ✓）。
 
 
 def canonical_hotkey(binding):

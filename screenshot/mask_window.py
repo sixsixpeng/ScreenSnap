@@ -938,12 +938,8 @@ class InlineEditor(QWidget):
         self.toolbar.set_selected_tool(tool or None)
 
     def set_annotation_setting(self, key, value):
-        from config.config_manager import TOOL_WIDTH_KEYS, fill_colors_following_stroke
-        # 填充色默认与线色一致：仍等于旧线色时跟随变化，用户自定义过则保留。
-        for fill_key, fill_value in fill_colors_following_stroke(self.settings, key, value).items():
-            self.settings[fill_key] = fill_value
-            self.canvas.settings[fill_key] = fill_value
-            self.toolbar.sync_setting(fill_key, fill_value)
+        from config.config_manager import TOOL_WIDTH_KEYS
+        # 2026-10-12：填充色与线色**各自独立** ✓（原先这里会让填充色跟随线色 ✗ 已移除 ✓）
         self.settings[key] = value
         self.canvas.settings[key] = value
         if key in self.toolbar.tool_color_buttons:

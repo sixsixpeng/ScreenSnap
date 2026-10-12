@@ -15,7 +15,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QFileDialog,
 from core.image_io import (matches_saved_format, normalize_save_as_path, save_as_filter,
                            save_image, saved_extension)
 from core.path_utils import resolved_dir, save_as_directory
-from config.config_manager import TOOL_WIDTH_KEYS, fill_colors_following_stroke
+from config.config_manager import TOOL_WIDTH_KEYS
 from editor.annotation_canvas import AnnotationCanvas
 from editor.image_effects import apply_output_effects, copy_saved_to_clipboard
 from core.screen_capture import qimage_to_pillow
@@ -304,11 +304,7 @@ class EditorWindow(QMainWindow):
 
     def set_annotation_setting(self, key, value):
         """保存当前工具参数，并更新适用的已选标注。"""
-        # 填充色默认与线色一致：仍等于旧线色时跟随变化，用户自定义过则保留。
-        for fill_key, fill_value in fill_colors_following_stroke(self.settings, key, value).items():
-            self.settings[fill_key] = fill_value
-            self.canvas.settings[fill_key] = fill_value
-            self.toolbar.sync_setting(fill_key, fill_value)
+        # 2026-10-12：填充色与线色**各自独立** ✓（原先这里会让填充色跟随线色 ✗ 已移除 ✓）
         self.settings[key] = value
         self.canvas.settings[key] = value
         if key in ("rect_fill_enabled", "rect_fill_opacity", "rect_fill_color",

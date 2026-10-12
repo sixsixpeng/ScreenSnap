@@ -181,7 +181,7 @@ class EditorPage(SettingsPage):
     def add_color(self, key, label):
         help_text = {
             "pen_color": "画笔描边颜色，用于画笔工具绘制的线条。",
-            "rect_color": "矩形边框颜色；开启矩形填充时也作为填充颜色。",
+            "rect_color": "矩形**边框**颜色（填充色见下一项，两者各自独立）。",
             "ellipse_color": "椭圆边框颜色；开启椭圆填充时也作为填充颜色。",
             "arrow_color": "箭头线条与箭头头部的颜色。",
             "marker_color": "荧光笔颜色；与荧光笔不透明度共同决定覆盖效果。",
@@ -191,7 +191,7 @@ class EditorPage(SettingsPage):
             "editor_border_color": "编辑画布周围的边框颜色；只显示在编辑区，不会写入导出图片。",
             "crop_color": "编辑器裁剪框的线条颜色；只用于裁剪辅助显示。",
             "text_background": "新建文字标注背景色块的颜色；仅当“文字背景”开启时生效。",
-            "rect_fill_color": "矩形标注的填充颜色；默认与矩形线条颜色一致，改线色会自动跟随。",
+            "rect_fill_color": "矩形标注的**填充**颜色（与线条颜色各自独立，默认值相同）。",
             "ellipse_fill_color": "椭圆标注的填充颜色；默认与椭圆线条颜色一致，改线色会自动跟随。",
             "mosaic_cursor_color": "编辑画布中马赛克涂抹范围示意圆圈的颜色。",
             "eraser_cursor_color": "编辑画布中橡皮擦直径示意圆圈的颜色。",
