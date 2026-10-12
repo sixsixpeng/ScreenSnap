@@ -700,6 +700,46 @@ class CanvasTests(CoreTests):
         finally:
             editor.close()
 
+    def test_resize_step_follows_view_scale(self):
+        """2026-10-12（用户反馈「每一次放大变很多」）：步长按**屏幕**像素换算 ⇒ 画布放大后每次增量更小。"""
+        from PySide6.QtCore import QRectF, Qt
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from unittest.mock import patch
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationRectItem
+
+        editor = EditorWindow(Image.new("RGB", (400, 300), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        item = AnnotationRectItem(QRectF(40, 40, 120, 80))
+        item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+        canvas.scene_data.addItem(item)
+        canvas.scene_data.clearSelection()
+        item.setSelected(True)
+        editor.show()
+        canvas.show()
+        self.app.processEvents()
+        try:
+            canvas._active_handle_name = "se"
+
+            def grow_once():
+                canvas.resetTransform()
+                canvas.scale(zoom, zoom)
+                self.app.processEvents()
+                before = item.rect().width()
+                with patch("editor.annotation_canvas.QCursor.setPos"):
+                    canvas.resize_selected(1, 0)
+                return item.rect().width() - before
+
+            zoom = 1.0
+            delta_1x = grow_once()
+            zoom = 4.0
+            delta_4x = grow_once()
+            self.assertGreater(delta_1x, 0.0, "1x 时应放大")
+            self.assertGreater(delta_4x, 0.0, "4x 时同样应放大（方向不变）")
+            self.assertLess(delta_4x, delta_1x,
+                            "画布放大 4 倍 ⇒ 单次按键的图像像素增量应更小（= 1 屏幕像素语义）")
+        finally:
+            editor.close()
     def test_resize_selected_scales_rect_item_by_one_pixel(self):
         """手柄上的键盘缩放：宽、高各 ±1px，且 QRect/QRectF 两种 rect() 都要生效。
 
