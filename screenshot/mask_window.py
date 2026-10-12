@@ -3130,6 +3130,12 @@ class MaskWindow(QWidget):
                 on_edge = (self.selection.handle_at(self.position) is not None
                            or self.selection.border_at(self.position)
                            or on_handle)
+                # 2026-10-12（同根因）：遮罩侧**首次按键即定格**手柄 ✓
+                # 否则 on_handle/on_edge 的悬停判定会随指针跟随而跳 ✗。
+                if on_handle and canvas is not None and canvas.active_handle() is None:
+                    _hovered = canvas.pointer_handle()
+                    if _hovered:
+                        canvas._active_handle_name = _hovered[1]
                 # 2026-10-11（用户反馈："原地编辑旋转时按 Q 也能微调"）：这里原来**没有 dx/dy 门槛** ✗ ⇒
                 # 按住旋转手柄时按**任意键**（Q、F、C…）都会走到下面的 rotate_selected(-1) ⇒ 表现为"随便按
                 # 一个键就转一下" ✗。补上 `(dx or dy)`：只有真正的微调键（W/A/S/D、方向键）才进入 ✓。

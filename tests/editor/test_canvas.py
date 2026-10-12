@@ -353,14 +353,14 @@ class CanvasTests(CoreTests):
         size2 = item.mapToScene(item.boundingRect()).boundingRect().size()
         canvas.resize_selected(1, 0)
         size3 = item.mapToScene(item.boundingRect()).boundingRect().size()
-        self.assertLess(size3.width(), size2.width(),
-                        "旋转 180° 后 e 手柄在左侧 ⇒ 屏幕 → 应变小（按当前实际方向）")
+        self.assertGreater(size3.width(), size2.width(),
+                        "2026-10-12 新契约：方向只看按键 ⇒ 屏幕 → 一律放大 ✓（与手柄/旋转无关 ✓）")
         # 反向对称：旋转 180° 后屏幕 ← 应放大
         size4 = item.mapToScene(item.boundingRect()).boundingRect().size()
         canvas.resize_selected(-1, 0)
         size5 = item.mapToScene(item.boundingRect()).boundingRect().size()
-        self.assertGreater(size5.width(), size4.width(),
-                        "反向对称：旋转 180° 后屏幕 ← 应放大（按当前实际方向）")
+        self.assertLess(size5.width(), size4.width(),
+                        "2026-10-12 新契约：屏幕 ← 一律缩小 ✓（与手柄/旋转无关 ✓）")
     def test_all_annotation_types_cover_nudge_and_resize(self):
         """规则 29：全部标注类型逐个核对「微调移动 + 手柄等比缩放」。"""
         from PySide6.QtCore import QPointF, QRectF
@@ -524,6 +524,37 @@ class CanvasTests(CoreTests):
         print("  已覆盖标注类型:", ", ".join(results))
         self.assertGreaterEqual(len(results), 3, "至少三种类型要真跑过")
 
+    def test_hovered_handle_is_latched_across_key_presses(self):
+        """2026-10-12（用户真机定位根因）：按键判定用的悬停命中必须定格，否则手柄漂移会让方向翻转。"""
+        from PySide6.QtCore import QEvent, QRectF, Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from unittest.mock import patch
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationRectItem
+
+        editor = EditorWindow(Image.new("RGB", (200, 160), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        item = AnnotationRectItem(QRectF(20, 20, 60, 40))
+        item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+        canvas.scene_data.addItem(item)
+        canvas.scene_data.clearSelection()
+        item.setSelected(True)
+        editor.show()
+        canvas.show()
+        self.app.processEvents()
+        try:
+            canvas.clear_active_handle()
+            with patch.object(canvas, "pointer_handle", return_value=(item, "se")):
+                canvas.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key_D, Qt.NoModifier))
+            self.assertEqual(canvas.active_handle(), "se", "首次按键应定格手柄")
+            with patch.object(canvas, "pointer_handle", return_value=(item, "nw")):
+                canvas.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, Qt.Key_D, Qt.NoModifier))
+            self.assertEqual(canvas.active_handle(), "se", "第二次按键不得改用漂移后的手柄")
+            canvas.clear_active_handle()   # mouseMoveEvent 会调用它
+            self.assertIsNone(canvas.active_handle())
+        finally:
+            editor.close()
     def test_keyboard_nudge_follows_handle_including_after_rotation(self):
         """2026-10-12 用户反馈：修改标注**尺寸**微调时指针一直没有跟随 ✗，并要求考虑**旋转后**的跟随 ✓。
 
@@ -712,8 +743,10 @@ class CanvasTests(CoreTests):
         canvas._active_handle_name = "n"
         w0, h0 = item.rect().width(), item.rect().height()
         self.assertTrue(canvas.resize_selected(0, -1), "上中点按 ↑ 应缩放")
-        self.assertGreater(item.rect().width(), w0, "边中点缩放时宽度也要变（等比）")
-        self.assertGreater(item.rect().height(), h0, "边中点缩放时高度也要变（等比）")
+        self.assertLess(item.rect().width(), w0,
+                        "2026-10-12 新契约：↑/W = 缩小 ✓（边中点同样等比 ⇒ 两轴一起变 ✓）")
+        self.assertLess(item.rect().height(), h0,
+                        "2026-10-12 新契约：↑/W = 缩小 ✓（边中点同样等比 ⇒ 两轴一起变 ✓）")
         self.assertAlmostEqual(item.rect().width() / item.rect().height(), 1.0, places=3,
                                msg="边中点也要保持长宽比")
 

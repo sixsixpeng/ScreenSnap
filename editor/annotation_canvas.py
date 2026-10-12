@@ -2246,6 +2246,8 @@ class AnnotationCanvas(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        # 2026-10-12：用户真的移动鼠标 ⇒ 解除按键定格的手柄 ✓（避免粘在旧手柄上 ✗）
+        self.clear_active_handle()
         self._materialize_deferred_pen_at(event)
         # 2026-10-11（用户实测：按住旋转按钮拖动时标注"跟着鼠标移动"而不是旋转）：
         # mousePressEvent 已经调过 _begin_rotation()（按下留痕显示 旋转手柄=[True] ✓），
@@ -3093,20 +3095,28 @@ class AnnotationCanvas(QGraphicsView):
                 local = inv.map(QPointF(dx, dy)) - origin
             else:
                 local = QPointF(dx, dy)
-            step_x = (local.x() if right else -local.x()) if (left or right) else 0.0
-            step_y = (local.y() if bottom else -local.y()) if (top or bottom) else 0.0
+            # 2026-10-12（用户报告 + 真机日志定位 ✓）：方向**只由按键决定**，与手柄/旋转无关 ✓
+            #   D与右 = 放大 ✓  A与左 = 缩小 ✓  S与下 = 放大 ✓  W与上 = 缩小 ✓
+            # 轴分离**必须保留** ✗：局部 x 用 local.x() ✓ 局部 y 用 local.y() ✓ 各取各的幅值 ✓
+            # （曾误写成两轴共用一个值 ✗ ⇒ 旋转 45/90 度时同时缩放两轴 ✗ 已回退 ✓ 不再犯 ✓）。
+            _sign = 1.0 if (dx if dx else dy) > 0 else -1.0
+            step_x = (abs(local.x()) * _sign) if (left or right) else 0.0
+            step_y = (abs(local.y()) * _sign) if (top or bottom) else 0.0
+            # 2026-10-12（用户反馈：每次按键视觉变化太大 ✓）：步长按**屏幕**换算 ✓
+            #   画布放大显示时 1 屏幕像素 < 1 图像像素 ⇒ 每次只变一点点 ✓ 手感恒定 ✓。
+            _view_scale = float(self.transform().m11()) or 1.0
             factor_x = factor_y = 1.0
             if proportional:
                 # 等比：以按下的那个方向为准算比例，另一轴跟随，保持长宽比。
                 if step_x:
-                    factor_x = factor_y = max(0.05, 1.0 + step_x / bounds.width())
+                    factor_x = factor_y = max(0.05, 1.0 + (step_x / _view_scale) / bounds.width())
                 elif step_y:
-                    factor_x = factor_y = max(0.05, 1.0 + step_y / bounds.height())
+                    factor_x = factor_y = max(0.05, 1.0 + (step_y / _view_scale) / bounds.height())
             else:
                 if step_x:
-                    factor_x = max(0.05, 1.0 + step_x / bounds.width())
+                    factor_x = max(0.05, 1.0 + (step_x / _view_scale) / bounds.width())
                 if step_y:
-                    factor_y = max(0.05, 1.0 + step_y / bounds.height())
+                    factor_y = max(0.05, 1.0 + (step_y / _view_scale) / bounds.height())
             # 【中心锚点】：以标注中心为基准缩放 —— 四条边一起动（等比拉伸），中心不动。
             before = item.mapToScene(bounds.center())
             raw = item.rect() if hasattr(item, "rect") else None
@@ -3275,6 +3285,11 @@ class AnnotationCanvas(QGraphicsView):
             if not handle_name:
                 hovered = self.pointer_handle()
                 handle_name = hovered[1] if hovered else ""
+                if handle_name:
+                    # 2026-10-12（用户真机定位根因）：悬停命中一旦用于**按键**判定就**定格** ✓
+                    # 否则指针跟随会让命中在 手柄/边/标注内部/对角手柄 之间跳 ✗ ⇒ 手柄一变方向就翻转 ✓
+                    # = 用户看到的四个键莫名全放大或全缩小 ✓；鼠标移动时清除 ✓（见 mouseMoveEvent）。
+                    self._active_handle_name = handle_name
             logging.getLogger("screensnap").debug(
                 "画布按键去向：手柄=%s（悬停=%s）dx=%s dy=%s 分支=%s",
                 self.active_handle(), handle_name, dx, dy,
