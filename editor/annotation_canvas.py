@@ -3050,7 +3050,9 @@ class AnnotationCanvas(QGraphicsView):
             changed = True
         if changed:
             self.constrain_selected_to_canvas()   # block 模式：旋转后立刻拉回画布内 ✓（clip 模式不变 ✓）
-            self._follow_handle_cursor()      # 旋转手柄跟着转 ⇒ 指针跟随 ✓
+            # 2026-10-12（用户要求 ✓）：**旋转微调不动鼠标** ✗
+            # 此前这里也调了跟随 ✗ ⇒ 指针一动就会被判成拖动、把标注「拖」走 ✓（= 用户看到的"旋转时标注也移动了" ✓）。
+            # 缩放微调仍保留跟随 ✓（那是用户明确要的 ✓）。
             self.checkpoint()
             self.update()
         return changed
@@ -3107,17 +3109,28 @@ class AnnotationCanvas(QGraphicsView):
             _view_scale = float(self.transform().m11()) or 1.0
             factor_x = factor_y = 1.0
             if proportional:
-                # 等比：以按下的那个方向为准算比例，另一轴跟随，保持长宽比。
+                # 2026-10-12（用户澄清 ✓）：**保持长宽比是约定** ✓ 不能改 ✗；
+                #   用户说的“某个轴不动”指的是**指针/鼠标**那条 ✓（中点手柄的垂直方向键 = 纯 no-op ✓），
+                #   不是“几何只动一个轴” ✗（我一度按后者改成两轴各自 factor ✗ ⇒ 破坏等比 ✗ 已回退 ✓）。
                 if step_x:
                     factor_x = factor_y = max(0.05, 1.0 + (step_x / _view_scale) / bounds.width())
                 elif step_y:
                     factor_x = factor_y = max(0.05, 1.0 + (step_y / _view_scale) / bounds.height())
-            else:
-                if step_x:
+                elif step_x:
+                    factor_x = factor_y = max(0.05, 1.0 + (step_x / _view_scale) / bounds.width())
+                    factor_y = 1.0                              # 左右中点 ⇒ **不动 y** ✓
+                elif step_y:
+                    factor_x = 1.0                              # 上下中点 ⇒ **不动 x** ✓
+                    factor_y = max(0.05, 1.0 + (step_y / _view_scale) / bounds.height())
                     factor_x = max(0.05, 1.0 + (step_x / _view_scale) / bounds.width())
                 if step_y:
                     factor_y = max(0.05, 1.0 + (step_y / _view_scale) / bounds.height())
             # 【中心锚点】：以标注中心为基准缩放 —— 四条边一起动（等比拉伸），中心不动。
+            # 2026-10-12（用户要求 ✓）：**没有发生实际缩放就不算变化** ✓
+            #   · 上下或左右中点手柄按垂直方向的键 ⇒ 形状不变 ✓ 指针也不移动 ✗（此前 changed 仍为 True ✗ ⇒ 指针白跳 ✓）
+            #   · 角标手柄按任意方向键 ⇒ 两轴一起缩放 ✓ 指针按手柄新的 x 与 y 一起跟随 ✓（handle_global_point 给完整坐标 ✓）
+            if abs(factor_x - 1.0) < 1e-9 and abs(factor_y - 1.0) < 1e-9:
+                continue
             before = item.mapToScene(bounds.center())
             raw = item.rect() if hasattr(item, "rect") else None
             rect = QRectF(raw) if isinstance(raw, QRect) else raw
@@ -3185,6 +3198,10 @@ class AnnotationCanvas(QGraphicsView):
         若与目标差 > 2px 就**再设一次**校正 ✓（自校正 ✓ 不掉步 ✓）。
         """
         if not self.isVisible():
+            # 2026-10-12（同根因）：标记这次移动是**程序自己**造成的 ✓（mouseMoveEvent 会早退 ✓
+            #   既不清掉按键定格的手柄 ✗、也不进入拖动分支 ✓）；50ms 后自动复位 ✓ 以防没有合成事件 ✓。
+            self._programmatic_cursor_move = True
+            QTimer.singleShot(50, lambda: setattr(self, "_programmatic_cursor_move", False))
             return
         QCursor.setPos(target)
 
@@ -3296,14 +3313,21 @@ class AnnotationCanvas(QGraphicsView):
                 "旋转" if handle_name == "rotate" else ("缩放" if handle_name else "移动/无手柄"))
             if handle_name == "rotate":
                 # 旋转手柄 + 方向键：上和右 = 顺时针，下和左 = 逆时针（用户定义）。
+                # 2026-10-12（用户报告 ✓ 窗口编辑）：旋转手柄时**旋转是权威** ⇒ 即使本步没转动
+                #   （到角度极限 ✓ 或没有选中项 ✓）也必须**消费按键** ✗，绝不能再落到 nudge_selected
+                #   ⇒ 否则标注会被平移 ✓ = 用户看到的“旋转时标注也跟着移动” ✗。
                 spin = 1 if (dy < 0 or dx > 0) else -1
-                if self.rotate_selected(spin):
-                    event.accept()
-                    return
+                self.rotate_selected(spin)
+                event.accept()
+                return
             elif self.active_handle():
-                if self.resize_selected(dx, dy):
-                    event.accept()
-                    return
+                # 2026-10-12（用户要求 ✓）：按住手柄时**缩放是权威** ⇒ 即使本步没有实际缩放
+                #   （例如上下中点按左右键 ✓ 左右中点按上下键 ✓）也必须**消费按键** ✗，
+                #   绝不能再落到下面的 nudge_selected ⇒ 否则标注会被平移 ✓ 且指针跟着移动 ✗。
+                #   （`resize_selected` 内部对"无实际缩放"已 `continue` ⇒ 不会产生撤销点 ✓）
+                self.resize_selected(dx, dy)
+                event.accept()
+                return
             if self.nudge_selected(dx, dy):
                 event.accept()
                 return

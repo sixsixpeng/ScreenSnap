@@ -599,7 +599,7 @@ class CanvasTests(CoreTests):
             canvas._active_handle_name = "rotate"
             with patch("editor.annotation_canvas.QCursor.setPos") as move:
                 self.assertTrue(canvas.rotate_selected(1))
-                move.assert_called_once_with(canvas.handle_global_point())
+                move.assert_not_called()   # 2026-10-12 用户要求：旋转微调不动鼠标
             # 移动微调：按住左键 ⇒ 指针按同样的屏幕位移跟随 ✓
             canvas._active_handle_name = None
             with patch("editor.annotation_canvas.QCursor.setPos") as move, \
