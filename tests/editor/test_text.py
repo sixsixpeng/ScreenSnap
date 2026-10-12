@@ -483,12 +483,13 @@ class TextTests(CoreTests):
             return QMouseEvent(QEvent.Type.MouseButtonDblClick, QPointF(0, 0),
                                Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
 
-        # 非文字标注：双击删除并可撤销还原
+        # 2026-10-12（用户要求，C8 契约变更）：**双击非文字标注不再删除** ✗
+        # ⇒ 只让它进入编辑态（选中）✓；删除走明确入口（Delete 键 / 右键菜单）✓。
+        canvas.scene_data.clearSelection()
         canvas.mouseDoubleClickEvent(dbl(rect))
-        self.assertEqual(len(canvas.annotations()), 1)
-        self.assertEqual(canvas.annotations()[0].toPlainText(), "保留")
-        canvas.undo()
-        self.assertEqual(len(canvas.annotations()), 2)
+        self.assertEqual(len(canvas.annotations()), 2, "双击不应删除任何标注 ✓")
+        self.assertEqual([i for i in canvas.scene_data.selectedItems()], [rect],
+                         "双击非文字标注应把它选中（进入编辑态）✓")
         # 文字标注：双击编辑而非删除（撤销后从场景取最新文字项，避免陈旧引用）
         live_text = [a for a in canvas.annotations() if hasattr(a, "toPlainText")][0]
         from PySide6.QtWidgets import QDialog

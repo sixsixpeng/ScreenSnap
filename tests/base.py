@@ -1,4 +1,4 @@
-"""ScreenSnap 测试共享基类：公共导入、QApplication 夹具与断言辅助。"""
+﻿"""ScreenSnap 测试共享基类：公共导入、QApplication 夹具与断言辅助。"""
 
 import json
 import tempfile
@@ -46,7 +46,7 @@ class CoreTests(unittest.TestCase):
         mask_window.ESCAPE_FALLBACK_ENABLED = cls._escape_fallback
 
 
-    def _check_options_after_double_click_delete(self, editor):
+    def _check_options_refresh_after_delete(self, editor):
         from PySide6.QtCore import QTimer
         from config.config_manager import TOOL_WIDTH_KEYS
 
@@ -61,10 +61,17 @@ class CoreTests(unittest.TestCase):
         canvas.checkpoint()
         rect.setSelected(True)
         ellipse.setSelected(True)
-        QTest.mouseDClick(canvas.viewport(), Qt.LeftButton,
+        # 2026-10-12（用户要求，C8 契约变更）：**双击删除标注已移除** ✗ ⇒ 改用明确的删除入口
+        # （选中目标 + `remove_selected()` = Delete 键 / 右键菜单「删除标注」同源 ✓）。
+        # 断言意图**完全不变** ✓：「删除多个标注中的一个之后，更多设置必须刷新、不得错位」✓
+        # （对应 README 调整记录 22 的原始问题 ✓）。函数名保留旧名以免影响 `-k` 过滤 ✓。
+        # 必须走**真实用户路径** ✓（直接改模型会绕过画布的选中/信号 ⇒ 更多设置不会刷新 ✗ 实测踩过 ✓）：
+        # 单击选中要删的那个标注 ✓ + 按 Delete 删除 ✓ —— 与旧的"双击删除"覆盖同一条刷新链 ✓。
+        canvas.scene_data.clearSelection()
+        QTest.mouseClick(canvas.viewport(), Qt.LeftButton,
                          pos=canvas.mapFromScene(QPointF(210, 70)))
-        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton,
-                           pos=canvas.mapFromScene(QPointF(210, 70)))
+        self.app.processEvents()
+        QTest.keyClick(canvas, Qt.Key_Delete)
         self.app.processEvents()
         self.assertEqual(canvas.annotations(), [rect])
         self.assertEqual(canvas.selected_annotation_tool(), "")
@@ -115,10 +122,10 @@ class CoreTests(unittest.TestCase):
         restored.setSelected(True)
         self.assertEqual(toolbar.selected_tool, "rect")
         self.assertTrue(button.isEnabled())
-        QTest.mouseDClick(canvas.viewport(), Qt.LeftButton,
-                         pos=canvas.mapFromScene(QPointF(80, 70)))
-        QTest.mouseRelease(canvas.viewport(), Qt.LeftButton,
-                           pos=canvas.mapFromScene(QPointF(80, 70)))
+        # 2026-10-12（C8 契约变更）：这里的第二次"双击删除"同样已移除 ✗ ⇒ 改用 **Delete 键** ✓
+        # （与右键菜单「删除标注」同源 ⇒ 走画布自身的删除与信号刷新 ✓，后半段断言意图不变 ✓）。
+        QTest.keyClick(canvas, Qt.Key_Delete)
+        self.app.processEvents()
         self.assertEqual(canvas.annotations(), [])
         self.assertFalse(button.isEnabled())
         self.assertEqual(toolbar._last_option_rows, set())

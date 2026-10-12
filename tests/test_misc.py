@@ -1,4 +1,4 @@
-"""暂未归类的其它用例（按用例名未命中任何分类规则）。"""
+﻿"""暂未归类的其它用例（按用例名未命中任何分类规则）。"""
 
 import os
 import sys
@@ -502,7 +502,7 @@ class MiscTests(CoreTests):
         self.assertEqual(item.brush().color().name(), "#00ad91")
         canvas.close()
 
-    def test_inline_options_refresh_after_double_click_delete(self):
+    def test_inline_options_refresh_after_delete(self):
         from config.config_manager import DEFAULTS
         from screenshot.mask_window import MaskWindow
         with tempfile.TemporaryDirectory() as folder:
@@ -516,7 +516,7 @@ class MiscTests(CoreTests):
             mask.show()
             self.app.processEvents()
             try:
-                self._check_options_after_double_click_delete(mask.session.inline_editor)
+                self._check_options_refresh_after_delete(mask.session.inline_editor)
             finally:
                 mask.close()
 

@@ -318,6 +318,63 @@ class CaptureTests(CoreTests):
             mask._grip_down = False
         mask.close()
 
+    def test_keyboard_nudge_while_drawing_region_follows_pointer(self):
+        """2026-10-12 用户要求：**框选过程中**（左键或右键按住拖动）就要能用 WASD/方向键微调，
+
+        并让指针跟随（此前只有"选完之后抓住控制点"才能微调 ✗ —— 框选时按键完全没反应 ✗）。
+        语义：起点固定，键盘移动的是"指针所在的那个角" ⇒ 等价于继续拖动但精度 1px ✓。
+        """
+        from PySide6.QtCore import QPoint, QSize
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        bounds = {"left": 0, "top": 0, "width": 220, "height": 160}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (220, 160)), bounds, [bounds], DEFAULTS)
+        mask.show()
+        self.app.processEvents()
+        try:
+            for button in (Qt.LeftButton, Qt.RightButton):
+                mask.selection.rects = []
+                mask.selection.active = None
+                mask.selection.start = None
+                with patch("screenshot.mask_window.QCursor.setPos") as move_pointer, \
+                        patch.object(mask, "save_as_selection") as save_as, \
+                        patch.object(mask, "complete") as complete:
+                    QTest.mousePress(mask, button, pos=QPoint(20, 20))
+                    QTest.mouseMove(mask, QPoint(80, 60))
+                    self.assertIsNotNone(mask.selection.active, button)
+                    start = QPoint(mask.selection.start)
+                    self.assertEqual(mask.selection.active.size(), QSize(61, 41), button)
+                    # A = 左移（不能让位给"另存为" ✗ D14）；指针跟随 ✓
+                    QTest.keyClick(mask, Qt.Key_A)
+                    save_as.assert_not_called()
+                    self.assertEqual(mask.selection.active.width(), 60, button)
+                    self.assertEqual(mask.position, start + QPoint(59, 40), button)
+                    move_pointer.assert_called_with(
+                        mask.mapToGlobal(mask.to_logical_point(mask.position)))
+                    # S = 下移（框选进行中不让位给"快捷保存" ✗）
+                    mask.save_selection()
+                    self.assertEqual(mask.selection.active.height(), 42, button)
+                    # 右/上继续微调 ⇒ 指针一路跟随 ✓
+                    QTest.keyClick(mask, Qt.Key_Right)
+                    self.assertEqual(mask.selection.active.width(), 61, button)
+                    QTest.keyClick(mask, Qt.Key_Up)
+                    self.assertEqual(mask.selection.active.height(), 41, button)
+                    # A(-1,0) → S 下移(0,+1) → 右(+1,0) → 上(0,-1) ⇒ 净位移 (+1, 0) ✓
+                    self.assertEqual(mask.position, start + QPoint(60, 40), button)
+                    # 松开鼠标 ⇒ 提交的是**微调后**的区域 ✓
+                    QTest.mouseRelease(mask, button, pos=QPoint(mask.position))
+                    # 右键框选进收集态、不自动提交 ✓；左键按 capture_after_selection 走提交（本就允许 ✓）。
+                    if button == Qt.RightButton:
+                        complete.assert_not_called()
+                    else:
+                        self.assertLessEqual(complete.call_count, 1, button)
+                    self.assertEqual(len(mask.selection.rects), 1, button)
+                    self.assertEqual(mask.selection.rects[-1].size(), QSize(61, 41), button)
+                    self.assertEqual(mask.selection.rects[-1].topLeft(), start, button)
+        finally:
+            mask.close()
+
     def test_mask_drag_resizes_from_each_edge_midpoint(self):
         from PySide6.QtCore import QPoint, QPointF, QEvent
         from PySide6.QtGui import QMouseEvent
@@ -1025,7 +1082,7 @@ class CaptureTests(CoreTests):
         select_hints = hint_texts(base, (10, 20), (80, 60), inline=True)
         pen_hints = hint_texts(base, (10, 20), (80, 60), inline=True)
         # 2026-10-10 起：双击-文字编辑在任何工具下都可用（编辑态由标注对象持有），
-        # 因此两种工具都应给出这条提示；仅「双击删除非文字标注」仍限选择工具、不单独提示。
+        # 因此两种工具都应给出这条提示。2026-10-12：**双击删除标注已移除** ✗ ⇒ 提示条只写「双击-文字编辑」✓。
         self.assertIn("双击-文字编辑", select_hints["inline_edit"])
         self.assertIn("双击-文字编辑", pen_hints["inline_edit"])
         # 右键菜单与撤销在两种工具下都支持

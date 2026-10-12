@@ -2403,6 +2403,9 @@ class MaskWindow(QWidget):
         
         if (getattr(self, "_grip_down", False)
                 or self.selection.resizing is not None or self.selection.dragging is not None
+                # 2026-10-12（用户要求）：框选进行中（active 非空）S 也是"下移微调"，
+                # 与 A/W/D 保持一致 ✓ —— 否则右键拖动时 WASD 里只有 S 会变成快捷保存 ✗。
+                or self.selection.active is not None
                 or (self.selection.nudge_corner is not None and recently_nudged)):
             # 在按键当刻判断（日志实证：此时 resizing=True），不依赖快捷键启用状态的刷新时机。
             logging.getLogger("screensnap").debug(
@@ -2555,6 +2558,15 @@ class MaskWindow(QWidget):
             return
 
         def apply_badge():
+            # 2026-10-12（D20/D22 教训，真机与用例都实测到 ✓）：延迟回调可能落在**遮罩已关闭、
+            # QLabel 已被 C++ 析构**之后 ✗ ⇒ 报 `RuntimeError: Internal C++ object (QLabel) already deleted` ✓。
+            # 因此先判活，再碰任何 Qt 对象 ✓（`shiboken6.isValid` 是本项目既有写法 ✓）。
+            try:
+                import shiboken6
+                if not shiboken6.isValid(self) or not shiboken6.isValid(widget):
+                    return
+            except Exception:                 # noqa: BLE001  仅安全兜底，不影响功能 ✓
+                return
             if not want_visible:
                 if widget.isVisible():
                     widget.hide()
@@ -2867,6 +2879,7 @@ class MaskWindow(QWidget):
         # 自己记录左键是否按下：selection.resizing/dragging 在部分路径下不可靠，
         # 而"S 该微调还是该保存"必须只看"手是否还按着"。
         self._grip_down = event.button() == Qt.LeftButton
+        self._nudge_hold = False      # 键盘微调接管标记只对本次拖动有效 ✓（见 _nudge_active_region）
         if self.inline_active():
             if event.button() == Qt.LeftButton:
                 self.position = self.to_physical_point(event.position().toPoint())
@@ -2943,7 +2956,12 @@ class MaskWindow(QWidget):
                            for edge in (left, right))
             y_edges.extend(edge - self.bounds["top"] for left, top, right, bottom in self.window_edges
                            for edge in (top, bottom))
-            self.selection.update(self.position, x_edges, y_edges)
+            if getattr(self, "_nudge_hold", False):
+                # 键盘微调已接管本次拖动 ⇒ 只按真实指针位置更新，不再做边缘吸附 ✗
+                # （吸附会把刚微调出来的 1px 偏移拉回原来的屏幕/窗口边缘 ✓ 见 _nudge_active_region）。
+                self.selection.update(self.position)
+            else:
+                self.selection.update(self.position, x_edges, y_edges)
         # 正在手绘或拖动时不显示悬停高亮，避免和选区抢视觉焦点。
         if (self.selection.start is None and self.selection.dragging is None
                 and self.selection.resizing is None):
@@ -2956,6 +2974,7 @@ class MaskWindow(QWidget):
 
     def mouseReleaseEvent(self, event):
         self._grip_down = False
+        self._nudge_hold = False
         """结束当前选区的创建、拖动或缩放。"""
         if self.inline_active():
             if event.button() == Qt.LeftButton and (self.selection.resizing is not None or
@@ -3015,6 +3034,30 @@ class MaskWindow(QWidget):
                     "右键双击忽略：当前没有选区（视图=%s）", self.monitor_rect.getRect())
                 event.accept()
 
+    def _nudge_active_region(self, dx, dy):
+        """**框选进行中**用键盘微调"正在移动的那个角"（起点固定 ✓ 指针跟随 ✓）。
+
+        2026-10-12（用户要求）：此前只有"选完之后抓住控制点"才能微调 ✗ —— 框选过程中按
+        WASD/方向键毫无反应 ✓。语义与继续拖动完全一致：`selection.start` 是固定角，键盘移动的
+        是"指针所在的那个角" ⇒ 等价于继续拖动，只是精度变成 1px ✓；指针同步跟随（`QCursor.setPos`）
+        ⇒ 松开鼠标提交的就是调整后的区域 ✓。左键拖动与右键拖动都走这里 ✓。
+        """
+        start = self.selection.start
+        if start is None:
+            return False
+        point = QPoint(self.position) + QPoint(dx, dy)
+        self.position = point
+        self.selection.active = QRect(start, point).normalized()
+        # 键盘接管本次拖动后不再自动吸附：否则 1px 微调会被"靠近边缘 8px 吸附"拉回原处 ✗
+        # （鼠标移动事件里的吸附分支见 mouseMoveEvent）。
+        self._nudge_hold = True
+        logging.getLogger("screensnap").debug(
+            "框选微调：视图=%s dx=%s dy=%s 位置=%s 区域=%s",
+            self.monitor_rect.getRect(), dx, dy, point, self.selection.active)
+        if isinstance(point, QPoint) and self.isVisible():
+            QCursor.setPos(self.mapToGlobal(self.to_logical_point(point)))
+        return True
+
     def keyPressEvent(self, event):
 
         """处理取消、提交、固定尺寸创建与最后选区的像素微调。"""
@@ -3047,6 +3090,9 @@ class MaskWindow(QWidget):
                 or self.selection.nudge_corner is not None
                 or self.selection.resizing is not None
                 or self.selection.dragging is not None
+                # 2026-10-12（用户要求）：**框选进行中**也算微调语境 ⇒ 右键拖动时按 A 是"左移"
+                # 而不是"另存为"（否则 W/A/S/D 里只有 A 会弹出对话框 ✗，与左键拖动不一致 ✗）。
+                or self.selection.active is not None
                 or (_canvas is not None and _canvas.active_handle() is not None)
                 or (time.monotonic() - getattr(self, "_nudge_at", 0.0)) <= 0.3)
             if not _nudging:
@@ -3170,6 +3216,12 @@ class MaskWindow(QWidget):
             dx = (-1 if key in (Qt.Key_A, Qt.Key_Left) else 1 if key in (Qt.Key_D, Qt.Key_Right) else 0)
             dy = (-1 if key in (Qt.Key_W, Qt.Key_Up) else 1 if key == Qt.Key_Down else 0)
             if dx or dy:
+                # 2026-10-12（用户要求）：**框选进行中**（左键或右键按住拖动 ⇒ active 非空）时，
+                # WASD/方向键微调"正在移动的那个角"，指针跟随 ✓（此前这一状态完全没反应 ✗）。
+                if self.selection.active is not None and self._nudge_active_region(dx, dy):
+                    event.accept()
+                    self.update_all()
+                    return
                 # 只有指针正压在手柄/边线上，或此前真正抓住过（nudge_corner 记忆）才微调：
                 # 从未抓过时方向键既不移动、也不写下微调记忆（记忆会顺带把 S 快捷保存禁用掉）。
                 if (not getattr(self, "_grip_down", False)

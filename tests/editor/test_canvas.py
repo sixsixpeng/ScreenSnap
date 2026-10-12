@@ -359,7 +359,8 @@ class CanvasTests(CoreTests):
         size4 = item.mapToScene(item.boundingRect()).boundingRect().size()
         canvas.resize_selected(-1, 0)
         size5 = item.mapToScene(item.boundingRect()).boundingRect().size()
-        self.assertGreater(size5.width(), size4.width(), "旋转 180° 后 ← 应放大")
+        self.assertGreater(size5.width(), size4.width(),
+                        "反向对称：旋转 180° 后屏幕 ← 应放大（按当前实际方向）")
     def test_all_annotation_types_cover_nudge_and_resize(self):
         """规则 29：全部标注类型逐个核对「微调移动 + 手柄等比缩放」。"""
         from PySide6.QtCore import QPointF, QRectF
@@ -522,6 +523,151 @@ class CanvasTests(CoreTests):
                 results.append(name)
         print("  已覆盖标注类型:", ", ".join(results))
         self.assertGreaterEqual(len(results), 3, "至少三种类型要真跑过")
+
+    def test_keyboard_nudge_follows_handle_including_after_rotation(self):
+        """2026-10-12 用户反馈：修改标注**尺寸**微调时指针一直没有跟随 ✗，并要求考虑**旋转后**的跟随 ✓。
+
+        契约：① 缩放/旋转微调后指针落在手柄的**新位置**（`handle_global_point()` ✓）；
+              ② 旋转后必须按"旋转后"的手柄位置算 ✓（不能只按屏幕坐标轴偏移 ✗）；
+              ③ 移动微调只在**确实按住左键**时带动指针 ✓（只敲方向键不应让指针乱跳 ✗）。
+        """
+        from PySide6.QtCore import QPoint, QPointF, QRectF, Qt
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from unittest.mock import patch
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationRectItem
+
+        editor = EditorWindow(Image.new("RGB", (80, 80), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        item = AnnotationRectItem(QRectF(0, 0, 20, 20))
+        item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+        canvas.scene_data.addItem(item)
+        canvas.scene_data.clearSelection()
+        item.setSelected(True)
+        editor.show()
+        canvas.show()
+        self.app.processEvents()
+        try:
+            self.assertTrue(canvas.isVisible(), "画布须可见，否则指针跟随按设计跳过")
+            canvas._active_handle_name = "se"
+            with patch("editor.annotation_canvas.QCursor.setPos") as move:
+                self.assertTrue(canvas.resize_selected(1, 1), "se 手柄应能放大")
+                move.assert_called_once_with(canvas.handle_global_point())
+            # 旋转 45° 后再缩放：指针必须落在**旋转后**的手柄上 ✓
+            item.setRotation(45.0)
+            # 用**场景坐标**比较手柄位移 ✓（全局坐标是整数像素，1px 缩放在画布缩放下可能取整成同一个点 ✗）
+            before_scene = QPointF(canvas.item_resize_handles(item)["se"])
+            with patch("editor.annotation_canvas.QCursor.setPos") as move:
+                self.assertTrue(canvas.resize_selected(1, 0))
+                expected = canvas.handle_global_point()
+                move.assert_called_once_with(expected)
+            after_scene = QPointF(canvas.item_resize_handles(item)["se"])
+            self.assertNotEqual(after_scene, before_scene,
+                                "旋转后缩放 ⇒ 手柄应沿旋转后的轴移动，指针跟随才有意义")
+            # 旋转手柄：指针跟着手柄绕中心走 ✓
+            canvas._active_handle_name = "rotate"
+            with patch("editor.annotation_canvas.QCursor.setPos") as move:
+                self.assertTrue(canvas.rotate_selected(1))
+                move.assert_called_once_with(canvas.handle_global_point())
+            # 移动微调：按住左键 ⇒ 指针按同样的屏幕位移跟随 ✓
+            canvas._active_handle_name = None
+            with patch("editor.annotation_canvas.QCursor.setPos") as move, \
+                    patch("editor.annotation_canvas.QApplication.mouseButtons",
+                          return_value=Qt.LeftButton), \
+                    patch("editor.annotation_canvas.QCursor.pos",
+                          return_value=QPoint(100, 100)):
+                self.assertTrue(canvas.nudge_selected(1, 0), "移动应生效")
+                move.assert_called_once()
+            # 没按住左键 ⇒ 不得动指针 ✗
+            with patch("editor.annotation_canvas.QCursor.setPos") as move, \
+                    patch("editor.annotation_canvas.QApplication.mouseButtons",
+                          return_value=Qt.NoButton):
+                self.assertTrue(canvas.nudge_selected(1, 0))
+                move.assert_not_called()
+        finally:
+            editor.close()
+
+    def test_block_mode_keeps_annotation_inside_canvas_after_nudge(self):
+        """2026-10-12（用户要求"标注不应该出去到画布之外" ✓）：`editor_overcanvas_mode=block`
+
+        （设置里的「禁止移出」✓）下，键盘微调**不得**把标注带出画布 ✓；
+        默认 `clip` 模式的行为**必须完全不变**（标注可出界，显示/导出时裁掉 ✓）。
+        """
+        from PySide6.QtCore import QRectF
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationRectItem
+
+        def build(mode):
+            editor = EditorWindow(Image.new("RGB", (200, 160), "white"),
+                                  dict(DEFAULTS, editor_overcanvas_mode=mode))
+            canvas = editor.canvas
+            item = AnnotationRectItem(QRectF(10, 10, 40, 30))
+            item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+            canvas.scene_data.addItem(item)
+            canvas.scene_data.clearSelection()
+            item.setSelected(True)
+            editor.show()
+            canvas.show()
+            self.app.processEvents()
+            return editor, canvas, item
+
+        editor, canvas, item = build("block")
+        try:
+            for _ in range(120):
+                canvas.nudge_selected(-1, -1)
+            rect = item.mapToScene(item.boundingRect()).boundingRect()
+            bounds = canvas.sceneRect()
+            self.assertGreaterEqual(rect.left(), bounds.left() - 0.51, "block 模式不得移出左边界 ✓")
+            self.assertGreaterEqual(rect.top(), bounds.top() - 0.51, "block 模式不得移出上边界 ✓")
+        finally:
+            editor.close()
+
+        editor, canvas, item = build("clip")
+        try:
+            for _ in range(120):
+                canvas.nudge_selected(-1, -1)
+            rect = item.mapToScene(item.boundingRect()).boundingRect()
+            self.assertLess(rect.left(), canvas.sceneRect().left(),
+                            "默认 clip 模式行为必须不变（标注可出界 ✓）")
+        finally:
+            editor.close()
+
+    def test_cursor_follow_corrects_itself_on_next_event_loop_turn(self):
+        """2026-10-12（用户报告"跟随不及时、多移动几步直接不同步" ✗）：
+
+        契约：跟随必须**立刻设一次** ✓ + **事件循环下一轮读回 `QCursor.pos()` 校正** ✓
+        （与目标差 > 2px 时再设一次 ✓）—— 这是修复的核心行为 ✓，必须有用例钉住 ✓。
+        """
+        from PySide6.QtCore import QPoint, QRectF
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from unittest.mock import patch
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationRectItem
+
+        editor = EditorWindow(Image.new("RGB", (200, 160), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        item = AnnotationRectItem(QRectF(20, 20, 60, 40))
+        item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+        canvas.scene_data.addItem(item)
+        canvas.scene_data.clearSelection()
+        item.setSelected(True)
+        editor.show()
+        canvas.show()
+        self.app.processEvents()
+        try:
+            canvas._active_handle_name = "se"
+            with patch("editor.annotation_canvas.QCursor.setPos") as move, \
+                    patch("editor.annotation_canvas.QCursor.pos", return_value=QPoint(0, 0)):
+                self.assertTrue(canvas.resize_selected(1, 1), "se 手柄应能放大")
+                self.assertEqual(move.call_count, 1, "按键当刻必须先立刻设一次 ✓（手感及时 ✓）")
+                target = move.call_args_list[0][0][0]
+                self.app.processEvents()      # 走到事件循环下一轮 ⇒ 触发读回校正 ✓
+                self.assertGreaterEqual(move.call_count, 2, "指针跑偏时应再设一次校正 ✓")
+                self.assertEqual(move.call_args_list[-1][0][0], target,
+                                 "校正目标必须与首次一致 ✓")
+        finally:
+            editor.close()
 
     def test_resize_selected_scales_rect_item_by_one_pixel(self):
         """手柄上的键盘缩放：宽、高各 ±1px，且 QRect/QRectF 两种 rect() 都要生效。

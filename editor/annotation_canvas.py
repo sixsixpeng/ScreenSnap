@@ -4,7 +4,7 @@ import logging
 import math
 
 from PIL import Image, ImageFilter
-from PySide6.QtCore import Qt, QPointF, QRect, QRectF, QLineF, Signal, QTimer
+from PySide6.QtCore import Qt, QPoint, QPointF, QRect, QRectF, QLineF, Signal, QTimer
 from PySide6.QtGui import (QBrush, QShortcut, QPainter, QPainterPath, QPen, QColor, QPixmap, QImage,
                              QPolygonF, QPainterPathStroker, QTextBlockFormat,
                              QTextCursor, QTransform, QCursor, QKeySequence)
@@ -179,8 +179,10 @@ class AnnotationCanvas(QGraphicsView):
         # 实测有擦除层时每帧都要 scene.render 全部标注（26.9 ms / 20 个 ✗ ⇒ 整帧 68.7 ms ✓）。
         # 这里缓存"隐藏擦除层后的标注渲染" ✓，每帧只把擦除遮罩按 DestinationOut 叠上去 ✓ ⇒ 逐像素等价 ✓。
         self._annotation_layer_stamp = 0
-        self._annotation_layer_cache = (None, None)
+        self._annotation_layer_cache = (None, None, None)   # (键, 不含擦除层, 整层) ✓
         self._building_annotation_cache = False
+        self._annotation_layer_pending = False          # 延迟重建是否已排队 ✓（见 _cached_annotation_layer）
+        self._base_restore_pending = False              # 底图恢复显示是否已排队 ✓（见 _restore_base_visibility）
         self._eraser_layer_locked = False
         self.scene_data.changed.connect(self._bump_annotation_layer_stamp)
         # 擦除以带 z 序的 EraseMaskItem 存在于场景中；该标志表示当前是否有擦除层，
@@ -1523,6 +1525,8 @@ class AnnotationCanvas(QGraphicsView):
             not annotation_levels or erase_layers[-1].zValue() > max(annotation_levels))
         if len(erase_layers) == 1 and top_erase_above_all:
             ann = self._cached_annotation_layer(w, h, x0, y0)
+            if ann is None:      # 缓存未就绪 ⇒ 当帧兜底 ✓（延迟重建已排入事件循环 ✓ 见该函数注释）
+                ann = self._render_annotation_layer_now(w, h, x0, y0)
             ap = QPainter(ann)
             ap.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
             for erase_item in erase_layers:
@@ -1530,20 +1534,32 @@ class AnnotationCanvas(QGraphicsView):
             ap.end()
             painter.drawImage(visible.topLeft(), ann)
         else:
-            ann = QImage(w, h, QImage.Format_ARGB32)
-            ann.fill(Qt.transparent)
-            ap = QPainter(ann)
-            ap.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
-            base_was_visible = self.base is not None and self.base.isVisible()
-            if base_was_visible:
-                self.base.hide()
-            try:
-                self.scene_data.render(ap, QRectF(0, 0, w, h), QRectF(x0, y0, w, h))
-            finally:
-                if base_was_visible:
-                    self.base.show()
-                ap.end()
+            # ≥2 个擦除层 ⇒ 必须保 z 序：直接用**预建的"整层"缓存** ✓（含擦除层、不含底图 ✓）。
+            # 2026-10-12（D35 收尾第三步）：这里原先在绘制期 `base.hide()/show()` ✗ ⇒ 现在只有
+            # "缓存未就绪那一帧"才会退回 `_render_annotation_layer_now`（冷路径 ✓ 不是热路径 ✓）。
+            # ⚠️ 2026-10-12（必须收紧 ✓）：**擦除拖动期间**stamp 被锁住（`_eraser_layer_locked` ✓），
+            # 而"整层"缓存把擦除层烤进了图像 ✗ ⇒ 新笔迹不会出现（正是"实时预览不对"那类 ✗）
+            # ⇒ 只有**静态**（不在实时擦除 ✓）时才用它 ✓；拖动中一律走当场渲染 ✓（冷路径 ✓ 正确优先 ✓）。
+            # 判据必须是"**拖动中**"`self.erasing` ✓ —— 不能用 `_erase_live_active()` ✗：
+            # 它等价于 `bool(erase_items())` ✓ ⇒ 只要存在擦除层就为真 ⇒ 这条缓存**永远走不到** ✗
+            # （自查发现 ✓ 上一版就是这样把整层缓存写成死路 ✗，绘制期切换依旧留在热路径上 ✗）。
+            ann = (None if self.erasing
+                   else self._cached_annotation_layer(w, h, x0, y0, want_full=True))
+            if ann is None:
+                ann = self._render_annotation_layer_now(w, h, x0, y0, include_erase=True)
             painter.drawImage(visible.topLeft(), ann)
+
+    def _restore_base_visibility(self):
+        """在**事件循环里**恢复底图显示 ✓（绘制期只允许"请求"，见 AGENTS 经验 D35 ✓）。"""
+        self._base_restore_pending = False
+        try:
+            import shiboken6
+            if not shiboken6.isValid(self):
+                return
+        except Exception:                     # noqa: BLE001  仅安全兜底 ✓
+            return
+        if self.base is not None and not self.base.isVisible():
+            self.base.show()
 
     def _bump_annotation_layer_stamp(self, *_regions):
         """场景内容变化 ⇒ 标注层缓存失效 ✓（只自增计数 ✓ 绝不触发任何重绘调用 ✓）。
@@ -1555,39 +1571,108 @@ class AnnotationCanvas(QGraphicsView):
         # 否则擦除自身的重绘也会把 changed 打进来 ⇒ 每帧重建 ⇒ 缓存形同虚设 ✗。
         if not self._building_annotation_cache and not self._eraser_layer_locked:
             self._annotation_layer_stamp += 1
+            # 2026-10-12（D35 收尾）：标注一变就**在这里**（非绘制期 ✓）排一次延迟重建 ✓
+            # ⇒ 事件循环下一轮缓存就绪 ⇒ 绘制期几乎永远命中缓存 ✓，
+            # 从而让"绘制期切可见性"的兜底 `_render_annotation_layer_now` 退化成罕见路径 ✓。
+            # 仍然只排一次（`_annotation_layer_pending` ✓ 规则 14：高频路径不重复排队 ✓）。
+            if not self._annotation_layer_pending:
+                self._annotation_layer_pending = True
+                QTimer.singleShot(0, self._rebuild_annotation_layer)
 
-    def _cached_annotation_layer(self, w, h, x0, y0):
-        """返回"隐藏擦除层后的标注渲染"的**副本**（纯计算缓存 ✓ 不改重绘语义 ✓）。
+    def _annotation_layer_key(self, w, h, x0, y0):
+        """缓存失效键：视口尺寸 / 可见区原点 / 缩放 / 场景条目数 / 标注变更计数 ✓。"""
+        return (w, h, x0, y0, round(float(self.transform().m11()), 6),
+                len(self.scene_data.items()), self._annotation_layer_stamp)
 
-        失效键：视口尺寸、可见区原点、缩放、场景条目数、标注变更计数 ✓。
+    def _cached_annotation_layer(self, w, h, x0, y0, want_full=False):
+        """**只在缓存命中时**返回"隐藏擦除层后的标注渲染"副本 ✓（绘制期**只读** ✓）。
+
+        2026-10-12 风险整改（AGENTS 经验 **D35**：绘制期绝不改可见性 ✗）：原实现在缓存未命中时
+        **就地** `base.hide() … scene.render() … base.show()` ✗ —— 与那次 0xC0000409 原生崩溃同一族 ✓。
+        现在未命中 ⇒ 排一次**延迟重建**（`QTimer.singleShot(0, …)` ✓ 事件循环下一轮、非绘制期 ✓）
+        并返回 `None` ✓；调用方当帧退回 `_render_annotation_layer_now`（与旧实现逐像素相同 ✓ 不劣于现状 ✓）。
         """
-        key = (w, h, x0, y0, round(float(self.transform().m11()), 6),
-               len(self.scene_data.items()), self._annotation_layer_stamp)
-        cached_key, cached = self._annotation_layer_cache
-        if cached_key == key and cached is not None and not cached.isNull():
-            return cached.copy()
+        key = self._annotation_layer_key(w, h, x0, y0)
+        cached_key, cached, full = self._annotation_layer_cache
+        chosen = full if want_full else cached
+        if cached_key == key and chosen is not None and not chosen.isNull():
+            return chosen.copy()
+        if not self._annotation_layer_pending:
+            self._annotation_layer_pending = True
+            QTimer.singleShot(0, self._rebuild_annotation_layer)
+        return None
+
+    def _rebuild_annotation_layer(self):
+        """**在事件循环里**（非绘制期 ✓）重建标注层缓存 —— 只有这里才允许临时切换可见性 ✓。"""
+        self._annotation_layer_pending = False
+        # D20/D22 教训：延迟回调可能落在部件已析构之后 ✗ ⇒ 先判活，再碰任何 Qt 对象 ✓。
+        try:
+            import shiboken6
+            if not shiboken6.isValid(self):
+                return
+        except Exception:                     # noqa: BLE001  仅安全兜底，不影响功能 ✓
+            pass
+        if not self.isVisible():
+            return
+        vp = self.viewport().rect()
+        if vp.isEmpty():
+            return
+        visible = self.mapToScene(vp).boundingRect().intersected(self.sceneRect())
+        if visible.isEmpty():
+            return
+        # 区域算法与 `_paint_erased_composite` 保持**一致** ✓（那边还要用同一块区域画棋盘格/底图 ✓）。
+        x0 = max(0, int(math.floor(visible.x())))
+        y0 = max(0, int(math.floor(visible.y())))
+        x1 = max(x0 + 1, int(math.ceil(visible.x() + visible.width())))
+        y1 = max(y0 + 1, int(math.ceil(visible.y() + visible.height())))
+        w, h = x1 - x0, y1 - y0
+        if w <= 0 or h <= 0:
+            return
+        key = self._annotation_layer_key(w, h, x0, y0)
+        image = self._render_annotation_layer_now(w, h, x0, y0)
+        # 2026-10-12（D35 收尾第三步）：≥2 个擦除层时合成必须**保 z 序** ⇒ 还要一张"整层"图像
+        # （含擦除层、不含底图 ✓）。它同样只在这里（**事件循环** ✓ 非绘制期 ✓）构建 ⇒
+        # 绘制期那条 `base.hide()/show()` 的分支从此只在"未就绪那一帧"兜底 ✓ 冷路径 ✓。
+        full = None
+        if len([item for item in self.erase_items() if item.isVisible()]) >= 2:
+            full = self._render_annotation_layer_now(w, h, x0, y0, include_erase=True)
+        self._annotation_layer_cache = (key, image, full)
+        self.viewport().update()      # 缓存就绪 ⇒ 请当帧用缓存重画 ✓
+
+    def _render_annotation_layer_now(self, w, h, x0, y0, include_erase=False):
+        """**绘制期**渲染标注层 —— 仅用于"缓存尚未就绪"的那一帧兜底 ✓。
+
+        2026-10-12（D35 收尾第四步 ✓）：**不再切换任何可见性** ✗ ⇒ 改为**逐图元绘制** ✓
+        （按 `Qt.AscendingOrder` 遍历场景、跳过底图、按需跳过擦除层、用 `item.sceneTransform()` 复原变换 ✓）。
+        前提已核查 ✓：全项目**没有** `setGraphicsEffect` 用在场景图元上 ✓（只在工具栏 ✗ 不在场景 ✓）、
+        也没有 `setOpacity` ✓ ⇒ 逐图元绘制与 `scene.render` 等价 ✓（像素探针验证：抽样差异 0 ✓）。
+        """
+        from PySide6.QtWidgets import QStyleOptionGraphicsItem
+
         image = QImage(w, h, QImage.Format_ARGB32)
         image.fill(Qt.transparent)
-        cache_painter = QPainter(image)
-        cache_painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing)
-        hidden = [item for item in self.erase_items() if item.isVisible()]
-        base_was_visible = self.base is not None and self.base.isVisible()
+        painter = QPainter(image)
+        painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing |
+                               QPainter.SmoothPixmapTransform)
+        painter.setClipRect(QRectF(0, 0, w, h))
+        painter.translate(-x0, -y0)
         self._building_annotation_cache = True
         try:
-            for item in hidden:
-                item.setVisible(False)
-            if base_was_visible:
-                self.base.hide()          # 底图由合成单独绘制 ✓ 不能进这层缓存 ✗
-            self.scene_data.render(cache_painter, QRectF(0, 0, w, h), QRectF(x0, y0, w, h))
+            for item in self.scene_data.items(Qt.AscendingOrder):   # 从底到顶 = z 序 ✓
+                if item is self.base or not item.isVisible():
+                    continue                                       # 底图由合成单独绘制 ✓
+                if not include_erase and isinstance(item, EraseMaskItem):
+                    continue                                       # 按需排除擦除层 ✓
+                option = QStyleOptionGraphicsItem()
+                option.exposedRect = item.boundingRect()
+                painter.save()
+                painter.setTransform(item.sceneTransform(), True)   # 叠加在 -x0,-y0 之上 ✓
+                item.paint(painter, option, None)
+                painter.restore()
         finally:
-            if base_was_visible:
-                self.base.show()
-            for item in hidden:
-                item.setVisible(True)
-            cache_painter.end()
+            painter.end()
             self._building_annotation_cache = False
-        self._annotation_layer_cache = (key, image)
-        return image.copy()
+        return image
 
     def paintEvent(self, event):
         """慢帧探针（性能，2026-10-11）：只在整屏重绘超过 8 ms 时记一条 DEBUG。
@@ -1626,7 +1711,11 @@ class AnnotationCanvas(QGraphicsView):
             self._paint_erased_composite(painter)
         elif self.base is not None and not self.base.isVisible():
             # 擦除层已消失（撤销/删除 ✓）⇒ 把底图恢复显示一次 ✓（配合合成里"只隐藏一次"的改动 ✓）
-            self.base.show()
+            # 2026-10-12（D35 收尾）：绘制期**不得**改可见性 ✗ ⇒ 这里只**排一次**延迟恢复 ✓
+            # （恢复显示不涉及本帧像素 ⇒ 推迟一轮视觉上等价 ✓）。
+            if not self._base_restore_pending:
+                self._base_restore_pending = True
+                QTimer.singleShot(0, self._restore_base_visibility)
         if self.round_corner_preview and self.corner_radius > 0:
             bounds = self.sceneRect()
             radius = min(self.corner_radius, bounds.width() / 2, bounds.height() / 2)
@@ -2866,7 +2955,9 @@ class AnnotationCanvas(QGraphicsView):
             self.confirmed.emit()
             event.accept()
             return
-        # 其他工具先切到选择；选择工具中双击非文字标注可直接删除，双击文字标注则就地编辑。
+        # 其他工具先切到选择；双击**文字**标注就地编辑，双击**非文字**标注只进入编辑态（选中）✓
+        # 2026-10-12（用户要求）：**去掉"双击删除标注"** ✗ —— 易误点且不稳定 ✓；
+        # 删除仍走明确入口：Delete 键 / 右键菜单「删除标注」（两者都不变 ✓）。
         if event.button() != Qt.LeftButton:
             event.accept()
             return
@@ -2892,12 +2983,7 @@ class AnnotationCanvas(QGraphicsView):
                 self.viewport().update()
                 self._update_resize_cursor(event.position().toPoint())
                 return
-            self.scene_data.clearSelection()
-            item.setSelected(True)
-            self.remove_selected()
-            self._update_resize_cursor(event.position().toPoint())
-            return
-            # 双击已有标注：只选中它（文字进入编辑、其它类型删除），工具保持不变。
+            # 双击非文字标注 ⇒ 只选中它（进入编辑态）✓ 与其它工具完全一致 ✓ 不再删除 ✗。
             self.scene_data.clearSelection()
             item.setSelected(True)
             self._update_resize_cursor(event.position().toPoint())
@@ -2961,6 +3047,8 @@ class AnnotationCanvas(QGraphicsView):
             item.setPos(item.pos() + before - after)
             changed = True
         if changed:
+            self.constrain_selected_to_canvas()   # block 模式：旋转后立刻拉回画布内 ✓（clip 模式不变 ✓）
+            self._follow_handle_cursor()      # 旋转手柄跟着转 ⇒ 指针跟随 ✓
             self.checkpoint()
             self.update()
         return changed
@@ -3039,9 +3127,89 @@ class AnnotationCanvas(QGraphicsView):
                 type(item).__name__, name or "(默认右下)", dx, dy, factor_x, factor_y,
                 round(bounds.width() * factor_x, 1), round(bounds.height() * factor_y, 1))
         if changed:
+            # 2026-10-12（用户要求"标注不应该出去到画布之外" ✓）：缩放后立刻夹回画布内 ✓
+            # （`constrain_selected_to_canvas()` 只在 `editor_overcanvas_mode=block`（"禁止移出"）时生效 ✓
+            #   默认 clip 保持不变 ✓ —— 用户可在 设置 > 编辑器 > 标注超出画布 里切换 ✓）。
+            # 位置必须在**跟随之前**：否则指针会指向一个马上被拉走的手柄位置 ✗。
+            self.constrain_selected_to_canvas()
+            self._follow_handle_cursor()      # 尺寸微调 ⇒ 指针跟随手柄新位置 ✓（旋转后同样成立 ✓）
             self.checkpoint()
             self.update()
         return changed
+
+    def handle_global_point(self, name=None):
+        """当前手柄的**屏幕全局坐标**（键盘微调后让指针跟随 ✓ 两个编辑器共用 ✓）。
+
+        2026-10-12（用户反馈："修改标注的尺寸微调时指针一直没有跟随"✗，并要求考虑**旋转后**的跟随 ✓）：
+        · 旋转后手柄位置由 item 的**当前变换**决定 ⇒ 每次都按 `item_resize_handles` /
+          `rotation_handle_position` 重算 ✓（绝不缓存按下时的坐标 ✗）；
+        · `name` 省略时按 `active_handle()` → `pointer_handle()` 的同一套回落顺序取 ✓
+          （与画布按键判定、遮罩侧判定完全同源 ✓）；
+        · 画布不可见 / 没有选中标注 / 该手柄不存在 ⇒ 返回 None ✓（调用方静默跳过 ✓）。
+        """
+        if not self.isVisible():
+            return None
+        items = self.scene_data.selectedItems()
+        if not items:
+            return None
+        name = name or self.active_handle()
+        if not name:
+            hovered = self.pointer_handle()
+            name = hovered[1] if hovered else ""
+        if not name:
+            return None
+        item = items[0]
+        spot = (self.rotation_handle_position(item) if name == "rotate"
+                else self.item_resize_handles(item).get(name))
+        if spot is None:
+            return None
+        return self.viewport().mapToGlobal(self.mapFromScene(spot))
+
+    def _apply_cursor_follow(self, target, delta=None):
+        """把指针移动到 `target`（Qt 原生全局坐标 ✓），**下一轮再读回校正一次** ✓。
+
+        2026-10-12（用户反馈"手柄缩放时指针跟随不及时、多移动几步直接不同步" ✗）：
+        原先在按键处理里**同步** `QCursor.setPos` ✗ ⇒ 此时几何/视图变换可能还没最终确认 ✓，
+        且 Windows 上连续快速 setPos 可能被合并/丢弃 ✗ ⇒ 逐步累积偏差 ✓。
+        现在：① 立刻设一次（手感及时 ✓）；② 推迟到**事件循环下一轮**读回 `QCursor.pos()` ✓，
+        若与目标差 > 2px 就**再设一次**校正 ✓（自校正 ✓ 不掉步 ✓）。
+        """
+        if not self.isVisible():
+            return
+        QCursor.setPos(target)
+
+        def correct():
+            try:
+                import shiboken6
+                if not shiboken6.isValid(self):
+                    return
+            except Exception:                 # noqa: BLE001  仅安全兜底 ✓
+                return
+            current = QCursor.pos()
+            if (current - target).manhattanLength() > 2:
+                logging.getLogger("screensnap").debug(
+                    "指针跟随校正：目标=%s 实际=%s", target, current)
+                QCursor.setPos(target)
+
+        QTimer.singleShot(0, correct)
+
+    def _follow_handle_cursor(self):
+        """缩放/旋转微调后把指针带到手柄的**新位置** ✓（旋转后手柄会绕中心走 ⇒ 每次都重算 ✓）。"""
+        point = self.handle_global_point()
+        if point is not None:
+            self._apply_cursor_follow(point)
+
+    def _follow_move_cursor(self, dx, dy):
+        """移动微调后按同样的**屏幕位移**带动指针 ✓（画布单位 × 缩放 = 屏幕像素 ✓）。
+
+        只在"确实按着左键"时跟随 ✓ —— 否则用户只是敲了下方向键，指针会莫名跳 1 像素 ✗
+        （遮罩侧 S 通道与两个编辑器的"按住标注本体 + 方向键"都满足这个条件 ✓）。
+        """
+        if not self.isVisible() or not (QApplication.mouseButtons() & Qt.LeftButton):
+            return
+        scale = float(self.transform().m11()) or 1.0
+        target = QCursor.pos() + QPoint(int(round(dx * scale)), int(round(dy * scale)))
+        self._apply_cursor_follow(target)      # 同样走"下一轮读回校正" ✓（不掉步 ✓）
 
     def nudge_selected(self, dx, dy):
         """方向键/WASD 微调选中的标注图形（移动图形本身，不是移动选区）。
@@ -3060,6 +3228,8 @@ class AnnotationCanvas(QGraphicsView):
                 item.setPath(item.path().translated(QPointF(dx, dy)))
             else:
                 item.setPos(item.pos() + QPointF(dx, dy))
+        self.constrain_selected_to_canvas()   # block 模式：微调后立刻夹回画布内 ✓（clip 模式不变 ✓）
+        self._follow_move_cursor(dx, dy)      # 按住本体微调 ⇒ 指针跟着标注走 ✓
         self.checkpoint()   # 与其它编辑一致：微调可撤销
         self.update()
         return True

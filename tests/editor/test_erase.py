@@ -173,6 +173,59 @@ class EraseTests(CoreTests):
         finally:
             canvas.close()
 
+    def test_multi_erase_layer_composite_uses_cache_and_keeps_visibility(self):
+        """2026-10-12 风险整改（AGENTS 经验 D35）回归用例。
+
+        契约：**≥2 个擦除层**且**不在擦除拖动中**时，实时合成必须走预建的"整层"缓存 ✓，
+        并且**不得改变任何可见性** ✗ —— 绘制期切换底图/擦除层可见性是一次 0xC0000409 原生崩溃的同族 ✓。
+        （自查发现 ★：判据若写成 `_erase_live_active()`＝`bool(erase_items())` ✗ ⇒ 这条缓存永远走不到 ✗。）
+        """
+        from editor.annotation_canvas import AnnotationCanvas
+        from editor.annotation_items import shape
+        from PySide6.QtCore import QPointF, Qt
+        from PySide6.QtGui import QImage, QPainter
+        from PIL import Image
+        from config.config_manager import DEFAULTS
+
+        canvas = AnnotationCanvas(Image.new("RGB", (300, 200), "white"),
+                                  dict(DEFAULTS, eraser_brush=True, eraser_width=16))
+        try:
+            canvas.resize(300, 200)
+            canvas.show()
+            self.app.processEvents()
+            canvas._add_annotation(shape("pen", QPointF(20, 40), QPointF(280, 40), "#ff0000", 8))
+            canvas.erasing = True
+            canvas.eraser_group += 1
+            canvas.erase_segment(QPointF(150, 10), QPointF(150, 190))
+            canvas.erasing = False
+            canvas._add_annotation(shape("pen", QPointF(20, 120), QPointF(280, 120), "#0000ff", 8))
+            canvas.erasing = True
+            canvas.eraser_group += 1
+            canvas.erase_segment(QPointF(60, 10), QPointF(60, 190))
+            canvas.erasing = False
+            self.assertEqual(len(canvas.erase_items()), 2, "本用例要覆盖 ≥2 擦除层 ✓")
+            canvas._annotation_layer_pending = False
+            canvas._rebuild_annotation_layer()          # 事件循环里的重建（这里直接调用 ✓）
+            _key, _plain, full = canvas._annotation_layer_cache
+            self.assertIsNotNone(full, "≥2 擦除层 ⇒ 必须预建整层缓存 ✓")
+            visible_before = [canvas.base.isVisible()] + [i.isVisible() for i in canvas.erase_items()]
+            image = QImage(300, 200, QImage.Format_ARGB32)
+            image.fill(Qt.transparent)
+            painter = QPainter(image)
+            # ★ 关键断言（能抓住"缓存成死路"✗）：静止状态**不得**走当场渲染 ✓
+            #   —— 若判据误写成 `_erase_live_active()`（＝有擦除层就为真 ✗），这里会立刻炸 ✓。
+            with patch.object(canvas, "_render_annotation_layer_now",
+                              side_effect=AssertionError("静止状态必须走整层缓存，不得当场渲染 ✗")) as renderer:
+                canvas._paint_erased_composite(painter)
+                renderer.assert_not_called()
+            painter.end()
+            visible_after = [canvas.base.isVisible()] + [i.isVisible() for i in canvas.erase_items()]
+            self.assertEqual(visible_before, visible_after,
+                             "合成期间不得改变任何可见性（D35 风险族 ✗）")
+            self.assertFalse(image.isNull(), "应当画出了内容 ✓")
+        finally:
+            canvas.close()
+
     def test_live_preview_matches_export_when_new_annotation_is_above_erase_layer(self):
         """2026-10-12 二修（用户实测：实时预览里后画的内容仍在橡皮擦下面 ✗ 而导出正确 ✓）。
 
@@ -876,9 +929,16 @@ class EraseTests(CoreTests):
         canvas.undo()
         self.assertEqual(len(canvas.annotations()), 2)
 
-        # 双击被擦过的矩形 → 删除（旧实现命中擦除层，删不掉）。
+        # 2026-10-12（用户要求，C8 契约变更）：**双击不再删除** ✗ ⇒ 双击被擦过的矩形只是选中它 ✓；
+        # 删除走明确入口（这里直接调用与 Delete 键/右键菜单同源的 remove_selected ✓），
+        # 覆盖意图不变："被擦过的标注仍可选中、仍可删除、且可撤销" ✓。
         canvas.set_tool("select")
         double_click(QPointF(40, 96))
+        self.assertEqual(len(canvas.annotations()), 2, "双击不应删除任何标注 ✓")
+        selected = canvas.scene_data.selectedItems()
+        self.assertEqual(len(selected), 1, "双击应选中被双击的那个标注 ✓")
+        self.assertFalse(hasattr(selected[0], "toPlainText"), "选中的应是被双击的矩形 ✓")
+        canvas.remove_selected()
         self.assertEqual(len(canvas.annotations()), 1)
         self.assertTrue(hasattr(canvas.annotations()[0], "toPlainText"))
         canvas.undo()

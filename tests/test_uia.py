@@ -1,4 +1,4 @@
-"""无障碍识别与悬停：UIA 下钻、命中穿透、悬停复用与节流。"""
+﻿"""无障碍识别与悬停：UIA 下钻、命中穿透、悬停复用与节流。"""
 
 import os
 import sys
@@ -443,13 +443,13 @@ class UiaTests(CoreTests):
         self.assertEqual(default_edits[0][0][0].size, (80, 60))
         self.assertFalse(fifth.isVisible())
 
-    def test_window_options_refresh_after_double_click_delete(self):
+    def test_window_options_refresh_after_delete(self):
         from config.config_manager import DEFAULTS
         editor = EditorWindow(Image.new("RGB", (320, 200), "white"), dict(DEFAULTS))
         editor.show()
         self.app.processEvents()
         try:
-            self._check_options_after_double_click_delete(editor)
+            self._check_options_refresh_after_delete(editor)
         finally:
             editor.close()
 
