@@ -341,26 +341,27 @@ class CanvasTests(CoreTests):
         after_center = item.mapToScene(item.boundingRect().center())
         self.assertAlmostEqual(before_center.x(), after_center.x(), places=3, msg="旋转中心不漂")
         self.assertAlmostEqual(before_center.y(), after_center.y(), places=3, msg="旋转中心不漂")
-        # ① 未旋转：e 手柄在右边 ⇒ 屏幕 → 放大
+        # ① 未旋转：e 手柄朝外 = 屏幕右 ⇒ 屏幕 → = 朝外 ⇒ 放大
         item.setRotation(0.0)
         canvas._active_handle_name = "e"
         size0 = item.mapToScene(item.boundingRect()).boundingRect().size()
         canvas.resize_selected(1, 0)
         size1 = item.mapToScene(item.boundingRect()).boundingRect().size()
-        self.assertGreater(size1.width(), size0.width(), "未旋转时 → 应放大")
-        # ① 旋转 180°：e 手柄视觉上跑到左边 ⇒ 同一个屏幕 → 应该缩小（以实际方向为准）
+        self.assertGreater(size1.width(), size0.width(), "未旋转时 → 应放大（朝外 ✓）")
+        # ① 旋转 180°：e 手柄视觉上跑到左边 ⇒ 朝外方向变成屏幕**左** ⇒ 同一个屏幕 → = 朝内 ⇒ 缩小
+        #   （2026-10-12 用户定契约「手柄跟手」✓：方向按**旋转后的朝外方向**重算 ✓）
         item.setRotation(180.0)
         size2 = item.mapToScene(item.boundingRect()).boundingRect().size()
         canvas.resize_selected(1, 0)
         size3 = item.mapToScene(item.boundingRect()).boundingRect().size()
-        self.assertGreater(size3.width(), size2.width(),
-                        "2026-10-12 新契约：方向只看按键 ⇒ 屏幕 → 一律放大 ✓（与手柄/旋转无关 ✓）")
-        # 反向对称：旋转 180° 后屏幕 ← 应放大
+        self.assertLess(size3.width(), size2.width(),
+                        "手柄跟手：旋转 180° 后 e 手柄朝外朝左 ⇒ 屏幕 → 是朝内 ⇒ 缩小 ✓")
+        # 反向对称：旋转 180° 后屏幕 ← 才是朝外 ⇒ 应放大
         size4 = item.mapToScene(item.boundingRect()).boundingRect().size()
         canvas.resize_selected(-1, 0)
         size5 = item.mapToScene(item.boundingRect()).boundingRect().size()
-        self.assertLess(size5.width(), size4.width(),
-                        "2026-10-12 新契约：屏幕 ← 一律缩小 ✓（与手柄/旋转无关 ✓）")
+        self.assertGreater(size5.width(), size4.width(),
+                           "手柄跟手：旋转 180° 后屏幕 ← = 朝外 ⇒ 放大 ✓")
     def test_all_annotation_types_cover_nudge_and_resize(self):
         """规则 29：全部标注类型逐个核对「微调移动 + 手柄等比缩放」。"""
         from PySide6.QtCore import QPointF, QRectF
@@ -618,6 +619,170 @@ class CanvasTests(CoreTests):
         finally:
             editor.close()
 
+    def test_keyboard_resize_axis_rules_across_rotations(self):
+        """2026-10-12 用户报告（问题 1/2）：标注键盘微调的两个通病，覆盖未旋转与任意角度旋转。
+
+        ① 角落手柄必须**等比**缩放（两轴同一比例）⇒ 指针按手柄新位置同时沿 X/Y 跟随 ✓；
+        ② 边中点手柄**只响应本轴方向键**（e/w 只 A/D、n/s 只 W/S）——旋转后也不得变成另一轴 ✓；
+        ③ 旋转只改变"几何沿标注自身轴放大/缩小"的视觉方向，不改变上面的规则 ✓。
+        """
+        from PySide6.QtCore import QPointF, QRectF
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationRectItem
+
+        editor = EditorWindow(Image.new("RGB", (400, 300), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        corners = ("nw", "ne", "se", "sw")
+        keys = {"W": (0, -1), "S": (0, 1), "A": (-1, 0), "D": (1, 0)}
+        allowed_for = {"e": {"A", "D"}, "w": {"A", "D"}, "n": {"W", "S"}, "s": {"W", "S"}}
+        try:
+            for rotation in (0, 30, 45, 90, 180):
+                for handle in corners + ("e", "w", "n", "s"):
+                    for key, (dx, dy) in keys.items():
+                        canvas.scene_data.clear()
+                        item = AnnotationRectItem(QRectF(50, 50, 40, 20))
+                        item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+                        canvas.scene_data.addItem(item)
+                        canvas.scene_data.clearSelection()
+                        item.setSelected(True)
+                        item.setRotation(rotation)
+                        canvas._active_handle_name = handle
+                        before = QPointF(canvas.item_resize_handles(item)[handle])
+                        changed = canvas.resize_selected(dx, dy)
+                        after = QPointF(canvas.item_resize_handles(item)[handle])
+                        label = f"旋转{rotation}° 手柄{handle} 键{key}"
+                        allowed = True if handle in corners else key in allowed_for[handle]
+                        if not allowed:
+                            self.assertFalse(changed, f"{label}: 非本轴方向键必须 no-op")
+                            self.assertEqual(before, after, f"{label}: no-op 时手柄不得移动")
+                            continue
+                        self.assertTrue(changed, f"{label}: 合法方向应生效")
+                        w, h = item.rect().width(), item.rect().height()
+                        self.assertAlmostEqual(w / h, 2.0, delta=0.02,
+                                               msg=f"{label}: 必须保持长宽比（等比）")
+                        if handle in corners:
+                            # 角落手柄等比 ⇒ 手柄两轴都动 ⇒ 指针沿 X/Y 同步跟随
+                            self.assertNotAlmostEqual(after.x(), before.x(), delta=1e-6,
+                                                      msg=f"{label}: 角落手柄 X 轴应同步移动")
+                            self.assertNotAlmostEqual(after.y(), before.y(), delta=1e-6,
+                                                      msg=f"{label}: 角落手柄 Y 轴应同步移动")
+        finally:
+            editor.close()
+
+    def test_midpoint_wrong_axis_key_is_pure_noop(self):
+        """2026-10-12 用户报告（问题 2）：上下边中点手柄按 A/D ⇒ 纯 no-op —— 不缩放、**不移动标注**、指针不动。
+
+        修复前：按键定格的手柄会被"指针跟随"合成的鼠标移动清掉 ✗ ⇒ 下次按键重判悬停、命中落空即
+        掉进 nudge_selected ⇒ 四个方向键都能平移标注（= 用户看到的"按一次之后全部方向可用"）✗。
+        """
+        from PySide6.QtCore import QEvent, QPointF, Qt
+        from PySide6.QtGui import QKeyEvent
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from unittest.mock import patch
+        from config.config_manager import DEFAULTS
+
+        editor = EditorWindow(Image.new("RGB", (200, 160), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        item = QGraphicsRectItem(0, 0, 40, 20)
+        item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+        item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsMovable, True)
+        canvas.scene_data.addItem(item)
+        canvas.scene_data.clearSelection()
+        item.setSelected(True)
+        editor.show()
+        canvas.show()
+        self.app.processEvents()
+        try:
+            for handle, wrong_key in (("n", Qt.Key_A), ("n", Qt.Key_D),
+                                      ("s", Qt.Key_A), ("s", Qt.Key_D),
+                                      ("e", Qt.Key_W), ("e", Qt.Key_S),
+                                      ("w", Qt.Key_W), ("w", Qt.Key_S)):
+                canvas._active_handle_name = handle
+                pos_before = QPointF(item.pos())
+                size_before = (item.rect().width(), item.rect().height())
+                with patch("editor.annotation_canvas.QCursor.setPos") as move:
+                    canvas.keyPressEvent(QKeyEvent(QEvent.Type.KeyPress, wrong_key,
+                                                   Qt.NoModifier))
+                    move.assert_not_called()          # 指针不得移动
+                self.assertEqual(item.pos(), pos_before, f"手柄{handle} 非本轴键不得平移标注")
+                self.assertEqual((item.rect().width(), item.rect().height()), size_before,
+                                 f"手柄{handle} 非本轴键不得缩放")
+        finally:
+            editor.close()
+
+    def test_active_handle_cleared_only_when_pointer_leaves_it(self):
+        """2026-10-12 真机日志定位（用户"按键后位移很抖、受控位置会变" ✗）：定格手柄的**解除判据**
+        是「指针是否还在同一定格手柄的命中圈内」——不看时间 ✗（原先用 50ms 定时器判"程序移动"，
+        真机按键间隔可达 500ms ⇒ 定时器早已过期 ⇒ 合成移动被当成用户移动 ⇒ 清掉定格 ✗
+        ⇒ 下一次按键掉进 nudge_selected ⇒ 标注整体平移 + 指针按 (dx,dy) 走 ✗）。"""
+        from PySide6.QtCore import QEvent, QPoint, QPointF, Qt
+        from PySide6.QtGui import QMouseEvent
+        from PySide6.QtWidgets import QGraphicsRectItem
+        from unittest.mock import patch
+        from config.config_manager import DEFAULTS
+
+        editor = EditorWindow(Image.new("RGB", (200, 160), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        item = QGraphicsRectItem(0, 0, 40, 20)
+        item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+        canvas.scene_data.addItem(item)
+        canvas.scene_data.clearSelection()
+        item.setSelected(True)
+        editor.show()
+        canvas.show()
+        self.app.processEvents()
+
+        def move_event(global_pos):
+            return QMouseEvent(QEvent.Type.MouseMove, QPointF(0, 0), QPointF(global_pos),
+                               Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+
+        try:
+            canvas._active_handle_name = "n"
+            # 指针仍在同一定格手柄上（= 指针跟随把它放回该手柄 ✓）⇒ 保留定格 ✓
+            with patch.object(canvas, "pointer_handle", return_value=(item, "n")):
+                canvas.mouseMoveEvent(move_event(QPoint(500, 500)))
+            self.assertEqual(canvas.active_handle(), "n",
+                             "指针仍在同一定格手柄上 ⇒ 不得清掉定格")
+            # 指针离开该手柄（用户真实移动 ✓）⇒ 清除定格 ✓
+            with patch.object(canvas, "pointer_handle", return_value=None):
+                canvas.mouseMoveEvent(move_event(QPoint(120, 90)))
+            self.assertIsNone(canvas.active_handle(), "指针离开该手柄 ⇒ 应清掉定格")
+            # 指针换到另一个手柄 ⇒ 也清除（下一次按键重新定格新的那个 ✓）
+            canvas._active_handle_name = "n"
+            with patch.object(canvas, "pointer_handle", return_value=(item, "nw")):
+                canvas.mouseMoveEvent(move_event(QPoint(120, 90)))
+            self.assertIsNone(canvas.active_handle(), "指针换到别的手柄 ⇒ 应清掉定格")
+        finally:
+            editor.close()
+
+    def test_cursor_follow_is_perceptible_on_every_moved_axis(self):
+        """2026-10-12 用户实测：角标等比缩放时角在屏幕上每步只移动 (1px, 0.5px) ⇒ 0.5 被取整
+        吃掉 ⇒ 用户看到"角标手柄只有 x 动、y 不动" ✗。契约：某轴**确实有位移**（浮点差非零）时
+        指针在该轴至少挪 1px ✓；该轴没有位移（浮点差为 0）时不得凭空移动 ✗。"""
+        from PySide6.QtCore import QPoint, QPointF
+        from unittest.mock import patch
+        from config.config_manager import DEFAULTS
+
+        editor = EditorWindow(Image.new("RGB", (60, 60), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        try:
+            with patch("editor.annotation_canvas.QCursor.pos", return_value=QPoint(100, 200)):
+                # 两轴都有位移，但取整后都回到原点 ⇒ 两轴都要补 1px
+                self.assertEqual(canvas._perceptible_cursor_point(QPointF(100.4, 200.5)),
+                                 QPoint(101, 201))
+                # 只有 x 有位移 ⇒ 只挪 x（y 不得凭空动）
+                self.assertEqual(canvas._perceptible_cursor_point(QPointF(100.4, 200.0)),
+                                 QPoint(101, 200))
+                # 反向同理
+                self.assertEqual(canvas._perceptible_cursor_point(QPointF(99.6, 199.4)),
+                                 QPoint(99, 199))
+                # 位移足够大 ⇒ 正常取整，不额外补
+                self.assertEqual(canvas._perceptible_cursor_point(QPointF(140.2, 260.7)),
+                                 QPoint(140, 261))
+        finally:
+            editor.close()
+
     def test_block_mode_keeps_annotation_inside_canvas_after_nudge(self):
         """2026-10-12（用户要求"标注不应该出去到画布之外" ✓）：`editor_overcanvas_mode=block`
 
@@ -780,13 +945,20 @@ class CanvasTests(CoreTests):
         QTest.keyClick(canvas, _Qt.Key_Right)
         self.assertNotEqual(item.pos(), pos_before, "未按手柄时按 → 应移动图形")
         # 边中点同样等比（用户确认：不是「只拉一个轴」）：宽高都要变，且长宽比不变。
+        # 2026-10-12 新契约（用户选定「手柄跟手」✓）：上中点按 ↑ = **朝外** ⇒ 放大 ✓、按 ↓ = 朝内 ⇒ 缩小 ✓。
         canvas._active_handle_name = "n"
         w0, h0 = item.rect().width(), item.rect().height()
         self.assertTrue(canvas.resize_selected(0, -1), "上中点按 ↑ 应缩放")
-        self.assertLess(item.rect().width(), w0,
-                        "2026-10-12 新契约：↑/W = 缩小 ✓（边中点同样等比 ⇒ 两轴一起变 ✓）")
-        self.assertLess(item.rect().height(), h0,
-                        "2026-10-12 新契约：↑/W = 缩小 ✓（边中点同样等比 ⇒ 两轴一起变 ✓）")
+        self.assertGreater(item.rect().width(), w0,
+                           "2026-10-12 新契约：↑/W = 放大（手柄跟手 ✓ 边中点同样等比 ⇒ 两轴一起变 ✓）")
+        self.assertGreater(item.rect().height(), h0,
+                           "2026-10-12 新契约：↑/W = 放大（手柄跟手 ✓）")
+        self.assertAlmostEqual(item.rect().width() / item.rect().height(), 1.0, places=3,
+                               msg="边中点也要保持长宽比")
+        w1, h1 = item.rect().width(), item.rect().height()
+        self.assertTrue(canvas.resize_selected(0, 1), "上中点按 ↓ 应缩放")
+        self.assertLess(item.rect().width(), w1, "↓/S = 缩小（朝内 ✓）")
+        self.assertLess(item.rect().height(), h1, "↓/S = 缩小（朝内 ✓）")
         self.assertAlmostEqual(item.rect().width() / item.rect().height(), 1.0, places=3,
                                msg="边中点也要保持长宽比")
 

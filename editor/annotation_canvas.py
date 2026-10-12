@@ -148,6 +148,10 @@ class AnnotationCanvas(QGraphicsView):
         self._tool_cursor_cache = {}
         self._applied_cursor_key = None
         self._left_button_down = False
+        # 2026-10-12（问题 2 ✓）：键盘微调的「指针跟随」是程序自己移动指针 —— 标记 + 目标点，
+        #   供 mouseMoveEvent 区分程序移动（保留按键定格的手柄）与用户真实移动（清掉定格）✓。
+        self._programmatic_cursor_move = False
+        self._programmatic_cursor_target = None
         self.text_alignment = Qt.AlignLeft
         self.start = None
         self.drawing = None
@@ -2246,8 +2250,23 @@ class AnnotationCanvas(QGraphicsView):
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
-        # 2026-10-12：用户真的移动鼠标 ⇒ 解除按键定格的手柄 ✓（避免粘在旧手柄上 ✗）
-        self.clear_active_handle()
+        # 2026-10-12：鼠标真的动了 ⇒ 若指针已**不在**按键定格的那个手柄上，才解除定格 ✓
+        #   （避免粘在旧手柄上 ✗，同时不误伤「指针跟随」把指针放到**同一个手柄**上的情形 ✗）。
+        # 判据只看「指针是否还在定格手柄的命中圈内」✓ —— 不看时间 ✗（此前用 50ms 定时器判"程序移动"
+        #   真机按键间隔可达 500ms ⇒ 定时器早已过期 ⇒ 合成移动被当成用户移动 ⇒ 清掉定格 ✗
+        #   ⇒ 下一次按键重判悬停、光标已偏出命中圈 ⇒ 掉进 nudge_selected ⇒ 标注被整体平移、
+        #   指针按 (dx,dy) 走 ⇒ 用户看到的「按键后位移很抖、受控位置会变」✗ 真机日志即此 ✓）。
+        # 顺序：先消费程序移动标记（避免它泄漏到下一次真实移动 ✓），再决定是否解除定格 ✓。
+        self._consume_programmatic_cursor_move(event)
+        # 2026-10-12（真机日志定位 ✓）：**按住左键期间绝不解除定格** ✓ —— 这就是"抓着手柄微调"的语义
+        #   （用户按下手柄后按住不放 + 连按方向键 ✓）。日志实证：按住期间一旦清掉定格 ✗，
+        #   按键就掉进 `nudge_selected`（移动标注本体 ✓）并把指针按 (dx,dy) 带走 ✗
+        #   ⇒ 标注每按一次平移 1px、指针跟着走、**再也回不到手柄上** ⇒ 用户看到的"抖/不同步/越走越偏" ✗
+        #   （日志：`标注手柄=False` + `指针跟随：手柄=None 位移=(-1,0)` ✓）。
+        #   只有**松开左键后**（纯悬停语境 ✓）才按"指针是否仍在同一定格手柄上"决定是否清除 ✓。
+        if (not (QApplication.mouseButtons() & Qt.LeftButton)
+                and not self._pointer_on_active_handle()):
+            self.clear_active_handle()
         self._materialize_deferred_pen_at(event)
         # 2026-10-11（用户实测：按住旋转按钮拖动时标注"跟着鼠标移动"而不是旋转）：
         # mousePressEvent 已经调过 _begin_rotation()（按下留痕显示 旋转手柄=[True] ✓），
@@ -3011,6 +3030,21 @@ class AnnotationCanvas(QGraphicsView):
         """松开时清除手柄状态。"""
         self._active_handle_name = None
 
+    def _pointer_on_active_handle(self):
+        """指针是否**仍在按键定格的那个手柄**上（同一手柄、同一 8px 命中圈 ✓）。
+
+        2026-10-12（真机日志定位 ✓）：这是"受控位置有没有变"的正确判据 ✓ —— 用它取代
+        「程序移动标记 + 50ms 定时器」那套时间判据 ✗（真机按键间隔可达 500ms ⇒ 定时器早已过期
+        ⇒ 合成的指针移动被当成用户移动 ⇒ 清掉定格手柄 ⇒ 下一次按键掉进 nudge_selected ✗）。
+        · 指针还在同一定格手柄（含"指针跟随"把指针放回该手柄 ✓）⇒ True ⇒ 保留定格 ✓；
+        · 指针换到别的/没有手柄（用户真移动了 ✓）⇒ False ⇒ 由调用方清除定格 ✓。
+        """
+        name = self.active_handle()
+        if not name:
+            return False
+        hit = self.pointer_handle(QCursor.pos())
+        return bool(hit) and hit[1] == name
+
     def pointer_handle(self, global_pos=None):
         """返回指针下的“选中标注”手柄 (item, 名称)，没有则 None。
 
@@ -3019,7 +3053,11 @@ class AnnotationCanvas(QGraphicsView):
         """
         if global_pos is None:
             return None
-        point = self.mapToScene(self.mapFromGlobal(global_pos))
+        # 2026-10-12（真机日志定位 ✓）：必须用 **viewport** 的局部坐标 ✗ —— `mapToScene` 期望的是
+        #   viewport 坐标 ✓，而 `self.mapFromGlobal` 给的是**整个 QGraphicsView** 的坐标（含边框/边距 ✓）
+        #   ⇒ 二者差 1~2px ⇒ 指针明明压在手柄上却判成"没压着" ✗ ⇒ 定格/悬停命中落空
+        #   ⇒ 按键掉进"移动标注本体"分支（= 用户看到的"抖/越走越偏"✗）。
+        point = self.mapToScene(self.viewport().mapFromGlobal(global_pos))
         for item in self.scene_data.selectedItems():
             if self.rotation_handle_at(item, point):
                 return (item, "rotate")
@@ -3089,21 +3127,32 @@ class AnnotationCanvas(QGraphicsView):
                 logging.getLogger("screensnap").debug(
                     "手柄键盘缩放：跳过过小的标注 %s", type(item).__name__)
                 continue
-            # 旋转后必须以【当前实际朝向】判定方向：把键盘的屏幕方向用标注的
-            # 场景变换逆映射到它自己的坐标轴，再决定放大还是缩小。
-            inv, ok = item.sceneTransform().inverted()
-            if ok:
-                origin = inv.map(QPointF(0, 0))
-                local = inv.map(QPointF(dx, dy)) - origin
+            # 2026-10-12（用户定契约 ✓ **手柄跟手**）：
+            #   ① **允许的轴 = 手柄本身的轴**（中点手柄恒定只响应本轴 ✓ 与旋转无关 ✓ 用户问题 2 ✓）
+            #   ② **方向 = 屏幕按键方向在该手柄「旋转后朝外方向」上的投影** ✓
+            #      · 上中点按 ↑ ⇒ 朝外 ⇒ 放大 ✓；按 ↓ ⇒ 朝内 ⇒ 缩小 ✓（用户明确要这种手感 ✓）
+            #      · 角落手柄 ⇒ 两轴门控都放行 ⇒ 任何方向键都等比放大/缩小 ✓（两轴一起动 ✓ 指针斜着跟随 ✓ 问题 1 ✓）
+            #      · 旋转后 ⇒ 朝外方向随 item 变换一起转 ⇒ 方向按旋转角重算 ✓（用户问题 3 ✓）
+            #   （旧的"按键方向 = 缩放方向、与手柄无关"契约按用户本次选择作废 ✗。）
+            _outward = self.HANDLE_DIRECTIONS.get(name)
+            if _outward is None:
+                # 没有手柄信息时（单元测试直接调用等）退回"按键方向 = 缩放方向"（原来那套 ✓）。
+                _proj = 1.0 if (dx if dx else dy) > 0 else -1.0
             else:
-                local = QPointF(dx, dy)
-            # 2026-10-12（用户报告 + 真机日志定位 ✓）：方向**只由按键决定**，与手柄/旋转无关 ✓
-            #   D与右 = 放大 ✓  A与左 = 缩小 ✓  S与下 = 放大 ✓  W与上 = 缩小 ✓
-            # 轴分离**必须保留** ✗：局部 x 用 local.x() ✓ 局部 y 用 local.y() ✓ 各取各的幅值 ✓
-            # （曾误写成两轴共用一个值 ✗ ⇒ 旋转 45/90 度时同时缩放两轴 ✗ 已回退 ✓ 不再犯 ✓）。
-            _sign = 1.0 if (dx if dx else dy) > 0 else -1.0
-            step_x = (abs(local.x()) * _sign) if (left or right) else 0.0
-            step_y = (abs(local.y()) * _sign) if (top or bottom) else 0.0
+                _transform = item.sceneTransform()
+                _base = _transform.map(QPointF(0, 0))
+                _dir = _transform.map(QPointF(_outward[0], _outward[1])) - _base
+                _proj = dx * _dir.x() + dy * _dir.y()
+                if abs(_proj) < 1e-9:
+                    # 角标手柄遇到"恰好垂直"的键（例如旋转 45° 时 ✓）⇒ 退回"按键方向 = 缩放方向"✓
+                    #   —— 角标必须**始终可用** ✓（用户问题 1 ✓）；中点手柄到不了这里 ✓（被轴门控挡掉 ✓）。
+                    _proj = 1.0 if (dx if dx else dy) > 0 else -1.0
+            _sign = 1.0 if _proj > 0 else -1.0
+            step_x = (abs(dx) * _sign) if (left or right) else 0.0
+            step_y = (abs(dy) * _sign) if (top or bottom) else 0.0
+            if not step_x and not step_y:
+                # 中点手柄的**垂直方向键** ⇒ 纯 no-op ✓：不缩放、不移动、指针不动 ✓（用户问题 2 ✓）。
+                continue
             # 2026-10-12（用户反馈：每次按键视觉变化太大 ✓）：步长按**屏幕**换算 ✓
             #   画布放大显示时 1 屏幕像素 < 1 图像像素 ⇒ 每次只变一点点 ✓ 手感恒定 ✓。
             _view_scale = float(self.transform().m11()) or 1.0
@@ -3112,19 +3161,13 @@ class AnnotationCanvas(QGraphicsView):
                 # 2026-10-12（用户澄清 ✓）：**保持长宽比是约定** ✓ 不能改 ✗；
                 #   用户说的“某个轴不动”指的是**指针/鼠标**那条 ✓（中点手柄的垂直方向键 = 纯 no-op ✓），
                 #   不是“几何只动一个轴” ✗（我一度按后者改成两轴各自 factor ✗ ⇒ 破坏等比 ✗ 已回退 ✓）。
+                # 2026-10-12（问题 1 根因 ✓）：曾有一段“死代码 + 独立 if step_y 覆盖”✗ ⇒ 旋转后
+                #   step_x/step_y 都非零时 factor_y 被覆盖成 step_y/height ✗ ⇒ 不等比 ⇒ 光标只沿单轴 ✗。
+                #   现在只保留两个互斥分支 ⇒ factor_x == factor_y 恒成立 ✓（等比 ✓）。
                 if step_x:
                     factor_x = factor_y = max(0.05, 1.0 + (step_x / _view_scale) / bounds.width())
                 elif step_y:
                     factor_x = factor_y = max(0.05, 1.0 + (step_y / _view_scale) / bounds.height())
-                elif step_x:
-                    factor_x = factor_y = max(0.05, 1.0 + (step_x / _view_scale) / bounds.width())
-                    factor_y = 1.0                              # 左右中点 ⇒ **不动 y** ✓
-                elif step_y:
-                    factor_x = 1.0                              # 上下中点 ⇒ **不动 x** ✓
-                    factor_y = max(0.05, 1.0 + (step_y / _view_scale) / bounds.height())
-                    factor_x = max(0.05, 1.0 + (step_x / _view_scale) / bounds.width())
-                if step_y:
-                    factor_y = max(0.05, 1.0 + (step_y / _view_scale) / bounds.height())
             # 【中心锚点】：以标注中心为基准缩放 —— 四条边一起动（等比拉伸），中心不动。
             # 2026-10-12（用户要求 ✓）：**没有发生实际缩放就不算变化** ✓
             #   · 上下或左右中点手柄按垂直方向的键 ⇒ 形状不变 ✓ 指针也不移动 ✗（此前 changed 仍为 True ✗ ⇒ 指针白跳 ✓）
@@ -3160,7 +3203,7 @@ class AnnotationCanvas(QGraphicsView):
             self.update()
         return changed
 
-    def handle_global_point(self, name=None):
+    def handle_global_point(self, name=None, precise=False):
         """当前手柄的**屏幕全局坐标**（键盘微调后让指针跟随 ✓ 两个编辑器共用 ✓）。
 
         2026-10-12（用户反馈："修改标注的尺寸微调时指针一直没有跟随"✗，并要求考虑**旋转后**的跟随 ✓）：
@@ -3169,6 +3212,9 @@ class AnnotationCanvas(QGraphicsView):
         · `name` 省略时按 `active_handle()` → `pointer_handle()` 的同一套回落顺序取 ✓
           （与画布按键判定、遮罩侧判定完全同源 ✓）；
         · 画布不可见 / 没有选中标注 / 该手柄不存在 ⇒ 返回 None ✓（调用方静默跳过 ✓）。
+        · `precise=True` ⇒ 返回**未取整**的 `QPointF` ✓：`mapToGlobal(QPoint)` 会把分数像素直接
+          取整 ✗，而角标等比缩放每步只让角移动 (1px, 0.5px) ✓ ⇒ 取整后 y 不动 ⇒ 用户看到
+          "角标手柄只有 x 动" ✗（见 `_perceptible_cursor_point` ✓）。
         """
         if not self.isVisible():
             return None
@@ -3186,7 +3232,10 @@ class AnnotationCanvas(QGraphicsView):
                 else self.item_resize_handles(item).get(name))
         if spot is None:
             return None
-        return self.viewport().mapToGlobal(self.mapFromScene(spot))
+        local = self.mapFromScene(spot)                 # QPointF（含分数像素 ✓）
+        origin = self.viewport().mapToGlobal(QPoint(0, 0))
+        x, y = origin.x() + local.x(), origin.y() + local.y()
+        return QPointF(x, y) if precise else QPoint(round(x), round(y))
 
     def _apply_cursor_follow(self, target, delta=None):
         """把指针移动到 `target`（Qt 原生全局坐标 ✓），**下一轮再读回校正一次** ✓。
@@ -3197,13 +3246,22 @@ class AnnotationCanvas(QGraphicsView):
         现在：① 立刻设一次（手感及时 ✓）；② 推迟到**事件循环下一轮**读回 `QCursor.pos()` ✓，
         若与目标差 > 2px 就**再设一次**校正 ✓（自校正 ✓ 不掉步 ✓）。
         """
+        # 2026-10-12（问题 2 根因 ✓）：**两种可见状态下都要登记**这次是程序自己移动指针 ✗
+        #   —— 原先只在 `not visible` 分支登记 ✗ ⇒ 真机（画布可见）时从不登记 ⇒
+        #   合成 mouseMoveEvent 按"用户移动"处理 ⇒ 清掉按键定格的手柄 ✗ ⇒ 下一次按键重判悬停、
+        #   命中落空即掉进 nudge_selected ⇒ 四个方向键全生效 + 指针乱走（用户问题 2 ✓）。
+        self._mark_programmatic_cursor_move(target)
         if not self.isVisible():
-            # 2026-10-12（同根因）：标记这次移动是**程序自己**造成的 ✓（mouseMoveEvent 会早退 ✓
-            #   既不清掉按键定格的手柄 ✗、也不进入拖动分支 ✓）；50ms 后自动复位 ✓ 以防没有合成事件 ✓。
-            self._programmatic_cursor_move = True
-            QTimer.singleShot(50, lambda: setattr(self, "_programmatic_cursor_move", False))
             return
-        QCursor.setPos(target)
+        point = self._perceptible_cursor_point(target)
+        # 2026-10-12 诊断（用户要求"多加日志排查" ✓ 按键级 ✓ 非高频 ✗）：一次按键一条 ✓
+        #   手柄/目标浮点/当前光标/实际落点/两轴位移 ⇒ 一眼看出"哪条轴没动、是否跳变" ✓。
+        _cur = QCursor.pos()
+        logging.getLogger("screensnap").debug(
+            "指针跟随：手柄=%s 目标=(%.1f,%.1f) 当前=(%d,%d) 落点=(%d,%d) 位移=(%d,%d)",
+            self.active_handle(), target.x(), target.y(), _cur.x(), _cur.y(),
+            point.x(), point.y(), point.x() - _cur.x(), point.y() - _cur.y())
+        QCursor.setPos(point)
 
         def correct():
             try:
@@ -3213,16 +3271,60 @@ class AnnotationCanvas(QGraphicsView):
             except Exception:                 # noqa: BLE001  仅安全兜底 ✓
                 return
             current = QCursor.pos()
-            if (current - target).manhattanLength() > 2:
+            if (current - point).manhattanLength() > 2:
                 logging.getLogger("screensnap").debug(
-                    "指针跟随校正：目标=%s 实际=%s", target, current)
-                QCursor.setPos(target)
+                    "指针跟随校正：目标=%s 实际=%s", point, current)
+                self._mark_programmatic_cursor_move(point)
+                QCursor.setPos(point)
 
         QTimer.singleShot(0, correct)
 
+    def _perceptible_cursor_point(self, target):
+        """把跟随目标转成"看得见移动"的整数点：任一轴**真的动了**就至少挪 1px。
+
+        2026-10-12（用户实测 ✓）：角标手柄等比缩放时，2:1 矩形的角在场景里每步只移动
+        (1px, 0.5px) ✗ ⇒ y 的 0.5 被取整吃掉 ⇒ 用户看到"角标手柄只有 x 动、y 不动" ✗。
+        这里按"该轴确实有位移（浮点差非零）但取整后没变化" ⇒ 补 ±1px ✓（目标仍是手柄的**绝对**
+        位置 ⇒ 不会累积漂移：下一拍重新按绝对目标取整 ⇒ 指针始终贴着手柄 1px 内 ✓）。
+        """
+        current = QCursor.pos()
+        x, y = int(round(target.x())), int(round(target.y()))
+        if target.x() != current.x() and x == current.x():
+            x += 1 if target.x() > current.x() else -1
+        if target.y() != current.y() and y == current.y():
+            y += 1 if target.y() > current.y() else -1
+        return QPoint(x, y)
+
+    def _mark_programmatic_cursor_move(self, target):
+        """登记「是程序自己把指针移到了 target」 ⇒ mouseMoveEvent 据此区分程序移动与用户移动。"""
+        self._programmatic_cursor_move = True
+        # 目标可能是浮点（`precise=True` ✓）⇒ 显式取整，避免依赖隐式转换 ✓（只用于留痕/兜底 ✓）。
+        self._programmatic_cursor_target = QPoint(round(target.x()), round(target.y()))
+        QTimer.singleShot(50, self._clear_programmatic_cursor_move)
+
+    def _clear_programmatic_cursor_move(self):
+        """复位程序指针移动标记（50ms 兜底，或事件已被消费时立即清）。"""
+        self._programmatic_cursor_move = False
+        self._programmatic_cursor_target = None
+
+    def _consume_programmatic_cursor_move(self, event):
+        """这次 mouseMoveEvent 是否是“程序自己移动指针”合成的？是则消费并返回 True。
+
+        2026-10-12（用户实测 ✓）：判据**只看向标记是否仍在有效期内** ✗，不再比较全局坐标 ✗
+        —— 合成事件的 `globalPosition()` 经 DPI 缩放/取整后常与 `mapToGlobal` 目标差 1~3px ✗
+        ⇒ 原来「±2px 一致才算程序移动」的判据会**误判成用户移动** ⇒ 清掉按键定格的手柄 ✗
+        ⇒ 下一次按键重新悬停判定、光标已偏出 8px 命中圈 ⇒ 命中落空 ⇒ 掉进 `nudge_selected`
+        ⇒ 指针按 (dx, dy) 平移（= 用户看到的「e/w 中点还能上下动鼠标」「角落手柄只动一个轴」✗）。
+        标记只在「刚刚程序移动过指针」后 50ms 内为真 ✓（随后由 `_clear_…` 复位 ✓）⇒ 时间判据足够安全 ✓。
+        """
+        if not getattr(self, "_programmatic_cursor_move", False):
+            return False
+        self._clear_programmatic_cursor_move()
+        return True
+
     def _follow_handle_cursor(self):
         """缩放/旋转微调后把指针带到手柄的**新位置** ✓（旋转后手柄会绕中心走 ⇒ 每次都重算 ✓）。"""
-        point = self.handle_global_point()
+        point = self.handle_global_point(precise=True)   # 浮点 ⇒ 保留 0.5px 级位移（见 _perceptible_* ✓）
         if point is not None:
             self._apply_cursor_follow(point)
 

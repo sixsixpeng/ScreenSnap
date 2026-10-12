@@ -585,7 +585,18 @@ class InlineEditor(QWidget):
                 #   ⇒ _active_handle 被清空 ⇒ 之后四个方向键全走「移动标注/选区」
                 #   （用户现象：一开始只有合法方向能动，一动之后四个方向都有反应）。
                 if not getattr(_ic, '_programmatic_cursor_move', False):
-                    view._active_handle = (_ic.pointer_handle(QCursor.pos()) if _ic is not None else None)
+                    # 用**按下这一刻**的位置判手柄 ✓（不用实时光标 ✗ —— 后者会被跟随带着走 ✓）。
+                    _press_global = view.mapToGlobal(local)
+                    _hit = _ic.pointer_handle(_press_global) if _ic is not None else None
+                    view._active_handle = _hit
+                    # 2026-10-12（真机日志定位 ✓ 用户"到一定程度原本方向就会突然改变"）：
+                    #   **画布侧的定格也必须在这里一次性定下来** ✗ —— 否则 `canvas._active_handle_name`
+                    #   一直为空 ⇒ `keyPressEvent` 里"按实时光标重新定格"会**每次按键都重算** ✗
+                    #   ⇒ 形状变化后指针落点靠近/换到别的手柄 ⇒ 手柄名在按键间跳变 ⇒ 方向跟着跳 ✗
+                    #   （日志实证：同一手柄 `n` 的跟随位移在 (0,-49)~(0,24) 之间来回 ✓）。
+                    #   按下这一刻定格 ⇒ 整个按键序列用同一个手柄 ⇒ 方向稳定 ✓。
+                    if _ic is not None:
+                        _ic._active_handle_name = _hit[1] if _hit else None
         elif event_type == QEvent.MouseButtonRelease and (view.selection.resizing is not None or
                                                           view.selection.dragging is not None):
             view.mouseReleaseEvent(mapped)
@@ -3373,7 +3384,7 @@ class MaskWindow(QWidget):
                 self.close()
             elif event.modifiers() == Qt.NoModifier:
                 dx = (-1 if key in (Qt.Key_A, Qt.Key_Left) else 1 if key in (Qt.Key_D, Qt.Key_Right) else 0)
-                dy = (-1 if key in (Qt.Key_W, Qt.Key_Up) else 1 if key == Qt.Key_Down else 0)
+                dy = (-1 if key in (Qt.Key_W, Qt.Key_Up) else 1 if key in (Qt.Key_S, Qt.Key_Down) else 0)
                 canvas = getattr(self.session.inline_editor, "canvas", None)
                 # 判定全量留痕（D13）：一次按键即可看出是"按键没到""没选中标注""判定挡住了"，
                 # 还是"被手柄分支放行"。诊断用，低频（只在按键时打）。
@@ -3388,18 +3399,26 @@ class MaskWindow(QWidget):
                 # 只有“左键确实按着”且“没压在手柄/边线上”时，方向键才移动标注图形本身；
                 # 压在手柄/边线上时交给下面的选区微调/缩放（两者不能混）。用 mouseButtons() 判断
                 # 真实按键状态，避免“松开后仍能移动”的假按住。
-                # 顺序：先手柄、后本体 —— 手柄常常就压在标注区域内，顺序反了会误判成移动。
+                # 2026-10-12（真机日志定位 ✓）：**先补齐画布侧定格，再算 on_handle** ✗
+                #   原来把"补齐"挂在 `on_handle` **自己**之下 ✗（自锁）⇒ 一旦定格为空就再也补不上 ✗
+                #   ⇒ 按键掉进「移动标注本体」分支 ⇒ 标注整体平移 + 指针按 (dx,dy) 走 ✗（用户现象 ✓）。
+                #   补齐顺序：**先用按下那一刻记住的手柄** ✓（`self._active_handle` 来自 mousePress ✓
+                #   整个按键序列稳定 ✓），只有它也为空时才退回实时光标 ✗（会被指针跟随带偏 ✓）。
+                if canvas is not None and canvas.active_handle() is None:
+                    _mem = getattr(self, "_active_handle", None)
+                    if _mem:
+                        canvas._active_handle_name = _mem[1]
+                    else:
+                        _hovered = canvas.pointer_handle(QCursor.pos())
+                        if _hovered:
+                            canvas._active_handle_name = _hovered[1]
+                            logging.getLogger("screensnap").debug(
+                                "原地编辑重新定格手柄：%s（指针=%s）", _hovered[1], QCursor.pos())
                 on_handle = (getattr(self, "_active_handle", None) is not None
                              or (canvas is not None and canvas.active_handle() is not None))
                 on_edge = (self.selection.handle_at(self.position) is not None
                            or self.selection.border_at(self.position)
                            or on_handle)
-                # 2026-10-12（同根因）：遮罩侧**首次按键即定格**手柄 ✓
-                # 否则 on_handle/on_edge 的悬停判定会随指针跟随而跳 ✗。
-                if on_handle and canvas is not None and canvas.active_handle() is None:
-                    _hovered = canvas.pointer_handle()
-                    if _hovered:
-                        canvas._active_handle_name = _hovered[1]
                 # 2026-10-11（用户反馈："原地编辑旋转时按 Q 也能微调"）：这里原来**没有 dx/dy 门槛** ✗ ⇒
                 # 按住旋转手柄时按**任意键**（Q、F、C…）都会走到下面的 rotate_selected(-1) ⇒ 表现为"随便按
                 # 一个键就转一下" ✗。补上 `(dx or dy)`：只有真正的微调键（W/A/S/D、方向键）才进入 ✓。
@@ -3416,9 +3435,14 @@ class MaskWindow(QWidget):
                         event.accept()
                         return
                     # 其余手柄：等比缩放微调（以中心为基准，四边一起动）。
-                    if canvas.resize_selected(dx, dy):
-                        event.accept()
-                        return
+                    # 2026-10-12（与画布侧 86 条同根因 ✓ 遮罩侧此前漏改 ✗）：**缩放是权威消费** ——
+                    #   即使本步没有实际缩放（中点手柄按非本轴键 ✓ 或已到尺寸边界 ✓）也必须
+                    #   `accept()+return` ✗，绝不能落到下面的「移动截图选区」分支 ✓
+                    #   —— 那条分支会用 `position + (dx,dy)` 去 `QCursor.setPos` ✓ ⇒ 指针被另一套
+                    #   逻辑挪动 ✗（= 用户看到的「指针乱动 / 跟标注手柄不同步 / 不及时」✓）。
+                    canvas.resize_selected(dx, dy)
+                    event.accept()
+                    return
                 if (QApplication.mouseButtons() & Qt.LeftButton) and not on_edge \
                         and canvas is not None and canvas.scene_data.selectedItems():
                     if canvas.nudge_selected(dx, dy):
@@ -3484,7 +3508,7 @@ class MaskWindow(QWidget):
                 return
         else:
             dx = (-1 if key in (Qt.Key_A, Qt.Key_Left) else 1 if key in (Qt.Key_D, Qt.Key_Right) else 0)
-            dy = (-1 if key in (Qt.Key_W, Qt.Key_Up) else 1 if key == Qt.Key_Down else 0)
+            dy = (-1 if key in (Qt.Key_W, Qt.Key_Up) else 1 if key in (Qt.Key_S, Qt.Key_Down) else 0)
             if dx or dy:
                 # 2026-10-12（用户要求）：**框选进行中**（左键或右键按住拖动 ⇒ active 非空）时，
                 # WASD/方向键微调"正在移动的那个角"，指针跟随 ✓（此前这一状态完全没反应 ✗）。
