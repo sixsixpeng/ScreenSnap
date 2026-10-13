@@ -173,6 +173,317 @@ class EraseTests(CoreTests):
         finally:
             canvas.close()
 
+    def _cache_test_editors(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        standalone = EditorWindow(Image.new("RGB", (320, 240), "white"), dict(DEFAULTS))
+        standalone.show()
+        bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+        settings = dict(DEFAULTS, inline_edit=True, capture_after_selection="edit",
+                        magnifier=False, window_detection=False)
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (320, 240), "white"), bounds, [bounds], settings)
+        mask.selection.rects.append(QRect(10, 12, 300, 220))
+        mask.complete()
+        mask.show()
+        self.app.processEvents()
+        return standalone, mask
+
+    def test_both_editors_skip_erase_cache_when_no_erase_layer_exists(self):
+        standalone, mask = self._cache_test_editors()
+        try:
+            for canvas in (standalone.canvas, mask.session.inline_editor.canvas):
+                with self.subTest(editor=type(canvas.parent()).__name__), \
+                        patch.object(canvas, "_render_annotation_layer_now") as render, \
+                        patch("editor.annotation_canvas.QTimer.singleShot") as schedule:
+                    canvas._annotation_layer_pending = False
+                    canvas._bump_annotation_layer_stamp()
+                    canvas._rebuild_annotation_layer()
+                    schedule.assert_not_called()
+                    render.assert_not_called()
+        finally:
+            standalone.close()
+            mask.close()
+
+    def test_both_editors_cache_single_erase_layer_below_new_annotation(self):
+        from PySide6.QtGui import QImage, QPainter
+
+        standalone, mask = self._cache_test_editors()
+        try:
+            for canvas in (standalone.canvas, mask.session.inline_editor.canvas):
+                with self.subTest(editor=type(canvas.parent()).__name__):
+                    canvas._add_annotation(shape("pen", QPointF(20, 40), QPointF(280, 40), "#ff0000", 16))
+                    canvas.erasing = True
+                    canvas.eraser_group += 1
+                    canvas.erase_segment(QPointF(120, 20), QPointF(120, 80))
+                    canvas.erasing = False
+                    canvas._add_annotation(shape("pen", QPointF(20, 40), QPointF(280, 40), "#0000ff", 8))
+                    canvas._rebuild_annotation_layer()
+                    cached_key, plain, full = canvas._annotation_layer_cache
+                    self.assertIsNotNone(full, "A covered single erase layer needs the ordered full cache")
+                    width, height, left, top = cached_key[:4]
+                    reference = canvas._render_annotation_layer_now(width, height, left, top, include_erase=True)
+                    self.assertEqual(full, reference)
+                    before = [item.isVisible() for item in canvas.scene_data.items()]
+                    image = QImage(320, 240, QImage.Format_ARGB32)
+                    image.fill(Qt.transparent)
+                    painter = QPainter(image)
+                    try:
+                        with patch.object(canvas, "_render_annotation_layer_now",
+                                          side_effect=AssertionError("Static preview must reuse the ordered cache")):
+                            for _ in range(3):
+                                canvas._paint_erased_composite(painter)
+                    finally:
+                        painter.end()
+                    self.assertEqual(before, [item.isVisible() for item in canvas.scene_data.items()])
+                    self.assertEqual(canvas.render_image().pixelColor(120, 40).name(), "#0000ff",
+                                     "An old erase must not remove the later blue annotation")
+        finally:
+            standalone.close()
+            mask.close()
+
+    def test_both_editors_live_multi_erase_reuses_ordered_prefix(self):
+        from PySide6.QtGui import QImage, QPainter
+
+        standalone, mask = self._cache_test_editors()
+        try:
+            for canvas in (standalone.canvas, mask.session.inline_editor.canvas):
+                with self.subTest(editor=type(canvas.parent()).__name__):
+                    canvas._add_annotation(shape("pen", QPointF(20, 40), QPointF(280, 40), "#ff0000", 16))
+                    canvas.erasing = True
+                    canvas.eraser_group += 1
+                    canvas.erase_segment(QPointF(120, 20), QPointF(120, 80))
+                    canvas.erasing = False
+                    canvas._add_annotation(shape("pen", QPointF(20, 40), QPointF(280, 40), "#0000ff", 8))
+                    canvas.erasing = True
+                    canvas._eraser_layer_locked = True
+                    canvas.eraser_group += 1
+                    canvas.erase_segment(QPointF(220, 20), QPointF(220, 80))
+                    canvas._rebuild_annotation_layer()
+                    self.assertEqual(len(canvas.erase_items()), 2)
+                    before = [item.isVisible() for item in canvas.scene_data.items()]
+                    for position in (220, 230, 240):
+                        canvas.erase_segment(QPointF(position, 20), QPointF(position, 80))
+                        image = QImage(320, 240, QImage.Format_ARGB32)
+                        image.fill(Qt.transparent)
+                        painter = QPainter(image)
+                        try:
+                            with patch.object(canvas, "_render_annotation_layer_now",
+                                              side_effect=AssertionError("Live erase must reuse its ordered prefix")):
+                                canvas._paint_erased_composite(painter)
+                        finally:
+                            painter.end()
+                        self.assertEqual(image.pixelColor(120, 40).name(), "#0000ff",
+                                         "The new blue stroke must remain above the old eraser")
+                        self.assertEqual(image.pixelColor(position, 40).name(), "#ffffff",
+                                         "Only the newest eraser removes the blue stroke")
+                    self.assertEqual(before, [item.isVisible() for item in canvas.scene_data.items()])
+                    canvas.erasing = False
+                    self.assertEqual(canvas.render_image().pixelColor(120, 40).name(), "#0000ff")
+                    self.assertEqual(canvas.render_image().pixelColor(240, 40).name(), "#ffffff")
+        finally:
+            standalone.close()
+            mask.close()
+
+    def test_both_editors_base_erase_mask_is_incremental_and_rebuilds_on_edits(self):
+        from PySide6.QtGui import QImage, QPainter
+
+        standalone, mask = self._cache_test_editors()
+        try:
+            for canvas in (standalone.canvas, mask.session.inline_editor.canvas):
+                with self.subTest(editor=type(canvas.parent()).__name__):
+                    canvas.settings["eraser_erase_base"] = True
+                    canvas.erasing = True
+                    for position in (40, 80, 120):
+                        canvas.eraser_group += 1
+                        canvas.erase_segment(QPointF(position, 20), QPointF(position, 80))
+                    layer = canvas.erase_items()[0]
+
+                    def reference():
+                        image = QImage(canvas.image.width, canvas.image.height, QImage.Format_ARGB32)
+                        image.fill(Qt.transparent)
+                        painter = QPainter(image)
+                        painter.setRenderHint(QPainter.Antialiasing)
+                        try:
+                            for erase in canvas.erase_items():
+                                painter.save()
+                                painter.setTransform(erase.sceneTransform(), True)
+                                for stroke in erase.base_strokes():
+                                    erase.paint_stroke(painter, stroke)
+                                painter.restore()
+                        finally:
+                            painter.end()
+                        return image
+
+                    with patch.object(layer, "paint_stroke", wraps=layer.paint_stroke) as paint:
+                        self.assertIsNotNone(canvas._base_erase_mask())
+                        self.assertEqual(paint.call_count, 3)
+                        paint.reset_mock()
+                        self.assertIsNotNone(canvas._base_erase_mask())
+                        paint.assert_not_called()
+                        canvas.eraser_group += 1
+                        canvas.erase_segment(QPointF(160, 20), QPointF(160, 80))
+                        paint.reset_mock()
+                        result = canvas._base_erase_mask()
+                        self.assertEqual(paint.call_count, 1, "Only the appended stroke should be replayed")
+                    self.assertEqual(result, reference())
+                    layer.set_groups_erase_base({2}, False)
+                    self.assertEqual(canvas._base_erase_mask(), reference(),
+                                     "Changing a middle group must invalidate the complete mask")
+                    layer.setRotation(90)
+                    layer.setPos(120, 0)
+                    self.assertEqual(canvas._base_erase_mask(), reference())
+                    layer.drop_groups({1})
+                    self.assertEqual(canvas._base_erase_mask(), reference())
+                    layer.set_groups_erase_base(layer.group_ids(), False)
+                    self.assertIsNone(canvas._base_erase_mask())
+        finally:
+            standalone.close()
+            mask.close()
+
+    def test_both_editors_mosaic_commit_reuses_only_matching_preview(self):
+        from PySide6.QtGui import QPainterPath
+
+        standalone, mask = self._cache_test_editors()
+        try:
+            for canvas in (standalone.canvas, mask.session.inline_editor.canvas):
+                for change in ("none", "path", "width", "mode", "size", "image"):
+                    with self.subTest(editor=type(canvas.parent()).__name__, change=change):
+                        canvas.settings.update(mosaic_width=20, mosaic_mode="blur", mosaic_size=10)
+                        path = QPainterPath(QPointF(40, 40))
+                        path.lineTo(QPointF(120, 90))
+                        canvas.mosaic_drawing = path
+                        with patch.object(canvas, "_mosaic_brush_overlay", wraps=canvas._mosaic_brush_overlay) as overlay:
+                            canvas._update_mosaic_brush_preview()
+                            expected = canvas.mosaic_preview[1].copy()
+                            if change == "path":
+                                path.lineTo(QPointF(140, 110))
+                            elif change == "width":
+                                canvas.settings["mosaic_width"] = 30
+                            elif change == "mode":
+                                canvas.settings["mosaic_mode"] = "pixel"
+                            elif change == "size":
+                                canvas.settings["mosaic_size"] = 15
+                            elif change == "image":
+                                canvas.image = Image.new("RGB", canvas.image.size, "red")
+                            canvas._commit_mosaic_brush(path)
+                            self.assertEqual(overlay.call_count, 1 if change == "none" else 2)
+                            if change == "none":
+                                item = canvas.annotations()[-1]
+                                self.assertEqual(item.pixmap().toImage(), expected)
+        finally:
+            standalone.close()
+            mask.close()
+
+    def test_both_editors_ordered_erase_layers_survive_undo_redo(self):
+        standalone, mask = self._cache_test_editors()
+        try:
+            for canvas in (standalone.canvas, mask.session.inline_editor.canvas):
+                with self.subTest(editor=type(canvas.parent()).__name__):
+                    def draw(color, width):
+                        canvas._add_annotation(shape("pen", QPointF(20, 60), QPointF(280, 60), color, width))
+                        canvas.checkpoint()
+
+                    def erase(position):
+                        canvas.erasing = True
+                        canvas.eraser_group += 1
+                        canvas.erase_segment(QPointF(position, 20), QPointF(position, 100))
+                        canvas.erasing = False
+                        canvas.checkpoint()
+
+                    def colors():
+                        self.app.processEvents()
+                        image = canvas.render_image()
+                        return image.pixelColor(100, 60).name(), image.pixelColor(200, 60).name()
+
+                    draw("#ff0000", 20)
+                    erase(100)
+                    self.assertEqual(colors(), ("#ffffff", "#ff0000"))
+                    draw("#0000ff", 10)
+                    self.assertEqual(colors(), ("#0000ff", "#0000ff"))
+                    erase(200)
+                    self.assertEqual(colors(), ("#0000ff", "#ffffff"))
+                    draw("#00ff00", 4)
+                    self.assertEqual(colors(), ("#00ff00", "#00ff00"))
+                    for expected in (("#0000ff", "#ffffff"), ("#0000ff", "#0000ff"),
+                                     ("#ffffff", "#ff0000")):
+                        canvas.undo()
+                        self.assertEqual(colors(), expected)
+                    for expected in (("#0000ff", "#0000ff"), ("#0000ff", "#ffffff"),
+                                     ("#00ff00", "#00ff00")):
+                        canvas.redo()
+                        self.assertEqual(colors(), expected)
+        finally:
+            standalone.close()
+            mask.close()
+
+    def test_both_editors_ordered_prefix_matches_transformed_scene(self):
+        from PySide6.QtGui import QImage, QPainter, QTransform
+
+        standalone, mask = self._cache_test_editors()
+        try:
+            for canvas in (standalone.canvas, mask.session.inline_editor.canvas):
+                for zoom in (0.5, 1.0, 1.25, 1.5, 1.75, 2.0):
+                    for rotation in (0, 30, 90, 180):
+                        with self.subTest(editor=type(canvas.parent()).__name__, zoom=zoom, rotation=rotation):
+                            for item in canvas.annotations() + canvas.erase_items():
+                                canvas.scene_data.removeItem(item)
+                            canvas._add_annotation(shape("rect", QPointF(20, 20), QPointF(220, 180), "#ff0000", 12))
+                            canvas.erasing = True
+                            canvas.eraser_group += 1
+                            canvas.erase_segment(QPointF(70, 20), QPointF(70, 150))
+                            canvas.erasing = False
+                            canvas._add_annotation(shape("rect", QPointF(40, 40), QPointF(240, 200), "#0000ff", 8))
+                            canvas.erasing = True
+                            canvas.eraser_group += 1
+                            canvas.erase_segment(QPointF(120, 20), QPointF(120, 150))
+                            latest = canvas.erase_items()[-1]
+                            latest.setTransformOriginPoint(QPointF(120, 85))
+                            latest.setRotation(rotation)
+                            latest.setTransform(QTransform().scale(1.25, 0.75))
+                            latest.setPos(7, 3)
+                            left, top, width, height = 30, 25, 220, 160
+                            expected = canvas._render_annotation_layer_now(width, height, left, top, include_erase=True)
+                            actual = canvas._render_annotation_layer_now(
+                                width, height, left, top, include_erase=True, excluded_erase=latest)
+                            painter = QPainter(actual)
+                            painter.setRenderHints(QPainter.Antialiasing | QPainter.TextAntialiasing |
+                                                   QPainter.SmoothPixmapTransform)
+                            painter.translate(-left, -top)
+                            painter.setTransform(latest.sceneTransform(), True)
+                            latest.paint(painter, None, None)
+                            painter.end()
+                            self.assertEqual(actual, expected)
+                            canvas.setTransform(QTransform().scale(zoom, zoom))
+                            canvas.centerOn(QPointF(180, 140))
+                            canvas._rebuild_annotation_layer()
+                            cache_key, prefix, full = canvas._annotation_layer_cache
+                            width, height, left, top = cache_key[:4]
+                            self.assertEqual(prefix, canvas._render_annotation_layer_now(
+                                width, height, left, top, include_erase=True, excluded_erase=latest))
+                            self.assertIsNone(full)
+                canvas.erasing = False
+        finally:
+            standalone.close()
+            mask.close()
+
+    def test_both_editors_base_mask_keeps_transformed_local_clip(self):
+        standalone, mask = self._cache_test_editors()
+        try:
+            for canvas in (standalone.canvas, mask.session.inline_editor.canvas):
+                with self.subTest(editor=type(canvas.parent()).__name__):
+                    layer = canvas._erase_stroke_item()
+                    layer.add_rect(1, QRectF(-20, 20, 40, 40), erase_base=True)
+                    layer.setPos(50, 0)
+                    result = canvas._base_erase_mask()
+                    self.assertEqual(result.pixelColor(40, 40).alpha(), 0,
+                                     "Pixels clipped from the original local mask must not reappear after moving")
+                    self.assertEqual(result.pixelColor(60, 40).alpha(), 255)
+        finally:
+            standalone.close()
+            mask.close()
+
     def test_multi_erase_layer_composite_uses_cache_and_keeps_visibility(self):
         """2026-10-12 风险整改（AGENTS 经验 D35）回归用例。
 
@@ -207,7 +518,8 @@ class EraseTests(CoreTests):
             canvas._annotation_layer_pending = False
             canvas._rebuild_annotation_layer()          # 事件循环里的重建（这里直接调用 ✓）
             _key, _plain, full = canvas._annotation_layer_cache
-            self.assertIsNotNone(full, "≥2 擦除层 ⇒ 必须预建整层缓存 ✓")
+            self.assertIsNotNone(_plain, "The newest top eraser uses an ordered prefix")
+            self.assertIsNone(full, "Do not allocate a second unused full-layer image")
             visible_before = [canvas.base.isVisible()] + [i.isVisible() for i in canvas.erase_items()]
             image = QImage(300, 200, QImage.Format_ARGB32)
             image.fill(Qt.transparent)

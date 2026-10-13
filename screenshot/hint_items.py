@@ -24,6 +24,10 @@ CAPTURE_ACTION_KEYS = (
 TOOLBAR_HIDE_KEY = ("capture_toolbar_hide_shortcut", "`")
 
 
+def pixel_size_text(size):
+    return f"{size[0]} x {size[1]} 物理px"
+
+
 def hint_texts(settings, position, selection, inline=False,
                toolbar_hidden=False, multi_select=False,
                right_capture=False):
@@ -53,7 +57,7 @@ def hint_texts(settings, position, selection, inline=False,
     redo_key = str(settings.get("editor_redo_shortcut", "Ctrl+Y") or "Ctrl+Y")
     action_keys = {name: str(settings.get(key, default))
                    for name, key, default, _label in CAPTURE_ACTION_KEYS}
-    size = f"  {selection[0]} x {selection[1]}" if selection else ""
+    size = "  " + pixel_size_text(selection) if selection else ""
     return {
         "coords": f"{position[0]}, {position[1]}{size}",
         "drag_move": "拖动移动" if selection and not inline else "",
@@ -70,8 +74,7 @@ def hint_texts(settings, position, selection, inline=False,
         "edit": (("右键双击提交" if right_capture else "左键双击提交")
              if selection and not inline else
              "左键双击空白保存" if inline else ""),
-        # 用户 2026-10-11：原句「握住控制点后 WASD/方向键微调」太长 ⇒ 精简为与其它项一致的短语。
-        "nudge": "WASD/方向键-微调" if selection else "",
+        "nudge": "握住-WASD/方向键微调" if selection else "",
         "cancel": "Esc取消" if not inline else "Esc放弃编辑",
         # 保存类提示只在**已有选区**时才有意义：没有选区时双击只是关闭遮罩。
         # 原地编辑里 S 也是保存（save_selection 判定）；非编辑时按收集态区分直存/快速保存。

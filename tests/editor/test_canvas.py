@@ -91,6 +91,237 @@ class CanvasTests(CoreTests):
         finally:
             mask.close()
 
+    def test_promoting_inline_editor_preserves_undo_redo_history(self):
+        from config.config_manager import DEFAULTS
+        from main import Application
+        from screenshot.mask_window import MaskWindow
+
+        settings = dict(DEFAULTS, inline_edit=True, magnifier=False, sound=False,
+                        capture_after_selection="edit")
+        bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+        application = Application.__new__(Application)
+        application.config = Mock(data=settings)
+        application.logger = Mock()
+        application.settings_window = Mock()
+        application.editors = []
+        for callback in ("notify_capture_copied", "remember_save_as_dir", "editor_saved",
+                         "add_sticker", "restart_capture", "close_all_editors", "notify"):
+            setattr(application, callback, Mock())
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (320, 240), "white"), bounds, [bounds], settings)
+        mask.edit_requested.connect(lambda images, positions: application.edit_images(images, from_capture=False))
+        try:
+            mask.selection.rects.append(QRect(10, 12, 300, 220))
+            mask.complete()
+            canvas = mask.session.inline_editor.canvas
+            canvas._add_annotation(shape("pen", QPointF(20, 60), QPointF(280, 60), "#ff0000", 20))
+            canvas.checkpoint()
+            canvas.erasing = True
+            canvas.eraser_group += 1
+            canvas.erase_segment(QPointF(100, 20), QPointF(100, 100))
+            canvas.erasing = False
+            canvas.checkpoint()
+            canvas._add_annotation(shape("pen", QPointF(20, 60), QPointF(280, 60), "#0000ff", 10))
+            canvas.checkpoint()
+            canvas.undo()
+            history_size, history_index = len(canvas.history), canvas.cursor_index
+            mask.complete_in_window_editor()
+            self.assertEqual(len(application.editors), 1)
+            target = application.editors[0].canvas
+            self.assertEqual((len(target.history), target.cursor_index), (history_size, history_index))
+
+            def color():
+                return target.render_image().pixelColor(100, 60).name()
+
+            self.assertEqual(color(), "#ffffff")
+            target.undo()
+            self.assertEqual(color(), "#ff0000")
+            target.redo()
+            self.assertEqual(color(), "#ffffff")
+            target.redo()
+            self.assertEqual(color(), "#0000ff")
+            target._add_annotation(shape("pen", QPointF(20, 60), QPointF(280, 60), "#00ff00", 4))
+            target.checkpoint()
+            target.undo()
+            self.assertEqual(color(), "#0000ff", "Only the new green annotation should be undone")
+            target.redo()
+            self.assertEqual(color(), "#00ff00")
+            target.undo()
+            target.undo()
+            target._add_annotation(shape("rect", QPointF(20, 20), QPointF(40, 40), "#000000", 3))
+            target.checkpoint()
+            self.assertEqual(target.cursor_index, len(target.history) - 1)
+            before = target.snapshot()
+            target.redo()
+            self.assertEqual(target.snapshot(), before, "A new edit must truncate the old redo branch")
+            application.edit_images([(Image.new("RGB", (40, 30), "white"), None)], from_capture=False)
+            fresh = application.editors[-1].canvas
+            self.assertEqual((len(fresh.history), fresh.cursor_index, len(fresh.annotations())), (1, 0, 0))
+        finally:
+            mask.close()
+            for editor in list(application.editors):
+                editor.close()
+
+    def test_promoting_inline_editor_keeps_empty_current_state_with_redo(self):
+        from config.config_manager import DEFAULTS
+        from main import Application
+        from screenshot.mask_window import MaskWindow
+
+        settings = dict(DEFAULTS, inline_edit=True, magnifier=False, sound=False, cursor=False,
+                        capture_after_selection="edit")
+        bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+        application = Application.__new__(Application)
+        application.config = Mock(data=settings)
+        application.logger = Mock()
+        application.settings_window = Mock()
+        application.editors = []
+        for callback in ("notify_capture_copied", "remember_save_as_dir", "editor_saved",
+                         "add_sticker", "restart_capture", "close_all_editors", "notify"):
+            setattr(application, callback, Mock())
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (320, 240), "white"), bounds, [bounds], settings,
+                              alternate=Image.new("RGB", (320, 240), "blue"))
+        mask.edit_requested.connect(lambda images, positions: application.edit_images(images, from_capture=False))
+        try:
+            mask.selection.rects.append(QRect(10, 12, 300, 220))
+            mask.complete()
+            source = mask.session.inline_editor.canvas
+            original_image, original_alternate = source.image, source.alternate
+            source.image = Image.new("RGB", original_image.size, "green")
+            source.alternate = Image.new("RGB", original_image.size, "yellow")
+            source.cursor_enabled = True
+            source.refresh_image()
+            source.checkpoint()
+            source._add_annotation(shape("rect", QPointF(20, 20), QPointF(40, 40), "#ff0000", 3))
+            source.checkpoint()
+            source.undo()
+            source.undo()
+            mask.complete_in_window_editor()
+            target = application.editors[0].canvas
+            self.assertEqual((len(target.history), target.cursor_index, len(target.annotations())), (3, 0, 0))
+            self.assertIs(target.image, original_image)
+            self.assertIs(target.alternate, original_alternate)
+            self.assertFalse(target.cursor_enabled)
+            target.redo()
+            self.assertEqual(target.image.getpixel((0, 0)), (0, 128, 0))
+            self.assertEqual(target.alternate.getpixel((0, 0)), (255, 255, 0))
+            self.assertTrue(target.cursor_enabled)
+            self.assertTrue(application.editors[0].toolbar.cursor_switch.isChecked())
+            target.redo()
+            self.assertEqual(len(target.annotations()), 1)
+            target.undo()
+            self.assertFalse(target.annotations())
+            target.undo()
+            self.assertIs(target.image, original_image)
+            self.assertFalse(target.cursor_enabled)
+            self.assertFalse(application.editors[0].toolbar.cursor_switch.isChecked())
+        finally:
+            mask.close()
+            for editor in list(application.editors):
+                editor.close()
+
+    def test_transferred_history_restores_reset_origin_and_cursor_availability(self):
+        from config.config_manager import DEFAULTS
+
+        settings = dict(DEFAULTS, cursor=False)
+        source = EditorWindow(Image.new("RGB", (100, 80), "white"), settings,
+                              Image.new("RGB", (100, 80), "blue"))
+        target = None
+        try:
+            source.canvas.image = Image.new("RGB", (60, 40), "green")
+            source.canvas.alternate = None
+            source.canvas.refresh_image()
+            source.canvas.checkpoint()
+            target = EditorWindow(source.canvas.image, settings)
+            target.canvas.restore_edit_history(source.canvas.export_edit_history())
+            self.assertFalse(target.toolbar.cursor_switch.isEnabled())
+            target.canvas.undo()
+            self.assertTrue(target.toolbar.cursor_switch.isEnabled())
+            self.assertEqual(target.canvas.image.size, (100, 80))
+            target.canvas.redo()
+            self.assertFalse(target.toolbar.cursor_switch.isEnabled())
+            target.canvas.reset()
+            self.assertEqual(target.canvas.image.size, (100, 80))
+            self.assertEqual(target.canvas.image.getpixel((0, 0)), (255, 255, 255))
+            self.assertIsNotNone(target.canvas.alternate)
+            self.assertTrue(target.toolbar.cursor_switch.isEnabled())
+        finally:
+            source.close()
+            if target is not None:
+                target.close()
+
+    def test_promoting_inline_editor_history_failure_keeps_current_annotations(self):
+        from config.config_manager import DEFAULTS
+        from main import Application
+        from screenshot.mask_window import MaskWindow
+
+        for failure in ("export", "restore"):
+            with self.subTest(failure=failure):
+                settings = dict(DEFAULTS, inline_edit=True, magnifier=False, sound=False,
+                                capture_after_selection="edit")
+                bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+                application = Application.__new__(Application)
+                application.config = Mock(data=settings)
+                application.logger = Mock()
+                application.settings_window = Mock()
+                application.editors = []
+                for callback in ("notify_capture_copied", "remember_save_as_dir", "editor_saved",
+                                 "add_sticker", "restart_capture", "close_all_editors", "notify"):
+                    setattr(application, callback, Mock())
+                with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                    mask = MaskWindow(Image.new("RGB", (320, 240), "white"), bounds, [bounds], settings)
+                mask.edit_requested.connect(lambda images, positions: application.edit_images(images, from_capture=False))
+                try:
+                    mask.selection.rects.append(QRect(10, 12, 300, 220))
+                    mask.complete()
+                    source = mask.session.inline_editor.canvas
+                    source._add_annotation(shape("rect", QPointF(20, 20), QPointF(40, 40), "#ff0000", 3))
+                    source.checkpoint()
+                    receiver = EditorWindow(source.image, settings, source.alternate)
+                    owner = source if failure == "export" else receiver.canvas
+                    with patch("app.capture_flow.EditorWindow", return_value=receiver), patch.object(
+                            owner, "export_edit_history" if failure == "export" else "restore_edit_history",
+                            side_effect=RuntimeError("synthetic transfer failure")):
+                        mask.complete_in_window_editor()
+                    target = application.editors[0].canvas
+                    self.assertEqual(len(target.annotations()), 1)
+                    self.assertEqual((len(target.history), target.cursor_index), (1, 0))
+                    target._add_annotation(shape("rect", QPointF(60, 20), QPointF(80, 40), "#0000ff", 3))
+                    target.checkpoint()
+                    target.undo()
+                    self.assertEqual(len(target.annotations()), 1)
+                finally:
+                    mask.close()
+                    for editor in list(application.editors):
+                        editor.close()
+
+    def test_transferred_history_restore_failure_rolls_back_receiver(self):
+        from config.config_manager import DEFAULTS
+
+        source = EditorWindow(Image.new("RGB", (100, 80), "red"), dict(DEFAULTS))
+        target = EditorWindow(Image.new("RGB", (100, 80), "blue"), dict(DEFAULTS))
+        try:
+            original = target.canvas.image
+            restore = target.canvas.restore
+            count = 0
+
+            def fail_once(records):
+                nonlocal count
+                count += 1
+                if count == 1:
+                    raise RuntimeError("synthetic record failure")
+                restore(records)
+
+            with patch.object(target.canvas, "restore", side_effect=fail_once):
+                with self.assertRaises(RuntimeError):
+                    target.canvas.restore_edit_history(source.canvas.export_edit_history())
+            self.assertIs(target.canvas.image, original)
+            self.assertEqual((len(target.canvas.history), target.canvas.cursor_index), (1, 0))
+            self.assertEqual(target.canvas.image.getpixel((0, 0)), (0, 0, 255))
+        finally:
+            source.close()
+            target.close()
+
     def test_annotation_points_clamp_to_canvas_in_both_editors(self):
         """契约（2026-10-11 用户要求「这个特性在两个编辑器都要有」）：独立编辑与原地编辑
 
@@ -263,6 +494,8 @@ class CanvasTests(CoreTests):
         QTest.mousePress(canvas.viewport(), Qt.LeftButton, pos=corner)
         self.app.processEvents()
         self.assertIs(canvas.resizing, item, "按在控制点上应进入缩放，而不是落笔")
+        self.assertEqual(canvas.cursor().shape(), Qt.SizeFDiagCursor,
+                 "Pressing the corner must immediately replace the drawing cursor")
         self.assertIsNone(getattr(canvas, "_deferred_pen", None), "按控制点不应触发延迟落笔")
         QTest.mouseMove(canvas.viewport(), corner + QPoint(20, 16))
         QTest.mouseRelease(canvas.viewport(), Qt.LeftButton, pos=corner + QPoint(20, 16))
@@ -273,6 +506,121 @@ class CanvasTests(CoreTests):
         # 拖动放量的正确性由既有的控制点/按键微调用例覆盖。
         self.assertEqual(canvas.tool, "pen", "拖控制点不应切换工具")
         editor.close()
+    def test_handle_cursor_stays_locked_until_release_in_both_editors(self):
+        from PySide6.QtCore import QEvent, QRect
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        standalone = EditorWindow(Image.new("RGB", (300, 220), "white"), dict(DEFAULTS))
+        bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+        settings = dict(DEFAULTS, inline_edit=True, magnifier=False, capture_after_selection="edit")
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (320, 240), "white"), bounds, [bounds], settings)
+        mask.selection.rects.append(QRect(10, 12, 300, 220))
+        mask.complete()
+        self.app.processEvents()
+
+        def mouse_event(canvas, position, pressed):
+            return QMouseEvent(QEvent.Type.MouseButtonPress if pressed else QEvent.Type.MouseButtonRelease,
+                               QPointF(position), QPointF(canvas.viewport().mapToGlobal(position)),
+                               Qt.LeftButton, Qt.LeftButton if pressed else Qt.NoButton, Qt.NoModifier)
+
+        try:
+            for label, canvas in (("standalone", standalone.canvas),
+                                  ("inline", mask.session.inline_editor.canvas)):
+                for tool in ("select", "pen", "marker", "rect", "ellipse", "arrow", "text",
+                             "picker", "eraser", "mosaic", "number"):
+                    for rotation in (0, 30, 90, 135, 180, 270):
+                        for handle in (*canvas.HANDLE_DIRECTIONS, "rotate"):
+                            with self.subTest(editor=label, tool=tool, rotation=rotation, handle=handle):
+                                canvas.scene_data.clear()
+                                item = shape("rect", QPointF(80, 70), QPointF(160, 130), "#ff0000", 3)
+                                canvas.scene_data.addItem(item)
+                                item.setTransformOriginPoint(item.boundingRect().center())
+                                item.setRotation(rotation)
+                                item.setSelected(True)
+                                canvas.set_tool(tool)
+                                spot = (canvas.rotation_handle_position(item) if handle == "rotate"
+                                        else canvas.item_resize_handles(item)[handle])
+                                position = canvas.mapFromScene(spot)
+                                expected = (canvas.rotation_cursor.shape() if handle == "rotate"
+                                            else canvas._rotated_handle_cursor(handle, item))
+                                if rotation == 0 and handle != "rotate":
+                                    expected = {"nw": Qt.SizeFDiagCursor, "se": Qt.SizeFDiagCursor,
+                                                "ne": Qt.SizeBDiagCursor, "sw": Qt.SizeBDiagCursor,
+                                                "n": Qt.SizeVerCursor, "s": Qt.SizeVerCursor,
+                                                "e": Qt.SizeHorCursor, "w": Qt.SizeHorCursor}[handle]
+                                release = mouse_event(canvas, QPoint(-60, -60), False)
+                                canvas.mousePressEvent(mouse_event(canvas, position, True))
+                                try:
+                                    self.assertEqual(canvas.cursor().shape(), expected)
+                                    self.assertEqual(canvas.viewport().cursor().shape(), expected)
+                                    if handle == "rotate":
+                                        self.assertEqual(canvas.cursor().pixmap().cacheKey(),
+                                                         canvas.rotation_cursor.pixmap().cacheKey())
+                                    canvas._update_resize_cursor(QPoint(-60, -60))
+                                    self.assertEqual(canvas.cursor().shape(), expected)
+                                    canvas._reset_hover_cursor()
+                                    self.assertEqual(canvas.cursor().shape(), expected)
+                                    canvas.refresh_tool_cursor()
+                                    self.assertEqual(canvas.cursor().shape(), expected)
+                                    self.assertEqual(canvas.viewport().cursor().shape(), expected)
+                                    canvas.leaveEvent(QEvent(QEvent.Type.Leave))
+                                    canvas._apply_tool_cursor()
+                                    self.assertEqual(canvas.cursor().shape(), expected)
+                                    if tool == "pen" and rotation == 0 and handle == "e":
+                                        with patch("editor.annotation_canvas.logging.getLogger") as logger:
+                                            for _ in range(30):
+                                                canvas._update_resize_cursor(QPoint(-60, -60))
+                                            logger.return_value.debug.assert_not_called()
+                                finally:
+                                    canvas.mouseReleaseEvent(release)
+                                self.assertIsNone(canvas.resizing)
+                                self.assertIsNone(canvas.rotating)
+                                restored = canvas.cursor()
+                                if tool == "select" and rotation == 0 and handle == "se":
+                                    canvas.mousePressEvent(mouse_event(canvas, position, True))
+                                    try:
+                                        self.assertEqual(canvas.cursor().shape(), expected,
+                                                         "Regripping without switching tools must restore the handle cursor")
+                                    finally:
+                                        canvas.mouseReleaseEvent(release)
+                                canvas._applied_cursor_key = None
+                                canvas._reset_hover_cursor()
+                                self.assertEqual(restored.shape(), canvas.cursor().shape())
+                                if tool in ("select", "number"):
+                                    self.assertEqual(restored.shape(), Qt.ArrowCursor)
+                                elif tool in ("pen", "marker", "rect", "ellipse", "arrow", "text"):
+                                    self.assertEqual(restored.pixmap().cacheKey(),
+                                                     canvas._tool_cursor(tool, False).pixmap().cacheKey())
+                                elif tool == "picker":
+                                    self.assertEqual(restored.pixmap().cacheKey(),
+                                                     canvas._picker_cursor.pixmap().cacheKey())
+                                else:
+                                    self.assertEqual(restored.shape(), Qt.BlankCursor)
+                canvas.scene_data.clear()
+                item = shape("rect", QPointF(80, 70), QPointF(160, 130), "#ff0000", 3)
+                canvas.scene_data.addItem(item)
+                item.setSelected(True)
+                canvas.set_tool("pen")
+                for handle in (*canvas.HANDLE_DIRECTIONS, "rotate"):
+                    canvas._active_handle_name = handle
+                    with patch("editor.annotation_canvas.QApplication.mouseButtons", return_value=Qt.LeftButton):
+                        canvas.refresh_tool_cursor()
+                        expected = (canvas.rotation_cursor.shape() if handle == "rotate"
+                                    else canvas._rotated_handle_cursor(handle, item))
+                        self.assertEqual(canvas.cursor().shape(), expected,
+                                         "A mask-owned grip must also keep the canvas operation cursor")
+                    canvas.clear_active_handle()
+                    with patch("editor.annotation_canvas.QApplication.mouseButtons", return_value=Qt.NoButton):
+                        canvas._reset_hover_cursor()
+                        self.assertEqual(canvas.cursor().pixmap().cacheKey(),
+                                         canvas._tool_cursor("pen", False).pixmap().cacheKey())
+        finally:
+            standalone.close()
+            mask.close()
+
     def test_click_enters_edit_state_while_drag_still_draws(self):
         """规则 1（用户 2026-10-10）：点击=编辑、拖动=画图。
 
@@ -426,7 +774,8 @@ class CanvasTests(CoreTests):
         —— 这两点照抄通过用例 test_canvas.py 的既有夹具。
         """
         from PySide6.QtCore import QPointF, QRect, QRectF
-        from PySide6.QtGui import QPainterPath
+        import math
+        from PySide6.QtGui import QPainterPath, QTransform
         from PySide6.QtWidgets import QGraphicsRectItem
         from config.config_manager import DEFAULTS
         from screenshot.mask_window import MaskWindow
@@ -462,6 +811,48 @@ class CanvasTests(CoreTests):
                 pos0 = item.pos()
                 self.assertTrue(canvas.nudge_selected(1, 0), f"{label}: 移动应生效")
                 self.assertNotEqual(item.pos(), pos0, f"{label}: 移动应改变位置")
+        try:
+            for label, canvas in (("standalone", standalone.canvas), ("inline", inline.canvas)):
+                with patch.object(canvas, "checkpoint"), patch.object(canvas, "_follow_handle_cursor"):
+                    for zoom in (0.5, 1.0, 1.25, 1.5, 1.75, 2.0, 4.0):
+                        print(f"  handle matrix: {label}, zoom={zoom}", flush=True)
+                        canvas.setTransform(QTransform().scale(zoom, zoom))
+                        for scale in (0.5, 1.0, 2.0, 6.0):
+                            for rotation in (0, 30, 90, 180, 270):
+                                for handle in canvas.HANDLE_DIRECTIONS:
+                                    canvas.scene_data.clear()
+                                    path = QPainterPath()
+                                    path.addRect(QRectF(0, 0, 40, 20))
+                                    item = AnnotationPathItem(path)
+                                    item.setFlag(QGraphicsRectItem.GraphicsItemFlag.ItemIsSelectable, True)
+                                    canvas.scene_data.addItem(item)
+                                    item.setSelected(True)
+                                    item.setScale(scale)
+                                    item.setRotation(rotation)
+                                    canvas._active_handle_name = handle
+                                    outward = (canvas.item_resize_handles(item)[handle]
+                                               - item.mapToScene(item.boundingRect().center()))
+                                    horizontal = abs(outward.x()) > abs(outward.y()) + 1e-9
+                                    dx = (1 if outward.x() > 0 else -1) if horizontal else 0
+                                    dy = 0 if horizontal else (1 if outward.y() > 0 else -1)
+                                    axis = (QPointF(item.boundingRect().width(), 0)
+                                            if "w" in handle or "e" in handle
+                                            else QPointF(0, item.boundingRect().height()))
+
+                                    def screen_length():
+                                        transform = item.deviceTransform(canvas.viewportTransform())
+                                        vector = transform.map(axis) - transform.map(QPointF())
+                                        return math.hypot(vector.x(), vector.y())
+
+                                    for direction in (1, -1):
+                                        for _ in range(8):
+                                            before = screen_length()
+                                            self.assertTrue(canvas.resize_selected(dx * direction, dy * direction))
+                                            self.assertAlmostEqual(screen_length() - before, direction, places=6,
+                                                                   msg=f"{label}/{zoom}/{scale}/{rotation}/{handle}")
+        finally:
+            standalone.close()
+            mask.close()
         print("  两个编辑器均通过（共享 %s）" % type(standalone.canvas).__name__)
 
     def test_resize_and_nudge_cover_every_annotation_type(self):
@@ -590,7 +981,7 @@ class CanvasTests(CoreTests):
             # 用**场景坐标**比较手柄位移 ✓（全局坐标是整数像素，1px 缩放在画布缩放下可能取整成同一个点 ✗）
             before_scene = QPointF(canvas.item_resize_handles(item)["se"])
             with patch("editor.annotation_canvas.QCursor.setPos") as move:
-                self.assertTrue(canvas.resize_selected(1, 0))
+                self.assertTrue(canvas.resize_selected(0, 1))
                 expected = canvas.handle_global_point()
                 move.assert_called_once_with(expected)
             after_scene = QPointF(canvas.item_resize_handles(item)["se"])
@@ -620,12 +1011,7 @@ class CanvasTests(CoreTests):
             editor.close()
 
     def test_keyboard_resize_axis_rules_across_rotations(self):
-        """2026-10-12 用户报告（问题 1/2）：标注键盘微调的两个通病，覆盖未旋转与任意角度旋转。
-
-        ① 角落手柄必须**等比**缩放（两轴同一比例）⇒ 指针按手柄新位置同时沿 X/Y 跟随 ✓；
-        ② 边中点手柄**只响应本轴方向键**（e/w 只 A/D、n/s 只 W/S）——旋转后也不得变成另一轴 ✓；
-        ③ 旋转只改变"几何沿标注自身轴放大/缩小"的视觉方向，不改变上面的规则 ✓。
-        """
+        """Rotated handles use their visible outward direction and retain aspect ratio."""
         from PySide6.QtCore import QPointF, QRectF
         from PySide6.QtWidgets import QGraphicsRectItem
         from config.config_manager import DEFAULTS
@@ -635,7 +1021,6 @@ class CanvasTests(CoreTests):
         canvas = editor.canvas
         corners = ("nw", "ne", "se", "sw")
         keys = {"W": (0, -1), "S": (0, 1), "A": (-1, 0), "D": (1, 0)}
-        allowed_for = {"e": {"A", "D"}, "w": {"A", "D"}, "n": {"W", "S"}, "s": {"W", "S"}}
         try:
             for rotation in (0, 30, 45, 90, 180):
                 for handle in corners + ("e", "w", "n", "s"):
@@ -649,10 +1034,15 @@ class CanvasTests(CoreTests):
                         item.setRotation(rotation)
                         canvas._active_handle_name = handle
                         before = QPointF(canvas.item_resize_handles(item)[handle])
+                        outward = before - item.mapToScene(item.boundingRect().center())
+                        projection = dx * outward.x() + dy * outward.y()
+                        horizontal = abs(outward.x()) > abs(outward.y()) + 1e-9
+                        allowed = (abs(projection) > 1e-9 and
+                                   (handle in corners or bool(dx if horizontal else dy)))
+                        old_width = item.rect().width()
                         changed = canvas.resize_selected(dx, dy)
                         after = QPointF(canvas.item_resize_handles(item)[handle])
                         label = f"旋转{rotation}° 手柄{handle} 键{key}"
-                        allowed = True if handle in corners else key in allowed_for[handle]
                         if not allowed:
                             self.assertFalse(changed, f"{label}: 非本轴方向键必须 no-op")
                             self.assertEqual(before, after, f"{label}: no-op 时手柄不得移动")
@@ -661,6 +1051,8 @@ class CanvasTests(CoreTests):
                         w, h = item.rect().width(), item.rect().height()
                         self.assertAlmostEqual(w / h, 2.0, delta=0.02,
                                                msg=f"{label}: 必须保持长宽比（等比）")
+                        self.assertEqual(w > old_width, projection > 0,
+                                         f"{label}: Outward enlarges, inward shrinks")
                         if handle in corners:
                             # 角落手柄等比 ⇒ 手柄两轴都动 ⇒ 指针沿 X/Y 同步跟随
                             self.assertNotAlmostEqual(after.x(), before.x(), delta=1e-6,
@@ -756,10 +1148,115 @@ class CanvasTests(CoreTests):
         finally:
             editor.close()
 
-    def test_cursor_follow_is_perceptible_on_every_moved_axis(self):
-        """2026-10-12 用户实测：角标等比缩放时角在屏幕上每步只移动 (1px, 0.5px) ⇒ 0.5 被取整
-        吃掉 ⇒ 用户看到"角标手柄只有 x 动、y 不动" ✗。契约：某轴**确实有位移**（浮点差非零）时
-        指针在该轴至少挪 1px ✓；该轴没有位移（浮点差为 0）时不得凭空移动 ✗。"""
+    def test_keyboard_resize_follow_does_not_reenter_mouse_drag(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+
+        editor = EditorWindow(Image.new("RGB", (400, 300), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        item = shape("rect", QPointF(100, 100), QPointF(200, 160), "#ff0000", 3)
+        canvas.scene_data.addItem(item)
+        item.setSelected(True)
+        editor.show()
+        self.app.processEvents()
+        try:
+            handles = canvas.item_resize_handles(item)
+            canvas.resizing = item
+            canvas.resize_handle = "se"
+            canvas._active_handle_name = "se"
+            canvas.resize_anchor = handles["nw"]
+            canvas.resize_anchor_local = item.mapFromScene(handles["nw"])
+            canvas.resize_start = handles["se"]
+            canvas.resize_transform = item.transform()
+            canvas.resize_scale = item.scale()
+            with patch("editor.annotation_canvas.QCursor.setPos"):
+                self.assertTrue(canvas.resize_selected(1, 0))
+                before = item.sceneTransform()
+                spot = canvas.item_resize_handles(item)["se"]
+                local = canvas.mapFromScene(spot)
+                event = QMouseEvent(QEvent.Type.MouseMove, QPointF(local),
+                                    QPointF(canvas.viewport().mapToGlobal(local)),
+                                    Qt.NoButton, Qt.LeftButton, Qt.NoModifier)
+                canvas.mouseMoveEvent(event)
+                self.assertEqual(item.sceneTransform(), before,
+                                 "Keyboard cursor follow must not run mouse resize again")
+                canvas._clear_programmatic_cursor_move()
+                canvas.mouseMoveEvent(event)
+                self.assertEqual(item.sceneTransform(), before,
+                                 "Resuming mouse resize at the handle must not jump")
+        finally:
+            editor.close()
+
+    def test_keyboard_cursor_follow_precision_and_latest_target(self):
+        from PySide6.QtCore import QTimer
+        from PySide6.QtGui import QTransform
+        from config.config_manager import DEFAULTS
+
+        editor = EditorWindow(Image.new("RGB", (300, 200), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+        item = shape("rect", QPointF(80.25, 70.75), QPointF(160.25, 110.75), "#ff0000", 3)
+        canvas.scene_data.addItem(item)
+        item.setSelected(True)
+        canvas._active_handle_name = "se"
+        editor.show()
+        self.app.processEvents()
+        try:
+            for zoom in (0.5, 1.25, 1.5, 1.75, 2.0):
+                canvas.setTransform(QTransform().scale(zoom, zoom))
+                expected = canvas.viewportTransform().map(canvas.item_resize_handles(item)["se"])
+                expected += QPointF(canvas.viewport().mapToGlobal(QPoint()))
+                actual = canvas.handle_global_point(precise=True)
+                self.assertAlmostEqual(actual.x(), expected.x())
+                self.assertAlmostEqual(actual.y(), expected.y())
+            callbacks = []
+            with patch.object(QTimer, "singleShot", side_effect=lambda delay, callback: callbacks.append((delay, callback))), \
+                    patch("editor.annotation_canvas.QCursor.setPos") as move, \
+                    patch("editor.annotation_canvas.QCursor.pos", return_value=QPoint()):
+                canvas._apply_cursor_follow(QPointF(100, 100))
+                canvas._apply_cursor_follow(QPointF(120, 130))
+                move.reset_mock()
+                for delay, callback in callbacks:
+                    if delay == 0:
+                        callback()
+                move.assert_called_once_with(QPoint(120, 130))
+                for delay, callback in callbacks[:1]:
+                    callback()
+                self.assertTrue(canvas._programmatic_cursor_move,
+                                "An old timeout must not clear the latest follow target")
+        finally:
+            editor.close()
+
+    def test_keyboard_follow_consumes_queued_targets_without_eating_mouse_drag(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+
+        editor = EditorWindow(Image.new("RGB", (300, 200), "white"), dict(DEFAULTS))
+        canvas = editor.canvas
+
+        def move_event(point):
+            return QMouseEvent(QEvent.Type.MouseMove, QPointF(), QPointF(point),
+                               Qt.NoButton, Qt.LeftButton, Qt.NoModifier)
+
+        try:
+            canvas._mark_programmatic_cursor_move(QPoint(100, 100))
+            canvas._mark_programmatic_cursor_move(QPoint(102, 100))
+            self.assertTrue(canvas._consume_programmatic_cursor_move(move_event(QPoint(100, 100))))
+            self.assertTrue(canvas._consume_programmatic_cursor_move(move_event(QPoint(102, 100))))
+            self.assertFalse(canvas._consume_programmatic_cursor_move(move_event(QPoint(103, 100))))
+            canvas._mark_programmatic_cursor_move(QPoint(100, 100))
+            self.assertFalse(canvas._consume_programmatic_cursor_move(move_event(QPoint(101, 100))))
+            canvas._mark_programmatic_cursor_move(QPoint(100, 100))
+            release = QMouseEvent(QEvent.Type.MouseButtonRelease, QPointF(), QPointF(100, 100),
+                                  Qt.LeftButton, Qt.NoButton, Qt.NoModifier)
+            canvas.mouseReleaseEvent(release)
+            self.assertFalse(canvas._consume_programmatic_cursor_move(move_event(QPoint(100, 100))))
+        finally:
+            editor.close()
+
+    def test_cursor_follow_rounding_never_overshoots_the_handle(self):
+        """Subpixel targets accumulate without forcing one-pixel cursor jumps."""
         from PySide6.QtCore import QPoint, QPointF
         from unittest.mock import patch
         from config.config_manager import DEFAULTS
@@ -768,18 +1265,19 @@ class CanvasTests(CoreTests):
         canvas = editor.canvas
         try:
             with patch("editor.annotation_canvas.QCursor.pos", return_value=QPoint(100, 200)):
-                # 两轴都有位移，但取整后都回到原点 ⇒ 两轴都要补 1px
                 self.assertEqual(canvas._perceptible_cursor_point(QPointF(100.4, 200.5)),
-                                 QPoint(101, 201))
-                # 只有 x 有位移 ⇒ 只挪 x（y 不得凭空动）
+                                 QPoint(100, 200))
                 self.assertEqual(canvas._perceptible_cursor_point(QPointF(100.4, 200.0)),
-                                 QPoint(101, 200))
-                # 反向同理
+                                 QPoint(100, 200))
                 self.assertEqual(canvas._perceptible_cursor_point(QPointF(99.6, 199.4)),
-                                 QPoint(99, 199))
-                # 位移足够大 ⇒ 正常取整，不额外补
+                                 QPoint(100, 199))
                 self.assertEqual(canvas._perceptible_cursor_point(QPointF(140.2, 260.7)),
                                  QPoint(140, 261))
+                for index in range(100):
+                    target = QPointF(-100.4 + index * 0.2, 200.3 + index * 0.35)
+                    point = canvas._perceptible_cursor_point(target)
+                    self.assertLessEqual(abs(point.x() - target.x()), 0.5)
+                    self.assertLessEqual(abs(point.y() - target.y()), 0.5)
         finally:
             editor.close()
 

@@ -381,6 +381,7 @@ class EditorWindow(QMainWindow):
     def update_cursor_switch(self):
         """撤销后同步复选框，屏蔽信号以免误触发新一次切换。"""
         with QSignalBlocker(self.toolbar.cursor_switch):
+            self.toolbar.cursor_switch.setEnabled(self.canvas.alternate is not None)
             self.toolbar.cursor_switch.setChecked(self.canvas.cursor_enabled)
 
     def output_image(self):
