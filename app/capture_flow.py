@@ -203,9 +203,9 @@ class CaptureFlowMixin:
         for index, (image, alternate) in enumerate(images):
             # 先取交接槽，再做留痕 —— 先前留痕写在取槽之前，pending 还没赋值就被引用，
             # 一按 E 就抛 UnboundLocalError、编辑器根本打不开（2026-10-11 真机日志定位）。
-            from screenshot.mask_window import take_pending_editor_annotations
+            from screenshot.mask_window import take_pending_editor_state
 
-            pending = take_pending_editor_annotations()
+            pending, history = take_pending_editor_state()
             logging.getLogger("screensnap").info(
                 "新建编辑器：光标图=%s 尺寸=%s 说明=%s",
                 "有" if alternate is not None else "无",
@@ -217,12 +217,26 @@ class CaptureFlowMixin:
                                   from_capture=from_capture)
             # 从原地编辑器按 E 转交过来的标注：以对象形式恢复，保证在窗口编辑里仍可选中/编辑
             # （2026-10-11 用户反馈：以前只交合成图，标注变成像素后无法再编辑）。
-            if pending and index == 0:
+            if (pending or history is not None) and index == 0:
                 try:
-                    editor.canvas.restore(pending)
+                    if history is not None:
+                        editor.canvas.restore_edit_history(history)
+                    else:
+                        editor.canvas.restore(pending)
+                        editor.canvas.history = [(editor.canvas.image, editor.canvas.alternate,
+                                                  editor.canvas.cursor_enabled, editor.canvas.snapshot())]
+                        editor.canvas.cursor_index = 0
                 except Exception as error:  # noqa: BLE001 恢复失败不影响打开编辑器
                     logging.getLogger("screensnap").warning(
                         "恢复转交过来的标注失败: %s", error)
+                    try:
+                        editor.canvas.restore(pending)
+                        editor.canvas.history = [(editor.canvas.image, editor.canvas.alternate,
+                                                  editor.canvas.cursor_enabled, editor.canvas.snapshot())]
+                        editor.canvas.cursor_index = 0
+                        logging.getLogger("screensnap").warning("已退回当前标注快照，迁移历史不可用")
+                    except Exception:
+                        logging.getLogger("screensnap").exception("恢复转交快照失败")
                 else:
                     logging.getLogger("screensnap").info(
                         "已从原地编辑器恢复 %d 个标注对象", len(pending))

@@ -6,6 +6,7 @@ uiautomation 是纯 Python 的 UIA 封装，能读到浏览器网页控件、WPF
 
 import ctypes
 import logging
+import math
 import os
 import time
 from ctypes import wintypes
@@ -625,7 +626,7 @@ def rectangle_of(control):
         rect = control.BoundingRectangle
         left, top, right, bottom = rect.left, rect.top, rect.right, rect.bottom
         if right > left and bottom > top:
-            return (int(left), int(top), int(right), int(bottom))
+            return (math.floor(left), math.floor(top), math.ceil(right), math.ceil(bottom))
     except Exception:
         pass
     return None

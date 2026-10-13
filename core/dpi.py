@@ -228,13 +228,17 @@ class DisplayMapper:
 
     def _mapping_for_logical(self, point):
         for mapping in self.mappings:
-            if mapping.logical.contains(point):
+            rect = mapping.logical
+            if (rect.x() <= point.x() < rect.x() + rect.width()
+                    and rect.y() <= point.y() < rect.y() + rect.height()):
                 return mapping
         return min(self.mappings, key=lambda mapping: self._distance_to_rect(point, mapping.logical))
 
     def _mapping_for_native(self, point):
         for mapping in self.mappings:
-            if mapping.native.contains(point):
+            rect = mapping.native
+            if (rect.x() <= point.x() < rect.x() + rect.width()
+                    and rect.y() <= point.y() < rect.y() + rect.height()):
                 return mapping
         return min(self.mappings, key=lambda mapping: self._distance_to_rect(point, mapping.native))
 

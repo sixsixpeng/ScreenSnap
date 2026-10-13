@@ -16,6 +16,17 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class UiaTests(CoreTests):
+    def test_uia_fractional_bounds_cover_physical_pixels_on_negative_screens(self):
+        from types import SimpleNamespace
+        from core.window_uia import rectangle_of
+
+        for bounds, expected in (((10.2, 20.8, 110.1, 80.3), (10, 20, 111, 81)),
+                                 ((-1919.8, -1079.2, -1819.1, -999.7), (-1920, -1080, -1819, -999)),
+                                 ((-10.0, 0.0, 120.0, 70.0), (-10, 0, 120, 70))):
+            control = SimpleNamespace(BoundingRectangle=SimpleNamespace(
+                left=bounds[0], top=bounds[1], right=bounds[2], bottom=bounds[3]))
+            self.assertEqual(rectangle_of(control), expected)
+
     def test_overlay_handles_survive_destroyed_widgets(self):
         """回归（2026-10-11 真机崩溃）：连续快速创建贴图时，本程序覆盖层的 C++ 对象可能已析构，
 
@@ -146,7 +157,7 @@ class UiaTests(CoreTests):
         # （旧契约是"贴在元素上方"，已废弃 ✗；位置不再做任何避让重算 ✓）
         self.assertLess(abs(badge.center().x() - element_rect.center().x()), 3, "水平应居中")
         label_calls = [call.args[-1] for call in painter.drawText.call_args_list]
-        self.assertIn("160 x 60 px", label_calls)
+        self.assertIn("160 x 60 物理px", label_calls)
         self.assertEqual(painter.setFont.call_args.args[0].pixelSize(), 18)
         self.assertEqual(painter.setPen.call_args.args[0].name(), "#f2fffc")
 
@@ -807,6 +818,25 @@ class UiaTests(CoreTests):
                 self.assertFalse(mask.isVisible())
             finally:
                 mask.close()
+
+    def test_live_size_hint_matches_reverse_selection_pixel_bounds(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            view = MaskWindow(Image.new("RGB", (320, 240), "white"), bounds, [bounds],
+                              dict(DEFAULTS, window_detection=False))
+        try:
+            for start, end in ((QPoint(200, 150), QPoint(40, 30)),
+                               (QPoint(40, 150), QPoint(200, 30))):
+                view.selection.begin_new(start)
+                view.position = end
+                view.selection.active = None
+                rect, size = view.element_size_hint(None)
+                self.assertEqual(size, (161, 121))
+        finally:
+            view.close()
 
     def test_manual_selection_also_reports_size_hint(self):
         """2026-10-11 用户反馈：左键点元素会显示尺寸徽标，而**手动画的选区**不显示 ✗（不对称）。

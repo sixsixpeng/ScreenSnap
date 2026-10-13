@@ -13,6 +13,7 @@
 
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QColor, QFont, QPen
+from screenshot.hint_items import pixel_size_text
 
 from config.config_manager import HINT_BAR_FILL_ALPHA, HINT_BAR_WARNING_FILL_ALPHA
 
@@ -220,7 +221,7 @@ def paint_info_badge(painter, area, element_rect, element_size=None,
     painter.setFont(font)
     badge_metrics = painter.fontMetrics()
     size = element_size or (element_rect.width(), element_rect.height())
-    label = f"{size[0]} x {size[1]} px"
+    label = pixel_size_text(size)
     label_width = badge_metrics.horizontalAdvance(label) + 16
     label_height = badge_metrics.height() + 8
     # 2026-10-11（用户指定最终规则，**彻底取代**此前所有避让计算 ✗）：

@@ -551,6 +551,141 @@ class DpiTests(CoreTests):
         self.assertEqual(mapper.physical_local_rect_to_logical_local_rect(right).toRect(),
                          QRect(3072, 0, 1920, 1080))
 
+    def test_mask_fractional_mouse_positions_round_only_after_physical_conversion(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        for scale in (1.0, 1.25, 1.5, 1.75):
+            bounds = {"left": -560, "top": -350, "width": 560, "height": 350}
+            geometry = QRect(-round(560 / scale), -round(350 / scale),
+                             round(560 / scale), round(350 / scale))
+            infos = [{"geometry": geometry, "dpr": scale}]
+            with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+                    patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=infos):
+                mask = MaskWindow(Image.new("RGB", (560, 350)), bounds, [bounds],
+                                  dict(DEFAULTS, window_detection=False, inline_edit=False, magnifier=False))
+            try:
+                for button in (Qt.LeftButton, Qt.RightButton):
+                    for offset in (0.2, 0.4, 0.6, 0.8):
+                        start = QPointF(70 + offset, 60 + offset)
+                        end = QPointF(120 + offset, 100 + offset)
+                        expected_start = QPoint(round(start.x() * 560 / geometry.width()),
+                                                round(start.y() * 350 / geometry.height()))
+                        expected_end = QPoint(round(end.x() * 560 / geometry.width()),
+                                              round(end.y() * 350 / geometry.height()))
+                        with self.subTest(scale=scale, button=button, offset=offset):
+                            mask.selection.rects.clear()
+                            mask.selection.start = None
+                            mask.mousePressEvent(QMouseEvent(QEvent.MouseButtonPress, start, start,
+                                                              button, button, Qt.NoModifier))
+                            self.assertEqual(mask.position, expected_start)
+                            mask.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, end, end,
+                                                             Qt.NoButton, button, Qt.NoModifier))
+                            self.assertEqual(mask.position, expected_end)
+                            self.assertEqual(mask.selection.active, QRect(expected_start, expected_end))
+            finally:
+                mask.close()
+
+    def test_cross_screen_mouse_grab_uses_native_layout_on_both_mask_views(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+        from core.dpi import DisplayMapper
+        from screenshot.mask_window import MaskSession, MaskWindow
+
+        layouts = (
+            ([{"left": 0, "top": 0, "width": 3840, "height": 2160},
+              {"left": 3840, "top": 0, "width": 1920, "height": 1080}],
+             [{"geometry": QRect(0, 0, 2560, 1440), "dpr": 1.5},
+              {"geometry": QRect(3840, 0, 1920, 1080), "dpr": 1.0}]),
+            ([{"left": -2560, "top": 0, "width": 2560, "height": 1440},
+              {"left": 0, "top": 0, "width": 1920, "height": 1080}],
+             [{"geometry": QRect(-2048, 0, 2048, 1152), "dpr": 1.25},
+              {"geometry": QRect(0, 0, 1097, 617), "dpr": 1.75}]),
+            ([{"left": 0, "top": -2160, "width": 3840, "height": 2160},
+              {"left": 0, "top": 0, "width": 2560, "height": 1440}],
+             [{"geometry": QRect(0, -2160, 2560, 1440), "dpr": 1.5},
+              {"geometry": QRect(0, 0, 2048, 1152), "dpr": 1.25}]),
+        )
+        for monitors, infos in layouts:
+            physical = QRect(monitors[0]["left"], monitors[0]["top"], monitors[0]["width"], monitors[0]["height"])
+            physical = physical.united(QRect(monitors[1]["left"], monitors[1]["top"],
+                                            monitors[1]["width"], monitors[1]["height"]))
+            bounds = dict(left=physical.x(), top=physical.y(), width=physical.width(), height=physical.height())
+            mapper = DisplayMapper(bounds, monitors, screen_infos=infos)
+            session = MaskSession(mapper)
+            settings = dict(DEFAULTS, window_detection=False, inline_edit=False, magnifier=False)
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                views = [MaskWindow(Image.new("RGB", (physical.width(), physical.height())), bounds,
+                                    monitors, settings, session=session, monitor=monitor, primary=index == 0)
+                         for index, monitor in enumerate(monitors)]
+            try:
+                for view in views:
+                    for target_index, info in enumerate(infos):
+                        geometry = info["geometry"]
+                        global_point = QPointF(geometry.x() + geometry.width() * 0.4,
+                                               geometry.y() + geometry.height() * 0.4)
+                        expected = QPoint(round(monitors[target_index]["width"] * 0.4),
+                                          round(monitors[target_index]["height"] * 0.4))
+                        expected += mapper.monitor_local_rect(monitors[target_index]).topLeft()
+                        local = global_point - QPointF(view.mapToGlobal(QPoint()))
+                        with self.subTest(view=view.primary, target=target_index, bounds=bounds):
+                            self.assertEqual(view.to_physical_point(local), expected)
+                            for button in (Qt.LeftButton, Qt.RightButton):
+                                start = view.monitor_rect.center()
+                                view.selection.begin_new(start)
+                                view._nudge_hold = True
+                                view.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, local, global_point,
+                                                               Qt.NoButton, button, Qt.NoModifier))
+                                self.assertEqual(view.position, expected)
+                                wanted = SelectionRects.resized_rect(start, expected, "both", QRect())
+                                self.assertEqual(view.selection.active, wanted)
+                                view._nudge_hold = False
+                    whole = mapper.full_physical_local_rect()
+                    native = infos[0 if view.primary else 1]["geometry"]
+                    sx = native.width() / view.monitor_rect.width()
+                    sy = native.height() / view.monitor_rect.height()
+                    self.assertEqual(view.to_logical_rect(whole),
+                                     QRectF((whole.x() - view.monitor_rect.x()) * sx,
+                                            (whole.y() - view.monitor_rect.y()) * sy,
+                                            whole.width() * sx, whole.height() * sy))
+            finally:
+                for view in views:
+                    view.close()
+
+    def test_inline_mouse_forwarding_preserves_fractional_native_position(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        for scale in (1.0, 1.25, 1.5, 1.75):
+            bounds = {"left": -560, "top": 0, "width": 560, "height": 350}
+            info = {"geometry": QRect(-round(560 / scale), 0, round(560 / scale), round(350 / scale)),
+                    "dpr": scale}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]), \
+                    patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=[info]):
+                mask = MaskWindow(Image.new("RGB", (560, 350)), bounds, [bounds],
+                                  dict(DEFAULTS, inline_edit=True, capture_after_selection="edit", magnifier=False))
+            try:
+                mask.selection.rects.append(QRect(40, 40, 360, 240))
+                mask.complete()
+                editor = mask.session.inline_editor
+                viewport = editor.canvas.viewport()
+                point = QPointF(31.4, 27.6)
+                expected_local = QPointF(viewport.mapTo(mask, QPoint())) + point
+                global_point = QPointF(viewport.mapToGlobal(QPoint())) + point
+                event = QMouseEvent(QEvent.MouseMove, point, global_point,
+                                    Qt.NoButton, Qt.NoButton, Qt.NoModifier)
+                with patch.object(mask, "mouseMoveEvent") as move:
+                    editor.eventFilter(viewport, event)
+                    self.assertEqual(move.call_args.args[0].position(), expected_local)
+                    self.assertEqual(move.call_args.args[0].globalPosition(), global_point)
+            finally:
+                mask.close()
+
     def test_mask_uses_logical_geometry_but_crops_physical_pixels(self):
         from config.config_manager import DEFAULTS
         from screenshot.mask_window import MaskWindow
@@ -603,7 +738,7 @@ class DpiTests(CoreTests):
         self.assertEqual(mask.session.views[1].logical_window_offset(), QPoint(0, 1728))
         self.assertEqual(mask.session.views[1].to_physical_point(QPoint(0, 0)), QPoint(0, 2160))
         self.assertEqual(mask.to_logical_rect(QRect(0, 2160, 1920, 1080)).toRect(),
-                         QRect(0, 1728, 1920, 1080))
+                         QRect(0, 1728, 1536, 864))
         self.assertEqual(mask.session.views[1].to_logical_rect(QRect(0, 2160, 1920, 1080)).toRect(),
                          QRect(0, 0, 1920, 1080))
         selected = []
@@ -727,6 +862,99 @@ class DpiTests(CoreTests):
         self.assertEqual(visible, [1])
         mask.close()
 
+    def test_manual_cross_monitor_capture_preserves_small_and_large_spans(self):
+        from config.config_manager import DEFAULTS
+        from core.dpi import DisplayMapper
+        from screenshot.mask_window import MaskSession, MaskWindow
+
+        monitors = [{"left": -1920, "top": 0, "width": 1920, "height": 1080},
+                    {"left": 0, "top": 0, "width": 2560, "height": 1440}]
+        bounds = {"left": -1920, "top": 0, "width": 4480, "height": 1440}
+        infos = [{"geometry": QRect(-1920, 0, 1920, 1080), "dpr": 1.0},
+                 {"geometry": QRect(0, 0, 1707, 960), "dpr": 1.5}]
+        settings = dict(DEFAULTS, inline_edit=False, capture_after_selection="edit", magnifier=False,
+                        window_detection=False, editor_image_shadow_enabled=False)
+        for region in (QRect(1700, 100, 240, 100), QRect(1000, 200, 1800, 300),
+                       QRect(1910, 100, 300, 100)):
+            for caller, action in ((0, "window"), (1, "window"), (0, "save"),
+                                   (1, "save"), (0, "copy"), (1, "copy")):
+                with self.subTest(region=region, caller=caller, action=action):
+                    mapper = DisplayMapper(bounds, monitors, screen_infos=infos)
+                    session = MaskSession(mapper)
+                    source = Image.new("RGB", (4480, 1440), "white")
+                    source.paste("red", (0, 0, 1920, 1080))
+                    source.paste("blue", (1920, 0, 4480, 1440))
+                    with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                        views = [MaskWindow(source, bounds, monitors,
+                                            settings, session=session, monitor=monitor, primary=index == 0)
+                                 for index, monitor in enumerate(monitors)]
+                    payloads = []
+                    copied = []
+                    for view in views:
+                        view.selected.connect(lambda images, positions: payloads.extend(images))
+                        view.edit_requested.connect(lambda images, positions: payloads.extend(images))
+                        view.save_requested.connect(lambda images, positions: payloads.extend(images))
+                        view.copy_done.connect(copied.append)
+                    try:
+                        session.selection.rects.append(QRect(region))
+                        sticker_image, position = views[caller]._sticker_payload(region)
+                        self.assertEqual(sticker_image.size, (region.width(), region.height()))
+                        if action == "copy":
+                            settings["capture_after_selection"] = "copy"
+                        with patch("screenshot.mask_window.QGuiApplication.clipboard"):
+                            views[caller].complete(force_window=action == "window", save_direct=action == "save")
+                        self.assertEqual(copied[0].size if action == "copy" else payloads[0][0].size,
+                                         sticker_image.size)
+                        captured = copied[0] if action == "copy" else payloads[0][0]
+                        self.assertEqual(captured.convert("RGB").getpixel((0, region.height() // 2)), (255, 0, 0))
+                        self.assertEqual(captured.convert("RGB").getpixel((region.width() - 1, region.height() // 2)),
+                                         (0, 0, 255))
+                        settings["capture_after_selection"] = "edit"
+                    finally:
+                        for view in views:
+                            view.close()
+
+    def test_automatic_window_spill_trims_only_unmodified_detected_regions(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 3840, "height": 1080}
+        monitors = [{"left": 0, "top": 0, "width": 1920, "height": 1080},
+                    {"left": 1920, "top": 0, "width": 1920, "height": 1080}]
+        for changed in (False, True):
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (3840, 1080)), bounds, monitors,
+                                  dict(DEFAULTS, inline_edit=False, capture_after_selection="edit"))
+            payloads = []
+            mask.edit_requested.connect(lambda images, positions: payloads.extend(images))
+            try:
+                mask.hover_rect = QRect(-8, -8, 1936, 1096)
+                self.assertTrue(mask.select_hover())
+                if changed:
+                    mask.selection.rects[0].translate(220, 100)
+                mask.complete(force_window=True)
+                self.assertEqual(payloads[0][0].size, (1936, 988) if changed else (1920, 1080))
+            finally:
+                mask.close()
+
+    def test_magnifier_crosshair_identifies_source_pixel_at_edges_and_center(self):
+        from PySide6.QtGui import QImage
+        from screenshot.magnifier_widget import paint_magnifier
+
+        image = QImage(160, 100, QImage.Format_RGB32)
+        for size in (100, 140, 320):
+            for source in (QPoint(0, 0), QPoint(159, 99), QPoint(80, 50), QPoint(0, 50), QPoint(80, 99)):
+                painter = Mock()
+                paint_magnifier(painter, image, QPoint(60, 50), QRect(0, 0, 500, 400),
+                                source_point=source, size=size)
+                target, _, sample = painter.drawImage.call_args.args
+                x = target.x() + (source.x() - sample.x() + 0.5) * target.width() / sample.width()
+                y = target.y() + (source.y() - sample.y() + 0.5) * target.height() / sample.height()
+                vertical = painter.drawLine.call_args_list[-2].args
+                horizontal = painter.drawLine.call_args_list[-1].args
+                self.assertAlmostEqual(vertical[0].x() if len(vertical) == 2 else vertical[0], x)
+                self.assertAlmostEqual(horizontal[0].y() if len(horizontal) == 2 else horizontal[1], y)
+
     def test_selection_spill_within_tolerance_trims_to_monitor(self):
         """最大化窗口不可见边框只多出几像素时按显示器收边；真正跨屏保持原样。"""
         from config.config_manager import DEFAULTS
@@ -746,6 +974,9 @@ class DpiTests(CoreTests):
             # 溢出虽小但只保留了不到一半面积 → 真正压在边上，不能收边
             self.assertEqual(mask._trim_region_to_monitor(QRect(1910, 500, 20, 100)),
                              QRect(1910, 500, 20, 100))
+            self.assertEqual(mask._trim_region_to_monitor(QRect(1700, 100, 240, 100)),
+                             QRect(1700, 100, 240, 100),
+                             "A normal control crossing a seam is not a maximized window frame")
         finally:
             mask.close()
 
@@ -1279,6 +1510,12 @@ class DpiTests(CoreTests):
             ("175% 缩放单屏", [{"left": 0, "top": 0, "width": 3840, "height": 2160}],
              [{"geometry": QRect(0, 0, 2194, 1234), "dpr": 1.75}],
              {"left": 0, "top": 0, "width": 3840, "height": 2160}),
+            ("水平混合 DPI 原生缩放间隙",
+             [{"left": 0, "top": 0, "width": 3840, "height": 2160},
+              {"left": 3840, "top": 0, "width": 1920, "height": 1080}],
+             [{"geometry": QRect(0, 0, 2560, 1440), "dpr": 1.5},
+              {"geometry": QRect(3840, 0, 1920, 1080), "dpr": 1.0}],
+             {"left": 0, "top": 0, "width": 5760, "height": 2160}),
             ("三屏混合：4K@150% + 2K@125% + 1080@100%",
              [{"left": 0, "top": 0, "width": 3840, "height": 2160},
               {"left": 3840, "top": 0, "width": 2560, "height": 1440},

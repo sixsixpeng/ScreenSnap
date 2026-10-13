@@ -184,4 +184,5 @@ class SelectionRects:
         if axis == "y":
             return QRect(original.left(), min(anchor.y(), point.y()), original.width(),
                          max(1, abs(anchor.y() - point.y()) + 1))
-        return QRect(anchor, point).normalized()
+        return QRect(min(anchor.x(), point.x()), min(anchor.y(), point.y()),
+                 abs(anchor.x() - point.x()) + 1, abs(anchor.y() - point.y()) + 1)

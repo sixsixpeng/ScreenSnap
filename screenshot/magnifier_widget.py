@@ -1,6 +1,6 @@
 """绘制光标附近像素的放大预览。"""
 
-from PySide6.QtCore import QRect, Qt
+from PySide6.QtCore import QPointF, QRect, Qt
 from PySide6.QtGui import QColor, QPen
 
 # 放大镜尺寸（正方形边长）与缩放倍率：采样区域 = 尺寸 / 倍率，
@@ -43,7 +43,7 @@ def magnifier_rect(point, bounds, size=MAGNIFIER_DEFAULT_SIZE, reserve_x=0, rese
 def paint_magnifier(painter, image, point, bounds, source_point=None, grid=False,
                     grid_color=None, size=MAGNIFIER_DEFAULT_SIZE):
     """把光标周围的小块原图放大绘制到遮罩上的悬浮区域。"""
-    source_point = source_point or point
+    source_point = point if source_point is None else source_point
     side = sample_size(size)
     sample_width = min(side, image.width())
     sample_height = min(side, image.height())
@@ -69,5 +69,9 @@ def paint_magnifier(painter, image, point, bounds, source_point=None, grid=False
             painter.drawLine(target.left(), y, target.right(), y)
         painter.restore()
     painter.setPen(QColor("#ff5252"))
-    painter.drawLine(target.center().x(), target.top(), target.center().x(), target.bottom())
-    painter.drawLine(target.left(), target.center().y(), target.right(), target.center().y())
+    source_x = min(max(source_point.x(), sample.left()), sample.right())
+    source_y = min(max(source_point.y(), sample.top()), sample.bottom())
+    x = target.x() + (source_x - sample.x() + 0.5) * target.width() / sample.width()
+    y = target.y() + (source_y - sample.y() + 0.5) * target.height() / sample.height()
+    painter.drawLine(QPointF(x, target.top()), QPointF(x, target.y() + target.height()))
+    painter.drawLine(QPointF(target.left(), y), QPointF(target.x() + target.width(), y))
