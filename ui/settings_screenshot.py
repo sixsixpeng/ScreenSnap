@@ -74,10 +74,36 @@ class ScreenshotEffectPreview(QWidget):
                     if (y - top) % major == 0 and y > top:
                         painter.drawText(left + length + 2, y - 2, str(y - top))
             if self.config.data.get("crosshair", True):
-                color = QColor(self.config.data.get("crosshair_color", "#ff0000"))
-                painter.setPen(QPen(color, self.config.data.get("crosshair_width", 1)))
-                painter.drawLine(int(center.x()), int(area.top()), int(center.x()), int(area.bottom()))
-                painter.drawLine(int(area.left()), int(center.y()), int(area.right()), int(center.y()))
+                width = self.config.data.get("crosshair_width", 1)
+                vertical = (int(center.x()), int(area.top()), int(center.x()), int(area.bottom()))
+                horizontal = (int(area.left()), int(center.y()), int(area.right()), int(center.y()))
+                # 预览与遮罩 _paint_crosshair 同一口径：随自适应开关/方式换色，不能开了预览却没变化。
+                adaptive = self.config.data.get("crosshair_adaptive", False)
+                invert = (adaptive and
+                          self.config.data.get("crosshair_adaptive_mode", "contrast") == "invert")
+                if invert:
+                    # 差值混合对预览自身的色块逐像素取反；交叉点只反一次（同遮罩，水平线断开）。
+                    painter.setCompositionMode(QPainter.CompositionMode_Difference)
+                    painter.setPen(QPen(QColor(255, 255, 255), width))
+                    gap = max(1, width)
+                    painter.drawLine(*vertical)
+                    painter.drawLine(horizontal[0], horizontal[1],
+                                     vertical[0] - gap, horizontal[3])
+                    painter.drawLine(vertical[0] + gap, horizontal[1],
+                                     horizontal[2], horizontal[3])
+                    painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+                else:
+                    if adaptive:
+                        # 预览底色以浅灰/近白为主 ⇒ 取「深主线 + 浅描边」这一对代表双色描边效果。
+                        painter.setPen(QPen(QColor(255, 255, 255), width + 2))
+                        painter.drawLine(*vertical)
+                        painter.drawLine(*horizontal)
+                        painter.setPen(QPen(QColor(0, 0, 0), width))
+                    else:
+                        color = QColor(self.config.data.get("crosshair_color", "#ff0000"))
+                        painter.setPen(QPen(color, width))
+                    painter.drawLine(*vertical)
+                    painter.drawLine(*horizontal)
             if self.config.data.get("magnifier", True):
                 # 预览里的放大镜按设置尺寸等比缩放（最大不超过预览区高度的一半），
                 # 因此调大尺寸时能直观看到放大镜变大，而不是永远同一个圆圈。
@@ -515,6 +541,13 @@ class ScreenshotPage(SettingsPage):
         self.form.addRow("十字线颜色", crosshair_color)
         self.number("crosshair_width", "十字线宽度 (px)", 1, 8,
                     "设置截图定位十字线宽度")
+        self.check("crosshair_adaptive", "十字线自适应颜色",
+                   "按十字线所在区域的实际像素自动换色，任何背景下都清晰可见"
+                   "（默认开启，默认双色描边）；关闭时用上面的单色")
+        self.choice("crosshair_adaptive_mode", "自适应方式",
+                    [("双色描边（推荐）", "contrast"), ("逐像素反色", "invert")],
+                    "双色描边：按亮度取黑/白并加反色描边，任意背景可见；"
+                    "逐像素反色：对十字线下方像素取反（背景接近中灰时对比偏低）")
         self._section("标尺")
         self.check("ruler_enabled", "标尺", "在截图遮罩边缘显示像素标尺，辅助定位与测量")
         ruler_color = ColorButton(config.data["ruler_color"],

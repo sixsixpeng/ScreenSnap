@@ -261,6 +261,10 @@ DEFAULTS = {
     "sticker_follow_sticker": True,
     "sticker_follow_interval": 120,
     "magnifier": True, "crosshair": True, "crosshair_color": "#ff0000", "crosshair_width": 1,
+    # 2026-10-13：十字线自适应颜色（默认开，默认双色描边；关掉即回到旧的单色行为）。
+    #   adaptive 关 → 用 crosshair_color 单色；开 → 按所在区域实际像素自动换色，
+    #   mode=contrast 双色描边（任意背景都可见，推荐、默认）/ mode=invert 逐像素反色。
+    "crosshair_adaptive": True, "crosshair_adaptive_mode": "contrast",
     "mask_color": "#000000", "mask_opacity": 70,
     "window_detection": True, "window_auto_select": False, "element_depth": 8,
     "window_hover_detect": True, "window_uia_detect": True,
@@ -645,6 +649,8 @@ def validate(data):
             raise ValueError("十字线颜色必须是六位十六进制颜色")
         elif key == "crosshair_width" and not 1 <= value <= 8:
             raise ValueError("十字线宽度必须在 1 到 8 像素之间")
+        elif key == "crosshair_adaptive_mode" and value not in ("contrast", "invert"):
+            raise ValueError("未知十字线自适应方式")
         elif key == "mask_opacity" and not 0 <= value <= 100:
             raise ValueError("遮罩透明度必须在 0 到 100 之间")
         elif key == "magnifier_size" and not 100 <= value <= 320:

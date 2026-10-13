@@ -440,6 +440,8 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `crosshair` | `true` | 是否显示全屏定位十字线。 |
 | `crosshair_color` | `#ff0000` | 定位十字线颜色；可在"设置 > 截图 > 定位辅助"改色。 |
 | `crosshair_width` | `1` px | 定位十字线宽度，范围 1–8 px。 |
+| `crosshair_adaptive` | `true` | 十字线自适应颜色：按所在区域实际像素自动换色（默认开、默认 `contrast` 双色描边；关掉后仍用 `crosshair_color` 单色，与旧版行为一致）。 |
+| `crosshair_adaptive_mode` | `contrast` | 自适应方式：`contrast` 双色描边（默认、推荐，任意背景可见）/ `invert` 逐像素反色。 |
 | `capture_picker_shortcut` | `C` | 在光标处取色一次的按键（一次性动作，无取色态），支持单键、修饰键组合或功能键（如 `Alt+C` / `F2`）；另有选区时按住 `Alt`/`Ctrl` + 左键取样，复制十六进制色值到剪贴板并设为当前标注颜色（避免与左键框选 / UIA 自动识别选择冲突）。 |
 | `capture_copy_shortcut` | `Y` | 选区确认前的「仅复制」键（可配置单键；原地编辑时也可用）。 |
 | `capture_custom_size_shortcut` | `F` | 选区阶段的「自定义尺寸」键。 |

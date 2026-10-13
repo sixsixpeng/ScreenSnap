@@ -2932,6 +2932,103 @@ class MaskWindow(QWidget):
             self.width(), self.height(), self.hover_rect is not None)
         self.paint_cost_stats = [0.0, 0, 0.0]
 
+    def _crosshair_luminance(self):
+        """采样十字线覆盖区域（限本屏）若干像素的平均亮度；无图像/越界返回 None。
+
+        2026-10-13：自适应十字线用。采样源是**冻结帧** `self.image`（物理像素，覆盖整块虚拟桌面），
+        `self.position` 是物理局部坐标 ⇒ 可直接索引；竖线取本屏 y 范围、横线取本屏 x 范围，
+        各约 32 点，成本可控（图像只读，不动任何子控件 ✓ D35）。
+        """
+        image = self.image
+        if image is None:
+            return None
+        image_width, image_height = image.size
+        top = max(0, self.monitor_rect.top())
+        bottom = min(image_height - 1, self.monitor_rect.bottom())
+        left = max(0, self.monitor_rect.left())
+        right = min(image_width - 1, self.monitor_rect.right())
+        if bottom < top or right < left:
+            return None
+
+        def sample(x, y):
+            if 0 <= x < image_width and 0 <= y < image_height:
+                red, green, blue = image.getpixel((x, y))[:3]
+                return 0.299 * red + 0.587 * green + 0.114 * blue
+            return None
+
+        samples = []
+        vertical_x = self.position.x()
+        horizontal_y = self.position.y()
+        if 0 <= vertical_x < image_width:
+            step = max(1, (bottom - top) // 32)
+            for y in range(top, bottom + 1, step):
+                value = sample(vertical_x, y)
+                if value is not None:
+                    samples.append(value)
+        if 0 <= horizontal_y < image_height:
+            step = max(1, (right - left) // 32)
+            for x in range(left, right + 1, step):
+                value = sample(x, horizontal_y)
+                if value is not None:
+                    samples.append(value)
+        if not samples:
+            return None
+        return sum(samples) / len(samples)
+
+    def _crosshair_adaptive_colors(self):
+        """按所在区域平均亮度选一对对比色 (主线色, 描边色)；拿不到像素返回 None。
+
+        暗底主线取白、亮底取黑，另附一条反色描边 ⇒ 任意背景（含颜色很丰富）都至少一色可见。
+        """
+        luminance = self._crosshair_luminance()
+        if luminance is None:
+            return None
+        if luminance < 128:
+            return QColor(255, 255, 255), QColor(0, 0, 0)
+        return QColor(0, 0, 0), QColor(255, 255, 255)
+
+    def _paint_crosshair(self, painter):
+        """绘制全屏十字线。
+
+        `crosshair_adaptive` 关闭时用单色 `crosshair_color`（**关 = 行为与旧版完全一致**）；
+        开启后（**默认**，默认 `contrast`）按所在区域实际像素换色：
+          - `contrast`（默认，推荐）：亮度自适应主线 + 反色描边，任意背景都可见；
+          - `invert`：差值混合逐像素反色 —— 一次绘制、零采样，颜色随区域自然变化，
+            弱点是背景接近中灰时反色后仍近中灰、对比偏低。
+        """
+        logical_position = self.to_logical_point(self.position)
+        width = self.settings.get("crosshair_width", 1)
+        adaptive = bool(self.settings.get("crosshair_adaptive", False))
+        mode = self.settings.get("crosshair_adaptive_mode", "contrast")
+        if adaptive and mode == "invert":
+            painter.setCompositionMode(QPainter.CompositionMode_Difference)
+            painter.setPen(QPen(QColor(255, 255, 255), width))
+            # 差值混合对同一像素作用两次会抵消（≈ 还原成底色）⇒ 水平线在竖线两侧断开一个线宽，
+            # 让十字交叉点（正是光标焦点）只被反色一次；断开处的缝隙由竖线覆盖，视觉无断口。
+            gap = max(1, width)
+            painter.drawLine(logical_position.x(), 0, logical_position.x(), self.height())
+            painter.drawLine(0, logical_position.y(),
+                             logical_position.x() - gap, logical_position.y())
+            painter.drawLine(logical_position.x() + gap, logical_position.y(),
+                             self.width(), logical_position.y())
+            painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+            return
+        if adaptive:
+            colors = self._crosshair_adaptive_colors()
+            if colors is None:
+                painter.setPen(QPen(QColor(self.settings.get("crosshair_color", "#ff0000")), width))
+            else:
+                main, halo = colors
+                # 先画更宽的描边、再画主线 ⇒ 两种颜色互相衬底。
+                painter.setPen(QPen(halo, width + 2))
+                painter.drawLine(logical_position.x(), 0, logical_position.x(), self.height())
+                painter.drawLine(0, logical_position.y(), self.width(), logical_position.y())
+                painter.setPen(QPen(main, width))
+        else:
+            painter.setPen(QPen(QColor(self.settings.get("crosshair_color", "#ff0000")), width))
+        painter.drawLine(logical_position.x(), 0, logical_position.x(), self.height())
+        painter.drawLine(0, logical_position.y(), self.width(), logical_position.y())
+
     def paintEvent(self, event):
         """遮罩、锚点和 HUD 仅绘制在窗口表面，不写入原始截图。"""
         started = time.perf_counter()
@@ -2984,11 +3081,7 @@ class MaskWindow(QWidget):
                 else:
                     painter.drawRect(anchor)
         if self.settings["crosshair"]:
-            logical_position = self.to_logical_point(self.position)
-            painter.setPen(QPen(QColor(self.settings.get("crosshair_color", "#ff0000")),
-                                self.settings.get("crosshair_width", 1)))
-            painter.drawLine(logical_position.x(), 0, logical_position.x(), self.height())
-            painter.drawLine(0, logical_position.y(), self.width(), logical_position.y())
+            self._paint_crosshair(painter)
         current_selection = self.selection.active or (
             self.selection.rects[-1] if self.selection.rects else None
         )

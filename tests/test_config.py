@@ -1422,6 +1422,7 @@ class ConfigTests(CoreTests):
                                   "capture_fullscreen_action", "capture_monitor_action",
                                   "capture_repeat_action")),
                 ("截图", "定位辅助", ("crosshair", "crosshair_color", "crosshair_width",
+                                  "crosshair_adaptive", "crosshair_adaptive_mode",
                                   "magnifier_size", "magnifier_grid")),
                 ("截图", "截图快捷操作", ("capture_quick_sticker_enabled", "capture_quick_sticker_shortcut",
                                      "capture_save_shortcut", "capture_custom_size_shortcut",
@@ -2121,7 +2122,10 @@ class ConfigTests(CoreTests):
                 validate({"crosshair_width": 9})
 
             bounds = {"left": 0, "top": 0, "width": 100, "height": 80}
-            settings = dict(config.data, crosshair=True, magnifier=False, mask_opacity=0)
+            # 显式关掉自适应：本条只验证 crosshair_color 单色可配置且真的绘制，
+            # 否则默认开的自适应会改用黑/白对比色，红色断言必然失败（自适应由下一条用例覆盖）。
+            settings = dict(config.data, crosshair=True, crosshair_adaptive=False,
+                            magnifier=False, mask_opacity=0)
             with patch("screenshot.mask_window.visible_windows", return_value=[]):
                 mask = MaskWindow(Image.new("RGB", (100, 80), "white"), bounds, [bounds], settings)
             mask.position = QPoint(50, 40)
@@ -2134,6 +2138,109 @@ class ConfigTests(CoreTests):
             self.assertTrue(any(pixel.red() > pixel.green() * 1.5
                                 and pixel.red() > pixel.blue() * 1.5
                                 for pixel in red_pixels))
+            mask.close()
+
+    def test_crosshair_adaptive_colors_by_region_and_toggle(self):
+        """十字线自适应：开关默认开（默认双色描边）；关闭回到旧单色，开启后按所在区域像素换色。"""
+        from config.config_manager import DEFAULTS, validate
+        from screenshot.mask_window import MaskWindow
+        from ui.settings_screenshot import ScreenshotPage
+
+        # 1) 设置页：默认开启 + 模式默认 contrast（双色描边）；改动可持久化（不改动现有颜色/宽度控件）；
+        #    「定位辅助」预览也要随开关换色（自适应深色线 ↔ 关闭后单色红），不能开了预览却没变化。
+        with tempfile.TemporaryDirectory() as folder:
+            config = ConfigManager(Path(folder) / "settings.json")
+            page = ScreenshotPage(config, config.save)
+            toggle = page.controls["crosshair_adaptive"]
+            mode = page.controls["crosshair_adaptive_mode"]
+            self.assertTrue(toggle.isChecked(), "自适应应默认开启（默认双色描边）✗")
+            self.assertEqual(mode.currentData(), "contrast")
+            preview = next(item for item in page.previews if item.kind == "assist")
+            # 钉死预览尺寸：滚动区会把内容控件拉到视口宽度，size 不定断言点就会落进别的色块。
+            preview.setFixedSize(260, 100)
+            # 线宽调到 3：中心像素被线条完全覆盖，避免 1px 抗锯齿半透混合让断言依赖覆盖率的细节。
+            page.controls["crosshair_width"].setValue(3)
+            area = preview.rect().adjusted(1, 1, -1, -1)
+            # 断言点取竖线上的 (center.x, top+8)：避开放大镜镜片（中心 ±27px）与三条灰色横线。
+            line_x, line_y = int(area.center().x()), int(area.top()) + 8
+
+            def crosshair_pixel():
+                # grab() 强制同步重绘；读竖线上的采样点。
+                return preview.grab().toImage().pixelColor(line_x, line_y)
+
+            pixel = crosshair_pixel()
+            self.assertTrue(pixel.red() < 60,
+                            "默认（双色描边）预览应是深主线（浅底取黑）: %s ✗" % pixel.name())
+            toggle.setChecked(False)
+            pixel = crosshair_pixel()
+            self.assertTrue(pixel.red() > 180 and pixel.green() < 80,
+                            "关闭自适应后预览应回到单色红十字线: %s ✗" % pixel.name())
+            toggle.setChecked(True)
+            mode.setCurrentIndex(mode.findData("invert"))
+            pixel = crosshair_pixel()
+            self.assertTrue(pixel.red() < 60,
+                            "invert 模式下预览浅灰处应被反成深色: %s ✗" % pixel.name())
+            saved = ConfigManager(config.path).data
+            self.assertTrue(saved["crosshair_adaptive"])
+            self.assertEqual(saved["crosshair_adaptive_mode"], "invert")
+
+        # 2) 校验：默认值与非法模式。
+        self.assertTrue(validate({})["crosshair_adaptive"])
+        self.assertEqual(validate({})["crosshair_adaptive_mode"], "contrast")
+        with self.assertRaises(ValueError):
+            validate({"crosshair_adaptive_mode": "unknown"})
+
+        # 3) contrast：暗底主线取白、亮底取黑，并各配反色描边；渲染像素随背景变化。
+        #    像素断言前先隐藏提示条并关标尺 —— 否则它们盖在十字线上，断言会在提示条文字上"假通过"。
+        bounds = {"left": 0, "top": 0, "width": 100, "height": 80}
+        for background, expected_main, expected_halo in (("black", "#ffffff", "#000000"),
+                                                        ("white", "#000000", "#ffffff")):
+            settings = dict(DEFAULTS, crosshair=True, crosshair_adaptive=True,
+                            crosshair_adaptive_mode="contrast", crosshair_width=3,
+                            magnifier=False, mask_opacity=0, ruler_enabled=False)
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (100, 80), background), bounds, [bounds], settings)
+            try:
+                mask.position = QPoint(50, 40)
+                main, halo = mask._crosshair_adaptive_colors()
+                self.assertEqual(main.name(), expected_main, background)
+                self.assertEqual(halo.name(), expected_halo, background)
+                mask.show()
+                mask.info_bar.hide()
+                self.app.processEvents()
+                column = [mask.grab().toImage().pixelColor(50, y) for y in range(80)]
+                if background == "black":
+                    self.assertTrue(any(pixel.red() > 200 and pixel.green() > 200 for pixel in column),
+                                    "黑底应出现亮的自适应十字线 ✗")
+                else:
+                    self.assertTrue(any(pixel.red() < 60 and pixel.green() < 60 for pixel in column),
+                                    "白底应出现暗的自适应十字线 ✗")
+            finally:
+                mask.close()
+
+        # 4) invert：逐像素反色 ⇒ 黑底竖线上应出现亮像素，且不崩；
+        #    十字交叉点（光标焦点）必须只被反色一次 —— 反两次会抵消回底色，交叉点变黑就是回归。
+        settings = dict(DEFAULTS, crosshair=True, crosshair_adaptive=True,
+                        crosshair_adaptive_mode="invert", crosshair_width=3,
+                        magnifier=False, mask_opacity=0, ruler_enabled=False)
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (100, 80), "black"), bounds, [bounds], settings)
+        try:
+            mask.position = QPoint(50, 40)
+            mask.show()
+            mask.info_bar.hide()
+            self.app.processEvents()
+            grabbed = mask.grab().toImage()
+            column = [grabbed.pixelColor(50, y) for y in range(80)]
+            self.assertTrue(any(pixel.red() > 200 for pixel in column),
+                            "黑底逐像素反色后应先出现亮十字线 ✗")
+            crossing = grabbed.pixelColor(50, 40)
+            self.assertTrue(crossing.red() > 200,
+                            "交叉点被反色两次会还原成黑底（必须只反一次）: %s ✗" % crossing.name())
+            gap_side = grabbed.pixelColor(50 - 3 - 1, 40)
+            self.assertTrue(gap_side.red() > 200,
+                            "水平线断口外侧应保持反色亮线: %s ✗" % gap_side.name())
+        finally:
             mask.close()
 
     def test_mask_left_double_click_uses_explicit_save_setting(self):
