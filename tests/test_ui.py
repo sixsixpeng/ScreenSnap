@@ -16,6 +16,25 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class UiTests(CoreTests):
+    def test_hint_preview_magnifier_and_text_share_the_same_coordinates(self):
+        from ui.widgets.hint_preview import HintBarPreview
+
+        with tempfile.TemporaryDirectory() as folder:
+            config = ConfigManager(Path(folder) / "settings.json")
+            preview = HintBarPreview(config)
+            preview.resize(600, 400)
+            transforms = []
+            try:
+                def record(painter, *args):
+                    transforms.append((painter.transform().dx(), painter.transform().dy()))
+
+                with patch("ui.widgets.hint_preview._draw_magnifier", new=record):
+                    preview.grab()
+                self.assertTrue(transforms)
+                self.assertTrue(all(transform == (0, 0) for transform in transforms))
+            finally:
+                preview.close()
+
     def test_magnifier_and_hint_bar_flip_as_one_group(self):
         """2026-10-11 用户要求：放大镜与提示条**整组一起翻**。
 

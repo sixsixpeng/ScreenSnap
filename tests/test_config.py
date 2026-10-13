@@ -491,6 +491,315 @@ class ConfigTests(CoreTests):
         self.assertEqual(migrate_legacy_settings({"manual_dir": "manual"}),
                          {"save_dir": "manual"})
 
+    def test_default_directories_display_without_becoming_explicit_preferences(self):
+        from core.path_utils import configured_dir
+
+        with tempfile.TemporaryDirectory() as folder:
+            config = ConfigManager(Path(folder) / "settings.json")
+            with patch("logger.log_setup.sys.argv", [str(Path(folder) / "main.py")]), \
+                    patch("logger.log_setup.sys.frozen", False, create=True):
+                settings = SettingsWindow(config)
+                try:
+                    expected = {"save_dir": configured_dir(config.data), "log_dir": Path(folder) / "logs"}
+                    for key, directory in expected.items():
+                        with self.subTest(key=key):
+                            control = next(settings.pages.widget(index).controls[key]
+                                           for index in range(settings.pages.count())
+                                           if key in settings.pages.widget(index).controls)
+                            self.assertEqual(control.input.text(), str(directory))
+                            control.input.editingFinished.emit()
+                            settings.flush_persist()
+                            self.assertEqual(config.data[key], "")
+                            self.assertEqual(ConfigManager(config.path).data[key], "")
+                            control.input.setText(str(Path(folder) / key))
+                            control.input.editingFinished.emit()
+                            self.assertEqual(config.data[key], str(Path(folder) / key))
+                            control.input.clear()
+                            control.input.editingFinished.emit()
+                            self.assertEqual(control.input.text(), str(directory))
+                            self.assertEqual(config.data[key], "")
+                finally:
+                    settings.close()
+
+    def test_directory_preferences_reject_invalid_types_and_repair_to_default(self):
+        from config.config_manager import repair, validate
+
+        for key in ("save_dir", "log_dir"):
+            for value in (None, False, 17, [], {}):
+                with self.subTest(key=key, value=value):
+                    with self.assertRaises(ValueError):
+                        validate({key: value})
+                    repaired, dropped = repair({key: value})
+                    self.assertEqual(repaired[key], "")
+                    self.assertIn(key, dropped)
+
+    def test_directory_page_reset_displays_default_and_keeps_other_page(self):
+        from core.path_utils import configured_dir
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("logger.log_setup.sys.argv", [str(Path(folder) / "main.py")]), \
+                patch("logger.log_setup.sys.frozen", False, create=True):
+            config = ConfigManager(Path(folder) / "settings.json")
+            config.data.update(save_dir=str(Path(folder) / "pictures"), log_dir=str(Path(folder) / "custom-logs"))
+            settings = SettingsWindow(config)
+            try:
+                def page_for(key):
+                    return next(settings.pages.widget(index) for index in range(settings.pages.count())
+                                if key in settings.pages.widget(index).controls)
+
+                save_page, log_page = page_for("save_dir"), page_for("log_dir")
+                save_page.reset_page()
+                self.assertEqual(config.data["save_dir"], "")
+                self.assertEqual(save_page.controls["save_dir"].input.text(), str(configured_dir(config.data)))
+                self.assertEqual(config.data["log_dir"], str(Path(folder) / "custom-logs"))
+                save_page.controls["save_dir"].input.editingFinished.emit()
+                self.assertEqual(config.data["save_dir"], "")
+                log_page.reset_page()
+                self.assertEqual(config.data["log_dir"], "")
+                self.assertEqual(log_page.controls["log_dir"].input.text(), str(Path(folder) / "logs"))
+                log_page.controls["log_dir"].input.editingFinished.emit()
+                settings.flush_persist()
+                persisted = ConfigManager(config.path)
+                self.assertEqual((persisted.data["save_dir"], persisted.data["log_dir"]), ("", ""))
+            finally:
+                settings.close()
+
+    def test_default_directory_display_survives_full_reset_import_and_reload(self):
+        from PySide6.QtWidgets import QMessageBox
+        from core.path_utils import configured_dir
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("logger.log_setup.sys.argv", [str(Path(folder) / "main.py")]), \
+                patch("logger.log_setup.sys.frozen", False, create=True), \
+                patch("ui.settings_window.set_start_on_boot"), \
+                patch("ui.settings_window.QMessageBox.information"):
+            config = ConfigManager(Path(folder) / "settings.json")
+            config.data.update(save_dir=str(Path(folder) / "custom-images"), log_dir=str(Path(folder) / "custom-logs"))
+            config.save()
+            settings = SettingsWindow(config)
+
+            def assert_controls():
+                for key, expected in (("save_dir", configured_dir(config.data)),
+                                      ("log_dir", Path(folder) / "logs")):
+                    control = next(settings.pages.widget(index).controls[key]
+                                   for index in range(settings.pages.count())
+                                   if key in settings.pages.widget(index).controls)
+                    self.assertEqual(control.input.text(), str(expected))
+                    self.assertEqual(config.data[key], "")
+
+            try:
+                with patch("ui.settings_window.yes_no_dialog") as confirmation:
+                    confirmation.return_value.exec.return_value = QMessageBox.Yes
+                    settings.reset_defaults()
+                assert_controls()
+                exported = Path(folder) / "export.json"
+                config.export_to(exported)
+                self.assertEqual({key: json.loads(exported.read_text(encoding="utf-8"))[key]
+                                  for key in ("save_dir", "log_dir")}, {"save_dir": "", "log_dir": ""})
+                for imported in ({}, {"save_dir": "", "log_dir": ""}):
+                    exported.write_text(json.dumps(imported), encoding="utf-8")
+                    with patch("ui.settings_window.QFileDialog.getOpenFileName", return_value=(str(exported), "")):
+                        settings.import_settings()
+                    assert_controls()
+                    self.assertEqual((ConfigManager(config.path).data["save_dir"],
+                                      ConfigManager(config.path).data["log_dir"]), ("", ""))
+                custom = {"save_dir": str(Path(folder) / "restored-images"),
+                          "log_dir": str(Path(folder) / "restored-logs")}
+                exported.write_text(json.dumps(custom), encoding="utf-8")
+                with patch("ui.settings_window.QFileDialog.getOpenFileName", return_value=(str(exported), "")):
+                    settings.import_settings()
+                for key, expected in custom.items():
+                    control = next(settings.pages.widget(index).controls[key]
+                                   for index in range(settings.pages.count())
+                                   if key in settings.pages.widget(index).controls)
+                    self.assertEqual(control.input.text(), expected)
+                    self.assertEqual(ConfigManager(config.path).data[key], expected)
+                config.export_to(exported)
+                self.assertEqual({key: json.loads(exported.read_text(encoding="utf-8"))[key]
+                                  for key in custom}, custom)
+            finally:
+                settings.close()
+
+    def test_directory_display_after_version_gate_and_complete_data_clear(self):
+        from core.path_utils import clear_data_directory, configured_dir
+        from core.version import APP_VERSION
+        from main import Application
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("logger.log_setup.sys.argv", [str(Path(folder) / "main.py")]), \
+                patch("logger.log_setup.sys.frozen", False, create=True):
+            root = Path(folder) / "ScreenSnap"
+            for custom in (False, True):
+                config = ConfigManager(root / "settings.json")
+                config.data.update(app_version="previous-version", save_dir="", log_dir="")
+                if custom:
+                    config.data.update(save_dir=str(Path(folder) / "pictures"), log_dir=str(Path(folder) / "logfiles"))
+                expected = {key: config.data[key] for key in ("save_dir", "log_dir")}
+                config.save()
+                application = Application.__new__(Application)
+                application.config, application.logger = config, Mock()
+                application.version_reset_from = ""
+                with patch("core.path_utils.data_dir", return_value=root):
+                    self.assertTrue(application.apply_version_gate())
+                reloaded = ConfigManager(config.path)
+                self.assertEqual({key: reloaded.data[key] for key in expected}, expected)
+                self.assertEqual(reloaded.data["app_version"], APP_VERSION)
+                settings = SettingsWindow(reloaded)
+                try:
+                    for key in expected:
+                        fallback = configured_dir({}) if key == "save_dir" else Path(folder) / "logs"
+                        control = next(settings.pages.widget(index).controls[key]
+                                       for index in range(settings.pages.count())
+                                       if key in settings.pages.widget(index).controls)
+                        self.assertEqual(control.input.text(), expected[key] or str(fallback))
+                finally:
+                    settings.close()
+            with patch("core.path_utils.data_dir", return_value=root):
+                clear_data_directory()
+            config = ConfigManager(root / "settings.json")
+            settings = SettingsWindow(config)
+            try:
+                for key in ("save_dir", "log_dir"):
+                    self.assertEqual(config.data[key], "")
+                    control = next(settings.pages.widget(index).controls[key]
+                                   for index in range(settings.pages.count())
+                                   if key in settings.pages.widget(index).controls)
+                    expected = configured_dir({}) if key == "save_dir" else Path(folder) / "logs"
+                    self.assertEqual(control.input.text(), str(expected))
+            finally:
+                settings.close()
+
+    def test_log_default_directory_matches_source_and_packaged_runtime(self):
+        from logger.log_setup import log_directory
+        from ui.settings_log import LogPage
+
+        with tempfile.TemporaryDirectory() as folder:
+            startup = Path(folder) / "source" / "main.py"
+            executable = Path(folder) / "package" / "ScreenSnap.exe"
+            custom = Path(folder) / "custom"
+            custom.mkdir()
+            for frozen, expected in ((False, startup.parent / "logs"), (True, executable.parent / "logs")):
+                with self.subTest(frozen=frozen), patch("logger.log_setup.sys.argv", [str(startup)]), \
+                        patch("logger.log_setup.sys.executable", str(executable)), \
+                        patch("logger.log_setup.sys.frozen", frozen, create=True):
+                    config = ConfigManager(Path(folder) / "settings.json")
+                    page = LogPage(config, Mock())
+                    try:
+                        self.assertEqual(log_directory(config.data), expected)
+                        self.assertEqual(page.controls["log_dir"].input.text(), str(expected))
+                        self.assertFalse(expected.exists(), "Reading defaults must not create the log directory")
+                        self.assertEqual(log_directory({"log_dir": str(custom)}), custom)
+                        self.assertEqual(log_directory({"log_dir": str(Path(folder) / "missing")}), expected)
+                    finally:
+                        page.deleteLater()
+
+    def test_default_directory_browser_and_open_use_effective_paths(self):
+        from PySide6.QtCore import QUrl
+        from PySide6.QtWidgets import QFileDialog
+        from ui.widgets.file_path_edit import FilePathEdit
+
+        with tempfile.TemporaryDirectory() as folder:
+            default = Path(folder) / "default"
+            changed = Mock()
+            control = FilePathEdit("", changed, default_path=lambda: default)
+            try:
+                with patch.object(QFileDialog, "getExistingDirectory", return_value="") as choose:
+                    control.browse()
+                    choose.assert_called_once_with(control, "选择目录", str(default))
+                    changed.assert_not_called()
+                with patch("ui.widgets.file_path_edit.QDesktopServices.openUrl", return_value=True) as open_url:
+                    self.assertTrue(control.open_directory())
+                    open_url.assert_called_once_with(QUrl.fromLocalFile(str(default)))
+                    self.assertTrue(default.is_dir())
+                    changed.assert_not_called()
+                custom = str(Path(folder) / "custom")
+                with patch.object(QFileDialog, "getExistingDirectory", return_value=custom):
+                    control.browse()
+                changed.assert_called_once_with(custom)
+                control.set_value("")
+                self.assertEqual(control.input.text(), str(default))
+                changed.reset_mock()
+                with patch.object(QFileDialog, "getExistingDirectory", return_value=str(default)):
+                    control.browse()
+                changed.assert_called_once_with(str(default))
+            finally:
+                control.deleteLater()
+
+    def test_displayed_log_default_is_the_actual_logger_destination(self):
+        from config.config_manager import DEFAULTS
+        from logger.log_setup import configure_logging, log_directory
+        from ui.settings_log import LogPage
+
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("logger.log_setup.sys.argv", [str(Path(folder) / "main.py")]), \
+                patch("logger.log_setup.sys.frozen", False, create=True):
+            config = ConfigManager(Path(folder) / "settings.json")
+            config.data.update(log_dir="", logging_enabled=True, log_monthly_folder=False)
+            page = LogPage(config, Mock())
+            try:
+                directory = Path(page.controls["log_dir"].input.text())
+                self.assertEqual(directory, log_directory(config.data))
+                with patch("logger.log_setup.enable_crash_dumps"):
+                    logger = configure_logging(config.data)
+                    logger.info("temporary default directory verification")
+                    handlers = [handler for handler in logger.handlers if hasattr(handler, "baseFilename")]
+                    self.assertEqual(Path(handlers[0].baseFilename), directory / "app.log")
+                    handlers[0].flush()
+                    self.assertIn("temporary default directory verification",
+                                  (directory / "app.log").read_text(encoding="utf-8"))
+            finally:
+                with patch("logger.log_setup.enable_crash_dumps"):
+                    configure_logging(dict(DEFAULTS, logging_enabled=False))
+                page.deleteLater()
+
+    def test_directory_full_reset_failure_keeps_config_and_controls(self):
+        from PySide6.QtWidgets import QMessageBox
+
+        with tempfile.TemporaryDirectory() as folder, patch("ui.settings_window.set_start_on_boot"), \
+                patch("ui.settings_window.QMessageBox.warning"):
+            config = ConfigManager(Path(folder) / "settings.json")
+            config.data.update(save_dir=str(Path(folder) / "images"), log_dir=str(Path(folder) / "logs"))
+            config.save()
+            settings = SettingsWindow(config)
+            original = dict(config.data)
+            disk = config.path.read_bytes()
+            try:
+                settings._persist_timer.start()
+                with patch.object(config, "save", side_effect=OSError("synthetic write failure")), \
+                        patch("ui.settings_window.yes_no_dialog") as confirmation:
+                    confirmation.return_value.exec.return_value = QMessageBox.Yes
+                    settings.reset_defaults()
+                self.assertEqual(config.data, original)
+                self.assertEqual(config.path.read_bytes(), disk)
+                self.assertTrue(settings._persist_timer.isActive())
+                for key in ("save_dir", "log_dir"):
+                    control = next(settings.pages.widget(index).controls[key]
+                                   for index in range(settings.pages.count())
+                                   if key in settings.pages.widget(index).controls)
+                    self.assertEqual(control.input.text(), original[key])
+                    control.input.editingFinished.emit()
+                    self.assertEqual(config.data[key], original[key])
+            finally:
+                settings.close()
+
+    def test_directory_page_reset_synchronizes_filename_text(self):
+        from config.config_manager import DEFAULTS
+
+        with tempfile.TemporaryDirectory() as folder:
+            config = ConfigManager(Path(folder) / "settings.json")
+            config.data.update(filename="custom_{time}", save_dir=str(Path(folder) / "images"))
+            settings = SettingsWindow(config)
+            try:
+                page = next(settings.pages.widget(index) for index in range(settings.pages.count())
+                            if "save_dir" in settings.pages.widget(index).controls)
+                page.reset_page()
+                self.assertEqual(page.controls["filename"].text(), DEFAULTS["filename"])
+                page.controls["filename"].editingFinished.emit()
+                self.assertEqual(config.data["filename"], DEFAULTS["filename"])
+                self.assertEqual(config.data["save_dir"], "")
+            finally:
+                settings.close()
+
     def test_log_directory_setting_persists(self):
         from ui.widgets.file_path_edit import FilePathEdit
 
@@ -3326,7 +3635,9 @@ class ConfigTests(CoreTests):
                                  DEFAULTS["sticker_snap_threshold"])
                 screenshot_page = settings.page("截图")
                 save_page = settings.page("保存与输出")
-                self.assertEqual(save_page.controls["save_dir"].input.text(), "")
+                from core.path_utils import configured_dir
+                self.assertEqual(save_page.controls["save_dir"].input.text(), str(configured_dir(manager.data)))
+                self.assertEqual(manager.data["save_dir"], "")
                 self.assertEqual(screenshot_page.controls["crosshair_color"].color, "#ff0000")
                 self.assertEqual(screenshot_page.controls["element_depth"].value(), 8)
                 self.assertEqual(screenshot_page.controls["mask_opacity"].value(), 70)

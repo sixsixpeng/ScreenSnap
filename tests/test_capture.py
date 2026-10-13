@@ -222,6 +222,40 @@ class CaptureTests(CoreTests):
             self.assertEqual(len(selection.rects), 1)
             self.assertIsNone(selection.resizing)
 
+    def test_selection_pixel_bounds_match_creation_and_resize_in_every_direction(self):
+        import itertools
+
+        for origin, size, scale, direction in itertools.product(
+                (QPoint(0, 0), QPoint(1920, 0), QPoint(-2560, -1440), QPoint(3840, -2160)),
+                ((1920, 1080), (2560, 1440), (3840, 2160)),
+                (1.0, 1.25, 1.5, 1.75),
+                ((1, 1), (-1, 1), (1, -1), (-1, -1))):
+            width, height = size
+            anchor = origin + QPoint(width // 2, height // 2)
+            point = anchor + QPoint(direction[0] * round(40 * scale), direction[1] * round(30 * scale))
+            expected = QRect(min(anchor.x(), point.x()), min(anchor.y(), point.y()),
+                             abs(point.x() - anchor.x()) + 1, abs(point.y() - anchor.y()) + 1)
+            with self.subTest(origin=origin, size=size, scale=scale, direction=direction):
+                selection = SelectionRects()
+                selection.begin_new(anchor)
+                selection.update(point)
+                self.assertEqual(selection.active, expected)
+                self.assertEqual(SelectionRects.resized_rect(anchor, point, "both", expected), expected)
+                self.assertEqual(SelectionRects.resized_rect(point, anchor, "both", expected), expected)
+                self.assertEqual(SelectionRects.resized_rect(anchor, anchor, "both", expected),
+                                 QRect(anchor.x(), anchor.y(), 1, 1))
+
+    def test_capture_size_text_uses_physical_pixels_in_all_selection_states(self):
+        from config.config_manager import DEFAULTS
+        from screenshot.hint_items import hint_texts
+
+        for inline, right_capture, multi_select in ((False, False, False), (True, False, False),
+                                                     (False, True, False), (False, True, True)):
+            texts = hint_texts(DEFAULTS, (-320, 40), (641, 361), inline=inline,
+                               right_capture=right_capture, multi_select=multi_select)
+            self.assertEqual(texts["coords"], "-320, 40  641 x 361 物理px")
+        self.assertEqual(hint_texts(DEFAULTS, (-320, 40), None)["coords"], "-320, 40")
+
     def test_selection_resizes_from_all_four_edge_midpoints(self):
         cases = (
             (QPoint(30, 10), QPoint(30, 6), "y", "vertical", "top"),
@@ -314,7 +348,10 @@ class CaptureTests(CoreTests):
                 else:
                     QTest.keyClick(mask, key)
                 self.assertEqual(mask.selection.nudge_corner[2], before + QPoint(dx, dy))
-            self.assertEqual(mask.selection.rects[0], QRect(mask.selection.nudge_corner[1], target).normalized())
+            anchor = mask.selection.nudge_corner[1]
+            self.assertEqual(mask.selection.rects[0],
+                         QRect(min(anchor.x(), target.x()), min(anchor.y(), target.y()),
+                             abs(target.x() - anchor.x()) + 1, abs(target.y() - anchor.y()) + 1))
             mask._grip_down = False
         mask.close()
 
@@ -413,6 +450,65 @@ class CaptureTests(CoreTests):
             self.assertEqual(mask.selection.active.size(), QSize(200, 150))
         finally:
             mask.close()
+
+    def test_window_edge_snap_uses_exact_pixel_bounds_for_left_and_right_on_both_views(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": -320, "top": -240, "width": 320, "height": 240}
+        window = (-280, -200, -160, -120)
+        expected = QRect(40, 40, 120, 80)
+        for primary in (True, False):
+            with patch("screenshot.mask_window.visible_windows", return_value=[window]):
+                mask = MaskWindow(Image.new("RGB", (320, 240)), bounds, [bounds],
+                                  dict(DEFAULTS, window_detection=False, inline_edit=False), primary=primary)
+            try:
+                for button in (Qt.LeftButton, Qt.RightButton):
+                    for start, end in ((expected.topLeft(), expected.bottomRight()),
+                                       (expected.bottomRight(), expected.topLeft())):
+                        with self.subTest(primary=primary, button=button, start=start):
+                            mask.selection.begin_new(start)
+                            event = QMouseEvent(QEvent.MouseMove, QPointF(end), QPointF(end),
+                                                Qt.NoButton, button, Qt.NoModifier)
+                            mask.mouseMoveEvent(event)
+                            self.assertEqual(mask.selection.active, expected)
+            finally:
+                mask.close()
+
+    def test_release_commits_final_pointer_and_preserves_reverse_keyboard_bounds(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 320, "height": 240}
+        for button in (Qt.LeftButton, Qt.RightButton):
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (320, 240)), bounds, [bounds],
+                                  dict(DEFAULTS, window_detection=False, inline_edit=False))
+            try:
+                with patch.object(mask, "complete"):
+                    start, last, final = QPoint(50, 50), QPoint(100, 90), QPoint(130, 110)
+                    mask.mousePressEvent(QMouseEvent(QEvent.MouseButtonPress, QPointF(start), QPointF(start),
+                                                     button, button, Qt.NoModifier))
+                    mask.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, QPointF(last), QPointF(last),
+                                                    Qt.NoButton, button, Qt.NoModifier))
+                    mask.mouseReleaseEvent(QMouseEvent(QEvent.MouseButtonRelease, QPointF(final), QPointF(final),
+                                                       button, Qt.NoButton, Qt.NoModifier))
+                    self.assertEqual(mask.selection.rects[-1], QRect(50, 50, 81, 61))
+                    mask.selection.rects.clear()
+                    mask.selection.begin_new(QPoint(200, 160))
+                    mask.position = QPoint(61, 51)
+                    mask.selection.update(mask.position)
+                    self.assertTrue(mask._nudge_active_region(-1, -1))
+                    self.assertEqual(mask.selection.active, QRect(60, 50, 141, 111))
+                    mask.mouseReleaseEvent(QMouseEvent(QEvent.MouseButtonRelease, QPointF(61, 51), QPointF(61, 51),
+                                                       button, Qt.NoButton, Qt.NoModifier))
+                    self.assertEqual(mask.selection.rects[-1], QRect(60, 50, 141, 111))
+            finally:
+                mask.close()
 
     def test_badge_poll_refreshes_position_from_live_cursor(self):
         """2026-10-12 左键整屏专项：左键划满整屏进入原地编辑后，画布（遮罩子控件）拦截鼠标移动

@@ -32,7 +32,8 @@ class StickerRow(QWidget):
         thumb.installEventFilter(self)
         layout.addWidget(thumb)
         size = sticker.pixmap.size()
-        info = QLabel(f"{sticker.describe()}\n{size.width()}×{size.height()} · ({sticker.x()}, {sticker.y()})")
+        info = QLabel(f"{sticker.describe()}\n{size.width()}×{size.height()} 物理px · "
+                  f"位置 ({sticker.x()}, {sticker.y()}) 逻辑px")
         info.setWordWrap(True)
         self.selection_targets.append(info)
         info.installEventFilter(self)
