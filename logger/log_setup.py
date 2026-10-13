@@ -10,6 +10,14 @@ from pathlib import Path
 from logger.log_context import ContextFilter
 
 
+def log_directory(settings):
+    requested = Path(settings.get("log_dir") or "").expanduser()
+    if settings.get("log_dir") and requested.is_dir():
+        return requested
+    startup = sys.executable if getattr(sys, "frozen", False) else sys.argv[0]
+    return Path(startup).resolve().parent / "logs"
+
+
 class MonthlyDirectoryTimedRotatingFileHandler(TimedRotatingFileHandler):
     """按月切换日志目录，同时保留配置的日/小时文件轮转。"""
 
@@ -57,13 +65,8 @@ def configure_logging(settings):
     # 标准库未内建 TRACE，这里为更细粒度日志分配低于 DEBUG 的等级。
     logging.addLevelName(5, "TRACE")
     logger.setLevel(5 if level == "TRACE" else getattr(logging, level, logging.INFO))
-    requested = Path(settings.get("log_dir") or "").expanduser()
-    if settings.get("log_dir") and requested.is_dir():
-        directory = requested
-    else:
-        startup = sys.executable if getattr(sys, "frozen", False) else sys.argv[0]
-        directory = Path(startup).resolve().parent / "logs"
-        directory.mkdir(parents=True, exist_ok=True)
+    directory = log_directory(settings)
+    directory.mkdir(parents=True, exist_ok=True)
     if settings.get("log_monthly_folder", True):
         handler = MonthlyDirectoryTimedRotatingFileHandler(
             directory, "app.log", when=settings["log_when"], backupCount=14,

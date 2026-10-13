@@ -104,11 +104,9 @@ class HintBarPreview(QWidget):
             size = int(data.get("magnifier_size", 140) or 140)
             frame = _magnifier_rect(cursor, inner, size)
             painter.setClipRect(inner)
-            painter.translate(-frame.x(), -frame.y())
             _draw_magnifier(painter, self._sample_image(), cursor, inner, cursor,
                             data.get("magnifier_grid", True),
                             data.get("magnifier_grid_color", "#cccccc"), size)
-            painter.translate(frame.x(), frame.y())
             painter.setClipping(False)
         anchor = frame if not frame.isEmpty() else QRect(cursor.x() + 32, cursor.y() + 32, 8, 8)
         items = _hint_items(data, (cursor.x(), cursor.y()), (240, 160))

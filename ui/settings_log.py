@@ -2,6 +2,7 @@
 
 from ui.widgets.file_path_edit import FilePathEdit
 from ui.widgets.tooltip import SettingsPage
+from logger.log_setup import log_directory
 
 
 class LogPage(SettingsPage):
@@ -25,17 +26,9 @@ class LogPage(SettingsPage):
                "开启后按 YYYY-MM 创建子目录；跨月后新日志会自动写入新的月份目录。\n"
                "关闭后日志直接写入所选目录。")
         directory = FilePathEdit(config.data["log_dir"],
-                     lambda value: self.update_value("log_dir", value))
+                     lambda value: self.update_value("log_dir", value),
+                     open_path=lambda: log_directory(self.config.data),
+                     default_path=lambda: log_directory({"log_dir": ""}))
         directory.setToolTip("仅使用已存在的目录；留空或目录不存在时保存到启动文件所在目录的 logs 文件夹")
         self.controls["log_dir"] = directory
-        # 2026-10-12（用户要求 ✓）：未设置时也要让人看到**当前实际会用的目录** ✓
-        #   （只在占位文字里显示 ✓ 绝不写回配置 ✗ 以免改变行为 ✓）。
-        if not str(config.data.get("log_dir") or ""):
-            try:
-                import sys as _sys
-                import pathlib as _pl
-                _default_logs = _pl.Path(_sys.argv[0]).resolve().parent / "logs"
-                directory.setPlaceholderText("未设置 ⇒ 实际使用：" + str(_default_logs))
-            except AttributeError:
-                pass
         self.form.addRow("日志保存目录", directory)

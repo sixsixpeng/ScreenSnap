@@ -1,6 +1,7 @@
 """目录路径输入与浏览。"""
 
 from pathlib import Path
+import logging
 
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
@@ -10,17 +11,20 @@ from PySide6.QtWidgets import QWidget, QHBoxLayout, QLineEdit, QPushButton, QFil
 class FilePathEdit(QWidget):
     """在手输目录和文件夹浏览之间共享同一个设置回调。"""
 
-    def __init__(self, value, changed, open_path=None):
+    def __init__(self, value, changed, open_path=None, default_path=None):
         """路径输入框 + 目录选择/打开按钮。
 
         open_path 是可调用对象而不是固定目录：保存页要打开“当前生效目录”（含归档子目录），
         不能直接用输入框里的原始值。
         """
         super().__init__()
+        self._value = value
+        self.default_path = default_path
+        self.changed = changed
         row = QHBoxLayout(self)
         row.setContentsMargins(0, 0, 0, 0)
-        self.input = QLineEdit(value)
-        self.input.editingFinished.connect(lambda: changed(self.input.text()))
+        self.input = QLineEdit(self.display_value())
+        self.input.editingFinished.connect(self.commit_value)
         button = QPushButton("浏览…")
         button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         button.clicked.connect(self.browse)
@@ -28,10 +32,29 @@ class FilePathEdit(QWidget):
         self.open_button.setIcon(self.style().standardIcon(QStyle.SP_DirOpenIcon))
         self.open_button.setToolTip("在资源管理器中打开当前保存目录")
         self.open_button.clicked.connect(lambda: self.open_directory(open_path))
-        self.changed = changed
         row.addWidget(self.input)
         row.addWidget(button)
         row.addWidget(self.open_button)
+
+    def set_value(self, value):
+        self._value = value
+        self.input.setText(self.display_value())
+
+    def display_value(self):
+        if self._value:
+            return str(self._value)
+        default = self.default_path() if callable(self.default_path) else self.default_path
+        return str(default) if default is not None else ""
+
+    def commit_value(self, explicit=False):
+        value = self.input.text()
+        if not explicit and value == self.display_value():
+            return
+        self._value = value
+        self.changed(value)
+        self.input.setText(self.display_value())
+        if not value and self.default_path is not None:
+            logging.getLogger("screensnap").debug("目录输入已恢复默认目录显示")
 
     def open_directory(self, path=None):
         """打开当前保存目录；目录不存在时先创建，保留 Explorer 定位能力。"""
@@ -51,4 +74,4 @@ class FilePathEdit(QWidget):
         folder = QFileDialog.getExistingDirectory(self, "选择目录", self.input.text())
         if folder:
             self.input.setText(folder)
-            self.changed(folder)
+            self.commit_value(explicit=True)

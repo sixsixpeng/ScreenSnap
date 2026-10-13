@@ -192,7 +192,7 @@ class EditorPage(SettingsPage):
             "crop_color": "编辑器裁剪框的线条颜色；只用于裁剪辅助显示。",
             "text_background": "新建文字标注背景色块的颜色；仅当“文字背景”开启时生效。",
             "rect_fill_color": "矩形标注的**填充**颜色（与线条颜色各自独立，默认值相同）。",
-            "ellipse_fill_color": "椭圆标注的填充颜色；默认与椭圆线条颜色一致，改线色会自动跟随。",
+            "ellipse_fill_color": "椭圆标注的填充颜色；与线条颜色各自独立，默认值相同。",
             "mosaic_cursor_color": "编辑画布中马赛克涂抹范围示意圆圈的颜色。",
             "eraser_cursor_color": "编辑画布中橡皮擦直径示意圆圈的颜色。",
         }[key]

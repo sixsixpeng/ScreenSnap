@@ -75,7 +75,9 @@ class SettingsPage(QWidget):
                 elif isinstance(widget, ColorButton):
                     widget.set_color(value)
                 elif isinstance(widget, FilePathEdit):
-                    widget.input.setText(str(value or ""))
+                    widget.set_value(value or "")
+                elif isinstance(widget, QLineEdit):
+                    widget.setText(str(value or ""))
                 elif hasattr(widget, "set_value"):
                     # 复合控件（如提示项列表）自带 set_value，用来把配置写回界面。
                     widget.set_value(copy.deepcopy(value))

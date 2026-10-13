@@ -249,15 +249,28 @@ class SettingsWindow(QWidget):
             f"当前设置会先备份到：\n{backup}\n然后全部恢复为默认值。是否继续？"
         ).exec() != QMessageBox.Yes:
             return
+        previous = copy.deepcopy(self.config.data)
+        pending_persist = self._persist_timer.isActive()
+        defaults_applied = False
         self._persist_timer.stop()
         try:
             if self.config.path.exists():
                 backup.write_bytes(self.config.path.read_bytes())
             self.config.data.clear()
             self.config.data.update(copy.deepcopy(DEFAULTS))
+            defaults_applied = True
             set_start_on_boot(self.config.data["start_on_boot"])
             self.config.save()
         except (OSError, ValueError) as error:
+            self.config.data.clear()
+            self.config.data.update(previous)
+            if defaults_applied:
+                try:
+                    set_start_on_boot(previous["start_on_boot"])
+                except (OSError, ValueError) as startup_error:
+                    logging.getLogger("screensnap").warning("恢复默认失败后还原启动设置失败: %s", startup_error)
+            if pending_persist:
+                self._persist_timer.start()
             logging.getLogger("screensnap").error("恢复默认设置失败: %s", error)
             QMessageBox.warning(self, "恢复默认设置失败", str(error))
             return
