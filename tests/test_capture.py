@@ -448,6 +448,14 @@ class CaptureTests(CoreTests):
             press(QPoint(199, 149))
             move(QPoint(0, 0))
             self.assertEqual(mask.selection.active.size(), QSize(200, 150))
+
+            # 2026-10-13：越出屏幕的拖动仍被夹回桌面（单屏时桌面==本屏）⇒ 不会截到桌面外的像素。
+            #   终点远超右下角 (260,200)，桌面只有 200×150 ⇒ 夹取后仍正好 200×150。
+            mask.selection.active = None
+            mask.selection.start = None
+            press(QPoint(0, 0))
+            move(QPoint(260, 200))
+            self.assertEqual(mask.selection.active.size(), QSize(200, 150))
         finally:
             mask.close()
 

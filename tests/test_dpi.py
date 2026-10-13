@@ -655,6 +655,81 @@ class DpiTests(CoreTests):
                 for view in views:
                     view.close()
 
+    def test_manual_drag_spans_monitors_without_keyboard_hold(self):
+        """2026-10-13 回归：**普通划选**（未按键盘微调，走 mouseMoveEvent 的普通分支）也必须能跨屏。
+
+        c9f3d3f 为解决"拉满多 1px"把普通拖动分支的夹取目标写成 self.monitor_rect ✗ ⇒ 划出本屏后
+        active 被交回本屏，用户现象"鼠标已移出屏幕、选区却停在屏边不出去"✗。修复后夹到整块虚拟桌面，
+        与 nudge 分支、complete() 同口径。这里刻意**不**设 _nudge_hold，覆盖此前漏测的普通分支；
+        覆盖水平/垂直接缝与混合 DPI（monitor_scales 显式注入以消除尺寸歧义）。
+        """
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent
+        from config.config_manager import DEFAULTS
+        from core.dpi import DisplayMapper
+        from screenshot.mask_window import MaskSession, MaskWindow
+
+        # (monitors, infos, monitor_scales)：info.geometry 为该屏 Qt 原生矩形
+        layouts = (
+            # 水平：2K@150%(原生 1707×960) + 1080p@100%，接缝在 x=2560
+            ([{"left": 0, "top": 0, "width": 2560, "height": 1440},
+              {"left": 2560, "top": 0, "width": 1920, "height": 1080}],
+             [{"geometry": QRect(0, 0, 1707, 960), "dpr": 1.5},
+              {"geometry": QRect(2560, 0, 1920, 1080), "dpr": 1.0}],
+             [1.5, 1.0]),
+            # 垂直：两块等大 @100%，接缝在 y=1440
+            ([{"left": 0, "top": 0, "width": 2560, "height": 1440},
+              {"left": 0, "top": 1440, "width": 2560, "height": 1440}],
+             [{"geometry": QRect(0, 0, 2560, 1440), "dpr": 1.0},
+              {"geometry": QRect(0, 1440, 2560, 1440), "dpr": 1.0}],
+             [1.0, 1.0]),
+            # 负原点：副屏在主屏左侧，接缝在 x=0
+            ([{"left": -1920, "top": 0, "width": 1920, "height": 1080},
+              {"left": 0, "top": 0, "width": 2560, "height": 1440}],
+             [{"geometry": QRect(-1920, 0, 1920, 1080), "dpr": 1.0},
+              {"geometry": QRect(0, 0, 1707, 960), "dpr": 1.5}],
+             [1.0, 1.5]),
+        )
+        for monitors, infos, scales in layouts:
+            physical = QRect(monitors[0]["left"], monitors[0]["top"], monitors[0]["width"], monitors[0]["height"])
+            physical = physical.united(QRect(monitors[1]["left"], monitors[1]["top"],
+                                            monitors[1]["width"], monitors[1]["height"]))
+            bounds = dict(left=physical.x(), top=physical.y(), width=physical.width(), height=physical.height())
+            mapper = DisplayMapper(bounds, monitors, screen_infos=infos, monitor_scales=scales)
+            session = MaskSession(mapper)
+            settings = dict(DEFAULTS, window_detection=False, inline_edit=False, magnifier=False)
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                views = [MaskWindow(Image.new("RGB", (physical.width(), physical.height())), bounds,
+                                    monitors, settings, session=session, monitor=monitor, primary=index == 0)
+                         for index, monitor in enumerate(monitors)]
+            try:
+                for source_index, target_index in ((0, 1), (1, 0)):
+                    view = views[source_index]
+                    start = view.monitor_rect.center()
+                    # 终点取目标屏 40% 处（物理局部坐标；远离屏幕/窗口边缘 ⇒ 不触发吸附）
+                    target = monitors[target_index]
+                    end = QPoint(target["left"] - bounds["left"] + round(target["width"] * 0.4),
+                                 target["top"] - bounds["top"] + round(target["height"] * 0.4))
+                    local = view.to_logical_point(end)     # 物理局部 → 本窗口逻辑局部（喂给鼠标事件）
+                    for button in (Qt.LeftButton, Qt.RightButton):
+                        with self.subTest(bounds=bounds, source=source_index,
+                                          target=target_index, button=button):
+                            view.selection.rects.clear()
+                            view.selection.begin_new(start)
+                            view._nudge_hold = False       # 走普通划选分支（非键盘微调）
+                            view.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, local, local,
+                                                            Qt.NoButton, button, Qt.NoModifier))
+                            self.assertEqual(view.position, end)
+                            wanted = SelectionRects.resized_rect(start, end, "both", QRect())
+                            self.assertEqual(view.selection.active, wanted)
+                            self.assertFalse(view.monitor_rect.contains(view.selection.active),
+                                             "跨屏划选必须超出本屏（被夹回本屏 = Bug）✗")
+                            self.assertTrue(view.selection.active.intersects(views[target_index].monitor_rect),
+                                            "跨屏划选应覆盖到邻屏 ✗")
+            finally:
+                for view in views:
+                    view.close()
+
     def test_inline_mouse_forwarding_preserves_fractional_native_position(self):
         from PySide6.QtCore import QEvent
         from PySide6.QtGui import QMouseEvent

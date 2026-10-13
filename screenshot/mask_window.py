@@ -3264,13 +3264,20 @@ class MaskWindow(QWidget):
                         -self.mapper.physical_bounds.topLeft()))
             else:
                 self.selection.update(self.position, x_edges, y_edges)
-                # 2026-10-12（规则 22 ✓ 物理空间）：新建选区（划选）也必须夹取到本屏 monitor_rect ✓。
-                #   active/position 都是物理局部坐标（相对 bounds 原点）✓ monitor_rect 同空间 ✓。
-                #   之前只有 inline/nudge 分支有夹取、普通分支没有 ✗ ⇒ TL→BR 拖满屏时终点被吸附到
-                #   排他右/下边界（left+width）⇒ QRect 两端含端点 ⇒ 宽高各多 1px（实测 2561×1441 ✗）；
-                #   BR→TL 反向时也因缺夹取无法保证选区被严格限制在本屏内 ✗。
+                # 2026-10-13（回归修复 ✓ 规则 22/26/27，物理空间）：普通划选分支的夹取目标是**整块虚拟桌面**
+                #   而**不是本屏 monitor_rect**。c9f3d3f 为解决"拉满多 1px（2561×1441）"把三分支统一夹到
+                #   monitor_rect，却把"手工跨屏选区"一并夹死 ✗ —— 每块屏一个遮罩窗口，划出本屏后 active 被
+                #   交回本屏 ⇒ 用户现象"鼠标已移出屏幕、选区却停在屏边不出去"✗（规则 29 的整类场景）。
+                #   active/position 都是物理局部坐标（相对 bounds 原点）✓，`full_physical_local_rect()` 同空间 ✓，
+                #   与 nudge 分支（上方）、`complete()`（bounds=full_physical_local_rect()）保持同一口径 ✓。
+                #   原始 1px 问题的真正修复是**含端点吸附**（x_edges/y_edges 用 left+width-1 ✓，见上），
+                #   夹到桌面已足够挡住越出桌面外的溢出，不再需要按单块屏收边 ⇒ 跨屏与尺寸正确二者兼得 ✓。
+                #   注意：仍在**同一块屏内**的划选行为不变（单屏时桌面==该屏 ✓）；
+                #   另两块屏之间若把终点停在屏幕接缝像素上，按"含端点"计会各多覆盖邻屏 1 列 —— 这正是
+                #   "用户确实拖过了屏边界"的合法结果，与本次要恢复的跨屏能力一致 ✓。
                 if self.selection.active is not None:
-                    self.selection.active = self.selection.active.intersected(self.monitor_rect)
+                    self.selection.active = self.selection.active.intersected(
+                        self.mapper.full_physical_local_rect())
         # 正在手绘或拖动时不显示悬停高亮，避免和选区抢视觉焦点。
         if (self.selection.start is None and self.selection.dragging is None
                 and self.selection.resizing is None):
