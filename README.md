@@ -326,7 +326,7 @@ python -m venv .venv
 
 ```python
 # core/version.py
-APP_VERSION = "1.0.13"   # ← 发布新版本时只改这一行
+APP_VERSION = "1.0.14"   # ← 发布新版本时只改这一行
 ```
 
 改动流程：
