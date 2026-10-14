@@ -289,6 +289,9 @@ DEFAULTS = {
     "window_hover_badge_color": "#102a31",
     # 2026-10-11 用户要求：候选框边线宽度默认 1（原 2）、尺寸徽标默认字号 8（原 12）
     "window_hover_border_width": 1, "window_hover_font_size": 8,
+    # 2026-10-14（用户要求可配置；默认先取 10）：尺寸标签“光标靠近即隐藏”的容差（像素，0–400）。
+    # 光标进入标签矩形四周该距离内即隐藏，移开立即恢复；0 表示只有压在标签本身上才隐藏。
+    "window_hover_badge_hide_margin": 10,
     "window_hover_opacity": 35, "window_hover_fill_mode": "reveal",
     "anchor_style": "border", "selection_border_color": "#168cff",
     "cursor": False, "history_limit": 10,
@@ -713,6 +716,8 @@ def validate(data):
             raise ValueError("控件提示边线宽必须在 1 到 6 像素之间")
         elif key == "window_hover_font_size" and not 8 <= value <= 32:
             raise ValueError("控件尺寸标签字号必须在 8 到 32 像素之间")
+        elif key == "window_hover_badge_hide_margin" and not 0 <= value <= 400:
+            raise ValueError("尺寸标签隐藏距离必须在 0 到 400 像素之间")
         elif key == "marker_opacity" and not 1 <= value <= 100:
             raise ValueError("荧光笔不透明度必须在 1 到 100 之间")
         elif key == "font_size" and not 6 <= value <= 200:

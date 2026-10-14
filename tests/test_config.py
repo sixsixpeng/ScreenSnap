@@ -945,6 +945,21 @@ class ConfigTests(CoreTests):
         with self.assertRaises(ValueError):
             validate({"window_hover_interval": 600})
 
+    def test_badge_hide_margin_default_and_bounds(self):
+        """2026-10-14：尺寸标签隐藏距离改为配置键 `window_hover_badge_hide_margin`。"""
+        from config.config_manager import DEFAULTS, validate
+
+        self.assertEqual(DEFAULTS["window_hover_badge_hide_margin"], 10)
+        # 区间两端都保留（0 表示只在标签本体上隐藏）。
+        self.assertEqual(
+            validate({"window_hover_badge_hide_margin": 0})["window_hover_badge_hide_margin"], 0)
+        self.assertEqual(
+            validate({"window_hover_badge_hide_margin": 400})["window_hover_badge_hide_margin"], 400)
+        with self.assertRaises(ValueError):
+            validate({"window_hover_badge_hide_margin": -1})
+        with self.assertRaises(ValueError):
+            validate({"window_hover_badge_hide_margin": 401})
+
     def test_new_feature_config_keys_initialized_and_reset(self):
         """本轮新增配置键（标尺/取色/序号/回收站）必须：
         ① 都写入 DEFAULTS 且类型正确；② 旧配置缺键时 validate 自动补齐默认值；
@@ -1488,7 +1503,8 @@ class ConfigTests(CoreTests):
                                   "hint_bar_warning_style")),
                 ("截图", "窗口与控件识别", ("window_detection", "window_auto_select", "window_hover_detect",
                                       "window_hover_color", "window_hover_opacity", "window_uia_detect",
-                                      "window_hover_interval", "element_depth")),
+                                      "window_hover_interval", "element_depth",
+                                      "window_hover_badge_hide_margin")),
                 ("截图", "遮罩与选区", ("mask_color", "mask_opacity", "selection_border_color", "anchor_style")),
                 ("剪贴板贴图", "文字贴图", ("text_sticker_font", "text_sticker_font_size")),
                 ("剪贴板贴图", "颜色贴图", ("color_sticker_width", "color_sticker_height")),

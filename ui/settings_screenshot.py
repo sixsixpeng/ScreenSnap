@@ -738,6 +738,10 @@ class ScreenshotPage(SettingsPage):
         self.number("window_hover_font_size", "尺寸标签字号(px)", 8, 32,
                     "调整候选区域宽高标签的文字大小").valueChanged.connect(
                         self._mark_hover_style_custom)
+        # 2026-10-14：尺寸标签的“光标靠近即隐藏”容差改为可自由配置（不属于候选框风格预设）。
+        self.number("window_hover_badge_hide_margin", "尺寸标签隐藏距离(px)", 0, 400,
+                    "光标进入尺寸标签四周该距离内即隐藏标签，移开立即恢复；\n"
+                    "0 表示只有压在标签本身上才隐藏")
 
     def sync_controls(self):
         super().sync_controls()

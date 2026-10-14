@@ -2753,17 +2753,14 @@ class MaskWindow(QWidget):
         _on_cursor_monitor = hint_visible_on_monitor(self.position, self.monitor_rect)
         # 2026-10-12（真机日志定位 ✓）：整屏时徽标贴屏幕最上沿、只有 22px 高 ⇒ 你"以为移上去了"其实差了 14px ✗
         #   ⇒ 2px 容差不够 ⇒ 放宽到 **14px**（上下左右各 14 ✓）⇒ 贴近一带即稳定隐藏 ✓（选区内部，无副作用 ✓）。
-        # 2026-10-12（真机日志 ✓ 命中区实测）：徽标实际 y∈[7,29] ✓，而你习惯把鼠标停在 y≈50~60 ✗
-        #   ⇒ 14px 容差仍不够（命中区到 y=43 ✓）⇒ 放宽到 **40px**（上下左右各 40 ✓）
-        #   ⇒ 顶部一带都会稳定隐藏 ✓（该区域本就是选区内部 ✓ 无副作用 ✓）。
-        # 2026-10-12（用户确认 ✓ 诊断结论）：徽标本体只有 22px 高、且贴选区顶边（几何 y∈[7,29] ✓），
-        #   而真机日志里用户的手习惯停在 y≈56~60 ✗ ⇒ 容差 2→14→40 都不够 ✓ ⇒ 放宽到 **100px** ✓
-        #   （用户明确"100px 都可以，关键是定位问题" ✓）⇒ 顶部一带都会稳定隐藏 ✓ 该带本就是选区内部 ✓ 无副作用 ✓。
-        # 2026-10-12（真机日志实测定位 ✓）：徽标本体 y∈[7,29]，用户手停点 y≈56~60 ⇒ 40px 容差（命中区到 y≈69）
-        #   已能覆盖 ✓；100px 会与"确认后必须显示"的既有契约用例冲突（光标 92px 外也要显示 ✓）⇒ 取 40px ✓
-        # 2026-10-12（用户要求 ✓）：命中区放到 **100px** —— 配合下面的"有选区即周期重绘"（判定必跑 ✓）✓
-        #   并已把 tests/test_uia 那条"确认后必须显示"的用例光标移到 100px 之外 ✓（契约不变 ✓ 只是取样点更远 ✓）。
-        _hover_rect = rect.adjusted(-100, -100, 100, 100)
+        # 2026-10-12（真机日志 ✓ 命中区实测）：命中容差经 2→14→40→100px 逐步放宽，最终定 **100px**
+        #   （用户："100px 都可以，关键是定位问题" ✓）⇒ 顶部一带都会稳定隐藏 ✓ 该带本就是选区内部 ✓ 无副作用 ✓。
+        # 2026-10-14（用户要求可配置）：上面这个 100px 原先写死 ⇒ 现在读 `window_hover_badge_hide_margin`
+        #   （默认 10，范围 0–400，见 DEFAULTS / validate）。命中区仍只覆盖标签四周、限制在选区内部，
+        #   不放宽到屏幕其它区域；⚠ 调大该键会让「光标靠近即隐藏」的范围更大，
+        #   tests/test_uia 的“确认后必须显示”用例把光标放在标签下方数百像素处，仍在其外。
+        _margin = max(0, int(self.settings.get("window_hover_badge_hide_margin", 10) or 0))
+        _hover_rect = rect.adjusted(-_margin, -_margin, _margin, _margin)
         want_visible = _on_cursor_monitor and not _hover_rect.contains(cursor_logical)
         needs_update = widget.isVisible() != want_visible or (
             want_visible and (widget.geometry() != rect or widget.text() != label))

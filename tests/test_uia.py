@@ -157,7 +157,7 @@ class UiaTests(CoreTests):
         # （旧契约是"贴在元素上方"，已废弃 ✗；位置不再做任何避让重算 ✓）
         self.assertLess(abs(badge.center().x() - element_rect.center().x()), 3, "水平应居中")
         label_calls = [call.args[-1] for call in painter.drawText.call_args_list]
-        self.assertIn("160 x 60 物理px", label_calls)
+        self.assertIn("160 x 60", label_calls)
         self.assertEqual(painter.setFont.call_args.args[0].pixelSize(), 18)
         self.assertEqual(painter.setPen.call_args.args[0].name(), "#f2fffc")
 
@@ -893,7 +893,9 @@ class UiaTests(CoreTests):
             self.app.processEvents()
             view = mask.session.views[0]
             view.monitor_rect = QRect(0, 0, 800, 600)   # 2026-10-12：让 position 落在本屏内（配套“只有光标屏显示徽标” ✓）
-            view.position = QPoint(160, 400)   # 2026-10-12：移到 100px 命中区之外（契约"确认后显示"不变 ✓）
+            # 2026-10-12：移到徽标命中区之外（与 window_hover_badge_hide_margin 默认值无关，
+            #             这里在标签下方数百像素），契约"确认后显示"不变 ✓
+            view.position = QPoint(160, 400)
             view.selection.active = None
             view.selection.rects = [QRect(0, 0, 320, 240)]                     # 全屏选区（出问题的场景 ✓）
             view._sync_size_badge(QRect(0, 0, 320, 240), (320, 240))           # 不得抛异常 ✓

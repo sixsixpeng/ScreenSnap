@@ -25,7 +25,9 @@ TOOLBAR_HIDE_KEY = ("capture_toolbar_hide_shortcut", "`")
 
 
 def pixel_size_text(size):
-    return f"{size[0]} x {size[1]} 物理px"
+    # 2026-10-14（用户要求）：尺寸提示条不要单位后缀 ⇒ 只给「宽 x 高」。
+    # 尺寸语义不变（仍是截图物理像素），只是不再显示“物理px”四个字。
+    return f"{size[0]} x {size[1]}"
 
 
 def hint_texts(settings, position, selection, inline=False,

@@ -253,7 +253,7 @@ class CaptureTests(CoreTests):
                                                      (False, True, False), (False, True, True)):
             texts = hint_texts(DEFAULTS, (-320, 40), (641, 361), inline=inline,
                                right_capture=right_capture, multi_select=multi_select)
-            self.assertEqual(texts["coords"], "-320, 40  641 x 361 物理px")
+            self.assertEqual(texts["coords"], "-320, 40  641 x 361")
         self.assertEqual(hint_texts(DEFAULTS, (-320, 40), None)["coords"], "-320, 40")
 
     def test_selection_resizes_from_all_four_edge_midpoints(self):
@@ -603,6 +603,48 @@ class CaptureTests(CoreTests):
                 self.assertFalse(badge.isVisible(), "光标移到徽标上 ⇒ 徽标应隐藏 ✓")
         finally:
             mask.close()
+
+    def test_badge_hide_margin_is_read_from_config(self):
+        """2026-10-14：尺寸标签的隐藏距离改为配置键 `window_hover_badge_hide_margin`。
+
+        同一个光标位置（标签下沿外约 30px）在该键为 0 时标签保持显示、为 100 时隐藏，
+        证明 `_sync_size_badge` 真的读该配置，而不是继续吃写死的 100px。"""
+        from PySide6.QtCore import QPoint, QRect
+        from unittest.mock import patch as _patch
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 2560, "height": 1440}
+        selection = QRect(0, 0, 2560, 1440)   # 整屏选区（标签贴顶边、y∈[6,~28]）
+        cursor = QPoint(1280, 60)             # 标签下沿之外约 30px
+        for margin, expected_visible in ((0, True), (100, False)):
+            with self.subTest(margin=margin):
+                settings = dict(DEFAULTS, inline_edit=False, magnifier=False,
+                                window_detection=False,
+                                window_hover_badge_hide_margin=margin)
+                with _patch("screenshot.mask_window.visible_windows", return_value=[]):
+                    mask = MaskWindow(Image.new("RGB", (2560, 1440), "white"), bounds,
+                                      [bounds], settings)
+                try:
+                    mask.show()
+                    self.app.processEvents()
+                    view = mask.session.views[0]
+                    view.monitor_rect = QRect(0, 0, 2560, 1440)
+                    view.selection.active = None
+                    view.selection.rects = [selection]
+                    with _patch("screenshot.mask_window.QCursor.pos", return_value=cursor), \
+                            _patch.object(view, "mapFromGlobal", return_value=cursor):
+                        view._badge_poll_tick()
+                        view._sync_size_badge(selection, (2560, 1440))
+                        self.app.processEvents()
+                        self.app.processEvents()
+                        self.app.processEvents()
+                        badge = getattr(view, "_size_badge", None)
+                        self.assertIsNotNone(badge, "应创建尺寸标签 ✓")
+                        self.assertEqual(badge.isVisible(), expected_visible,
+                                         f"margin={margin} 时标签可见性应为 {expected_visible} ✓")
+                finally:
+                    mask.close()
 
     def test_mask_drag_resizes_from_each_edge_midpoint(self):
         from PySide6.QtCore import QPoint, QPointF, QEvent
