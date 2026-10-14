@@ -7,7 +7,6 @@ dist/
 .idea/
 .codebuddy/
 pyvenv.cfg
-/RELEASE_NOTES.md
 
 # 启动脚本生成的快捷方式（start up.bat 自动创建，不入库）
 *.lnk
