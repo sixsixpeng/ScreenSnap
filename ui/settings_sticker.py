@@ -136,7 +136,7 @@ def _set_snap_hint_control(page, key, value):
 
 def apply_snap_hint_preset(page):
     """选择预设 ⇒ 一次性写入颜色/线宽/线型；“自定义”不写任何值。"""
-    preset = page.controls["sticker_snap_hint_preset"].currentData()
+    preset = page.controls["sticker_snap_hint_preset"].value()
     values = SNAP_HINT_PRESETS.get(preset)
     if not values:
         return
@@ -150,14 +150,11 @@ def apply_snap_hint_preset(page):
 
 def mark_snap_hint_custom(page):
     """手动改动颜色/线宽/线型 ⇒ 预设自动变为“自定义”（已是自定义则不动）。"""
-    combo = page.controls.get("sticker_snap_hint_preset")
-    if combo is None or combo.currentData() == "custom":
+    preset = page.controls.get("sticker_snap_hint_preset")
+    if preset is None or preset.value() == "custom":
         return
-    index = combo.findData("custom")
-    if index >= 0:
-        combo.blockSignals(True)
-        combo.setCurrentIndex(index)
-        combo.blockSignals(False)
+    # 预设组合已改为单选按钮组 ⇒ set_value 不发信号，不需要 blockSignals。
+    preset.set_value("custom")
     page.update_value("sticker_snap_hint_preset", "custom")
 
 
@@ -226,14 +223,14 @@ class StickerPage(SettingsPage):
     def __init__(self, config, changed):
         super().__init__(config, changed)
         self.group("透明图像背景")
-        mode = self.choice("sticker_background_mode", "默认背景模式",
+        mode = self.radios("sticker_background_mode", "默认背景模式",
                    [("透明", "transparent"), ("伪透明", "pseudo"),
                     ("暗色棋盘", "dark_checker"), ("亮色棋盘", "light_checker")],
                    "仅影响含透明通道的贴图；每张贴图也可在右键菜单中单独调整")
         self.background_preview = BackgroundModePreview(config, config.data["sticker_background_mode"])
         self.form.addRow(self.background_preview)
         self.previews.append(self.background_preview)
-        mode.currentIndexChanged.connect(lambda: self.background_preview.set_mode(mode.currentData()))
+        mode.changed.connect(lambda value: self.background_preview.set_mode(value))
         self.group("贴图外观")
         self.check("sticker_selection_effect_enabled", "选中时显示光晕",
                "控制贴图获得焦点或进入多选状态时显示的蓝色选中光晕")
@@ -255,7 +252,7 @@ class StickerPage(SettingsPage):
         self.number("sticker_snap_threshold", "吸附触发距离", 1, 40,
                     "贴图边缘距离目标多近时才吸附，单位是逻辑像素（与系统缩放无关）；\n"
                     "数值越大越容易吸附，过大时贴图会“黏手”，建议 4 到 12")
-        self.choice("sticker_snap_targets", "吸附目标",
+        self.radios("sticker_snap_targets", "吸附目标",
                     [("屏幕与工作区边缘", "screen"), ("窗口和贴图边缘", "window"),
                      ("两者都吸附", "both")],
                     "屏幕：贴到显示器可用区域的四边，任务栏占位会被排除；\n"
@@ -264,17 +261,17 @@ class StickerPage(SettingsPage):
         self.group("吸附提示样式")
         self.check("sticker_snap_hint_enabled", "显示吸附提示",
                    "吸附瞬间沿贴图外沿显示的提示框；每张贴图还可以在右键菜单里单独开关")
-        self.choice("sticker_snap_hint_preset", "预设样式",
+        self.radios("sticker_snap_hint_preset", "预设样式",
                     [("默认青绿虚线", "default"), ("蓝色实线", "blue_solid"),
                      ("橙色点线", "orange_dot"), ("白色高对比", "white_contrast"),
                      ("自定义", "custom")],
                     "预设会一次性设定颜色/线宽/线型；手动改动其中任一项即变成“自定义”")
         self.color("sticker_snap_hint_color", "提示颜色", "吸附提示框的颜色（默认与提示虚线同为青绿）")
         self.number("sticker_snap_hint_width", "提示线宽 (px)", 1, 6, "吸附提示框的线条宽度")
-        self.choice("sticker_snap_hint_style", "提示线型",
+        self.radios("sticker_snap_hint_style", "提示线型",
                     [("实线", "solid"), ("虚线", "dash"), ("点线", "dot"), ("点划线", "dash_dot")],
                     "吸附提示框的线型，默认虚线与旧行为一致")
-        self.choice("sticker_snap_hint_mode", "显示时机",
+        self.radios("sticker_snap_hint_mode", "显示时机",
                     [("吸附关系存在期间常显", "always"), ("仅吸附瞬间", "drag")],
                     "默认“常显”：只要贴图还贴着目标就一直显示提示框；\n选“仅吸附瞬间”则松开后按下面的延时淡出")
         self.number("sticker_snap_hint_duration", "淡出延时 (ms)", 0, 3000,
@@ -284,13 +281,15 @@ class StickerPage(SettingsPage):
         self.snap_hint_preview = StickerSnapHintPreview(config)
         self.previews.append(self.snap_hint_preview)
         self.form.addRow(self.snap_hint_preview)
-        self.controls["sticker_snap_hint_preset"].currentIndexChanged.connect(
-            lambda _=0: apply_snap_hint_preset(self))
+        # 2026-10-14：预设组合与提示线型已由下拉改为单选按钮组 ⇒ 用 changed（点击时才发），
+        # 信号探测里也要带上 changed，否则选线型后不会自动切到“自定义”。
+        self.controls["sticker_snap_hint_preset"].changed.connect(
+            lambda _value: apply_snap_hint_preset(self))
         for _key in ("sticker_snap_hint_color", "sticker_snap_hint_width",
                      "sticker_snap_hint_style"):
             _widget = self.controls.get(_key)
             _signal = None
-            for _name in ("color_changed", "valueChanged", "currentIndexChanged"):
+            for _name in ("color_changed", "valueChanged", "currentIndexChanged", "changed"):
                 _candidate = getattr(_widget, _name, None)
                 if _candidate is not None and hasattr(_candidate, "connect"):
                     _signal = _candidate

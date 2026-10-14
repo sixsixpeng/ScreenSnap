@@ -9,7 +9,7 @@ class AppearancePage(SettingsPage):
     def __init__(self, config, changed):
         super().__init__(config, changed)
         self.group("应用主题")
-        self.choice(
+        self.radios(
             "theme", "颜色模式",
             [("跟随系统", "system"), ("明亮", "light"), ("黑暗", "dark")],
             "跟随 Windows 当前应用颜色模式，或固定使用明亮/黑暗主题。",

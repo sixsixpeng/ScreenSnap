@@ -143,16 +143,17 @@ class StickerTests(CoreTests):
         manager.close_all()
 
     def test_snap_hint_preset_wiring(self):
-        """预设联动：选预设 ⇒ 一次性写入颜色/线宽/线型；手动改动 ⇒ 预设变“自定义”。"""
-        from PySide6.QtWidgets import QComboBox
+        """预设联动：选预设 ⇒ 一次性写入颜色/线宽/线型；手动改动 ⇒ 预设变“自定义”。
+        2026-10-14：预设组合已由下拉改为单选按钮组（RadioRow）⇒ 联动改用 value()/set_value()。"""
         from ui.settings_sticker import (SNAP_HINT_PRESETS, apply_snap_hint_preset,
                                          mark_snap_hint_custom)
+        from ui.widgets.tooltip import RadioRow
 
         class FakePage:
             """只实现联动用到的两个接口：controls 映射与 update_value。"""
 
-            def __init__(self, combo):
-                self.controls = {"sticker_snap_hint_preset": combo,
+            def __init__(self, preset):
+                self.controls = {"sticker_snap_hint_preset": preset,
                                  "sticker_snap_hint_color": None,
                                  "sticker_snap_hint_width": None,
                                  "sticker_snap_hint_style": None}
@@ -161,31 +162,29 @@ class StickerTests(CoreTests):
             def update_value(self, key, value):
                 self.written[key] = value
 
-        combo = QComboBox()
-        for name, value in (("默认青绿虚线", "default"), ("蓝色实线", "blue_solid"),
-                            ("橙色点线", "orange_dot"), ("白色高对比", "white_contrast"),
-                            ("自定义", "custom")):
-            combo.addItem(name, value)
-        page = FakePage(combo)
+        preset = RadioRow((("默认青绿虚线", "default"), ("蓝色实线", "blue_solid"),
+                           ("橙色点线", "orange_dot"), ("白色高对比", "white_contrast"),
+                           ("自定义", "custom")), "default", "测试用预设组合")
+        page = FakePage(preset)
         self.assertEqual(set(SNAP_HINT_PRESETS), {"default", "blue_solid",
                                                   "orange_dot", "white_contrast"})
-        # 选“蓝色实线” ⇒ 三个键一起写入
-        combo.setCurrentIndex(1)
+        # 选“蓝色实线” ⇒ 三个键一起写入（点按钮 = 用户操作）
+        preset._buttons["blue_solid"].click()
         apply_snap_hint_preset(page)
         self.assertEqual(page.written["sticker_snap_hint_color"], "#2f7bff")
         self.assertEqual(page.written["sticker_snap_hint_width"], 2)
         self.assertEqual(page.written["sticker_snap_hint_style"], "solid")
         # 选“自定义” ⇒ 不写任何值（保留用户当前样式）
         page.written.clear()
-        combo.setCurrentIndex(4)
+        preset._buttons["custom"].click()
         apply_snap_hint_preset(page)
         self.assertEqual(page.written, {})
         # 手动改动 ⇒ 预设自动变“自定义”，且不覆盖任何样式值
-        combo.setCurrentIndex(0)
+        preset.set_value("default")
         page.written.clear()
         mark_snap_hint_custom(page)
         self.assertEqual(page.written, {"sticker_snap_hint_preset": "custom"})
-        self.assertEqual(combo.currentData(), "custom")
+        self.assertEqual(preset.value(), "custom")
 
     def test_snap_hint_style_inherited_once_and_owned_by_the_sticker(self):
         """吸附提示样式：创建时从全局默认继承一次，之后全局改动不追溯；每张贴图可单独开关。"""

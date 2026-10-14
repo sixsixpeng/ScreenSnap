@@ -615,13 +615,13 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(self.text_height, 36, 1, 1, 2)
         panel_layout.addWidget(self.mosaic_brush, 30, 0, 1, 3)
         panel_layout.addWidget(self.eraser_erase_base, 31, 0, 1, 3)
-        # 2026-10-11 修复：此前误放在行 33（那是「椭圆填充色」✗）且被重复添加两次 ✗（同一控件入两次布局
-        # ⇒ 组件重叠 ✓）。改用**空闲的行 24** ✓：只添加一次 ✓，且不超过其它工具已有的最大行（36 ✓）
-        # ⇒ 面板高度不增长（行 37 会把面板撑高 6px ✗ 触发"multirow 选项要放得下"的用例上限 ✗）。
-        # 放在**已存在的最大行 36 的第 0 列**（该行已有 text_height 占 1..2 列 ✓）：不新增空行 ⇒
-        # 面板高度不变 ✓（行 37 会撑高 6px、行 24 会在 pen 的 1↔26 之间累积行距 +4px ✗ 都会被
-        # "multirow 选项要放得下"的高度预算用例抓到 ✓）。
-        panel_layout.addWidget(self.eraser_brush, 36, 0, 1, 2)
+        # 2026-10-14 修复（用户报告：文字「更多设置」底部两行叠在一起、还带橡皮擦的 tooltip ✗）：
+        # 上次把橡皮擦的「涂抹模式（自由笔刷）」从行 33 挪走后**误放进行 36 的第 0 列** —— 该格
+        # 已被文字工具的 `QLabel("文字高度")` 占用（行 36 已有 text_height 占 1..2 列）⇒ 同一格里
+        # 两个控件重叠，且 `_refresh_option_rows` 把行 36 给文字工具 ⇒ 文字弹层里必然叠在一起 ✓。
+        # 现在独占**唯一的空闲行 14**（<37 里只有 14 没人用 ✓）：橡皮擦可见行数不变 ⇒ 面板高度不变 ✓
+        # （行 37 会撑高 6px ✗ 触发"multirow 选项要放得下"的高度预算用例 ✗）。
+        panel_layout.addWidget(self.eraser_brush, 14, 0, 1, 3)
         # 序号标注专属参数：形状、填充色、文字色、字号、起始值与预设组合。
         sequence_shape_options = (
             ("圆形", "circle"), ("方形", "square"), ("三角", "triangle"),
@@ -1010,8 +1010,10 @@ class ToolbarWidget(QWidget):
             tool = self.selected_tool
         rows = ({1} if tool in TOOL_WIDTH_KEYS else set())
         if tool == "eraser":
-            # 2026-10-11：橡皮擦对齐马赛克 ⇒ 宽度滑杆（行 1）+ 涂抹开关（行 33）+ 擦原图（行 31）✓
-            rows.update((1, 31, 33))
+            # 2026-10-11：橡皮擦对齐马赛克 ⇒ 宽度滑杆（行 1）+ 涂抹开关（行 14）+ 擦原图（行 31）✓
+            # 2026-10-14 修复：这里原来写的是行 33（那是「椭圆填充色」✗）⇒ 橡皮擦弹层一直显示别的
+            # 工具的填充色、看不到自己的涂抹开关；现在换成自由笔刷真正所在的行 14 ✓。
+            rows.update((1, 14, 31))
             self.tool_widths[tool] = max(10, min(100, self.tool_widths[tool]))
             with QSignalBlocker(self.pen_width):
                 self.pen_width.setRange(10, 100)
@@ -1137,8 +1139,10 @@ class ToolbarWidget(QWidget):
         """返回某工具在「更多设置」中展示的参数行集合（不含宽度范围等副作用）。"""
         rows = {1} if tool in TOOL_WIDTH_KEYS else set()
         if tool == "eraser":
-            # 2026-10-11：橡皮擦对齐马赛克 ⇒ 宽度滑杆（行 1）+ 涂抹开关（行 33）+ 擦原图（行 31）✓
-            rows.update((1, 31, 33))
+            # 2026-10-11：橡皮擦对齐马赛克 ⇒ 宽度滑杆（行 1）+ 涂抹开关（行 14）+ 擦原图（行 31）✓
+            # 2026-10-14 修复：这里原来写的是行 33（那是「椭圆填充色」✗）⇒ 橡皮擦弹层一直显示别的
+            # 工具的填充色、看不到自己的涂抹开关；现在换成自由笔刷真正所在的行 14 ✓。
+            rows.update((1, 14, 31))
         elif tool == "marker":
             rows.update((2, 27))
         elif tool == "pen":

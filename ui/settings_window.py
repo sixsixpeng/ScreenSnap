@@ -207,8 +207,11 @@ class SettingsWindow(QWidget):
                 control.set_color(value)
             elif isinstance(value, bool):
                 control.setChecked(value)
-            elif key in ("font", "mosaic_mode", "annotation_tool", "text_alignment", "arrow_style",
-                         "rect_style", "ellipse_style"):
+            elif hasattr(control, "set_value"):
+                # 2026-10-14：下拉改单选后，单选按钮组与提示项列表等复合控件都用 set_value
+                # （set_value 不发信号，正好替代原来的 QSignalBlocker）。
+                control.set_value(value)
+            elif key in ("font", "annotation_tool", "arrow_style", "sequence_shape"):
                 control.setCurrentIndex(control.findData(value))
             else:
                 control.setValue(value)

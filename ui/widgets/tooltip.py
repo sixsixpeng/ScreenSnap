@@ -3,13 +3,74 @@
 import copy
 import logging
 
-from PySide6.QtCore import QSignalBlocker
+from PySide6.QtCore import QSignalBlocker, Signal
 from PySide6.QtWidgets import (QWidget, QFormLayout, QCheckBox, QSpinBox, QDoubleSpinBox,
                                QLineEdit, QComboBox, QGroupBox, QHBoxLayout, QScrollArea,
-                               QVBoxLayout, QPushButton, QStyle)
+                               QVBoxLayout, QPushButton, QStyle, QRadioButton, QButtonGroup,
+                               QGridLayout)
 
 from ui.widgets.color_button import ColorButton
 from ui.widgets.file_path_edit import FilePathEdit
+
+
+class RadioRow(QWidget):
+    """互斥单选按钮组：选项全部可见、一点即选，省去展开下拉的步骤。
+
+    少量取值（≤4 个）排一行；更多时自动折成两行，避免把设置窗口撑宽。
+    取值 API 与下拉一致：`value()` 读当前值、`set_value()` 程序化回写（不发信号）、
+    `changed(value)` 只在用户点击时发出。
+    """
+
+    changed = Signal(object)
+
+    def __init__(self, options, value, help_text, on_change=None, columns=None):
+        super().__init__()
+        # 容器自身也要有 tooltip：设置页契约要求每个控件都有说明，且悬停按钮之间的空白也应提示。
+        self.setToolTip(help_text)
+        layout = QGridLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setHorizontalSpacing(12)
+        layout.setVerticalSpacing(4)
+        self._group = QButtonGroup(self)
+        self._values = {}
+        self._buttons = {}
+        count = len(options)
+        if columns is None:
+            # 5–10 个折成两行（如 5 个 → 3+2），既不挤一行也不拉长整页。
+            columns = count if count <= 4 else (count + 1) // 2
+        columns = max(1, int(columns))
+        for index, (name, key) in enumerate(options):
+            button = QRadioButton(name)
+            button.setToolTip(help_text)
+            self._group.addButton(button)
+            layout.addWidget(button, index // columns, index % columns)
+            self._values[button] = key
+            self._buttons[key] = button
+        layout.setColumnStretch(columns, 1)
+        if value in self._buttons:
+            self._buttons[value].setChecked(True)
+        self._on_change = on_change
+        # buttonClicked 只在用户点击时发出 ⇒ 程序化 set_value 不会误触发保存/联动。
+        self._group.buttonClicked.connect(self._clicked)
+
+    def _clicked(self, button):
+        value = self._values[button]
+        self.changed.emit(value)
+        if self._on_change is not None:
+            self._on_change(value)
+
+    def value(self):
+        """当前选中的取值；没有任何选中时返回 None。"""
+        for button, key in self._values.items():
+            if button.isChecked():
+                return key
+        return None
+
+    def set_value(self, value):
+        """按配置值回写选中项（供 sync_controls / 恢复默认 / 联动使用），不发出 changed。"""
+        button = self._buttons.get(value)
+        if button is not None:
+            button.setChecked(True)
 
 
 class SettingsPage(QWidget):
@@ -180,6 +241,18 @@ class SettingsPage(QWidget):
             widget.addItem(name, value)
         widget.setCurrentIndex(widget.findData(self.config.data[key]))
         return self.bind(key, widget, widget.currentIndexChanged, widget.currentData, label, help_text)
+
+    def radios(self, key, label, options, help_text, on_change=None):
+        """互斥单选按钮组（三选一等少量互斥取值）；on_change 用于联动（如隐藏无关参数行）。"""
+        def change(value):
+            self.update_value(key, value)
+            if on_change is not None:
+                on_change(value)
+
+        widget = RadioRow(options, self.config.data[key], help_text, change)
+        self.controls[key] = widget
+        self.form.addRow(label, widget)
+        return widget
 
     def color(self, key, label, help_text):
         """创建颜色设置按钮，同时登记到 controls 便于统一刷新。"""

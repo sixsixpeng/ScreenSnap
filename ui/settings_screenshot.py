@@ -409,13 +409,13 @@ class ScreenshotPage(SettingsPage):
         delay.setSingleStep(100)
         self.group("截图内容")
         self.check("cursor", "捕获鼠标", "把鼠标指针画进截图原图；系统光标无法读取时，开关前后结果可能相同")
-        self.choice("capture_gap_fill", "显示器间隙填充",
+        self.radios("capture_gap_fill", "显示器间隙填充",
                 [("透明", "transparent"), ("纯黑", "black"), ("纯白", "white")],
                 "多显示器拼接时，虚拟桌面矩形中不属于任何显示器的区域如何填充；默认透明")
         self.group("截图后")
         self.check("inline_edit", "原地编辑",
                    rich_tooltip("原地编辑", "仅单屏单选区在截图位置编辑；多选区、跨屏选区或关闭此项时使用独立编辑器。"))
-        self.choice("capture_after_selection", "截图确认后",
+        self.radios("capture_after_selection", "截图确认后",
                     [("仅保存，不打开编辑器", "save"), ("进入编辑器", "edit"),
                      ("仅复制到剪贴板", "copy")],
                     rich_tooltip("截图选区后的动作", "普通左键手绘区域松开后执行；UIA/悬停候选左键点击直接进入编辑；\n"
@@ -424,13 +424,13 @@ class ScreenshotPage(SettingsPage):
                                  "单区域按原地编辑设置处理，多区域/跨屏进入独立编辑器。此右键流程不受本设置影响；\n"
                                  "快速保存按键始终直接保存，窗口编辑按钮始终可手动打开编辑器；\n"
                                  "选择“仅复制到剪贴板”时不会落盘，也不进入编辑器；全屏、当前显示器和上次区域动作可在下面分别配置。"))
-        self.choice("capture_fullscreen_action", "全屏截图后",
+        self.radios("capture_fullscreen_action", "全屏截图后",
                 [("进入编辑器", "edit"), ("直接保存", "save")],
                 "全屏热键截取后自动进入编辑或保存，不再需要确认整屏选区")
-        self.choice("capture_monitor_action", "当前显示器截图后",
+        self.radios("capture_monitor_action", "当前显示器截图后",
                 [("进入编辑器", "edit"), ("直接保存", "save")],
                 "当前显示器热键截取后自动进入编辑或保存，不再需要确认整屏选区")
-        self.choice("capture_repeat_action", "上次区域截图后",
+        self.radios("capture_repeat_action", "上次区域截图后",
                 [("进入编辑器", "edit"), ("直接保存", "save")],
                 "上次区域热键截取后自动进入编辑或保存；直接保存沿用原有输出、剪贴板和通知逻辑")
         self.group("截图快捷操作")
@@ -452,7 +452,7 @@ class ScreenshotPage(SettingsPage):
                        "把当前选区送进独立编辑器窗口，使用完整工具栏编辑")
         self._shortcut("capture_multi_select_shortcut", "多选编辑模式按键", "Alt+M",
                    "选区阶段进入多选收集；原地编辑中按下会先按下方策略处理当前编辑，再继续选择")
-        self.choice("capture_multi_edit_action", "切换多选时处理编辑",
+        self.radios("capture_multi_edit_action", "切换多选时处理编辑",
                 [("保存当前编辑", "save"), ("丢弃当前编辑", "discard")],
                 "原地编辑内容有修改时，无弹窗地按此设置保存或丢弃；未修改则直接继续")
         self._shortcut("capture_copy_shortcut", "仅复制按键", "Y",
@@ -568,7 +568,7 @@ class ScreenshotPage(SettingsPage):
                    "想选外层窗口或父容器时按 Tab 逐层切换")
         self._effect_preview("hover")
         self._section("候选框外观")
-        fill_mode = self.choice("window_hover_fill_mode", "候选区域显示方式",
+        fill_mode = self.radios("window_hover_fill_mode", "候选区域显示方式",
                     (("透出原图（无填充）", "reveal"),
                      ("半透明颜色填充", "fill")),
                     "透出模式会移除候选区域上的遮罩并显示原始截图，边框和尺寸标签仍保留。")
@@ -578,16 +578,16 @@ class ScreenshotPage(SettingsPage):
             "边框保持实色，便于看清识别范围").valueChanged.connect(
                 self._mark_hover_style_custom)
         hover_opacity_control = self.controls["window_hover_opacity"]
-        hover_opacity_control.setEnabled(fill_mode.currentData() == "fill")
-        fill_mode.currentIndexChanged.connect(
-            lambda _index: hover_opacity_control.setEnabled(fill_mode.currentData() == "fill"))
+        hover_opacity_control.setEnabled(fill_mode.value() == "fill")
+        fill_mode.changed.connect(
+            lambda _value: hover_opacity_control.setEnabled(fill_mode.value() == "fill"))
         # 透出模式下候选框不填充，填充颜色同样不参与绘制，随模式一起置灰。
         hover_fill_control = self.controls["window_hover_color"]
-        hover_fill_control.setEnabled(fill_mode.currentData() == "fill")
+        hover_fill_control.setEnabled(fill_mode.value() == "fill")
         hover_fill_control.setToolTip("自定义候选框填充颜色；仅在“半透明颜色填充”模式下生效，"
                                       "透出原图模式下候选框没有填充")
-        fill_mode.currentIndexChanged.connect(
-            lambda _index: hover_fill_control.setEnabled(fill_mode.currentData() == "fill"))
+        fill_mode.changed.connect(
+            lambda _value: hover_fill_control.setEnabled(fill_mode.value() == "fill"))
         self._section("无障碍识别与精度")
         self.check("window_uia_detect", "优先用无障碍识别 (UIA)",
                    "默认开启：截图识别会先用 Windows 无障碍树识别，能读到浏览器网页控件、\n"
@@ -627,7 +627,7 @@ class ScreenshotPage(SettingsPage):
         border.setToolTip("只改变截图选择框的边框颜色，不影响标注颜色")
         self.controls[border_key] = border
         self.form.addRow("选区边框颜色", border)
-        self.choice("anchor_style", "选区锚点", [("边框", "border"), ("填充", "fill")],
+        self.radios("anchor_style", "选区锚点", [("边框", "border"), ("填充", "fill")],
                     "选区四角与四边控制点的外观：边框为空心方块，填充为实心方块")
         self._effect_preview("selection")
         self.group("历史")
@@ -723,8 +723,8 @@ class ScreenshotPage(SettingsPage):
         self.config.data["window_hover_fill_mode"] = "fill"
         fill_mode = self.controls.get("window_hover_fill_mode")
         if fill_mode is not None:
-            with QSignalBlocker(fill_mode):
-                fill_mode.setCurrentIndex(fill_mode.findData("fill"))
+            # 2026-10-14：候选区域显示方式改为单选按钮组 ⇒ set_value 不发信号，无需 QSignalBlocker。
+            fill_mode.set_value("fill")
             self.controls["window_hover_opacity"].setEnabled(True)
             if "window_hover_color" in self.controls:
                 self.controls["window_hover_color"].setEnabled(True)

@@ -41,7 +41,7 @@ class EditorPage(SettingsPage):
         self.preview("rect")
         self.add_color("rect_color", "矩形颜色")
         self.number("rect_width", "矩形线宽", 1, 50, "只影响矩形工具")
-        self.choice("rect_style", "矩形线型", [("实线", "solid"), ("虚线", "dash")],
+        self.radios("rect_style", "矩形线型", [("实线", "solid"), ("虚线", "dash")],
                     "新建矩形使用的边框线型")
         self.check_number("rect_corner_enabled", "rect_corner_radius", "矩形标注圆角 (px)", 0, 100,
                           "勾选后新建矩形标注使用圆角；右侧数值为圆角半径，0 表示直角；"
@@ -54,7 +54,7 @@ class EditorPage(SettingsPage):
         self.preview("ellipse")
         self.add_color("ellipse_color", "椭圆颜色")
         self.number("ellipse_width", "椭圆线宽", 1, 50, "只影响椭圆工具")
-        self.choice("ellipse_style", "椭圆线型", [("实线", "solid"), ("虚线", "dash")],
+        self.radios("ellipse_style", "椭圆线型", [("实线", "solid"), ("虚线", "dash")],
                     "新建椭圆使用的边框线型")
         self.check("ellipse_fill_enabled", "椭圆填充区域", "绘制椭圆时填充区域")
         self.add_color("ellipse_fill_color", "椭圆填充颜色")
@@ -64,7 +64,7 @@ class EditorPage(SettingsPage):
         self.preview("eraser")
         self.number("eraser_width", "橡皮擦直径", 10, 100, "只影响橡皮擦工具，范围 10–100")
         self.add_color("eraser_cursor_color", "示意圈颜色")
-        self.choice("editor_straight_modifier", "直线绘制修饰键", [
+        self.radios("editor_straight_modifier", "直线绘制修饰键", [
             ("Ctrl 或 Alt（任一）", "either"), ("仅 Ctrl", "ctrl"), ("仅 Alt", "alt"),
             ("关闭（全部按自由笔迹）", "off")],
             "画笔 / 荧光笔 / 马赛克 / 橡皮擦**按住拖动**时，按住所选修饰键即切换为直线；选「关闭」则始终为自由笔迹")
@@ -87,7 +87,7 @@ class EditorPage(SettingsPage):
         self.number("text_width", "文字宽度", 0, 2000, "新建文字标注的文本框宽度（像素）；超出后自动换行，0 表示按内容自动")
         self.number("text_height", "文字高度", 0, 2000, "新建文字标注的文本框高度（像素）；超出部分裁剪，0 表示按内容自动")
         self.decimal("line_spacing", "文字行距", 0.5, 4, "多行文字的行间距倍率")
-        self.choice("text_alignment", "文字对齐", [("左对齐", "left"), ("居中", "center"),
+        self.radios("text_alignment", "文字对齐", [("左对齐", "left"), ("居中", "center"),
                                              ("右对齐", "right")], "新建文字标注的对齐方式")
         fonts = QFontDatabase.families()
         self.choice("font", "默认字体", [("系统默认", "")] + [(font, font) for font in fonts], "从已安装字体中选择")
@@ -111,7 +111,7 @@ class EditorPage(SettingsPage):
         self.add_color("sequence_text_color", "序号文字色")
         self.number("sequence_font_size", "序号字号", 6, 200, "新建序号标注的数字字号")
         self.number("sequence_start", "序号起始值", 0, 999, "第一个序号的号码，后续自动递增")
-        self.choice("sequence_preset", "预设组合",
+        self.radios("sequence_preset", "预设组合",
                     [("自定义", "custom"), ("红圆", "red_circle"), ("蓝方", "blue_square"),
                      ("绿星", "green_star"), ("琥珀菱形", "amber_diamond"),
                      ("紫五边形", "purple_pentagon"), ("青六边形", "teal_hexagon"),
@@ -119,7 +119,7 @@ class EditorPage(SettingsPage):
                     "一键套用形状与配色组合；选自定义后可逐项自由调整")
         self.group("马赛克")
         self.preview("mosaic")
-        self.choice("mosaic_mode", "马赛克类型", [("方块", "blocks"), ("毛玻璃", "blur"),
+        self.radios("mosaic_mode", "马赛克类型", [("方块", "blocks"), ("毛玻璃", "blur"),
                              ("细粒", "fine")], "标注区域的像素处理方式")
         self.number("mosaic_size", "马赛克方块", 2, 100, "像素化块大小")
         self.check("mosaic_brush", "涂抹模式（自由笔刷）",
@@ -133,7 +133,7 @@ class EditorPage(SettingsPage):
         self.add_color("editor_border_color", "编辑区边框颜色")
         # 透明像素的预览底色：只影响编辑画布显示，导出仍按真实 alpha 写出，所以单独成组。
         self.group("透明背景")
-        self.choice("editor_transparent_background", "透明区域显示",
+        self.radios("editor_transparent_background", "透明区域显示",
                     [("跟随主题棋盘", "theme"), ("暗色棋盘", "dark_checker"),
                      ("亮色棋盘", "light_checker"), ("纯透明", "transparent")],
                     "编辑画布中透明像素（多显示器间隙、擦除镂空、圆角外）的预览底色；"
@@ -147,12 +147,12 @@ class EditorPage(SettingsPage):
         self.group("画布与标注交互")
         self.number("editor_zoom_wheel_step", "滚轮缩放步进 (%)", 1, 50,
                     "按住 Ctrl 滚动滚轮时每一格的缩放百分比，范围 1–50。\n调大：缩放更快、几格就能到目标倍率，但容易一步跳过想要的尺寸。\n调小：更细腻，但要滚更多次；1% 接近逐像素微调。\n不影响工具栏上的放大/缩小按钮与“适应窗口”，只影响滚轮步长。")
-        self.choice("editor_rotation_snap", "旋转吸附", [(f"{value}°", value) for value in (0, 5, 15, 45)],
+        self.radios("editor_rotation_snap", "旋转吸附", [(f"{value}°", value) for value in (0, 5, 15, 45)],
                     "旋转标注时按住 Shift 吸附到多少度的整数倍。\n5°/15°：适合把标注摆正或做小幅微调；45°：适合快速转成对角。\n0°：完全不吸附，可停在任意角度（适合对齐非直角），代价是想转 90°/180° 只能靠目测。\n不按 Shift 时始终自由旋转，此设置不生效。")
-        self.choice("editor_rotation_handle", "旋转按钮位置",
+        self.radios("editor_rotation_handle", "旋转按钮位置",
                     [("标注中心", "center"), ("顶部外侧", "top")],
                     "单选标注时旋转按钮画在哪里。\n标注中心：按钮随图形移动/旋转、永远在图形内，缩放或旋转后一定点得到；代价是它会盖住标注中心的内容（细窄的箭头、线段尤其明显）。\n顶部外侧：不挡内容、更接近常见习惯；代价是标注贴近画布上缘、或放大后顶边跑到可视区外时，按钮会看不见也点不到。\n只影响单选；多选时按包围盒中心旋转。")
-        self.choice("editor_overcanvas_mode", "标注超出画布", [("直接裁切", "clip"), ("禁止移出", "block")],
+        self.radios("editor_overcanvas_mode", "标注超出画布", [("直接裁切", "clip"), ("禁止移出", "block")],
                     "把标注拖到画布之外时的处理方式。\n直接裁切：标注位置完全不动，超出的部分在编辑视图与导出里都裁掉 —— 贴边填充的矩形能真正填满边缘，但拖出去的部分会“看不见了”。\n禁止移出：把标注平移回画布内（只平移、不缩放），避免误拖到画面外；代价是想把标注紧贴边缘摆放时会觉得“推不出去”。\n只影响本次编辑的标注，不改变已保存的图片。")
         self.number("editor_checker_tile_size", "棋盘格边长 (px)", 4, 32,
                     "透明像素预览棋盘的方格边长，范围 4–32 像素。\n调小：格子密、更接近“这里真的透明”的观感，但可能显得花、有摩尔纹。\n调大：更清楚，但会盖住较多细节，小面积透明处反而看不清。\n只影响显示，不会写进导出的图片。")
@@ -165,10 +165,9 @@ class EditorPage(SettingsPage):
         self.group("取色")
         self.preview("picker", 120)
         # 序号预设组合：选择后立即套用形状与配色到对应键（自定义不覆盖）。
-        preset_combo = self.controls.get("sequence_preset")
-        if preset_combo is not None:
-            preset_combo.currentIndexChanged.connect(
-                lambda _i: self._apply_sequence_preset(preset_combo.currentData()))
+        preset_control = self.controls.get("sequence_preset")
+        if preset_control is not None:
+            preset_control.changed.connect(self._apply_sequence_preset)
 
     def _apply_sequence_preset(self, preset_key):
         from editor.annotation_items import SEQUENCE_PRESETS

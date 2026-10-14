@@ -41,7 +41,7 @@ class GeneralPage(SettingsPage):
         self.group("启动与通知")
         self.check("start_on_boot", "开机自动启动", "登录 Windows 后自动运行 ScreenSnap")
         self.check("bubble", "通知总开关", "关闭后不显示应用内预览、托盘提示和 Windows Toast；完成音效仍由独立开关控制")
-        self.choice("notification_backend", "通知方式",
+        self.radios("notification_backend", "通知方式",
                 [("Windows 11 原生通知", "win11toast"), ("旧版应用通知", "legacy")],
                 "默认使用「旧版应用通知」：应用内图片预览 + 系统托盘文字通知，必定带缩略图。\n"
                 "选择「Windows 11 原生通知」时走系统通知中心；\n"

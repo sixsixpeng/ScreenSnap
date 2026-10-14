@@ -107,7 +107,7 @@ class UiaTests(CoreTests):
             self.assertEqual(manager.data["capture_after_selection"], "edit")
             settings = SettingsWindow(manager)
             screenshot = settings.page("截图")
-            self.assertEqual(screenshot.controls["capture_after_selection"].currentData(), "edit")
+            self.assertEqual(screenshot.controls["capture_after_selection"].value(), "edit")
             self.assertIn("\n", screenshot.controls["capture_after_selection"].toolTip())
             screenshot.reset_page()
             # 单页重置应把本页涉及的项（含本轮新增项）还原为默认值并持久化。
@@ -122,7 +122,7 @@ class UiaTests(CoreTests):
             self.assertEqual(ConfigManager(path).data["mask_color"], DEFAULTS["mask_color"])
             self.assertEqual(ConfigManager(path).data["mask_opacity"], DEFAULTS["mask_opacity"])
             self.assertEqual(manager.data["capture_after_selection"], "edit")
-            self.assertEqual(screenshot.controls["capture_after_selection"].currentData(), "edit")
+            self.assertEqual(screenshot.controls["capture_after_selection"].value(), "edit")
             settings.close()
 
     def test_color_dialog_keeps_normal_window_parent(self):

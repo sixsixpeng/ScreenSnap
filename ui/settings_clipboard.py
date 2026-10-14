@@ -80,7 +80,7 @@ class ClipboardPage(SettingsPage):
                    "复制 #RGB、#RRGGBB 或裸六位十六进制时贴出色块而不是这段文字；"
                    "关闭后这类内容一律按文字贴出")
         self.group("取色复制")
-        self.choice("picker_copy_format", "复制格式",
+        self.radios("picker_copy_format", "复制格式",
                 [("#RRGGBB（十六进制）", "hex"), ("rgb(r, g, b)", "rgb"),
                  ("rgba(r, g, b, 1)", "rgba"), ("hsl(h, s%, l%)", "hsl"),
                  ("全部（三行）", "all")],
@@ -90,7 +90,7 @@ class ClipboardPage(SettingsPage):
                    "开启后连续取色不再互相覆盖，而是拼成多行文本一次粘贴拿到一组配色（同一颜色不重复）。")
         self.group("颜色贴图")
         self.check("color_sticker_value", "标注色值", "在颜色卡片左下角显示十六进制色值")
-        self.choice("color_sticker_labels", "标签内容",
+        self.radios("color_sticker_labels", "标签内容",
                 [("跟随取色复制格式", "follow"), ("只显示色块", "off"),
                  ("十六进制", "hex"), ("rgb(r, g, b)", "rgb"), ("rgba(r, g, b, 1)", "rgba"),
                  ("hsl(h, s%, l%)", "hsl"), ("全部三行 + 色名", "all"), ("色值 + 色名", "name")],

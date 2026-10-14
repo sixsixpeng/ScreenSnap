@@ -1217,6 +1217,53 @@ class ConfigTests(CoreTests):
         canvas.close()
         toolbar.close()
 
+    def test_option_panel_rows_do_not_cross_tools(self):
+        """回归（2026-10-14 用户报告）：文字「更多设置」最下面的「文字高度」与橡皮擦的
+        「涂抹模式（自由笔刷）」被放进同一格 ⇒ 文字弹层里两行叠在一起、还带着橡皮擦的 tooltip。
+        现在自由笔刷独占空闲行 14，且行 33（椭圆填充色）不再串进橡皮擦弹层。"""
+        from config.config_manager import DEFAULTS
+        from editor.toolbar_widget import ToolbarWidget
+
+        toolbar = ToolbarWidget(DEFAULTS["pen_color"], dict(DEFAULTS), "select")
+        try:
+            toolbar.tool_buttons["text"].click()
+            text_rows = set(toolbar._last_option_rows)
+            self.assertIn(36, text_rows)
+            self.assertNotIn(14, text_rows)
+            self.assertTrue(toolbar.eraser_brush.isHidden(),
+                            "文字弹层不得出现橡皮擦的「涂抹模式（自由笔刷）」✗")
+            self.assertFalse(toolbar.text_height.isHidden())
+            self.assertTrue(all(widget is None or not widget.isHidden()
+                                for widget in toolbar.option_rows[36]),
+                            "「文字高度」所在行必须整行显示 ✗")
+
+            toolbar.tool_buttons["eraser"].click()
+            eraser_rows = set(toolbar._last_option_rows)
+            self.assertIn(14, eraser_rows)
+            self.assertNotIn(33, eraser_rows)   # 行 33 是「椭圆填充色」，不属于橡皮擦
+            self.assertFalse(toolbar.eraser_brush.isHidden())
+            self.assertFalse(toolbar.eraser_erase_base.isHidden())
+            self.assertTrue(toolbar.ellipse_fill_color.isHidden(),
+                            "橡皮擦弹层不得出现别的工具的「椭圆填充色」✗")
+
+            # 结构性护栏：除第 0 行第 1..2 列的「当前工具颜色」按钮组（同一格互斥显示）外，
+            # 选项面板里任何两个控件都不允许落在同一格 —— 否则某个工具的弹层里就会叠在一起。
+            layout = toolbar.options_button.menu().actions()[0].defaultWidget().layout()
+            cells = {}
+            for index in range(layout.count()):
+                widget = layout.itemAt(index).widget()
+                if widget is None:
+                    continue
+                row, col, rowspan, colspan = layout.getItemPosition(index)
+                for r in range(row, row + rowspan):
+                    for c in range(col, col + colspan):
+                        cells.setdefault((r, c), set()).add(id(widget))
+            overlaps = sorted(cell for cell, ids in cells.items() if len(ids) > 1)
+            self.assertTrue(all(cell[0] == 0 and cell[1] in (1, 2) for cell in overlaps),
+                            f"选项面板存在落在同一格的控件: {overlaps}")
+        finally:
+            toolbar.close()
+
     def test_text_settings_available_in_all_four_places(self):
         """今天新增的文字设置（含 text_width）在四处都应就位并带预览：
         ① 设置页「编辑器>文字」；② 工具栏「更多设置>文字」（两个编辑器共用）；
@@ -1821,7 +1868,8 @@ class ConfigTests(CoreTests):
             from config.config_manager import DEFAULTS as _DEFAULTS
 
             self.assertEqual(manager.data["notification_backend"], _DEFAULTS["notification_backend"])
-            backend.setCurrentIndex(backend.findData("legacy"))
+            # 2026-10-14：通知方式由下拉改为单选按钮组 ⇒ 点按钮走真实链路（发信号并落盘）。
+            backend._buttons["legacy"].click()
             self.assertEqual(ConfigManager(manager.path).data["notification_backend"], "legacy")
             for label, key in (("复制完成通知", "copy_notification"),
                                ("保存成功通知", "save_notification"),
@@ -2242,6 +2290,50 @@ class ConfigTests(CoreTests):
                             "水平线断口外侧应保持反色亮线: %s ✗" % gap_side.name())
         finally:
             mask.close()
+
+    def test_small_choice_controls_use_radio_row(self):
+        """2026-10-14（用户要求）：选项不超过 10 个的枚举设置改为**一组单选按钮**（多时自动折两行），
+        点击即选、不必展开下拉；取值仍写入配置，也能被「恢复本页默认」还原；超过 10 项仍是下拉。"""
+        from config.config_manager import DEFAULTS
+        from ui.settings_clipboard import ClipboardPage
+        from ui.settings_editor import EditorPage
+        from ui.settings_save import SaveOutputPage
+        from ui.widgets.tooltip import RadioRow
+
+        with tempfile.TemporaryDirectory() as folder:
+            config = ConfigManager(Path(folder) / "settings.json")
+            page = SaveOutputPage(config, config.save)
+            # 4 项：一行放下；点一下即写入配置并落盘。
+            fmt = page.controls["save_format"]
+            self.assertIsInstance(fmt, RadioRow)
+            self.assertEqual(set(fmt._buttons), {"png", "jpg", "webp", "bmp"})
+            fmt._buttons["webp"].click()
+            self.assertEqual(config.data["save_format"], "webp")
+            self.assertEqual(ConfigManager(config.path).data["save_format"], "webp")
+            # 恢复本页默认：控件与配置一起回到默认值。
+            page.reset_page()
+            self.assertEqual(config.data["save_format"], DEFAULTS["save_format"])
+            self.assertEqual(fmt.value(), DEFAULTS["save_format"])
+            page.close()
+
+            # 8 项：自动折成两行（选项多时不把设置窗口撑宽）。
+            clipboard = ClipboardPage(config, config.save)
+            labels = clipboard.controls["color_sticker_labels"]
+            self.assertIsInstance(labels, RadioRow)
+            self.assertEqual(len(labels._buttons), 8)
+            grid = labels.layout()
+            grid_rows = {grid.getItemPosition(index)[0] for index in range(grid.count())}
+            self.assertGreater(len(grid_rows), 1, "8 个选项应折成多行 ✗")
+            labels._buttons["rgb"].click()
+            self.assertEqual(config.data["color_sticker_labels"], "rgb")
+            clipboard.close()
+
+            # 11 项以上仍是下拉：一行放不下，展开列表反而更好用。
+            editor = EditorPage(config, config.save)
+            self.assertNotIsInstance(editor.controls["sequence_shape"], RadioRow)
+            self.assertNotIsInstance(editor.controls["annotation_tool"], RadioRow)
+            self.assertNotIsInstance(editor.controls["arrow_style"], RadioRow)
+            editor.close()
 
     def test_mask_left_double_click_uses_explicit_save_setting(self):
         from config.config_manager import DEFAULTS
@@ -3753,19 +3845,19 @@ class ConfigTests(CoreTests):
                     screenshot_page.controls["capture_multi_select_shortcut"]
                     .keySequence().toString(), "Alt+M")
                 self.assertEqual(
-                    screenshot_page.controls["capture_multi_edit_action"].currentData(),
+                    screenshot_page.controls["capture_multi_edit_action"].value(),
                     "save")
                 self.assertEqual(
-                    screenshot_page.controls["capture_fullscreen_action"].currentData(),
+                    screenshot_page.controls["capture_fullscreen_action"].value(),
                     "save")
                 self.assertEqual(
-                    screenshot_page.controls["capture_monitor_action"].currentData(),
+                    screenshot_page.controls["capture_monitor_action"].value(),
                     "save")
                 self.assertEqual(
-                    screenshot_page.controls["capture_repeat_action"].currentData(),
+                    screenshot_page.controls["capture_repeat_action"].value(),
                     "save")
                 self.assertEqual(
-                    screenshot_page.controls["capture_gap_fill"].currentData(),
+                    screenshot_page.controls["capture_gap_fill"].value(),
                     "transparent")
                 self.assertTrue(settings.page("常规").controls["sound"].isChecked())
                 self.assertTrue(settings.page("编辑器").controls["rect_corner_enabled"].isChecked())

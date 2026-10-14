@@ -59,7 +59,7 @@ class SaveOutputPage(SettingsPage):
         archive_day.toggled.connect(
             lambda checked: archive_month.setChecked(False) if checked else None)
         self.group("文件与目录")
-        self.choice("save_format", "保存格式", [("PNG（无损）", "png"), ("JPEG", "jpg"),
+        self.radios("save_format", "保存格式", [("PNG（无损）", "png"), ("JPEG", "jpg"),
                                             ("WebP", "webp"), ("BMP", "bmp")],
                     "自动与手动保存使用的图片格式")
         self.number("save_quality", "图片质量", 1, 100,
@@ -87,7 +87,7 @@ class SaveOutputPage(SettingsPage):
                    "是否清理通知（Toast/托盘气泡）用过的缩略图缓存。\n这些图随时可按需重建，所以清理一般无感；关闭只是让缓存目录继续变大。\n不影响真实截图与贴图文件。")
         self.check("cache_clear_sticker", "清理孤儿贴图缓存",
                    "是否清理“孤儿”贴图私有缓存。\n只删当前没有任何活动贴图或回收站贴图引用的文件；会话仍在引用的源文件永远不会被删。\n关闭：这些不再使用的缓存文件会一直留在缓存目录里。")
-        self.choice("cache_cleanup_timing", "自动清理时机",
+        self.radios("cache_cleanup_timing", "自动清理时机",
                     [("仅手动", "off"), ("启动时", "start"), ("退出时", "exit")],
                     "除“立即清理”按钮外，是否在启动或退出时按上面的范围自动清理一次缓存。\n仅手动：只在点按钮时清理（默认）。\n启动时：界面起来之后在后台清理，不拖慢启动。\n退出时：先保存贴图会话再清理，避免把本会话仍在引用的源文件当成孤儿删掉。\n自动清理同样遵守上面三个范围开关。")
         self.form.addRow(self._cache_controls())

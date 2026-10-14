@@ -1853,10 +1853,9 @@ class DpiTests(CoreTests):
                 self.assertEqual(editor.palette().color(QPalette.Window).name(),
                                  system_window_color)
                 theme_control = settings.page("主题与外观").controls["theme"]
-                self.assertEqual(theme_control.currentData(), "system")
-                self.assertEqual({theme_control.itemData(index)
-                                  for index in range(theme_control.count())},
-                                 {"system", "dark", "light"})
+                # 2026-10-14：颜色模式由下拉改为单选按钮组 ⇒ 用 value() 读当前值、_buttons 取全部取值。
+                self.assertEqual(theme_control.value(), "system")
+                self.assertEqual(set(theme_control._buttons), {"system", "dark", "light"})
                 manager.data["theme"] = "sepia"
                 with self.assertRaises(ValueError):
                     manager.save()
