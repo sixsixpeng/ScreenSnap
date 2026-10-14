@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QSize, Signal, QTimer
+from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QSize, Signal, QTimer, QEvent
 from PySide6.QtGui import (QGuiApplication, QPixmap, QPainter, QColor, QPen,
                            QImage, QTransform, QBitmap, QRegion, QPainterPath)
 from PySide6.QtWidgets import QWidget
@@ -185,6 +185,14 @@ class StickerItem(QWidget):
             self.apply_style()
         self.state_changed.emit()
 
+    def event(self, event):
+        result = super().event(event)
+        # 窗口跨屏的 DPR 通知可能晚于 moveEvent，且逻辑尺寸不一定变化。
+        # 构造期事件也会到达这里，必须等 Pixmap/样式状态初始化完成。
+        if event.type() == QEvent.Type.DevicePixelRatioChange and hasattr(self, "_pixmap_ratio"):
+            self.apply_style()
+        return result
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self.update_input_mask()
@@ -205,6 +213,8 @@ class StickerItem(QWidget):
                 "贴图样式变化补偿: padding %d→%d 位置(%d,%d)→(%d,%d)",
                 pad_before, pad_after, self.x() - delta, self.y() - delta, self.x(), self.y())
         self._pad_cache = pad_after
+        # 背景/DPR/alpha 改变时即使 QSize 相同，也不能依赖 resizeEvent 更新窗口裁剪。
+        self.update_input_mask()
         self.update()
 
     def paintEvent(self, event):
@@ -342,22 +352,33 @@ class StickerItem(QWidget):
         self.state_changed.emit()
 
     def update_input_mask(self):
-        """透明模式只让非透明像素命中；伪透明与棋盘模式保留整块拖动区域。"""
+        """按窗口逻辑坐标构造遮罩；setMask 同时影响命中与可见区域。"""
+        rect = self.image_rect()
+        key = (self.pixmap.cacheKey(), self.pixmap.devicePixelRatio(),
+               self.size().width(), self.size().height(), rect, self.background_mode,
+               self.shadow_enabled, self.shadow_blur(), self.shadow_offset())
+        if getattr(self, "_input_mask_log_key", None) != key:
+            self._input_mask_log_key = key
+            logging.getLogger("screensnap").debug(
+                "贴图透明遮罩更新: 模式=%s 图像=%dx%d DPR=%.2f 逻辑区域=%s 阴影=%s",
+                self.background_mode, self.pixmap.width(), self.pixmap.height(),
+                self.pixmap.devicePixelRatio(), rect, self.shadow_enabled)
         if self.background_mode != "transparent" or self.pixmap.isNull():
             self.clearMask()
             return
-        rect = self.image_rect()
         mask = QImage(self.size(), QImage.Format_Mono)
         mask.fill(0)
         source = self.pixmap.toImage()
         if source.isNull() or not source.hasAlphaChannel():
             self.clearMask()
-            logging.getLogger("screensnap").debug(
-                "贴图输入遮罩跳过无透明通道图像: null=%s", source.isNull())
             return
         opaque = source.createAlphaMask().scaled(
             max(1, rect.width()), max(1, rect.height()), Qt.IgnoreAspectRatio,
             Qt.SmoothTransformation)
+        # 2026-10-14：createAlphaMask/scaled 保留源 Pixmap 的 DPR；这里已缩到
+        # 逻辑尺寸，点式 drawImage 会再除一次 DPR，把右上/右下/左下透明角挪到
+        # 图片内部。窗口 QRegion 必须使用 DPR=1 的逻辑栅格，不能改源图来补偿。
+        opaque.setDevicePixelRatio(1.0)
         painter = QPainter(mask)
         painter.drawImage(rect.topLeft(), opaque)
         painter.end()
@@ -776,7 +797,7 @@ class StickerItem(QWidget):
             return
         factor = 1.1 if event.angleDelta().y() > 0 else 1 / 1.1
         self.scale_factor = min(10, max(0.1, self.scale_factor * factor))
-        self.resize(self.window_size())
+        self.apply_style()
         self.batch_scaled.emit(self, factor)
         self.show_scale_hint()
         event.accept()
@@ -816,19 +837,22 @@ class StickerItem(QWidget):
     def reset_size(self):
         """恢复原始像素大小，不更换贴图内容。"""
         self.scale_factor = 1.0
-        self.resize(self.window_size())
+        self.apply_style()
+        self.state_changed.emit()
 
     def rotate(self, degrees):
         """按指定角度旋转贴图显示，不修改源图片文件。"""
         self.rotation_degrees = (self.rotation_degrees + degrees) % 360
         self.pixmap = self.original_pixmap.transformed(
             QTransform().rotate(self.rotation_degrees), Qt.SmoothTransformation)
-        self.resize(self.window_size())
+        self.apply_style()
+        self.state_changed.emit()
 
     def reset_rotation(self):
         self.rotation_degrees = 0
         self.pixmap = QPixmap(self.original_pixmap)
-        self.resize(self.window_size())
+        self.apply_style()
+        self.state_changed.emit()
 
     def replace_image(self, image, source):
         """历史图片轮换时保留贴图窗口的当前位置和缩放倍率。"""
@@ -838,8 +862,17 @@ class StickerItem(QWidget):
         self.original_pixmap = QPixmap.fromImage(image)
         self.rotation_degrees = 0
         self.pixmap = QPixmap(self.original_pixmap)
+        # 新 Pixmap 没有旧对象的 DPR；同屏也必须重新写入，不能命中比例缓存早退。
+        self._pixmap_ratio = None
+        self._apply_pixmap_ratio()
         self.resize(self.window_size())
+        # 同尺寸替换不保证产生 resizeEvent；新 alpha/source 必须立即生效并安排保存。
+        self.update_input_mask()
         self.update()
+        self.state_changed.emit()
+        logging.getLogger("screensnap").debug(
+            "替换贴图完成: 物理=%dx%d DPR=%.2f 缩放=%.2f",
+            self.pixmap.width(), self.pixmap.height(), self._pixmap_ratio, self.scale_factor)
 
     def closeEvent(self, event):
         self.closed.emit()

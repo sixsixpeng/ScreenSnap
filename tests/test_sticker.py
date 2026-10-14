@@ -97,7 +97,8 @@ class StickerTests(CoreTests):
         from config.config_manager import DEFAULTS
         from sticker.sticker_manager import StickerManager
 
-        with tempfile.TemporaryDirectory() as folder:
+        with tempfile.TemporaryDirectory() as folder, \
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
             session = Path(folder) / "stickers.json"
             session.write_text('[{"id": "keep-me"}]', encoding='utf-8')
             manager = StickerManager(dict(DEFAULTS))
@@ -107,14 +108,14 @@ class StickerTests(CoreTests):
             manager.quitting = True          # 退出路径：remove() 会早退
             item.close()                     # Qt 关窗并析构 C++ 对象
             self.app.processEvents()
-            with patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
-                ok = manager.persist()
+            ok = manager.persist()
             self.assertFalse(ok, "全部状态读取失败时必须报告失败")
             self.assertEqual(session.read_text(encoding='utf-8'), '[{"id": "keep-me"}]',
                              "读取失败时绝不能覆盖上一次的会话文件")
             # 清理：先解绑再关，避免对已析构对象调用 close()（close_all 本轮已加固，这里也不依赖它）。
             manager.quitting = False
             manager.items.clear()
+            manager.stop_pending_persistence()
 
     def test_remove_keeps_item_in_session_while_quitting(self):
         """回归（用户 2026-10-11）：退出时 Qt 会关闭所有顶层窗口，贴图窗口的 closeEvent
@@ -1279,7 +1280,8 @@ class StickerTests(CoreTests):
 
         with tempfile.TemporaryDirectory() as folder, \
                 patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
-            manager = StickerManager(DEFAULTS)
+            # 本用例验证真正孤儿；回收站引用由 lifecycle 回归单独覆盖。
+            manager = StickerManager(dict(DEFAULTS, sticker_recycle_enabled=False))
             image = QImage(12, 8, QImage.Format_RGB32)
             image.fill(QColor("red"))
             item = manager.add(image)
@@ -1295,7 +1297,7 @@ class StickerTests(CoreTests):
 
         with tempfile.TemporaryDirectory() as folder, \
                 patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
-            manager = StickerManager(DEFAULTS)
+            manager = StickerManager(dict(DEFAULTS, sticker_recycle_enabled=False))
             image = QImage(12, 8, QImage.Format_RGB32)
             image.fill(QColor("red"))
             retained = manager.add(image)

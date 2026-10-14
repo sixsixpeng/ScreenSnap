@@ -243,10 +243,8 @@ class StickerManager(QObject):
             clipboard_images = len(list(clipboard_dir.glob("clipboard_*.png")))
             history_entries = self.clear_clipboard_history()
         if self.settings.get("cache_clear_sticker", True):
-            # 活动贴图与回收站里的贴图仍引用着各自的源文件：这些源文件不能算“可重建缓存”。
-            referenced_sources = (item.source for item in (*self.items, *self.recycle_bin)
-                                  if item.source)
-            sticker_images = self.cleanup_cache(referenced_sources)
+            # 引用保护统一由 cleanup_cache 负责，自动持久化和恢复也遵守同一规则。
+            sticker_images = self.cleanup_cache(())
         if self.settings.get("cache_clear_toast", True):
             # Toast 缩略图只是通知里的一次性预览，随时可按需重建，直接整目录清掉。
             for image in self._cache_dir("toast_cache").glob("*.png"):
@@ -385,11 +383,15 @@ class StickerManager(QObject):
                              encoding="utf-8")
         temporary.replace(path)
 
-    def _remember_placement(self, item, save=True):
-        if not item.source:
+    def _remember_placement(self, item, save=True, state=None):
+        if state is None:
+            if not item.source:
+                return
+            state = item.state()
+        source = state.get("source")
+        if not source:
             return
-        state = item.state()
-        key = self._placement_key(item.source)
+        key = self._placement_key(source)
         self.placement_states.pop(key, None)
         self.placement_states[key] = {
             key: state[key] for key in ("source", "x", "y", "scale", "width", "height")
@@ -905,10 +907,13 @@ class StickerManager(QObject):
             path = data_dir() / "stickers.json"
             path.parent.mkdir(parents=True, exist_ok=True)
             states = []
+            snapshots = []
             failed = 0
             for item in self.items:
                 try:
-                    states.append(item.state())
+                    state = item.state()
+                    states.append(state)
+                    snapshots.append((item, state))
                 except Exception as error:  # noqa: BLE001 退出路径上窗口可能已被 Qt 析构
                     # 退出时 remove() 会早退，窗口对象可能已被 Qt 删除（WA_DeleteOnClose），
                     # item.state() 会抛 RuntimeError。逐张兜住，绝不让单张失败导致整次会话
@@ -923,14 +928,17 @@ class StickerManager(QObject):
             # 留痕（2026-10-11）：退出时若这里 items=0，就说明贴图在退出前已被移除，
             # 问题在移除路径而不在持久化本身。
             logging.getLogger("screensnap").debug(
-                "保存贴图会话: items=%d states=%d 可见=%d",
-                len(self.items), len(states),
-                sum(1 for item in self.items if item.isVisible()))
-            for item in self.items:
-                self._remember_placement(item, save=False)
+                "保存贴图会话: items=%d states=%d 跳过=%d",
+                len(self.items), len(states), failed)
+            # 退出期间窗口可能在首次读取后已析构；日志和布局只消费成功的纯数据快照。
+            for item, state in snapshots:
+                try:
+                    self._remember_placement(item, save=False, state=state)
+                except (OSError, RuntimeError, TypeError, ValueError, KeyError) as error:
+                    logging.getLogger("screensnap").warning("记录贴图布局失败，继续保存会话: %s", error)
             try:
                 self._save_placement_states()
-            except (OSError, TypeError, ValueError) as error:
+            except (OSError, RuntimeError, TypeError, ValueError) as error:
                 logging.getLogger("screensnap").warning("保存贴图布局失败: %s", error)
             temporary = path.with_suffix(".tmp")
             temporary.write_text(json.dumps(states, indent=2), encoding="utf-8")
@@ -948,10 +956,14 @@ class StickerManager(QObject):
         self._persist_timer.start()
 
     def cleanup_cache(self, sources):
-        """仅清理私有缓存中未被有效会话引用的贴图。"""
+        """仅清理私有缓存中未被会话、活动窗口或回收站引用的贴图。"""
         # 贴图私有缓存：只有当前无人引用的 sticker_*.png 才可删，返回实际删除数量供上报。
         cache = self._cache_dir("sticker_cache")
-        referenced = {Path(source).resolve() for source in sources}
+        referenced = {Path(source).resolve() for source in sources if source}
+        # 不调用 state()/Qt API：读取失败或隐藏的活动窗口也仍拥有源图。
+        # 真正删除/清空/超限后引用退出列表，下一次清理即可回收，不永久保留布局历史。
+        referenced.update(Path(item.source).resolve()
+                          for item in (*self.items, *self.recycle_bin) if item.source)
         removed = 0
         for file in cache.glob("sticker_*.png"):
             if file.resolve() not in referenced:
@@ -960,6 +972,8 @@ class StickerManager(QObject):
                     removed += 1
                 except OSError as error:
                     logging.getLogger("screensnap").warning("无法清理贴图缓存 %s: %s", file, error)
+        if removed:
+            logging.getLogger("screensnap").debug("清理无引用贴图缓存: 删除=%d 保留引用=%d", removed, len(referenced))
         return removed
 
     def restore(self):
