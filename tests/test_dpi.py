@@ -578,10 +578,11 @@ class DpiTests(CoreTests):
                         with self.subTest(scale=scale, button=button, offset=offset):
                             mask.selection.rects.clear()
                             mask.selection.start = None
-                            mask.mousePressEvent(QMouseEvent(QEvent.MouseButtonPress, start, start,
+                            origin = QPointF(mask.mapToGlobal(QPoint()))
+                            mask.mousePressEvent(QMouseEvent(QEvent.MouseButtonPress, start, origin + start,
                                                               button, button, Qt.NoModifier))
                             self.assertEqual(mask.position, expected_start)
-                            mask.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, end, end,
+                            mask.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, end, origin + end,
                                                              Qt.NoButton, button, Qt.NoModifier))
                             self.assertEqual(mask.position, expected_end)
                             self.assertEqual(mask.selection.active, QRect(expected_start, expected_end))
@@ -717,7 +718,8 @@ class DpiTests(CoreTests):
                             view.selection.rects.clear()
                             view.selection.begin_new(start)
                             view._nudge_hold = False       # 走普通划选分支（非键盘微调）
-                            view.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, local, local,
+                            native = QPointF(view.mapToGlobal(QPoint())) + local
+                            view.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, local, native,
                                                             Qt.NoButton, button, Qt.NoModifier))
                             self.assertEqual(view.position, end)
                             wanted = SelectionRects.resized_rect(start, end, "both", QRect())
@@ -1615,6 +1617,12 @@ class DpiTests(CoreTests):
              [{"geometry": QRect(0, -1728, 3072, 1728), "dpr": 1.25},
               {"geometry": QRect(0, 32, 1920, 1080), "dpr": 1.0}],
              {"left": 0, "top": -2160, "width": 3840, "height": 3240}),
+            ("日志现场：上方4K@125%负原点横向错位 + 下方1920x1200@100%主屏",
+             [{"left": -751, "top": -2160, "width": 3840, "height": 2160},
+              {"left": 0, "top": 0, "width": 1920, "height": 1200}],
+             [{"geometry": QRect(-751, -2160, 3072, 1728), "dpr": 1.25},
+              {"geometry": QRect(0, 0, 1920, 1200), "dpr": 1.0}],
+             {"left": -751, "top": -2160, "width": 3840, "height": 3360}),
         )
         for name, monitors, screens, bounds in cases:
             mapper = DisplayMapper(bounds, monitors, screens)

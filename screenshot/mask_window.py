@@ -555,7 +555,7 @@ class InlineEditor(QWidget):
         local = QPointF(watched.mapTo(view, QPoint())) + event.position()
         mapped = QMouseEvent(event_type, local, event.globalPosition(),
                              event.button(), event.buttons(), event.modifiers())
-        point = view.to_physical_point(local)
+        point = view._mouse_event_position(mapped)
         if event_type == QEvent.MouseMove:
             view.mouseMoveEvent(mapped)
             return view.selection.resizing is not None or view.selection.dragging is not None
@@ -589,7 +589,7 @@ class InlineEditor(QWidget):
                 #   （用户现象：一开始只有合法方向能动，一动之后四个方向都有反应）。
                 if not getattr(_ic, '_programmatic_cursor_move', False):
                     # 用**按下这一刻**的位置判手柄 ✓（不用实时光标 ✗ —— 后者会被跟随带着走 ✓）。
-                    _press_global = view.mapToGlobal(local)
+                    _press_global = event.globalPosition().toPoint()
                     _hit = _ic.pointer_handle(_press_global) if _ic is not None else None
                     view._active_handle = _hit
                     # 2026-10-12（真机日志定位 ✓ 用户"到一定程度原本方向就会突然改变"）：
@@ -2639,6 +2639,20 @@ class MaskWindow(QWidget):
         native = QPointF(self.mapToGlobal(QPoint())) + QPointF(point)
         return self.mapper.native_global_to_physical_global(native) - self.mapper.physical_bounds.topLeft()
 
+    def _mouse_event_position(self, event):
+        """事件原生全局坐标 -> 物理局部；跨屏抓取时不能用来源窗口的局部点重建。"""
+        native = event.globalPosition()
+        point = (self.mapper.native_global_to_physical_global(native)
+                 - self.mapper.physical_bounds.topLeft())
+        # 仅记录两路输入确实不一致的情况，固定签名限频，不逐次移动刷日志。
+        rebuilt = QPointF(self.mapToGlobal(QPoint())) + event.position()
+        if abs(rebuilt.x() - native.x()) > 2 or abs(rebuilt.y() - native.y()) > 2:
+            log_every(logging.getLogger("screensnap"), logging.DEBUG,
+                      "capture_mouse_coordinate_source", str(self.monitor_rect.getRect()), 5,
+                      "截图鼠标使用原生全局点：视图=%s 局部=%s 事件全局=%s 局部重建=%s 物理局部=%s",
+                      self.monitor_rect.getRect(), event.position(), native, rebuilt, point)
+        return point
+
     def _live_cursor_physical(self):
         """实时读取光标的物理局部坐标，不依赖 `mouseMoveEvent` 更新的 `self.position`。
 
@@ -2649,9 +2663,8 @@ class MaskWindow(QWidget):
         ⇒ 徽标不隐藏 ✗（右键多选不进入原地编辑 ⇒ 移动事件照常 ⇒ 不受影响 ✓）。
         这里改用 `QCursor.pos()` 实时读取：徽标与画布同级、光标真实位置就是全局光标 ✓。
         """
-        global_point = QCursor.pos()
-        local = self.mapFromGlobal(global_point)
-        return self.to_physical_point(local)
+        return (self.mapper.native_global_to_physical_global(QCursor.pos())
+                - self.mapper.physical_bounds.topLeft())
 
     def to_logical_rect(self, rect):
         """截图物理局部矩形 -> 当前窗口逻辑局部矩形。"""
@@ -2833,7 +2846,13 @@ class MaskWindow(QWidget):
             #   徽标 hover 判定拿这个过时位置去算，光标明明移到顶部徽标上却判成"不在徽标上" ⇒ 不隐藏 ✗
             #   （右键多选不进入原地编辑 ⇒ 移动事件照常 ⇒ 不受影响 ✓）。这里每拍用 QCursor.pos() 实时
             #   刷新 self.position ✓。
-            self.position = self._live_cursor_physical()
+            # 共享交互的端点只能由鼠标/键盘入口写入，另一块屏的轮询不能抢写。
+            # 徽标 hover 自行读取实时光标，静止编辑时仍可同步 position（D38）。
+            interacting = (self.selection.start is not None or self.selection.dragging is not None
+                           or self.selection.resizing is not None
+                           or any(getattr(view, "_nudge_hold", False) for view in self.session.views))
+            if not interacting:
+                self.position = self._live_cursor_physical()
             # 2026-10-12（真机日志定位 ✓）：进入原地编辑后遮罩被画布完全覆盖，`self.update()` **不触发
             #   paintEvent** ✗（日志：周期刷新拍到 position=(1233,27) 已在徽标上，却始终没有「尺寸徽标
             #   决策」日志）⇒ 徽标判定一直没跑 ✗。改为这里**直接**计算并同步徽标状态，不再依赖
@@ -3262,12 +3281,10 @@ class MaskWindow(QWidget):
         global_point = QCursor.pos()
         physical = self.mapper.native_global_to_physical_global(global_point) - self.mapper.physical_bounds.topLeft()
         target = self.focus_view_for_position(physical) or self
-        local = target.mapFromGlobal(global_point)
-        local_point = target.to_physical_point(local)
         logging.getLogger("screensnap").debug(
             "取色（快捷键一次取样）：目标视图=%s 光标全局点=%s 局部物理点=%s",
-            target.monitor_rect.getRect(), global_point, local_point)
-        target.sample_color_at(local_point)
+            target.monitor_rect.getRect(), global_point, physical)
+        target.sample_color_at(physical)
 
     def mousePressEvent(self, event):
         """左键开始创建选区，已有选区的命中由选区对象判定。"""
@@ -3275,7 +3292,7 @@ class MaskWindow(QWidget):
         # 取色分支（Alt/Ctrl+左键取样）永远走不到 —— 这正是"划选后无法取色"的原因。
         if (event.button() == Qt.LeftButton
                 and QGuiApplication.keyboardModifiers() & (Qt.AltModifier | Qt.ControlModifier)):
-            self.sample_color_at(self.to_physical_point(event.position()))
+            self.sample_color_at(self._mouse_event_position(event))
             event.accept()
             return
         # 自己记录左键是否按下：selection.resizing/dragging 在部分路径下不可靠，
@@ -3284,7 +3301,7 @@ class MaskWindow(QWidget):
         self._nudge_hold = False      # 键盘微调接管标记只对本次拖动有效 ✓（见 _nudge_active_region）
         if self.inline_active():
             if event.button() == Qt.LeftButton:
-                self.position = self.to_physical_point(event.position())
+                self.position = self._mouse_event_position(event)
                 hit = self.selection.handle_at(self.position)
                 if hit is not None or self.selection.border_at(self.position):
                     if hit is not None:
@@ -3298,7 +3315,7 @@ class MaskWindow(QWidget):
         # 取色已改为一次性动作（按 C 在光标处取样，见上方 2476 行的 Alt/Ctrl+左键分支与
         # sample_color_at），全仓库再无 `picker_mode = True` 的写入点，该分支永远进不去，故删除。
         if event.button() in (Qt.LeftButton, Qt.RightButton):
-            self.position = self.to_physical_point(event.position())
+            self.position = self._mouse_event_position(event)
             if event.button() == Qt.RightButton:
                 self.selection.begin_new(self.position)
             else:
@@ -3321,7 +3338,7 @@ class MaskWindow(QWidget):
     def mouseMoveEvent(self, event):
         """将显示器及窗口的全局边缘转换为遮罩内的局部坐标。"""
         if self.inline_active():
-            self.position = self.to_physical_point(event.position())
+            self.position = self._mouse_event_position(event)
             hit = self.selection.handle_at(self.position)
             if self.selection.resizing is not None or hit is not None:
                 cursor = self.resize_cursor if self.selection.resizing is not None else hit[2]
@@ -3341,7 +3358,7 @@ class MaskWindow(QWidget):
                     self.selection.active = self.selection.active.intersected(self.monitor_rect)
             self.update_all()
             return
-        self.position = self.to_physical_point(event.position())
+        self.position = self._mouse_event_position(event)
         hit = self.selection.handle_at(self.position)
         if self.selection.resizing is not None or hit is not None:
             cursor = self.resize_cursor if self.selection.resizing is not None else hit[2]
@@ -3407,7 +3424,7 @@ class MaskWindow(QWidget):
     def mouseReleaseEvent(self, event):
         keyboard_controlled = self._nudge_hold
         if event.button() in (Qt.LeftButton, Qt.RightButton) and not keyboard_controlled:
-            final_point = self.to_physical_point(event.position())
+            final_point = self._mouse_event_position(event)
             if final_point != self.position and any((self.selection.start is not None,
                                                      self.selection.resizing is not None,
                                                      self.selection.dragging is not None)):

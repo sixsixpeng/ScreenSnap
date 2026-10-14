@@ -478,7 +478,8 @@ class CaptureTests(CoreTests):
                                        (expected.bottomRight(), expected.topLeft())):
                         with self.subTest(primary=primary, button=button, start=start):
                             mask.selection.begin_new(start)
-                            event = QMouseEvent(QEvent.MouseMove, QPointF(end), QPointF(end),
+                            native = QPointF(mask.mapToGlobal(QPoint())) + QPointF(end)
+                            event = QMouseEvent(QEvent.MouseMove, QPointF(end), native,
                                                 Qt.NoButton, button, Qt.NoModifier)
                             mask.mouseMoveEvent(event)
                             self.assertEqual(mask.selection.active, expected)
@@ -674,7 +675,8 @@ class CaptureTests(CoreTests):
             self.assertEqual(mask.position, corner + QPoint(1, 0))
             self.assertEqual(mask.selection.nudge_corner[2], corner + QPoint(1, 0))
             move_pointer.assert_called_with(mask.mapToGlobal(mask.position))
-            mask.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, QPointF(45, 38), QPointF(45, 38),
+            native = QPointF(mask.mapToGlobal(QPoint())) + QPointF(45, 38)
+            mask.mouseMoveEvent(QMouseEvent(QEvent.MouseMove, QPointF(45, 38), native,
                                            Qt.NoButton, Qt.NoButton, Qt.NoModifier))
             self.assertEqual(mask.position, QPoint(45, 38))
             self.assertIsNone(mask.selection.handle_at(mask.position))
