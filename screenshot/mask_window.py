@@ -7,7 +7,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import (Qt, Signal, QPoint, QPointF, QRect, QRectF, QEvent, QMimeData,
+from PySide6.QtCore import (Qt, Signal, QPoint, QPointF, QRect, QRectF, QEvent,
                             QTimer, QSize)
 from PySide6.QtGui import QFont, QKeyEvent
 from PySide6.QtGui import QMouseEvent

@@ -32,7 +32,10 @@ ROOT = Path(__file__).resolve().parent
 MODULES = [
     "tests.test_config",
     "tests.test_capture",
+    "tests.test_capture_pointer",
     "tests.test_sticker",
+    "tests.test_sticker_mask",
+    "tests.test_sticker_lifecycle",
     "tests.test_uia",
     "tests.test_dpi",
     "tests.test_ui",
