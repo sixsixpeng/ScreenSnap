@@ -95,6 +95,15 @@
     - **禁止暗中联动**：不得让改 A 键的代码顺手改 B 键 ✗（无论叫"跟随""同步""默认一致" ✓）。若产品上确需联动，必须**显式**满足：在 README 的配置表与调整记录里写明"改 A 会同时改 B" ✓ + 在设置页该控件的说明里写明 ✓ + 有用例钉住联动条件（例如"仅当 B 仍等于旧 A 时才跟随" ✓）。否则一律按独立处理 ✓。
     - **报告口径**：每次配置相关改动的报告都要写清"跑了哪些键、发现哪些不一致、修了什么、还剩哪些有意为之的例外" ✓。
 
+36. **所有测试必须有时间限制、可见计时和超时回收，禁止无限死等。** 测试、最小探针、导入自检及后台验证都适用；不能只在说明里写“有超时”，执行器必须真的实施：
+
+    - **启动前显示**：绝对解释器路径、绝对工作目录、完整命令、开始时间、单进程超时秒数；批量任务还要给出整体时间预算。先核实依赖可导入，不假定后台终端继承前台的 cwd 或 Python。
+    - **有界预算**：默认定向子集 120 秒、完整模块 180 秒、单模块导入 20 秒；已有耗时证据表明需要更长时，运行前明确提高数值并说明原因，绝不设为无限。每次重试也受期限约束，且受批次整体预算限制。
+    - **等待期间可见**：长任务至少每 10–15 秒输出当前模块/阶段、已耗时与剩余时间；使用无缓冲输出，必要时把进度写入可读取的临时日志。后台任务没有新输出也不能无期限轮询；等待后台结果的上层同样要有截止时间。
+    - **超时立即处理**：标记 `TIMEOUT`，保留已经产生的 stdout/stderr、命令和日志路径；终止并回收本次测试的进程树，再有限等待退出。Windows 可按本次 PID 使用 `taskkill /PID <pid> /T /F`；清理也要有超时，不得批量杀掉用户的其他 Python/应用进程。禁止测试跑着时继续编辑它所读取的生产代码或用例。
+    - **结束必须显示**：结束时间、实际耗时、退出码、`Ran N` 与 `OK/FAILED`。`Ran 0` 不算有效验证；已知原生退出异常即使有 `Ran N / OK` 也单列“摘要通过、收尾异常”，不能说正常退出；无摘要、超时或未知非零退出均不得算通过，只允许有界重试/分块定位。
+    - **不因提交检查而例外**：提交前验证也遵守本规则。测试脚本若没有子进程超时，必须由满足本规则的外层逐模块执行器托管；仅给工具设置后台标志或打印一个时间戳不等于有超时保护。
+
 - **D35 绘制期绝不改可见性（子控件与场景图元都不行）**
   - 现象：给"全屏截图松开后尺寸标签消失"做修复时，我在 `drawForeground`（绘制期）里直接 `show()` 一个子控件 `QLabel` ✗ ⇒ `tests.test_capture -k mask` 由 **Ran 22 OK** 变成**摘要前原生崩溃**（`exit=-1073740791` / `0xC0000409` ✓ 无 Ran ✓）。另一次同族隐患：`_paint_erased_composite` → `_cached_annotation_layer` 在绘制期 `base.hide() … scene.render() … base.show()` ✗（改的是**场景图元**可见性 ✓ 同样属风险族 ✓）。
   - 排查：`git stash push <改动文件>` 后跑同一子集（HEAD 版本 **Ran 22 OK** ✓）⇒ 确认是本次改动触发 ✓（C7）；把 `show()` 换成 `QTimer.singleShot(0, …)` 后同子集恢复 **Ran 22 OK** ✓。
@@ -160,10 +169,10 @@
   - 现象：程序什么都没执行就报解析错误。
   - 排查：模板里出现了 markdown 反引号、未转义双引号，或反斜杠 u 转义序列。
   - 避免：跨语言生成代码用占位符替换（例如两个 @ 代表反引号）；或直接写单语言脚本文件。
-- **B2 命令结果没有 stdout**
-  - 现象：Cannot read properties of undefined (reading text)。
-  - 排查：长命令超过执行器上限，被转成后台作业（返回 kind 为 background）。
-  - 避免：把命令拆短；拿到 job_id 后用 job_output 收结果；不要假设一定有 stdout。
+- **B2 后台命令的输出、工作目录与解释器不能沿用前台假设**
+  - 现象：命令输出缺失时曾报 `Cannot read properties of undefined (reading text)`；2026-10-14 截图贴图基线在后台批量报 `ModuleNotFoundError: No module named 'tests.test_capture'` 等，尚未运行任何真实用例。
+  - 排查：前者是长命令被转成后台作业；后者核对运行目录和 `sys.executable`，发现后台落在仓库根且解析到另一套 Python，固定项目目录与已验证的解释器后，原 12 个子集共 105 条均有 OK 摘要。
+  - 避免：子进程显式传绝对 `cwd` 和绝对 Python 路径，不依赖前台 `Set-Location`、PATH 或虚拟环境激活；先做依赖/模块导入检查。取得后台任务 ID 后按规则 36 有界取结果；空输出不等于成功、导入失败不等于产品回归。
 - **B3 重定向出来的文件是空的**
   - 现象：读回文件为空，误判为程序没有输出。
   - 排查：Start-Process 的 RedirectStandardOutput 在沙箱里写不出内容。
@@ -178,7 +187,7 @@
 - **C1 测试进程挂死不返回**
   - 现象：命令被转成后台作业、一直不出结果。
   - 排查：mock 只替换了第一处，其余用例弹出真实模态文件对话框。
-  - 避免：替换对话框或补丁点时先 Select-String 数出现次数，按全部替换；跑测试要有超时兜底。
+  - 避免：替换对话框或补丁点时先 Select-String 数出现次数，按全部替换；所有测试按规则 36 显示计时并实施超时，超时保留现场、回收本次进程树。停止无限等待后再查遗漏的模态入口，不靠继续等或连续启动新任务碰运气。
 - **C2 复现不出线上现象**
   - 现象：探针跑不出日志重复、UIA 崩溃等真实症状。
   - 排查：离屏平台枚举不到屏幕；纯控制台进程跑 UIA 会直接退出。
@@ -187,10 +196,10 @@
   - 现象：FakeEditor 没有 copy_done 属性。
   - 排查：测试桩没有跟随新信号或新方法更新。
   - 避免：改接口时同步更新测试桩（规则 16）；桩缺属性能立刻暴露未接线问题，别用 getattr 掩盖。
-- **C4 偶发无摘要被当成失败**
-  - 现象：模块跑完没有 Ran 或 OK 摘要，退出码非 0。
-  - 排查：离屏收尾原生崩溃（同一天同一模块可复现为通过）。
-  - 避免：重跑一次并用 Ran N 判定；分模块、必要时分块运行。
+- **C4 分开记录摘要通过、原生收尾异常和无摘要，不能混为全绿**
+  - 现象：离屏测试有 `Ran N / OK` 却以原生异常退出；另有贴图用例在摘要前访问违规，只有退出码 `3221225477`。将两种情况混为“已知收尾异常”会把未验证的用例放过。
+  - 排查：同时核对完整摘要、退出码和 faulthandler 栈；2026-10-14 `test_sticker_without_saved_position_centers_using_logical_size` 当前版与临时 HEAD 单跑均无摘要，不能用其他 92 条的 OK 代替它。
+  - 避免：按规则 36 记录时限与实际耗时；有 `Ran N / OK` 的已知原生收尾异常单列，无摘要/超时不算通过。有限重跑后分块或单跑定位，禁止新增 skip、删除用例或只报通过总数掩盖未验证项。
 
 - **C5 只在副屏验证，主屏问题被遗漏**
   - 现象：功能在副屏正常，切到主屏就错位或失效（同类问题已被多次发现）。
@@ -202,14 +211,14 @@
   - 排查：用**独立的单行导入自检**（单独脚本文件，不要依赖 shell 里的嵌套引号）确认崩溃发生在导入阶段；看退出码是否为 -1073741819；并确认改动前该模块能否被导入。
   - 避免：模块级只放纯数据与枚举（例如 `QKeySequence.Undo` 枚举值）；`QKeySequence(...)`、QIcon、QPixmap 等 Qt 对象一律在函数内构造，或在 QApplication 建立之后构造。
 
-- **C7 模块变红先用 `git stash` 与 HEAD 对照，别把既有失败算成回归、也别放过自己引入的回归**
+- **C7 模块变红先用工作区外临时 HEAD 副本对照，区分既有失败与新回归**
   - 现象：跨屏多选改完后 `test_dpi` 3 条红，无法判断哪些是我引入的。
   - 排查：`git stash push <改动文件>` → 在 HEAD 版本跑同样 3 条 → 对比（1 条 HEAD 通过=我引入的回归；2 条 HEAD 同样失败=既有失败）→ `git stash pop`。随后定位到回归原因是归属判定把测试桩 Mock 的 `monitor_rect.contains()` 当真值，加了 `isinstance(monitor_rect, QRect)` 守卫即解决。
-  - 避免：改动共享方法后若某模块变红，先做 HEAD 对照再修；引入的回归必须修完才能提交，既有失败顺手修或明确标注（都属于"改了实现没改期望"的爆炸半径，规则 27）。
+  - 避免：历史 stash 流程仅作为取证记录，不作为现行默认做法。先用工作区外临时 HEAD 副本（如 `git archive`）在同解释器、平台变量、命令和超时下对照，不 stash/checkout 覆盖用户当前改动。2026-10-14 配置放大镜失败与贴图无摘要在两边复现，而截图两边均 115 OK，据此分别归类。新回归必须修完；既有失败或未验证项明确点名，比较结束只清理本轮临时副本并保留报告。
 
 - **C8 设计契约变更后没有同步旧断言，红的是"旧契约"而不是回归**
   - 现象：把"采集阶段快捷键只在主遮罩上创建"改成"每块遮罩各建一份"后，test_dpi 三条红：assertTrue(all(view.capture_action_shortcuts is None …))、assertIsNone(secondary.capture_action_shortcuts)、以及用例名里的 only_primary_has_shortcuts。
-  - 排查：grep -n "capture_action_shortcuts is None|only_primary|is None" 定位旧断言；再用 git stash 对 HEAD 跑同样用例（见 C7）区分"旧契约"与"真回归"。
+  - 排查：grep -n "capture_action_shortcuts is None|only_primary|is None" 定位旧断言；再按 C7 用工作区外临时 HEAD 副本跑同样用例，区分"旧契约"与"真回归"。
   - 避免：契约级改动（一份→多份、单窗口→多窗口、单选→多选）先把**断言、用例名、文档表格、日志文案**一起 grep 出来改（本轮还漏改了「S 快捷键未创建…（只有主遮罩视图创建快捷键）」这类旧日志文案）。
 
 - **C9 会话级/全局资源的用例要断言"性质"，不要断言"精确次数"**
@@ -221,6 +230,16 @@
   - 现象：改动一轮之后，问题常常出在"**别人**"身上 —— ① 某个文件被脚本误删/覆盖后没人发现（A6/A7/A10 都是这一类）✗；② 某个模块少了一行 import ⇒ 只有真正跑到那行时才 `NameError`（本会话真实发生两次：`sticker/sticker_manager.py` 少了 `root` ⇒ `persist_clipboard_history` 一调用就崩 ✗；`editor/annotation_canvas.py` 少了 `QPoint` ⇒ 新写的指针跟随一跑就 `NameError` ✗）。而"只跑受影响的 `-k` 子集 + `py_compile`" **发现不了**这两类 ✗ —— py_compile 只查**指定文件**的语法，不查它引用的名字与文件是否存在 ✓；子集也只覆盖它自己那条路径 ✓。
   - 排查：三件事一起看 —— ① `git status --short --untracked-files=all` 与 `git diff --stat` ✓（出现 ` D <file>` 或意外消失的文件就是误删 ✗）；② **逐个模块导入**自检：把 `app/core/editor/screenshot/sticker/ui/config/logger` 与 `main` 下所有 `.py` 转成模块名，**每个模块用一个独立进程**导入（这样 C6 那类"导入期原生崩溃"只会打断那一个 ✓ 不会掩盖其余 ✓）：`.venv\Scripts\python.exe -c "import importlib,sys; importlib.import_module(sys.argv[1])" <模块名>` ✓；③ 导入失败/退出码非 0 的模块逐个读 traceback 最后一帧 ✓（在产品代码 ⇒ 真 bug ✓ 按 D21 修产品 ✓，不要先改测试 ✓）。
   - 避免：把"全量导入自检"固定成一轮改动的**收尾动作**（与 `py_compile` 同级 ✓），尤其在：批量脚本改过多个文件之后 ✓、删除/重命名过文件或函数之后 ✓、以及规则 34 的"最终总检查"里 ✓。报告里要写清"自检覆盖了多少个模块、有几个失败、失败的是谁" ✓ —— 只报"子集全绿"不算覆盖到这一层 ✗（本会话多次吃过这个亏 ✓）。
+
+- **C11 直接导入别的 TestCase 会被 unittest 重复收集**
+  - 现象：2026-10-14 新增 `tests.test_sticker_lifecycle` 本应只运行14条，却输出 `Ran 36 tests`；模块直接导入了 `ClipboardOutputTests`，既有22条也被收集，造成重复执行和条数误判。
+  - 排查：核对测试类定义与 `Ran N`，查看模块顶层导入；改为导入 `tests.test_sticker` 模块后，通过模块属性复用 `output_context`，同一命令恢复为14条。
+  - 避免：只复用测试助手时导入模块，不把其他 `TestCase` 类暴露在当前模块顶层，也不通过继承整套测试类复用夹具；新增测试先核对预期条数及完整测试名，不能把重复条目计为新增覆盖。
+
+- **C12 项目根已在 sys.path 里但不在首位，tests/editor 遮蔽生产 editor**
+  - 现象：2026-10-14 从 `tests` 目录直接运行 `test_sticker_lifecycle.py`，在收集前报 `ModuleNotFoundError: No module named 'editor.image_effects'`，没有 `Ran N`；同一模块的 `python -m unittest` 入口却能运行。
+  - 排查：核对绝对 cwd 和 `sys.path` 顺序：项目根已由 `PYTHONPATH` 加入，但脚本目录在首位，`tests/editor` 被解析为生产包；`if root not in sys.path` 因根已存在而不再前置。移除已有同值条目再将根插入索引0，原目录/原命令恢复14条 OK、退出0。
+  - 避免：测试入口必须保证生产项目根在 `sys.path[0]`，不能只保证“存在”；对带 `editor` 等同名子目录的测试树，同时验证模块入口与从 tests 目录直接运行。导入失败先核对模块来源及路径顺序，不以改生产导入、添加 skip 或换 cwd 掩盖遮蔽。
 
 ### D. 判断与流程
 
@@ -237,9 +256,9 @@
   - 排查：只看了局部代码就下结论。
   - 避免：结论必须来自实测；被推翻时显式更正文档（含修正记录，并说明原结论为何不准确）。
 - **D4 同类问题反复出现（只修了报告的那一个入口）**
-  - 现象：修完仅复制，保存又报同样的重复通知。
-  - 排查：两个动作共用同一条 status 到 notify 的通道，只改了其中一处。
-  - 避免：修一处后审计所有同类入口（同一信号或函数的所有调用点），并把结论写进文档防止复发。
+  - 现象：修完仅复制，保存又报同样的重复通知；2026-10-14 Space 与两个编辑器贴图均漏复制，快速贴图保存还会重复添加输出效果。
+  - 排查：前者共用 status 到 notify 通道；后者逐层追到 `copy_to_clipboard=False` / `save(automatic=True)`，并核对贴图与保存是否各自再次合成，发现问题横跨多个主动入口。
+  - 避免：一次生成成品供保存/复制/贴图共用，副作用放在明确用户动作的收尾，不塞到底层 add、缓存写入或恢复。列全左右键/多选 Space、两个编辑器按钮/按键、文件/历史/剪贴板/面板、保存/另存/显式复制的入口矩阵；覆盖四种复制组合、取消、占用、保存失败及通知次数。遵守已确认的图片/路径文字格式边界，无有效路径不借用上一张文件；保存成功与复制成功分别判断，并把例外写进文档。
 
 - **D5 "没反应"类问题先加可观测点，再动逻辑**
   - 现象：主屏 Alt+M 进不去多选，我按推测连改两轮都没中（改归属转交、改快捷键放行），用户只能反复回报"还是不行"。
@@ -397,14 +416,31 @@
   - 现象：给 editor/editor_window.py 加「汉化助手」时把 _CHINESE_DIALOGS_READY = [False] 与 def _ensure_chinese_dialogs() 写在**类体中间**（列 0）⇒ 类在该行结束，之后所有 4 空格缩进的 def 都变成该函数的**嵌套函数** ⇒ AttributeError: EditorWindow object has no attribute invalidate_rotation_reset（9 条 ERROR），dir(EditorWindow) 只剩 showEvent。**过程无语法错**（缩进合法）⇒ 比 IndentationError 更难查。
   - 排查：py_compile 通过却报 AttributeError 时，打印 dir(类)（缺方法即定位）；再用列首正则列出**列 0 行**，看类体内是否混进了模块级语句。
   - 避免：模块级常量/函数一律放在**类之前**（或文件末尾）；往类里插入代码前先确认插入点的缩进层级；改完立刻 py_compile **并**跑一次受影响模块的用例（编译通过不等于类结构完好）。
+
+- **D39 剪贴板历史内部回写触发外部变化链，轮播被自己重置**
+  - 现象：给 Ctrl+F3 贴出的卡片补图片复制后，内部写入触发 `dataChanged`；若照外部复制入史，会把历史重排并将轮播索引重置，后续一直回到首项。
+  - 排查：追踪 `publish_output → dataChanged → _clipboard_changed/_remember_clipboard_source`，分别检查同步再入和守卫撤销后到达的延迟通知；连续轮播各来源并对比历史键与索引，另输入真正的外部新内容核对仍可入史。
+  - 避免：只在内部历史发布边界设置同步守卫，用 `try/finally` 复位；以发布内容键识别延迟自通知，外部内容变化时清除该标记。原始文字/HTML/文件信息保留在 origin/历史，不为方便去重扩展自动复制格式；测试同步、延迟、外部变化、复制关闭/失败及连续轮播。
+- **D40 Qt 图像存储格式差异不能直接当成输出内容变化**
+  - 现象：2026-10-14 成品一致性回归中，QPixmap 转回的 `Format_ARGB32_Premultiplied` 与输出 QImage 的 `Format_RGBA8888` 被直接比较，出现格式/alpha 存储差异，混入真正的漏复制与重复效果失败。
+  - 排查：分别打印格式、尺寸、devicePixelRatio、行跨度与 alpha 处理方式，再比较规范化后的像素；不能只看对象 format 或原始字节就下结论。
+  - 避免：内容一致性断言先转换为明确的共同格式（本轮用预乘 ARGB32）并核对尺寸/像素；若测试的是编码或存储格式，就另设断言，不以归一化掩盖该契约。逐像素/字节比较须处理行填充与透明像素，不用扩大容差让真实内容差异变绿。
+
+- **D41 混合 DPI 跨屏抓取不能用来源窗口局部点重建全局点**
+  - 现象：2026-10-14 用户报告上大下小排布拖框进入下屏后回跳，光标已到底部而高亮仍留在上屏；上屏4K@125%、物理原点 `(-751,-2160)`，下屏1920×1200@100%，Qt 原生布局存在纵向间隙。独立全局字段的合成轨迹复现约270物理像素后的映射反跳；不能把这项证据写成真实桌面投递模型已验收。
+  - 排查：对照日志中的物理/Qt 原生屏幕矩形，比较 `event.globalPosition()` 与 `mapToGlobal(event.position())` 重建值；追踪 `MaskWindow._mouse_event_position`、`InlineEditor.eventFilter` 及徽标轮询对共享端点的写入。`tests.test_capture_pointer` 的 `test_reported_vertical_gap_does_not_jump_back_after_270_pixels` 和连续336种抓取组合使用独立全局/局部字段复现旧错误，避免测试夹具把错误假设复制进预期值。
+  - 避免：鼠标抓取的 press/move/release 直接转换事件的 Qt 原生 `globalPosition()`，转发时保留该字段，浮点保留至物理转换；禁止按来源屏幕 DPR 重建跨屏端点，也不能用当前 `QCursor.pos()` 代替事件落点。徽标等轮询只读取实时光标，不抢写拖动/键盘接管中的交互端点。修改前后覆盖主副屏双向、上下错位/负原点/混合DPI/布局间隙、两种局部事件模型、释放补末段/吸附/取色/快速贴图；合成回归与真机验收分开报告，真机还要验证原地已有选区跨屏调整后的编辑层重建。
+
 ## Validation
 
 - Use the project environment's `python` executable. On the expected Windows setup, `py -3` may resolve to a different interpreter without project dependencies.
+- Every test, probe and import check must follow rule 36: explicit absolute interpreter/cwd, enforced per-process and batch deadlines, visible start/end/elapsed time and periodic progress, and bounded process-tree cleanup on timeout. A runner without child timeouts (including the current `run_tests.py`) must be wrapped by an external per-module executor; do not run it unbounded or treat background polling as a timeout.
 - The suite is split by feature under `tests/` (shared base: `tests/base.py`): `test_config`, `test_capture`, `test_sticker`, `test_uia`, `test_dpi`, `test_ui`, `test_app`, `test_misc`, plus `tests/editor/` (`test_canvas`, `test_tools`, `test_text`, `test_erase`, `test_zoom`). Run the narrowest relevant module first (e.g. `python -m unittest tests.test_dpi`) and always in its own process: a module that leaves mask/editor/focus state behind fails unrelated later cases, and one shared process also hits the offscreen shutdown crash. There is no `tests.test_core` any more.
+- Focused regressions also live in `tests.test_capture_pointer`, `tests.test_sticker_lifecycle`, and `tests.test_sticker_mask`; include them explicitly rather than assuming `run_tests.py` lists every module. For sticker clipping, run `tests.test_sticker_mask` in fresh processes with `QT_SCALE_FACTOR=1/1.25/1.5/1.75` as well as its mocked-DPR matrix; an instance method mock is not evidence about the actual Qt platform DPR or the Windows native window region.
 - Each test module runs standalone (`python tests/test_app.py`), via `python -m unittest tests.test_app`, or under `discover` from either the repository root or the `tests/` directory; modules bootstrap the repository root onto `sys.path`, so never rely on the caller's cwd.
 - Qt widget tests run offscreen in CI and may emit platform clipboard or window warnings. Report test counts and failures from unittest's final summary, not from those warnings.
 - Real global hotkeys, mixed-DPI display geometry, UI Automation providers, and click-through behavior require Windows desktop verification when a change affects them.
-- The suite is 500+ Qt tests; a single-process run can stall or crash natively at offscreen shutdown. Prefer chunked runs (e.g. 20 tests per subprocess with a timeout) and read a non-zero exit together with its `OK` summary as the known shutdown crash, not a failure. Tests that genuinely need a real desktop screen (window handles, a screen wider than the editor) should be `unittest.skip` placeholders instead of failing.
+- The suite is 500+ Qt tests; a single-process run can stall or crash natively at offscreen shutdown. Prefer chunked runs (e.g. 20 tests per subprocess with the enforced deadline in rule 36). A positive `Ran N / OK` with a known native shutdown exception is reported as summary passed with abnormal shutdown, not normal exit; no summary, zero collected tests, timeout or an unexplained non-zero exit is not a pass. Tests that genuinely need a real desktop screen follow rule 19; never remove coverage or add a skip to hide a regression.
 
 - `build.bat` and `start up.bat` are stored as **GBK (cp936), no BOM, CRLF** and start with `chcp 936`. cmd.exe mis-parses UTF-8 batch files under `chcp 65001` — multi-byte characters straddling a read block get split and the tail of the line is executed as a command — while a GBK file under a UTF-8 console prints mojibake. Keep both scripts GBK + `chcp 936`, keep `.gitattributes` (`*.bat text eol=crlf`), and decode them as GBK when reading or editing.
 
