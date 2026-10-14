@@ -47,6 +47,54 @@ RETRY_MIN_SECONDS = 30.0
 RECENT_INPUT_SECONDS = 1.5
 # 系统输入比自家钩子新这么多秒，判定钩子没有在工作
 MISSED_INPUT_SECONDS = 2.5
+# 2026-10-14（用户报告"被别的程序抢了、一直不恢复、也没日志"）：旧判据只看「系统有输入而自家
+# 通用钩子没收到」✗ —— 抢占方通常**只吞掉那一个组合键**，你敲别的键/动鼠标仍会刷新
+# `_observed_input` ⇒ 判据恒为"健康" ⇒ 不重装、不打日志。
+#
+# 因此新增按热键的判据：通用钩子在键盘链上看到某热键的**主键按下、且修饰键恰好等于绑定**
+# （多按一个修饰键时 keyboard 根本不会触发该热键），而回调连续 REQUIRED_MISSES 次都没触发
+# ⇒ 判定它被其它程序吞掉/抢占。
+#
+# ⚠ 回退教训（2026-10-14 真机把热键整体改坏）：**通用钩子回调里绝不能调用 keyboard 的任何
+# API**（当时调了 `keyboard.is_pressed` 判断修饰键）。那会在真实钩子链上出问题（已实证：
+# 按键仍到达通用钩子、但 18 个热键的回调再也不触发），而且第一版判据还会误报——
+# 真机日志里 `repeat` 被误判成"被抢占"并触发了一次重装。现在改成：钩子回调只做纯 Python 的
+# 集合/字符串判断（自己维护按下的修饰键集合），并且必须**连续两次**同键未触发才算数。
+REQUIRED_MISSES = 2
+# 两次「按下但未触发」之间超过这么久就重新计数（避免把相隔很久的两次偶发算成一次）
+MISS_WINDOW_SECONDS = 10.0
+# 回调刚触发过这么久以内，通用钩子随后再看到同一主键也不算“等待回调”——
+# 钩子链顺序可能让回调先跑、通用钩子后跑（否则会被误判成被抢占）。
+FIRED_GRACE_SECONDS = 0.25
+
+_MODIFIER_ALIASES = {
+    "ctrl": "ctrl", "control": "ctrl",
+    "shift": "shift",
+    "alt": "alt",
+    "win": "windows", "windows": "windows", "cmd": "windows", "meta": "windows",
+}
+MODIFIER_NAMES = ("ctrl", "shift", "alt", "windows")
+
+
+def parse_binding_keys(binding):
+    """绑定串 -> (修饰键集合, 主键名)；不认识的形式返回 None（该项不参与被抢占判定）。
+
+    只做字符串解析、不依赖 keyboard 的私有 API：解析不出来时最差只是退回旧判据，
+    绝不会因为解析异常影响热键注册本身。
+    """
+    text = str(binding or "").strip().lower().replace(" ", "")
+    if not text:
+        return None
+    parts = [part for part in text.split("+") if part]
+    if not parts:
+        return None
+    modifiers = set()
+    for token in parts[:-1]:
+        modifier = _MODIFIER_ALIASES.get(token)
+        if modifier is None:
+            return None
+        modifiers.add(modifier)
+    return modifiers, parts[-1]
 
 
 def last_input_seconds():
@@ -102,6 +150,14 @@ class HotkeyManager(QObject):
         self._heartbeat_at = time.monotonic()
         # 正在停止：避免 stop() 卸掉输入观察钩子后，工作线程又在 install() 里重新挂上（泄漏）。
         self._stopping = False
+        # 被抢占判定（2026-10-14）：action -> (修饰键集合, 主键名)；action -> [连续未触发次数, 首次时刻]；
+        # action -> 最近一次真正触发回调的时刻；以及本地维护的“当前按下的键名”集合。
+        # 注意：全部是纯 Python 状态，钩子回调里**不调用 keyboard 的任何 API**（见文件头教训）。
+        self._hotkey_keys = {}
+        self._misses = {}
+        self._last_fired = {}
+        self._pressed_names = set()
+        self.intercept_reinstalls = 0
 
     def set_health_interval(self, seconds):
         """按设置调整体检周期（夹紧到 2–600 秒；只在真的变化时生效）。"""
@@ -115,9 +171,45 @@ class HotkeyManager(QObject):
         self.health_timer.setInterval(value * 1000)
         logging.getLogger("screensnap").debug("热键体检间隔调整为 %d 秒", value)
 
-    def _note_input(self, _event=None):
-        """通用钩子回调：只记时间戳，不做任何其它工作（高频路径，规则 14）。"""
-        self._observed_input = time.monotonic()
+    def _note_input(self, event=None):
+        """通用钩子回调：记时间戳、维护本地修饰键状态，并累计「组合键已按下但未触发」。
+
+        ⚠ 高频路径且**绝不允许调用 keyboard 的任何 API**（规则 14 + 2026-10-14 真机教训：
+        在钩子回调里查按键状态会让真实钩子链上的热键回调整体失效）。
+        这里只做纯 Python 的集合/字符串判断，并且整体兜住异常，保证回调永不抛异常。
+        """
+        try:
+            now = time.monotonic()
+            self._observed_input = now
+            name = getattr(event, "name", None)
+            if name is None:
+                return          # 鼠标事件没有 name
+            name = str(name).lower()
+            if getattr(event, "event_type", "down") == "down":
+                self._pressed_names.add(name)
+            else:
+                self._pressed_names.discard(name)
+            if not self._hotkey_keys or getattr(event, "event_type", "down") != "down":
+                return
+            for action, parsed in self._hotkey_keys.items():
+                if parsed is None:
+                    continue
+                modifiers, main = parsed
+                if main != name:
+                    continue
+                # 修饰键必须**恰好**等于绑定：多按一个修饰键时 keyboard 根本不会触发该热键，
+                # 若不要求精确匹配就会误判被抢占（真机日志里就是这么误报 repeat 的）。
+                if (self._pressed_names & set(MODIFIER_NAMES)) != modifiers:
+                    continue
+                if now - self._last_fired.get(action, 0.0) <= FIRED_GRACE_SECONDS:
+                    continue
+                entry = self._misses.get(action)
+                if entry is not None and now - entry[1] <= MISS_WINDOW_SECONDS:
+                    entry[0] += 1
+                else:
+                    self._misses[action] = [1, now]
+        except Exception:  # noqa: BLE001 钩子回调抛异常会破坏 keyboard 的监听链
+            logging.getLogger("screensnap").debug("输入观察钩子回调异常（已忽略）", exc_info=True)
 
     @staticmethod
     def _mouse_module():
@@ -148,9 +240,16 @@ class HotkeyManager(QObject):
         except Exception:  # noqa: BLE001
             return None, ""
     def _ensure_input_hooks(self):
-        """挂上键盘与鼠标的通用钩子，用于「系统有输入但自家钩子没收到」的判定。"""
+        """挂上键盘与鼠标的通用钩子，用于输入观察与「组合键被吞」判定。
+
+        只做**添加**，不在重装时先卸再挂（2026-10-14 回退）：那会在真实钩子链上卸掉/重挂钩子，
+        已被真机证明会把热键整体改坏；观察钩子若真被系统摘掉，由 `_hook_missed_input` 判定并
+        重装热键本身即可。
+        """
         if self._input_hooks or getattr(self, "_stopping", False):
             return
+        # 重新挂钩子时丢弃旧的按键状态，避免把「重挂前按下的键」当成仍按着。
+        self._pressed_names = set()
         logger = logging.getLogger("screensnap")
         try:
             self._input_hooks.append(keyboard.hook(self._note_input))
@@ -185,6 +284,19 @@ class HotkeyManager(QObject):
             return False   # 空闲中或无法判定 ⇒ 不下结论
         return (time.monotonic() - self._observed_input) > MISSED_INPUT_SECONDS
 
+    def _intercepted_hotkey(self):
+        """连续 REQUIRED_MISSES 次「组合键已按下但回调未触发」的动作名（顺便清计数）。
+
+        2026-10-14：抢占方通常只吞掉某个组合键，因而「系统有输入而自家钩子没收到」这条旧判据
+        永远为假（敲别的键仍会刷新观察时间戳）；这里直接盯「该热键该响却没响」，并要求连续两次，
+        避免把「多按了一个修饰键」这类偶发误判成被抢占（真机日志里正是一次误报触发了重装）。
+        """
+        for action, entry in list(self._misses.items()):
+            if entry[0] >= REQUIRED_MISSES:
+                self._misses.pop(action, None)
+                return action
+        return None
+
     def _maybe_log_heartbeat(self):
         """节流汇总（每 10 分钟一条）：让「体检确实在跑」有据可查（规则 14）。"""
         now = time.monotonic()
@@ -213,6 +325,9 @@ class HotkeyManager(QObject):
     def emit_action(self, action):
         """后台热键回调在暂停期间丢弃动作，避免设置页录制时误触发。"""
         if not self.paused.is_set():
+            # 被抢占判定用的成对记录：触发过就清掉未触发计数。
+            self._last_fired[action] = time.monotonic()
+            self._misses.pop(action, None)
             # 留痕（节流）：区分「钩子没收到」与「收到了没动作」，排查热键失效用。
             try:
                 from logger.log_rate import log_every
@@ -252,7 +367,9 @@ class HotkeyManager(QObject):
         `force=True` 表示由用户操作触发的按需体检（例如托盘双击截图）：它**无条件重装一次**，
         不看监听线程状态 —— 静默摘钩时监听线程仍然存活，任何「先判断再重装」的逻辑都发现不了它，
         而重装本身才是恢复动作（约 4ms，真机验证有效）。
-        非 force 时才有判据：监听线程不可用、或「系统有输入而钩子没收到」，其余什么都不做。
+        非 force 时的判据（按优先级）：① 监听线程不可用；② 某热键的组合键被通用钩子**连续两次**
+        看到、回调却都没触发（被其它程序抢占/吞键，2026-10-14 新增）；③ 系统有输入而钩子没收到。
+        其余什么都不做（不重装、不打日志）。
 
         适用场景（真机反馈，2026-10-11）：安全软件在钩子链里拖慢回调时，Windows 会按
         LowLevelHooksTimeout 静默移除 WH_KEYBOARD_LL 钩子，且不报错 —— 表现为「被拦一次后
@@ -263,6 +380,8 @@ class HotkeyManager(QObject):
         self.checks += 1
         logger = logging.getLogger("screensnap")
         alive = self.listener_alive()
+        # force 时无条件重装、不看判据；否则先取「组合键被吞」这一条（比“任何输入”判据更具体）。
+        intercepted = None if force else self._intercepted_hotkey()
         if force:
             # 按需体检（用户操作触发）：无条件重装一次。
             # 理由（用户 2026-10-11 反馈「一直没看到恢复提示」）：Windows 静默摘掉 WH_KEYBOARD_LL
@@ -278,6 +397,14 @@ class HotkeyManager(QObject):
             logger.warning(
                 "热键钩子疑似被系统摘掉（监听线程不可用），正在重装: 第 %d 次",
                 self.reinstall_count + 1)
+        elif intercepted is not None:
+            # 2026-10-14：某热键的组合键已被通用钩子看到、回调却没响 ⇒ 疑被其它程序抢占/吞键。
+            now = time.monotonic()
+            if now - self._last_retry < RETRY_MIN_SECONDS:
+                return
+            logger.warning(
+                "热键 %s 连续 %d 次按下组合键但未触发回调（疑被其它程序抢占/吞掉），正在重装: 第 %d 次",
+                intercepted, REQUIRED_MISSES, self.reinstall_count + 1)
         elif self._hook_missed_input():
             # 系统近期有键鼠输入，而自家钩子两秒多没收到任何事件 ⇒ 判定钩子已被摘掉。
             now = time.monotonic()
@@ -292,28 +419,45 @@ class HotkeyManager(QObject):
             return
         self._last_retry = time.monotonic()
         self.reinstall_count += 1
+        if intercepted is not None:
+            self.intercept_reinstalls += 1
+        # 重装热键不影响观察钩子（不再卸钩/重挂）⇒ 只需重置观察时间戳与未触发计数，
+        # 避免刚重装就被自己的旧计数判成“又失效了”。
+        self._observed_input = time.monotonic()
+        self._misses.clear()
         self.requests.put(dict(self._last_request))
 
 
     def listen(self):
-        """在后台线程持续接收配置刷新及停止请求。"""
+        """在后台线程持续接收配置刷新及停止请求；任何异常都不得让本线程静默退出。"""
         while True:
-            request = self.requests.get()
-            if request is None:
-                self.clear()
-                return
             try:
+                request = self.requests.get()
+                if request is None:
+                    self.clear()
+                    return
                 self.install(request)
             except (ValueError, OSError) as error:
                 self.failed.emit(str(error))
+            except Exception as error:  # noqa: BLE001 兜底：线程一旦死掉，热键就再也回不来
+                logging.getLogger("screensnap").error(
+                    "热键监听处理请求失败（线程继续运行）: %s", error, exc_info=True)
 
     def install(self, request):
         """先移除旧热键，部分注册失败时也清理已注册的部分。"""
         self._ensure_input_hooks()
         self.clear()
         if not request["enabled"]:
+            self._hotkey_keys = {}
+            self._misses.clear()
+            # 关闭热键后必须清空重装依据：否则体检会拿着“上一次启用时的绑定”把热键注册回来。
+            self._last_request = None
             return
         logger = logging.getLogger("screensnap")
+        # 绑定解析只服务「组合键被吞」判定；解析不出来的项退回旧判据，不影响注册本身。
+        self._hotkey_keys = {action: parse_binding_keys(binding)
+                             for action, binding in request["bindings"].items() if binding}
+        self._misses.clear()
         try:
             for action, binding in request["bindings"].items():
                 if not binding:
@@ -337,9 +481,12 @@ class HotkeyManager(QObject):
             raise
 
     def clear(self):
-        """释放 keyboard 持有的所有全局热键句柄。"""
+        """释放 keyboard 持有的所有全局热键句柄；单个失效句柄不得阻断后续注册。"""
         for handle in self.handles:
-            keyboard.remove_hotkey(handle)
+            try:
+                keyboard.remove_hotkey(handle)
+            except Exception as error:  # noqa: BLE001 2026-10-14：以前这里没兜住 ⇒ 线程会静默死
+                logging.getLogger("screensnap").debug("移除热键句柄失败（已跳过）: %s", error)
         self.handles.clear()
 
     def stop(self):

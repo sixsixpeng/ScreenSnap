@@ -30,11 +30,13 @@ class SettingsWindow(QWidget):
     recording = Signal(bool)
 
     def __init__(self, config, clear_clipboard_history=None, clear_cache=None,
-                 reset_all_user_data=None):
+                 reset_all_user_data=None, restore_hotkeys=None):
         super().__init__()
         self.config = config
         self.clear_clipboard_history_callback = clear_clipboard_history
         self.reset_all_user_data_callback = reset_all_user_data
+        # 热键恢复入口由 main 注入（设置窗口不直接持有 HotkeyManager）。
+        self.restore_hotkeys_callback = restore_hotkeys
         # 缓存清理由 main 注入：设置窗口不直接依赖贴图管理器，避免 ui 反向依赖 sticker。
         self.clear_cache_callback = clear_cache
         self._saved_start_on_boot = config.data["start_on_boot"]
@@ -119,7 +121,8 @@ class SettingsWindow(QWidget):
             icon = action_icon(custom_icon) if custom_icon else self.style().standardIcon(icon)
             self.navigation.addItem(QListWidgetItem(icon, title))
             if page is HotkeyPage:
-                widget = page(self.config, self.persist, self.recording.emit)
+                widget = page(self.config, self.persist, self.recording.emit,
+                              self.restore_hotkeys_callback)
             elif page is SaveOutputPage:
                 widget = page(self.config, self.persist, self.clear_cache_callback)
             else:
@@ -350,7 +353,8 @@ class SettingsWindow(QWidget):
         for page in (GeneralPage, HotkeyPage, ScreenshotPage, EditorPage, StickerPage,
                  ClipboardPage, AppearancePage, SaveOutputPage, LogPage):
             if page is HotkeyPage:
-                widget = page(self.config, self.persist, self.recording.emit)
+                widget = page(self.config, self.persist, self.recording.emit,
+                              self.restore_hotkeys_callback)
             elif page is SaveOutputPage:
                 widget = page(self.config, self.persist, self.clear_cache_callback)
             else:

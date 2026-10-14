@@ -1,4 +1,4 @@
-﻿"""暂未归类的其它用例（按用例名未命中任何分类规则）。"""
+"""暂未归类的其它用例（按用例名未命中任何分类规则）。"""
 
 import os
 import sys
@@ -75,6 +75,134 @@ class MiscTests(CoreTests):
                 while not manager.handles and _time.monotonic() < deadline:
                     _time.sleep(0.02)
                 self.assertTrue(manager.handles, "重装后热键句柄必须重建")
+            finally:
+                manager.stop()
+
+    def test_hotkey_intercepted_criterion_triggers_reinstall(self):
+        """2026-10-14（先误报、后收紧）：通用钩子用**纯 Python** 记录「组合键按下但回调未触发」，
+        必须**连续 REQUIRED_MISSES 次**、且修饰键**恰好**匹配才算被抢占（多按一个修饰键时
+        keyboard 根本不会触发该热键，上一版就是这么误报 carry 的）。
+        另外结构性要求：钩子回调里**不得出现任何 keyboard API 调用** —— 上一版在回调里调
+        `keyboard.is_pressed`，真机上把 18 个热键的回调整体改坏（按键仍到通用钩子、热键不响）。"""
+        import inspect
+        import time as _time
+        from types import SimpleNamespace
+        from unittest.mock import patch as _patch
+        from hotkey import hotkey_manager as hm
+
+        class FakeKeyboard:
+            class _listener:
+                listening = True
+
+            def add_hotkey(self, binding, callback, suppress=False):
+                return "h:" + binding
+
+            def remove_hotkey(self, handle):
+                pass
+
+            def hook(self, callback):
+                return callback
+
+            def unhook(self, handle):
+                pass
+
+        def press(manager, name, event_type="down"):
+            manager._note_input(SimpleNamespace(name=name, event_type=event_type))
+
+        with _patch.object(hm, "keyboard", FakeKeyboard()):
+            manager = hm.HotkeyManager()
+            try:
+                # 动作名用 "probe"：不与其它用例共用 emit_action 的日志节流键（避免跨用例污染）。
+                manager.register({"hotkeys_enabled": True,
+                                  "hotkeys": {"probe": "ctrl+alt+a", "save": "s"},
+                                  "capture_hotkey_suppress": False,
+                                  "hotkey_health_interval": 20})
+                deadline = _time.monotonic() + 3
+                while not manager.handles and _time.monotonic() < deadline:
+                    _time.sleep(0.02)
+                self.assertTrue(manager.handles, "注册后应重建热键句柄")
+                self.assertEqual(manager._hotkey_keys["save"], (set(), "s"))
+
+                # ① 修饰键不精确（多按了 shift）⇒ 不计入未触发（真机日志里就是这样误报的）
+                press(manager, "ctrl")
+                press(manager, "alt")
+                press(manager, "shift")
+                press(manager, "a")
+                self.assertNotIn("probe", manager._misses)
+                press(manager, "shift", "up")
+
+                # ② 一次未触发还不足以判定（偶发不算被抢占）
+                press(manager, "a")
+                self.assertEqual(manager._misses["probe"][0], 1)
+                manager.check_health()
+                self.assertEqual(manager.intercept_reinstalls, 0, "只差一次不应重装")
+
+                # ③ 连续第二次未触发 ⇒ 判定被抢占、重装并留下 WARNING（旧判据此处为假，故一并隔离）
+                press(manager, "a")
+                self.assertEqual(manager._misses["probe"][0], 2)
+                before = manager.reinstall_count
+                with _patch.object(hm, "last_input_seconds", lambda: 30.0), \
+                        self.assertLogs("screensnap", level="WARNING") as captured:
+                    manager.check_health()
+                self.assertEqual(manager.reinstall_count, before + 1, "判定被抢占后必须重装")
+                self.assertEqual(manager.intercept_reinstalls, 1)
+                self.assertTrue(any("未触发回调" in line for line in captured.output),
+                                "被抢占必须留下可核对的日志（本次诉求之一）")
+
+                # ④ 回调真的触发过就清零；紧随其后的重复按键落在宽限期内 ⇒ 也不计未触发
+                press(manager, "a")
+                self.assertEqual(manager._misses["probe"][0], 1)
+                manager.emit_action("probe")
+                self.assertNotIn("probe", manager._misses)
+                press(manager, "a")
+                self.assertNotIn("probe", manager._misses, "刚触发过的宽限期内不应计入未触发")
+                # 过了宽限期再按一次，才重新计数
+                manager._last_fired["probe"] = _time.monotonic() - 5.0
+                press(manager, "a")
+                self.assertEqual(manager._misses["probe"][0], 1)
+
+                # ⑤ 结构性护栏：钩子回调里不得出现 keyboard 调用（上一版就是这里把热键改坏的）
+                source = inspect.getsource(manager._note_input)
+                for forbidden in ("keyboard.", "is_pressed", "start_if_necessary"):
+                    self.assertNotIn(forbidden, source,
+                                     "通用钩子回调不得调用 keyboard 的任何 API ✗")
+            finally:
+                manager.stop()
+
+    def test_hotkey_worker_survives_unexpected_errors(self):
+        """2026-10-14：以前 install()/clear() 抛非 ValueError/OSError 时，监听线程会静默退出 ⇒
+        之后所有注册/重装请求都石沉大海（表现为热键永久失效且无日志）。现在必须兜住并继续处理。"""
+        import time as _time
+        from unittest.mock import patch as _patch
+        from hotkey import hotkey_manager as hm
+
+        calls = {"add": 0}
+
+        def flaky_add(binding, callback, suppress=False):
+            calls["add"] += 1
+            if calls["add"] == 1:
+                raise RuntimeError("模拟第三方钩子抛非预期异常")
+            return "h:" + binding
+
+        settings = {"hotkeys_enabled": True, "hotkeys": {"capture": "ctrl+alt+a"},
+                    "capture_hotkey_suppress": False, "hotkey_health_interval": 20}
+        with _patch.object(hm.keyboard, "add_hotkey", side_effect=flaky_add), \
+                _patch.object(hm.keyboard, "remove_hotkey", lambda handle: None):
+            manager = hm.HotkeyManager()
+            try:
+                manager.register(settings)
+                deadline = _time.monotonic() + 3
+                while calls["add"] == 0 and _time.monotonic() < deadline:
+                    _time.sleep(0.02)
+                _time.sleep(0.1)
+                self.assertTrue(manager.worker.is_alive(), "监听线程不得因非预期异常退出")
+                self.assertFalse(manager.handles, "首次注册应因异常失败且不残留句柄")
+                # 线程还活着 ⇒ 第二次注册必须真的执行
+                manager.register(settings)
+                deadline = _time.monotonic() + 3
+                while not manager.handles and _time.monotonic() < deadline:
+                    _time.sleep(0.02)
+                self.assertTrue(manager.handles, "线程存活后应能继续注册热键")
             finally:
                 manager.stop()
 

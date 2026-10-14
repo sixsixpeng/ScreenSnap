@@ -13,15 +13,25 @@ SCREENSHOT_HOTKEY_ACTIONS = CAPTURE_SHORTCUT_KEYS
 class HotkeyPage(SettingsPage):
     """通过 Qt 录制组合键并在写入配置前检查动作冲突。"""
 
-    def __init__(self, config, changed, recording=None):
+    def __init__(self, config, changed, recording=None, restore_hotkeys=None):
         super().__init__(config, changed)
         self.group("全局热键")
         self.check("hotkeys_enabled", "启用全局热键", "关闭后所有全局快捷键暂停注册")
         self.number("hotkey_health_interval", "热键体检周期 (秒)", 2, 600,
                     "每隔这么久体检一次全局热键：① hook 监听线程死了 ⇒ 立刻重装；\n"
-                    "② 系统近期有键鼠输入、而自家钩子没收到 ⇒ 判定钩子被摘掉并重装；\n"
-                    "③ 其余情况什么都不做（不会平白重装、也不打日志）。数值越小恢复越快。\n"
+                    "② 某个热键的组合键已被按下、回调却没触发（被其它程序抢占/吞键）⇒ 判定失效并重装；\n"
+                    "③ 系统近期有键鼠输入、而自家钩子没收到 ⇒ 判定钩子被摘掉并重装；\n"
+                    "④ 其余情况什么都不做（不会平白重装、也不打日志）。数值越小恢复越快。\n"
                     "被安全软件拦截导致热键失灵时，动一下鼠标/键盘即可触发判定。默认 4 秒，最小 2 秒")
+        if restore_hotkeys is not None:
+            # 2026-10-14：热键被其它程序抢占时，自动判据之外还要有一个用户能主动按的兜底入口。
+            restore = QPushButton("重新注册全局热键")
+            restore.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
+            restore.setToolTip("立即清空并重新注册所有全局热键。\n"
+                               "快捷键被其它程序抢占、或系统把钩子摘掉后失灵时，用它兜底；\n"
+                               "等于一次无需重启程序的“重启热键”。")
+            restore.clicked.connect(restore_hotkeys)
+            self.form.addRow(restore)
         self.group("截图快捷键")
         self.check("capture_hotkey_suppress", "拦截截图快捷键输入",
                "启用后，截图热键按下/释放会由系统钩子拦截，不传给当前前台应用；释放按键后解除拦截。某些系统权限策略可能限制此能力")

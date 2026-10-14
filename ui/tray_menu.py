@@ -7,7 +7,7 @@ from ui.action_icons import action_icon
 
 def make_tray_menu(app, capture, settings, quit_app, edit_clipboard=None, open_image=None,
                    hotkeys=None, open_sticker=None, paste_clipboard=None, sticker_panel=None,
-                   recycle_bin=None):
+                   recycle_bin=None, restore_hotkeys=None):
     """只组装菜单动作，截图与退出逻辑仍由主程序持有。"""
     menu = QMenu()
 
@@ -58,6 +58,11 @@ def make_tray_menu(app, capture, settings, quit_app, edit_clipboard=None, open_i
                    f"从文件打开新贴图{shortcut_suffix(hotkeys, 'open_sticker_file')}",
                    "选择图片文件并直接创建一个贴图窗口。", open_sticker)
     menu.addSeparator()
+    if restore_hotkeys is not None:
+        # 2026-10-14：热键被其它程序抢占/系统摘钩后，这里是不依赖任何热键的兜底入口。
+        add_action(action_icon("rotate_left"), "重新注册全局热键",
+                   "快捷键被其它程序抢占、或系统把钩子摘掉后失灵时，立即清空并重新注册所有全局热键。",
+                   restore_hotkeys)
     add_action(action_icon("settings"), "设置", "打开设置窗口，调整截图、保存、快捷键和外观。", settings)
     menu.addSeparator()
     add_action(action_icon("exit"), "退出",

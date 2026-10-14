@@ -124,7 +124,8 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         self.settings_window = SettingsWindow(
             self.config, self.stickers.clear_clipboard_history,
             self.stickers.clear_rebuildable_cache,
-            reset_all_user_data=self.request_full_user_data_reset)
+            reset_all_user_data=self.request_full_user_data_reset,
+            restore_hotkeys=self.restore_hotkeys)
         self.settings_window.changed.connect(self.refresh)
         self.settings_window.recording.connect(self.pause_hotkeys)
         self.hotkey_recording = False
@@ -143,6 +144,7 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
             paste_clipboard=lambda: self.dispatch("paste_clipboard"),
             sticker_panel=self.open_sticker_panel,
             recycle_bin=self.open_recycle_bin,
+            restore_hotkeys=self.restore_hotkeys,
         )
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self.tray_clicked)
@@ -334,6 +336,7 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
             paste_clipboard=lambda: self.dispatch("paste_clipboard"),
             sticker_panel=self.open_sticker_panel,
             recycle_bin=self.open_recycle_bin,
+            restore_hotkeys=self.restore_hotkeys,
         )
         self.tray.setContextMenu(self.menu)
         if not self.hotkey_recording:
@@ -420,6 +423,9 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
     def pause_hotkeys(self, recording):
         """录制期间注销全局热键，结束后按最新配置重新注册。"""
         self.hotkey_recording = recording
+        # 留痕：暂停标记一旦卡住（录制没收到结束信号），热键会表现为“能按但没反应”，
+        # 日志里必须能一眼看出是暂停导致的。
+        self.logger.info("全局热键%s（设置页录制）", "已暂停" if recording else "已恢复")
         self.hotkeys.set_paused(recording)
         settings = dict(self.config.data)
         settings["hotkeys_enabled"] = False if recording else self.config.data["hotkeys_enabled"]
@@ -430,6 +436,23 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         """即使关闭普通提示，也将热键注册失败报告给用户。"""
         self.logger.error("热键注册失败: %s", message)
         self.notify(f"热键注册失败: {message}")
+
+    def restore_hotkeys(self):
+        """手动兜底：立即清空并按当前设置重新注册所有全局热键。
+
+        快捷键被其它程序抢占、或系统静默摘掉钩子导致失灵时，这是无需重启程序的恢复入口；
+        即使此前从未成功注册过（`_last_request` 为空）也能靠 register() 重新建立。
+        同时清掉「设置页正在录制」留下的暂停标记 —— 那个标记卡住时热键会表现为
+        「注册着但按了没反应」，这个入口必须能把它救回来。
+        """
+        self.logger.info("用户请求重新注册全局热键（暂停标记一并清除）")
+        self.hotkeys.set_paused(False)
+        self.hotkey_recording = False
+        self.hotkeys.register(self.config.data)
+        if self.config.data.get("hotkeys_enabled", True):
+            self.notify("已重新注册全局热键")
+        else:
+            self.notify("全局热键当前已关闭，未注册")
 
 
     def dispatch(self, action):
