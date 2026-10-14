@@ -6,7 +6,7 @@ import logging
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QSignalBlocker, QMimeData
+from PySide6.QtCore import Qt, Signal, QSignalBlocker
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QFileDialog,
                                QDialog, QDialogButtonBox, QDial, QDoubleSpinBox, QHBoxLayout, QLabel,
@@ -17,7 +17,8 @@ from core.image_io import (matches_saved_format, normalize_save_as_path, save_as
 from core.path_utils import resolved_dir, save_as_directory
 from config.config_manager import TOOL_WIDTH_KEYS
 from editor.annotation_canvas import AnnotationCanvas
-from editor.image_effects import apply_output_effects, copy_saved_to_clipboard
+from editor.image_effects import (apply_output_effects, copy_saved_to_clipboard,
+                                  copy_image_to_clipboard)
 from core.screen_capture import qimage_to_pillow
 from editor.image_transform import transform
 from editor.toolbar_widget import ToolbarWidget
@@ -406,12 +407,13 @@ class EditorWindow(QMainWindow):
             number += 1
         return path
 
-    def save(self, automatic=False, copy_to_clipboard=False, force_copy_image=False):
+    def save(self, automatic=False, copy_to_clipboard=False, force_copy_image=False,
+             result=None):
         """首次保存分配文件名；后续保存覆盖同一路径，避免重复文件。"""
         logger = logging.getLogger("screensnap")
         path = (self.last_path if matches_saved_format(self.last_path, self.settings)
             else self.allocate_path(automatic))
-        result = self.output_image()
+        result = self.output_image() if result is None else result
         if not save_image(result, path, self.settings):
             logger.error("图片保存失败: %s（格式 %s，质量 %s）", path,
                          self.settings["save_format"], self.settings["save_quality"])
@@ -436,9 +438,9 @@ class EditorWindow(QMainWindow):
         """仅把当前合成图复制到剪贴板，不落盘并退出编辑。"""
         logger = logging.getLogger("screensnap")
         result = self.output_image()
-        payload = QMimeData()
-        payload.setImageData(result)
-        QGuiApplication.clipboard().setMimeData(payload)
+        if not copy_image_to_clipboard(result):
+            self.status.emit("复制图片失败：剪贴板不可用，请重试")
+            return
         logger.info("仅复制图片到剪贴板: %dx%d", result.width(), result.height())
         # 通知只发一次：走 copy_done（带图）。这里不要再 status.emit —— 应用的
         # editor.status → notify 会把它变成第二条纯文字通知（窗口编辑曾因此收到两条）。
@@ -626,17 +628,24 @@ class EditorWindow(QMainWindow):
             image = self.output_image()
             logging.getLogger("screensnap").debug(
                 "编辑器请求创建贴图: %dx%d", image.width(), image.height())
-            self.sticker_requested.emit(image)
+            self.sticker_saved_path = None
             self.suppress_save_notification = True
+            save_error = None
             try:
-                self.save(automatic=True)
+                self.sticker_saved_path = self.save(
+                    automatic=True, copy_to_clipboard=True, result=image)
             except OSError as error:
+                save_error = error
                 logging.getLogger("screensnap").error(
-                    "贴图已创建但编辑器自动保存失败: %s", error, exc_info=True)
-                self.status.emit(f"贴图已创建，但自动保存失败: {error}")
+                    "编辑器贴图保存失败，继续贴图并按设置复制图像: %s", error, exc_info=True)
+                copy_saved_to_clipboard(None, image, self.settings)
             finally:
                 self.suppress_save_notification = False
-                self.close()
+            # 保存、复制与贴图共用 image；通知接收方拿到本次路径，不借用上一张文件。
+            self.sticker_requested.emit(image)
+            if save_error is not None:
+                self.status.emit(f"贴图已创建，但自动保存失败: {save_error}")
+            self.close()
         elif action == "custom_size":
             self.set_custom_size()
         elif action == "recapture":
@@ -666,7 +675,10 @@ class EditorWindow(QMainWindow):
                     return
                 finally:
                     self.suppress_save_notification = False
-            QGuiApplication.clipboard().setText(str(self.last_path))
+            if not copy_saved_to_clipboard(
+                    self.last_path, None, {"copy_saved_path": True, "copy_saved_image": False}):
+                self.status.emit("复制文件路径失败：剪贴板不可用，请重试")
+                return
             self.status.emit("文件路径已复制")
         elif action == "close_all_editors":
             self.close_all_requested.emit()

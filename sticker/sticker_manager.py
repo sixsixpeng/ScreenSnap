@@ -14,6 +14,7 @@ from PIL import Image as PillowImage
 
 from core.path_utils import configured_dir, data_dir, cache_dir
 from core.window_snap import window_logical_rect
+from editor.image_effects import copy_saved_to_clipboard
 from logger.log_rate import log_every
 from sticker.clipboard_source import ClipboardSource, read_clipboard
 from sticker.sticker_item import StickerItem
@@ -50,6 +51,8 @@ class StickerManager(QObject):
         self.clipboard_history = []
         self.clipboard_history_keys = []
         self.clipboard_history_index = -1
+        self._publishing_clipboard = False
+        self._published_clipboard_key = None
         self._clipboard_persist_timer = QTimer(self)
         self._clipboard_persist_timer.setSingleShot(True)
         self._clipboard_persist_timer.setInterval(350)
@@ -74,11 +77,16 @@ class StickerManager(QObject):
 
     def _clipboard_changed(self):
         """保存剪贴板变化的独立快照，供连续热键轮询。"""
+        if self._publishing_clipboard:
+            return
         try:
             source = read_clipboard(self.settings, self.clipboard)
             if source is None:
                 return
             key = self._clipboard_source_key(source)
+            if key == self._published_clipboard_key:
+                return
+            self._published_clipboard_key = None
             if self.clipboard_history_keys and self.clipboard_history_keys[0] == key:
                 return
             if key in self.clipboard_history_keys:
@@ -216,6 +224,8 @@ class StickerManager(QObject):
         self.clipboard_history_keys.clear()
         self.clipboard_history_index = -1
         self._clipboard_persist_timer.stop()
+        # 保留发布键：排队中的自通知不能重新填入刚清空的历史。
+        # 用户下一次主动贴出、且历史为空时，可以重新接纳当前实际内容。
         self.persist_clipboard_history()
         logging.getLogger("screensnap").info("清空剪贴板历史: %d 条", count)
         return count
@@ -584,31 +594,60 @@ class StickerManager(QObject):
             self.schedule_persist()
         return len(members)
 
+    def publish_output(self, image, path=None, origin=None, clipboard=None):
+        """仅主动贴出/替换的命令调用；底层 add、恢复与缓存没有剪贴板副作用。
+
+        历史卡片原文保留在 origin，自动输出只复制图片；屏蔽自己的同步及延迟变化通知，
+        否则 Ctrl+F3 每次被新图片重置到历史首项、不能轮播。
+        """
+        board = self.clipboard if clipboard is None else clipboard
+        preserve_history = origin is not None and board is self.clipboard
+        self._publishing_clipboard = preserve_history
+        try:
+            copied = copy_saved_to_clipboard(path, image, self.settings,
+                                             clipboard=board)
+            if copied and preserve_history:
+                published = read_clipboard(self.settings, board)
+                self._published_clipboard_key = (self._clipboard_source_key(published)
+                                                if published is not None else None)
+        finally:
+            self._publishing_clipboard = False
+        return copied
+
     def paste_clipboard(self, clipboard=None):
         """按当前内容到较早内容的顺序轮询剪贴板历史并创建新贴图。"""
         if clipboard is not None:
             source = read_clipboard(self.settings, clipboard)
             if source is None:
                 return None
-            return self.add(source.image, origin=source.origin())
+            item = self.add(source.image, origin=source.origin())
+            self.publish_output(source.image, origin=source, clipboard=clipboard)
+            return item
         board = self.clipboard
         source = read_clipboard(self.settings, board)
         if source is not None and board is self.clipboard:
-            self._remember_clipboard_source(source)
+            self._remember_clipboard_source(source, allow_published=not self.clipboard_history)
         self._trim_clipboard_history()
         if not self.clipboard_history:
             return None
         self.clipboard_history_index = (self.clipboard_history_index + 1) % len(self.clipboard_history)
         source = self.clipboard_history[self.clipboard_history_index]
         item = self.add(source.image.copy(), origin=source.origin())
+        self.publish_output(source.image, origin=source)
         logging.getLogger("screensnap").info(
             "贴出剪贴板历史: %d/%d 类型=%s", self.clipboard_history_index + 1,
             len(self.clipboard_history), source.kind)
         return item
 
-    def _remember_clipboard_source(self, source):
+    def _remember_clipboard_source(self, source, allow_published=False):
         """同步热键触发时的最新剪贴板内容，避免信号尚未派发造成漏项。"""
         key = self._clipboard_source_key(source)
+        if key == self._published_clipboard_key:
+            if not allow_published:
+                return
+            logging.getLogger("screensnap").debug("空历史主动接纳当前剪贴板图片，保留自通知防护")
+        else:
+            self._published_clipboard_key = None
         if not self.clipboard_history_keys or self.clipboard_history_keys[0] != key:
             snapshot = ClipboardSource(source.kind, source.image.copy(),
                                       source.text, source.paths, source.html)
@@ -620,6 +659,7 @@ class StickerManager(QObject):
             self.clipboard_history_keys.insert(0, key)
             self._trim_clipboard_history()
             self.clipboard_history_index = -1
+            self._clipboard_persist_timer.start()
 
     def open_file(self, replace=None):
         """多选打开图片；替换模式用第一张替换当前窗口，其余创建新贴图。"""
@@ -641,6 +681,7 @@ class StickerManager(QObject):
                 replace.replace_image(image, path)
             else:
                 self.add(image, path)
+            self.publish_output(image, path)
             opened += 1
         if failed:
             QMessageBox.warning(replace, "部分图片无法打开", "以下图片无法读取：\n" + "\n".join(failed))
@@ -748,8 +789,11 @@ class StickerManager(QObject):
             logging.getLogger("screensnap").debug("自动保存目录不存在: %s", folder)
             return []
         available = []
+        private_cache = folder / "cache"
         for pattern in saved_patterns():
             for path in folder.rglob(pattern):
+                if private_cache in path.parents:
+                    continue
                 try:
                     available.append((path.stat().st_mtime, path))
                 except OSError as error:
@@ -784,12 +828,14 @@ class StickerManager(QObject):
                 item.move(bounds.center() - QPoint(item.width() // 2, item.height() // 2))
             item.show()
             self._remember_placement(item)
+            self.publish_output(image, source)
             return True
         if most_recent_open_item is not None:
             most_recent_open_item.show()
             most_recent_open_item.raise_()
             most_recent_open_item.activateWindow()
             self.active_sticker = most_recent_open_item
+            self.publish_output(QImage(most_recent_open_item.source), most_recent_open_item.source)
             return True
         logging.getLogger("screensnap").debug("自动保存目录中没有可贴出的新图片")
         return False
@@ -812,6 +858,7 @@ class StickerManager(QObject):
                 logging.getLogger("screensnap").info("切换历史贴图: %s", source)
             else:
                 self.history_sticker = self.add(image, source)
+            self.publish_output(image, source)
             return
 
     def toggle_hidden(self):

@@ -23,30 +23,50 @@ def clipboard_available():
     return False
 
 
-def copy_saved_to_clipboard(path, image, settings, force_image=False):
-    """保存后按设置把结果复制到剪贴板：路径与图像各自受开关控制。
+def copy_saved_to_clipboard(path, image, settings, force_image=False,
+                            clipboard=None):
+    """主动输出按设置复制：路径文字与图像独立，无落盘路径时只输出图像。
 
-    两个开关都关时不动剪贴板（设置优先）；force_image 用于「复制图像」这类显式命令。
+    两个开关都关时不动剪贴板；只写图片和路径文字，不附加文件对象格式。
+    内部缓存、恢复和预览不得调用本函数。失败返回 False，不重试、不增加通知。
     """
-    copy_path = bool(settings.get("copy_saved_path"))
+    logger = logging.getLogger("screensnap")
+    copy_path = bool(settings.get("copy_saved_path")) and path is not None
     copy_image = bool(settings.get("copy_saved_image")) or bool(force_image)
     if not (copy_path or copy_image):
+        logger.debug("输出复制跳过：图片/路径开关关闭或没有有效保存路径")
         return False
     from PySide6.QtCore import QMimeData
     from PySide6.QtGui import QGuiApplication
 
-    if not clipboard_available():
-        # 只在占用时记一条 WARNING，不做重试：重试会把日志刷满（规则 14），文件本身已保存成功。
-        logging.getLogger("screensnap").warning(
-            "剪贴板被其他程序占用，本次跳过复制（文件已保存）: %s", path)
+    try:
+        if not clipboard_available():
+            logger.warning("剪贴板被其他程序占用，本次输出跳过复制（不重试）")
+            return False
+        if copy_image and isinstance(image, Image.Image):
+            from core.screen_capture import to_qimage
+
+            image = to_qimage(image)
+        if copy_image and (image is None or image.isNull()):
+            logger.warning("输出复制失败：图像为空")
+            return False
+        payload = QMimeData()
+        if copy_path:
+            payload.setText(str(path))
+        if copy_image:
+            payload.setImageData(image)
+        board = clipboard if clipboard is not None else QGuiApplication.clipboard()
+        board.setMimeData(payload)
+    except (OSError, RuntimeError, TypeError, ValueError) as error:
+        logger.warning("输出复制失败（不重试）: %s", error)
         return False
-    payload = QMimeData()
-    if copy_path:
-        payload.setText(str(path))
-    if copy_image:
-        payload.setImageData(image)
-    QGuiApplication.clipboard().setMimeData(payload)
+    logger.debug("输出已复制到剪贴板：图片=%s 路径=%s", copy_image, copy_path)
     return True
+
+
+def copy_image_to_clipboard(image, clipboard=None):
+    """显式仅复制图像，不受自动复制开关影响，也不附加保存路径。"""
+    return copy_saved_to_clipboard(None, image, {}, force_image=True, clipboard=clipboard)
 
 
 def apply_output_effects(image, settings, round_corners=False, corner_radius=None):

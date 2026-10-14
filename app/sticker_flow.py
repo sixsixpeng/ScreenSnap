@@ -16,6 +16,7 @@ from core import app_icon, data_dir, capture, qimage_to_pillow
 from core.dpi import DisplayMapper
 from core.startup import set_start_on_boot
 from editor import EditorWindow
+from editor.image_effects import copy_saved_to_clipboard
 from hotkey import HotkeyManager
 from logger import configure_logging
 from screenshot import MaskWindow
@@ -36,7 +37,12 @@ class StickerFlowMixin:
 
     def _connect_sticker_signals(self, views):
         for view in views:
-            view.sticker_requested.connect(self.add_sticker)
+            def add_inline_sticker(image, position, current=view):
+                editor = getattr(getattr(current, "session", None), "inline_editor", None)
+                self.add_sticker(image, position,
+                                 saved_path=getattr(editor, "sticker_saved_path", None))
+
+            view.sticker_requested.connect(add_inline_sticker)
             view.quick_sticker_requested.connect(self.add_quick_sticker)
 
 
@@ -45,13 +51,16 @@ class StickerFlowMixin:
         # 编辑器路径的落盘由编辑器自己完成（save(automatic=True)），快速贴图没有编辑器，
         # 因此在这里补一次保存；保存失败不阻断贴图，只记日志并提示。
         try:
-            # notify=False：只通知“已创建贴图”，不弹“图片已保存”；
-            # copy_to_clipboard=False：快速贴图不改动剪贴板（贴图本身才是产物）。
-            saved_paths = self.save_capture_images([(image, None)], notify=False, copy_to_clipboard=False)
+            # 只通知贴图；图片与路径复制仍按保存设置，final_output 避免成品图再次加效果。
+            saved_paths = self.save_capture_images(
+                [(image, None)], notify=False, copy_to_clipboard=True, final_output=True)
         except (OSError, TypeError, ValueError, RuntimeError) as error:
             self.logger.error("快速贴图保存失败: %s", error, exc_info=True)
             self.notify(f"快速贴图保存失败: {error}")
             saved_paths = []
+        if not saved_paths:
+            # 没有成功落盘路径时不可复制旧文件/缓存路径，但仍可按图片开关复制本张成品。
+            copy_saved_to_clipboard(None, image, self.config.data)
         # 通知点击应跳到「保存目录」而不是贴图私有缓存（2026-10-11 用户反馈）。
         self.add_sticker(image, position, saved_path=saved_paths[0] if saved_paths else None)
 
@@ -74,7 +83,7 @@ class StickerFlowMixin:
         # 贴图通知带缩略图（2026-10-11 用户要求：除「复制文字」外所有通知都带图）；
         # 点击目标优先用 saved_path（保存目录），贴图自身的 source 指向私有缓存。
         source = getattr(item, "source", None)
-        target = saved_path or getattr(self, "_last_saved_path", None) or source
+        target = saved_path or source
         if self.config.data.get("bubble", True) and self.config.data.get("sticker_notification", True):
             try:
                 self.show_image_notice(image, "已创建贴图", str(target or ""), target,
@@ -102,7 +111,7 @@ class StickerFlowMixin:
             try:
                 # 贴图窗口本身就是产物：用它的位图做缩略图（CaptureNotification 同时接受 QImage/PIL）。
                 # 贴剪贴板：优先已落盘的保存路径；source 可能是私有缓存，交给 show_image_notice 净化。
-                target = getattr(self, "_last_saved_path", None) or source
+                target = source
                 self.show_image_notice(item.pixmap.toImage(), "已贴出剪贴板内容", str(target or ""), target,
                                        category="sticker_notification")
                 return

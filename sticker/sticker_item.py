@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QWidget
 from core.window_snap import (visible_targets, window_logical_rect, window_present,
                               window_under_point)
 from core.constants import checker_tile_size
+from editor.image_effects import copy_image_to_clipboard
 from logger.log_context import log_scope
 from logger.log_rate import log_every
 from sticker.sticker_menu import show_menu
@@ -847,8 +848,9 @@ class StickerItem(QWidget):
     def copy_image(self):
         """复制原始图像而非带窗口缩放效果的预览。"""
         image = QImage(self.source) if self.source else self.image
-        if image is not None and not image.isNull():
-            QGuiApplication.clipboard().setImage(image)
+        if image is None or image.isNull():
+            image = self.original_pixmap.toImage()
+        return copy_image_to_clipboard(image)
 
     def toggle_top(self):
         """切换置顶标志后重新显示窗口，使窗口管理器应用新状态。"""

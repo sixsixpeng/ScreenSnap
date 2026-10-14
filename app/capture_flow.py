@@ -14,6 +14,7 @@ from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QGraphicsView, QFil
 from config import ConfigManager
 from config.config_manager import TOOL_WIDTH_KEYS
 from core import app_icon, data_dir, capture, qimage_to_pillow
+from core.screen_capture import to_qimage
 from core.dpi import DisplayMapper
 from core.startup import set_start_on_boot
 from editor import EditorWindow
@@ -279,7 +280,8 @@ class CaptureFlowMixin:
                         frame.top() + 36,
                         screen.bottom() - result.height() + 1))
                     position = QPoint(x, y)
-                self.add_sticker(result, position)
+                self.add_sticker(result, position,
+                                 saved_path=getattr(current, "sticker_saved_path", None))
 
             editor.sticker_requested.connect(add_editor_sticker)
             editor.recapture_requested.connect(lambda current=editor: self.restart_capture(current))
@@ -315,15 +317,18 @@ class CaptureFlowMixin:
             self.save_capture_images(images)
 
 
-    def save_capture_images(self, images, positions=None, notify=True, copy_to_clipboard=True):
+    def save_capture_images(self, images, positions=None, notify=True, copy_to_clipboard=True,
+                            final_output=False):
         """直接保存选区图片，但沿用编辑器最终效果与手动保存配置。
 
         返回本次真正落盘的文件路径列表（2026-10-11：快速贴图/贴图通知需要它 —— 贴图本身的
         source 指向私有缓存，点通知应当跳到保存目录而不是缓存）。
+        final_output=True 仅用于已装饰的快速贴图，保存与复制直接使用该成品，不二次加阴影。
         """
         saved_paths = []
         for image, alternate in images:
-            editor = EditorWindow(image, self.config.data, alternate, from_capture=True)
+            source = qimage_to_pillow(image) if final_output and not isinstance(image, Image.Image) else image
+            editor = EditorWindow(source, self.config.data, alternate, from_capture=True)
             editor.copy_done.connect(self.notify_capture_copied)
             editor.save_as_dir_chosen.connect(self.remember_save_as_dir)
             # notify=False 时仍记录日志与历史，只是不弹保存提示（快速贴图只要贴图那一条提示）。
@@ -331,7 +336,11 @@ class CaptureFlowMixin:
                 lambda path, image, flag=notify: (saved_paths.append(str(path)),
                                                   self.saved(path, image, notify=flag))[1])
             try:
-                editor.save(automatic=True, copy_to_clipboard=copy_to_clipboard)
+                if final_output:
+                    result = to_qimage(image) if isinstance(image, Image.Image) else image
+                    editor.save(automatic=True, copy_to_clipboard=copy_to_clipboard, result=result)
+                else:
+                    editor.save(automatic=True, copy_to_clipboard=copy_to_clipboard)
             except OSError as error:
                 self.initial_save_failed(f"直接保存截图失败: {error}")
             finally:

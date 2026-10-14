@@ -73,9 +73,13 @@ class SaveOutputPage(SettingsPage):
         hint.setWordWrap(True)
         self.form.addRow("", hint)
         self.check("open_dir", "保存后打开目录", "每次保存成功后打开资源管理器")
-        self.group("手动保存后复制")
-        self.check("copy_saved_image", "图片", "双击保存和保存按钮将合成图片放入剪贴板")
-        self.check("copy_saved_path", "文件路径文字", "双击保存和保存按钮将保存路径作为文字放入剪贴板")
+        self.group("输出后复制")
+        self.check("copy_saved_image", "图片",
+                   "保存、另存为、截图直存和主动贴图（Space、编辑器、文件、历史、剪贴板轮播）后复制图片。\n"
+                   "仅复制与贴图菜单的复制图像始终复制；恢复会话、预览和缓存不会覆盖剪贴板。")
+        self.check("copy_saved_path", "文件路径文字",
+                   "上述输出已有保存文件或图片源文件时，将其路径作为文字复制；不提供文件对象格式。\n"
+                   "未落盘的图片/卡片与保存失败没有可复制路径；两项都关闭时保留原剪贴板。")
         self.group("缓存管理")
         self.check("cache_clear_clipboard", "清理剪贴板历史",
                    "点“立即清理缓存”或自动清理时，是否连同剪贴板历史（内存记录 + 历史图片）一起清空。\n关闭：剪贴板历史保留，之后仍能按时间顺序贴出旧图；代价是该目录会持续变大。\n与贴图无关：已创建的贴图与回收站内容都不受这里影响。")

@@ -30,7 +30,8 @@ from core.window_focus import activate_window
 from config.config_manager import INTRUDER_WARNING_LABELS, hint_bar_style
 from logger.log_rate import log_every
 from editor.annotation_canvas import AnnotationCanvas
-from editor.image_effects import apply_output_effects, copy_saved_to_clipboard
+from editor.image_effects import (apply_output_effects, copy_saved_to_clipboard,
+                                  copy_image_to_clipboard)
 from editor.toolbar_widget import ToolbarWidget, rich_tooltip
 from screenshot.selection_rect import SelectionRects
 from screenshot.overlay_info import (hint_visible_on_monitor, info_bar_layout,
@@ -938,25 +939,26 @@ class InlineEditor(QWidget):
         self.view.close()
         return path
 
-    def save(self, automatic=False, copy_to_clipboard=False, force_copy_image=False):
+    def save(self, automatic=False, copy_to_clipboard=False, force_copy_image=False,
+             result=None):
         path = (self.last_path if matches_saved_format(self.last_path, self.settings)
             else self.allocate_path(automatic))
-        result = self.output_image()
+        result = self.output_image() if result is None else result
         if not save_image(result, path, self.settings):
             raise OSError(f"图片保存失败：{path}")
         self.last_path = path
         save_signal = (self.saved_silently if self.suppress_save_notification
                        else self.saved)
         save_signal.emit(str(path), result)
-        if (copy_to_clipboard and (self.settings["copy_saved_image"] or self.settings["copy_saved_path"])) or force_copy_image:
-            payload = QMimeData()
-            if self.settings["copy_saved_path"]:
-                payload.setText(str(path))
-            if self.settings["copy_saved_image"] or force_copy_image:
-                payload.setImageData(result)
-            QGuiApplication.clipboard().setMimeData(payload)
-        if self.settings["open_dir"]:
-            os.startfile(str(path.parent)) if os.name == "nt" else None
+        if copy_to_clipboard or force_copy_image:
+            copy_saved_to_clipboard(path, result, self.settings,
+                                    force_image=force_copy_image)
+        if self.settings["open_dir"] and os.name == "nt":
+            try:
+                os.startfile(str(path.parent))
+            except OSError as error:
+                logging.getLogger("screensnap").warning(
+                    "打开保存目录失败 %s: %s", path.parent, error)
         return path
 
     def set_tool(self, tool):
@@ -1081,21 +1083,32 @@ class InlineEditor(QWidget):
             # 第一版原地编辑禁用会改变图片尺寸/几何的图像变换，避免 DPI 和选区映射风险。
             return
         elif action == "paste":
+            if self.view.session.closing or self.view.quick_sticker_consumed:
+                logging.getLogger("screensnap").debug("原地编辑贴图忽略：会话已关闭或请求已消费")
+                return
+            # 全局 Space 与画布 Space 共用会话消费标记；先登记再发同步信号，防止再入。
+            self.view.quick_sticker_consumed = True
             image = self.output_image()
             logging.getLogger("screensnap").debug(
                 "原地编辑请求创建贴图: %dx%d", image.width(), image.height())
             position = self.view.mapper.physical_local_to_native_global(self.rect.topLeft())
-            self.sticker_requested.emit(image, position)
+            self.sticker_saved_path = None
             self.suppress_save_notification = True
+            save_error = None
             try:
-                self.save(automatic=True)
+                self.sticker_saved_path = self.save(
+                    automatic=True, copy_to_clipboard=True, result=image)
             except OSError as error:
+                save_error = error
                 logging.getLogger("screensnap").error(
-                    "贴图已创建但原地编辑自动保存失败: %s", error, exc_info=True)
-                self.save_failed.emit(f"贴图已创建，但自动保存失败: {error}")
+                    "原地编辑贴图保存失败，继续贴图并按设置复制图像: %s", error, exc_info=True)
+                copy_saved_to_clipboard(None, image, self.settings)
             finally:
                 self.suppress_save_notification = False
-                self.view.close()
+            self.sticker_requested.emit(image, position)
+            if save_error is not None:
+                self.save_failed.emit(f"贴图已创建，但自动保存失败: {save_error}")
+            self.view.close()
         elif action == "custom_size":
             self.view.set_inline_custom_size(self)
         elif action == "recapture":
@@ -1110,9 +1123,9 @@ class InlineEditor(QWidget):
             self.view.close()
         elif action == "copy_only":
             image = self.output_image()
-            payload = QMimeData()
-            payload.setImageData(image)
-            QGuiApplication.clipboard().setMimeData(payload)
+            if not copy_image_to_clipboard(image):
+                self.save_failed.emit("复制图片失败：剪贴板不可用，请重试")
+                return
             logging.getLogger("screensnap").info(
                 "原地编辑仅复制到剪贴板: %dx%d", image.width(), image.height())
             # 通知由应用层统一处理（受「复制完成通知」开关控制）：沿用遮罩的 copy_done。
@@ -1123,7 +1136,18 @@ class InlineEditor(QWidget):
         elif action == "copy":
             self.save(copy_to_clipboard=True, force_copy_image=True)
         elif action == "path":
-            QGuiApplication.clipboard().setText(str(self.last_path))
+            if not self.last_path:
+                self.suppress_save_notification = True
+                try:
+                    self.save()
+                except OSError as error:
+                    self.save_failed.emit(f"保存失败: {error}")
+                    return
+                finally:
+                    self.suppress_save_notification = False
+            if not copy_saved_to_clipboard(
+                    self.last_path, None, {"copy_saved_path": True, "copy_saved_image": False}):
+                self.save_failed.emit("复制文件路径失败：剪贴板不可用，请重试")
         elif action == "discard":
             self.discard()
         elif action == "close_all_editors":
@@ -1801,9 +1825,9 @@ class MaskWindow(QWidget):
             # 原地编辑里按 Y ＝ 编辑器工具栏的「仅复制」：带标注的成品图进剪贴板，不落盘（规则 11）。
             editor = self.session.inline_editor
             image = editor.output_image()
-            payload = QMimeData()
-            payload.setImageData(image)
-            QGuiApplication.clipboard().setMimeData(payload)
+            if not copy_image_to_clipboard(image):
+                self.save_failed.emit("复制图片失败：剪贴板不可用，请重试")
+                return
             logger.info("仅复制（原地编辑）到剪贴板: %dx%d", image.width(), image.height())
             self.copy_done.emit(image)
             self._dismiss_inline_editor()
@@ -1820,9 +1844,9 @@ class MaskWindow(QWidget):
         else:
             image = self.image
             label = "整屏"
-        payload = QMimeData()
-        payload.setImageData(to_qimage(image))
-        QGuiApplication.clipboard().setMimeData(payload)
+        if not copy_image_to_clipboard(image):
+            self.save_failed.emit("复制图片失败：剪贴板不可用，请重试")
+            return
         logger.info("仅复制%s到剪贴板: %dx%d", label, image.width, image.height)
         self.copy_done.emit(image)
         self.close()
@@ -1948,7 +1972,7 @@ class MaskWindow(QWidget):
             if dirty and action == "save":
                 editor.suppress_save_notification = True
                 try:
-                    editor.save(automatic=True)
+                    editor.save(automatic=True, copy_to_clipboard=True)
                 except OSError as error:
                     editor.save_failed.emit(str(error))
                     self.update_all()
@@ -2464,12 +2488,11 @@ class MaskWindow(QWidget):
             self.close()
             return
         if action == "copy" and not (save_direct or force_window):
-            from PySide6.QtGui import QGuiApplication
-            from PySide6.QtCore import QMimeData
             # 多选收集了多块时只复制最后划选的那一块（与 Y 同一语义）。
-            payload = QMimeData()
-            payload.setImageData(to_qimage(images[-1][0]))
-            QGuiApplication.clipboard().setMimeData(payload)
+            if not copy_image_to_clipboard(images[-1][0]):
+                self.session.completing = False
+                self.save_failed.emit("复制图片失败：剪贴板不可用，请重试")
+                return
             logging.getLogger("screensnap").info("仅复制最后一个选区到剪贴板: %dx%d",
                                                  images[-1][0].width, images[-1][0].height)
             self.copy_done.emit(images[-1][0])
@@ -3280,7 +3303,7 @@ class MaskWindow(QWidget):
                 self.selection.begin_new(self.position)
             else:
                 self.selection.begin(self.position)
-            if self.quick_sticker_armed and event.button() == Qt.LeftButton:
+            if self.quick_sticker_armed:
                 self.quick_sticker_armed = False
                 self.quick_sticker_pending = True
             # 记录按下位置，用于区分“单击确认元素”和“拖动手绘选区”。
@@ -3402,6 +3425,9 @@ class MaskWindow(QWidget):
                 self.update_inline_region()
                 if self.session.inline_editor is not None:
                     self.session.inline_editor.end_region_resize()
+                if self.quick_sticker_pending:
+                    self.quick_sticker_pending = False
+                    self.trigger_quick_sticker()
             return
         if event.button() in (Qt.LeftButton, Qt.RightButton):
             active = self.selection.active
@@ -3689,7 +3715,8 @@ class MaskWindow(QWidget):
 
     def keyReleaseEvent(self, event):
         if self.quick_sticker_armed and not event.isAutoRepeat():
-            sequence = self.quick_sticker_shortcut.key()
+            # 快捷键仅主视图注册，armed 则会话共享；副视图不能解引用空 shortcut。
+            sequence = QKeySequence(self.settings.get("capture_quick_sticker_shortcut", "Space"))
             if sequence.count() and sequence[0].key() == event.key():
                 self.quick_sticker_armed = False
         super().keyReleaseEvent(event)
@@ -3808,7 +3835,7 @@ class MaskWindow(QWidget):
         # 就地编辑文字（场景里有获得焦点的 QGraphicsTextItem）时空格是字符，不是命令。
         from PySide6.QtWidgets import QApplication, QGraphicsTextItem
 
-        if self.quick_sticker_consumed:
+        if self.session.closing or self.quick_sticker_consumed:
             _logger.info("快速贴图忽略：本次截图已消费过"); return
         if not self.quick_sticker_enabled:
             _logger.info("快速贴图忽略：开关未启用（capture_quick_sticker_enabled）"); return
@@ -3816,7 +3843,7 @@ class MaskWindow(QWidget):
         if QApplication.activeModalWidget() is not None:
             return
         if self.inline_active():
-            editor = getattr(self.session, "inline", None)
+            editor = self.session.inline_editor
             canvas = getattr(editor, "canvas", None)
             scene_getter = getattr(canvas, "scene", None)
             if callable(scene_getter):
@@ -3833,6 +3860,10 @@ class MaskWindow(QWidget):
             return
         if not self.selection.rects:
             self.quick_sticker_armed = True
+            return
+        if self.inline_active():
+            _logger.debug("快速贴图转交原地编辑器：使用当前标注合成图")
+            self.session.inline_editor.execute("paste")
             return
         self.quick_sticker_consumed = True
         # 2026-10-11 用户要求：多选模式下**每个选区都贴一张**（原来只贴最后一个）。

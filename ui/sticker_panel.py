@@ -361,6 +361,7 @@ class StickerPanel(QWidget):
                 failed.append(path)
                 continue
             added.append(self.manager.add(image, path))
+            self.manager.publish_output(image, path)
         if group_name and added:
             self.manager.assign_group(added, group_name)
         if failed:

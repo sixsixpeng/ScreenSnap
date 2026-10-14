@@ -834,7 +834,11 @@ class StickerTests(CoreTests):
         Application._connect_sticker_signals(app, views)
 
         for view in views:
-            view.sticker_requested.connect.assert_called_once_with(app.add_sticker)
+            view.sticker_requested.connect.assert_called_once()
+            callback = view.sticker_requested.connect.call_args.args[0]
+            image, position = object(), QPoint(20, 10)
+            callback(image, position)
+            app.add_sticker.assert_called_with(image, position, saved_path=None)
             view.quick_sticker_requested.connect.assert_called_once_with(app.add_quick_sticker)
 
     def test_inline_editor_paste_creates_sticker_when_save_fails(self):
@@ -992,7 +996,10 @@ class StickerTests(CoreTests):
         editor.sticker_requested.connect(emitted.append)
         with patch.object(editor, "save") as save, patch.object(editor, "close") as close:
             editor.execute("paste")
-        save.assert_called_once_with(automatic=True)
+        save.assert_called_once()
+        self.assertTrue(save.call_args.kwargs["automatic"])
+        self.assertTrue(save.call_args.kwargs["copy_to_clipboard"])
+        self.assertIs(save.call_args.kwargs["result"], emitted[0])
         close.assert_called_once_with()
         self.assertEqual(len(emitted), 1)
         self.assertIsNotNone(emitted[0])
@@ -2022,6 +2029,609 @@ class StickerTests(CoreTests):
                 manager.clear_rebuildable_cache()
             self.assertFalse(clipboard.exists() or toast.exists() or sticker.exists())
 
+
+
+class ClipboardOutputTests(CoreTests):
+    """主动输出的剪贴板契约；只使用内存剪贴板与临时用户数据。"""
+
+    def output_context(self, **overrides):
+        from contextlib import contextmanager, ExitStack
+        from types import SimpleNamespace
+        from PySide6.QtCore import QObject, Signal, QMimeData
+        from PySide6.QtGui import QImage
+        from config.config_manager import DEFAULTS
+        from main import Application
+
+        class Clipboard(QObject):
+            dataChanged = Signal()
+
+            def __init__(self):
+                super().__init__()
+                self.payload = QMimeData()
+                self.writes = []
+
+            def mimeData(self):
+                return self.payload
+
+            def image(self):
+                return QImage(self.payload.imageData()) if self.payload.hasImage() else QImage()
+
+            def text(self):
+                return self.payload.text()
+
+            def setMimeData(self, payload):
+                self.payload = payload
+                self.writes.append(payload)
+                self.dataChanged.emit()
+
+            def setText(self, text):
+                payload = QMimeData()
+                payload.setText(text)
+                self.setMimeData(payload)
+
+            def setImage(self, image):
+                payload = QMimeData()
+                payload.setImageData(image)
+                self.setMimeData(payload)
+
+        @contextmanager
+        def context():
+            with ExitStack() as stack:
+                folder = Path(stack.enter_context(tempfile.TemporaryDirectory()))
+                settings = dict(DEFAULTS, save_dir=str(folder), archive_by_month=False,
+                                archive_by_day=False, filename="output", open_dir=False,
+                                magnifier=False, crosshair=False, window_detection=False,
+                                window_hover_detect=False, window_uia_detect=False,
+                                capture_after_selection="edit", inline_edit=True,
+                                editor_image_round_corners=False, sticker_recycle_enabled=False)
+                settings.update(overrides)
+                board = Clipboard()
+                board.setText("clipboard sentinel")
+                board.writes.clear()
+                stack.enter_context(patch("PySide6.QtGui.QGuiApplication.clipboard", return_value=board))
+                stack.enter_context(patch("editor.image_effects.clipboard_available", return_value=True))
+                stack.enter_context(patch("sticker.sticker_manager.data_dir", return_value=folder))
+                stack.enter_context(patch("screenshot.mask_window.visible_windows", return_value=[]))
+                manager = StickerManager(settings, clipboard=board)
+                app = Application.__new__(Application)
+                app.config = SimpleNamespace(data=settings, save=Mock())
+                app.stickers = manager
+                app.editors = []
+                app.logger = Mock()
+                app.settings_window = Mock()
+                app.capture_notice = None
+                app.notify = Mock()
+                app.show_image_notice = Mock()
+                app.saved = Mock()
+                masks = []
+                try:
+                    yield SimpleNamespace(folder=folder, settings=settings, board=board,
+                                          manager=manager, app=app, masks=masks)
+                finally:
+                    for mask in masks:
+                        mask.close()
+                    for editor in app.editors[:]:
+                        editor.close()
+                    manager.quitting = True
+                    manager.close_all()
+                    manager._persist_timer.stop()
+                    manager._clipboard_persist_timer.stop()
+                    manager.deleteLater()
+                    self.app.processEvents()
+
+        return context()
+
+    def output_editor(self, context, inline):
+        from main import Application
+
+        image = Image.new("RGB", (160, 120), "#315a83")
+        if not inline:
+            Application.edit_images(context.app, [(image, None)], from_capture=False)
+            return context.app.editors[-1]
+        bounds = {"left": 0, "top": 0, "width": 160, "height": 120}
+        mask = MaskWindow(image, bounds, [bounds], context.settings)
+        context.masks.append(mask)
+        Application._connect_sticker_signals(context.app, mask.session.views)
+        mask.image_saved_silently.connect(context.app.saved)
+        mask.selection.rects.append(QRect(20, 20, 80, 60))
+        mask.complete()
+        return mask.session.inline_editor
+
+    def assert_same_image(self, actual, expected):
+        from PySide6.QtGui import QImage
+
+        self.assertEqual(actual.convertToFormat(QImage.Format_ARGB32_Premultiplied),
+                         expected.convertToFormat(QImage.Format_ARGB32_Premultiplied))
+
+    def assert_output_clipboard(self, context, image, path=None):
+        board, settings = context.board, context.settings
+        wants_image = settings["copy_saved_image"]
+        wants_path = settings["copy_saved_path"] and path is not None
+        self.assertEqual(len(board.writes), int(wants_image or wants_path))
+        if wants_image:
+            self.assert_same_image(board.image(), image)
+        if wants_path:
+            self.assertEqual(board.text(), str(path))
+        elif not wants_image:
+            self.assertEqual(board.text(), "clipboard sentinel")
+
+    def test_clipboard_output_editor_paste_buttons_and_keys(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QKeyEvent, QImage
+
+        for inline in (False, True):
+            for flags in ((True, False), (False, True), (True, True), (False, False)):
+                for entry in ("button", "space", "global") if inline else ("button", "space"):
+                    with self.subTest(inline=inline, flags=flags, entry=entry), self.output_context(
+                            copy_saved_image=flags[0], copy_saved_path=flags[1],
+                            editor_image_shadow_enabled=True, editor_image_shadow_size=2) as context:
+                        editor = self.output_editor(context, inline)
+                        editor.canvas.scene_data.addItem(shape(
+                            "rect", QPointF(10, 10), QPointF(40, 30), "#ff0000", 3))
+                        expected = editor.output_image()
+                        signal = editor.sticker_requested
+                        emitted = []
+                        signal.connect(lambda image, *args: emitted.append(image.copy()))
+                        with patch.object(editor, "output_image", wraps=editor.output_image) as render:
+                            if entry == "button":
+                                next(button for button in editor.toolbar.output_buttons
+                                     if button.text() == "贴图").click()
+                            elif entry == "space":
+                                editor.canvas.keyPressEvent(QKeyEvent(
+                                    QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier, " "))
+                            else:
+                                editor.view.trigger_quick_sticker()
+                            self.assertEqual(render.call_count, 1, "贴图/保存/复制应共用一次合成")
+                        self.assertEqual(len(emitted), 1)
+                        self.assert_same_image(emitted[0], expected)
+                        self.assertEqual(len(context.manager.items), 1)
+                        path = next(context.folder.glob("output*.png"))
+                        self.assert_same_image(QImage(str(path)), expected)
+                        self.assert_output_clipboard(context, expected, path)
+                        self.assert_same_image(context.manager.items[0].pixmap.toImage(), expected)
+
+    def test_clipboard_output_quick_sticker_has_one_effect_pass(self):
+        from core.screen_capture import to_qimage
+        from editor.image_effects import apply_output_effects
+
+        for flags in ((True, False), (False, True), (True, True), (False, False)):
+            with self.subTest(flags=flags), self.output_context(
+                    copy_saved_image=flags[0], copy_saved_path=flags[1],
+                    editor_image_round_corners=True, editor_image_border_enabled=True,
+                    editor_image_shadow_enabled=True, editor_image_shadow_size=2) as context:
+                image = apply_output_effects(Image.new("RGBA", (40, 30), "red"),
+                                             context.settings, True)
+                context.app.add_quick_sticker(image, QPoint(10, 10))
+                path = next(context.folder.glob("output*.png"))
+                expected = to_qimage(image)
+                self.assert_output_clipboard(context, expected, path)
+                self.assert_same_image(context.manager.items[0].pixmap.toImage(), expected)
+                from PySide6.QtGui import QImage
+                self.assert_same_image(QImage(str(path)), expected)
+                self.assertEqual(context.app.saved.call_count, 1)
+                self.assertFalse(context.app.saved.call_args.kwargs["notify"])
+
+    def test_clipboard_output_left_right_space_drag_gestures(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent, QImage
+        from main import Application
+
+        for button in (Qt.LeftButton, Qt.RightButton):
+            for timing in ("before", "during", "after"):
+                with self.subTest(button=button, timing=timing), self.output_context() as context:
+                    bounds = {"left": 0, "top": 0, "width": 160, "height": 120}
+                    mask = MaskWindow(Image.new("RGB", (160, 120), "red"), bounds,
+                                      [bounds], context.settings)
+                    context.masks.append(mask)
+                    Application._connect_sticker_signals(context.app, mask.session.views)
+                    def mouse(kind, point, buttons):
+                        return QMouseEvent(kind, QPointF(*point), QPointF(*point), button, buttons,
+                                           Qt.NoModifier)
+                    if timing == "before":
+                        mask.trigger_quick_sticker()
+                    mask.mousePressEvent(mouse(QEvent.MouseButtonPress, (20, 20), button))
+                    mask.mouseMoveEvent(mouse(QEvent.MouseMove, (90, 70), button))
+                    if timing == "during":
+                        mask.trigger_quick_sticker()
+                    mask.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, (90, 70), Qt.NoButton))
+                    if timing == "after":
+                        mask.trigger_quick_sticker()
+                    mask.trigger_quick_sticker()  # Qt + 全局入口同一次请求，不得二次输出。
+                    self.assertEqual(len(context.manager.items), 1)
+                    path = next(context.folder.glob("output*.png"))
+                    self.assert_output_clipboard(context, QImage(str(path)), path)
+
+    def test_clipboard_output_multiselect_preserves_order_and_last_image(self):
+        from PySide6.QtGui import QImage
+        from main import Application
+
+        with self.output_context() as context:
+            bounds = {"left": 0, "top": 0, "width": 160, "height": 120}
+            image = Image.new("RGB", (160, 120), "red")
+            image.paste("blue", (80, 0, 160, 120))
+            mask = MaskWindow(image, bounds, [bounds], context.settings)
+            context.masks.append(mask)
+            Application._connect_sticker_signals(context.app, mask.session.views)
+            mask.selection.rects.extend((QRect(10, 10, 30, 20), QRect(90, 10, 40, 25)))
+            mask.trigger_quick_sticker()
+            self.assertEqual(len(context.manager.items), 2)
+            self.assertEqual(len(context.board.writes), 2)
+            self.assert_same_image(context.board.image(), context.manager.items[-1].pixmap.toImage())
+            self.assertEqual(context.board.image().pixelColor(5, 5).name(), "#0000ff")
+            self.assertEqual(len(list(context.folder.glob("output*.png"))), 2)
+
+    def test_clipboard_output_save_buttons_keys_and_double_click_signal(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QKeyEvent, QImage
+
+        for inline in (False, True):
+            for entry in ("button", "S", "Ctrl+S", "double"):
+                for flags in ((True, False), (False, True), (True, True), (False, False)):
+                    with self.subTest(inline=inline, entry=entry, flags=flags), self.output_context(
+                            copy_saved_image=flags[0], copy_saved_path=flags[1]) as context:
+                        editor = self.output_editor(context, inline)
+                        expected = editor.output_image()
+                        if entry == "button":
+                            next(button for button in editor.toolbar.output_buttons
+                                 if button.text() == "保存").click()
+                        elif entry == "double":
+                            editor.canvas.confirmed.emit()
+                        else:
+                            modifier = Qt.ControlModifier if entry == "Ctrl+S" else Qt.NoModifier
+                            editor.canvas.keyPressEvent(QKeyEvent(
+                                QEvent.KeyPress, Qt.Key_S, modifier, "s"))
+                        path = next(context.folder.glob("output*.png"))
+                        self.assert_same_image(QImage(str(path)), expected)
+                        self.assert_output_clipboard(context, expected, path)
+
+    def test_clipboard_output_capture_presets_direct_save_and_formats(self):
+        from PySide6.QtGui import QImage
+        from core.screen_capture import to_qimage
+
+        for mode in (None, "fullscreen", "monitor", "repeat"):
+            for fmt in ("png", "jpg", "webp", "bmp"):
+                with self.subTest(mode=mode, fmt=fmt), self.output_context(
+                        save_format=fmt, capture_after_selection="save", copy_saved_path=True) as context:
+                    image = Image.new("RGB", (30, 20), "red")
+                    context.app.handle_capture_selection([(image, None)], mode=mode)
+                    path = next(path for path in context.folder.glob("output.*") if path.is_file())
+                    self.assertFalse(QImage(str(path)).isNull())
+                    self.assert_output_clipboard(context, to_qimage(image), path)
+
+    def test_clipboard_output_save_as_both_editors_and_cancel(self):
+        from PySide6.QtGui import QImage
+
+        for inline in (False, True):
+            for flags in ((True, False), (False, True), (True, True), (False, False)):
+                with self.subTest(inline=inline, flags=flags), self.output_context(
+                        copy_saved_image=flags[0], copy_saved_path=flags[1]) as context:
+                    editor = self.output_editor(context, inline)
+                    expected = editor.output_image()
+                    with patch("editor.editor_window.QFileDialog.getSaveFileName", return_value=("", "")):
+                        self.assertIsNone(editor.save_as())
+                    self.assertEqual(context.board.writes, [])
+                    path = context.folder / "chosen.png"
+                    with patch("editor.editor_window.QFileDialog.getSaveFileName", return_value=(str(path), "")):
+                        editor.save_as()
+                    self.assert_same_image(QImage(str(path)), expected)
+                    self.assert_output_clipboard(context, expected, path)
+
+    def test_clipboard_output_paste_failure_still_copies_image_without_stale_path(self):
+        for inline in (False, True):
+            with self.subTest(inline=inline), self.output_context(copy_saved_path=True) as context:
+                editor = self.output_editor(context, inline)
+                expected = editor.output_image()
+                editor.last_path = context.folder / "previous.png"
+                with patch.object(editor, "save", side_effect=OSError("disk full")):
+                    editor.execute("paste")
+                self.assertEqual(len(context.manager.items), 1)
+                self.assert_output_clipboard(context, expected)
+                self.assertEqual(context.board.text(), "")
+        with self.output_context(copy_saved_path=True) as context:
+            with patch.object(context.app, "save_capture_images", side_effect=OSError("disk full")):
+                context.app.add_quick_sticker(Image.new("RGB", (20, 15), "red"))
+            self.assertEqual(len(context.manager.items), 1)
+            self.assert_output_clipboard(context, context.manager.items[0].pixmap.toImage())
+            self.assertEqual(context.board.text(), "")
+
+    def test_clipboard_output_only_copy_and_menu_are_explicit_image_commands(self):
+        from PySide6.QtGui import QImage
+
+        for inline in (False, True):
+            with self.subTest(inline=inline), self.output_context(
+                    copy_saved_image=False, copy_saved_path=False) as context:
+                editor = self.output_editor(context, inline)
+                expected = editor.output_image()
+                editor.execute("copy_only")
+                self.assert_same_image(context.board.image(), expected)
+                self.assertEqual(len(context.board.writes), 1)
+                self.assertEqual(list(context.folder.glob("output*.png")), [])
+        with self.output_context(copy_saved_image=False, copy_saved_path=False) as context:
+            source = context.folder / "source.png"
+            Image.new("RGB", (20, 15), "red").save(source)
+            item = context.manager.add(QImage(str(source)), source)
+            item.rotate(90)
+            item.copy_image()
+            self.assert_same_image(context.board.image(), QImage(str(source)))
+            self.assertEqual(len(context.board.writes), 1)
+
+    def test_clipboard_output_busy_board_keeps_only_copy_editor_open(self):
+        for inline in (False, True):
+            with self.subTest(inline=inline), self.output_context() as context:
+                editor = self.output_editor(context, inline)
+                with patch("editor.image_effects.clipboard_available", return_value=False), \
+                        patch.object(editor.view if inline else editor, "close") as close:
+                    editor.execute("copy_only")
+                    close.assert_not_called()
+                self.assertEqual(context.board.writes, [])
+
+    def test_clipboard_output_file_history_and_panel_commands(self):
+        from PySide6.QtGui import QImage
+        from ui.sticker_panel import StickerPanel
+
+        for flags in ((True, False), (False, True), (True, True), (False, False)):
+            for entry in ("file", "replace", "latest", "cycle", "panel"):
+                with self.subTest(flags=flags, entry=entry), self.output_context(
+                        copy_saved_image=flags[0], copy_saved_path=flags[1]) as context:
+                    source = context.folder / "source.png"
+                    Image.new("RGB", (25, 20), "blue").save(source)
+                    expected = QImage(str(source))
+                    if entry in ("file", "replace"):
+                        item = context.manager.add(expected, source) if entry == "replace" else None
+                        with patch("sticker.sticker_manager.QFileDialog.getOpenFileNames",
+                                   return_value=([str(source)], "")):
+                            context.manager.open_file(item)
+                    elif entry == "latest":
+                        context.manager.paste_latest()
+                    elif entry == "cycle":
+                        context.manager.cycle(1)
+                    else:
+                        panel = StickerPanel(context.manager)
+                        try:
+                            with patch("ui.sticker_panel.QFileDialog.getOpenFileNames",
+                                       return_value=([str(source)], "")):
+                                panel.add_files_to_group()
+                        finally:
+                            panel.close()
+                    self.assert_output_clipboard(context, expected, source)
+
+    def test_clipboard_output_clipboard_cycle_keeps_history_and_origin(self):
+        from PySide6.QtCore import QMimeData, QUrl
+        from PySide6.QtGui import QImage
+
+        for kind in ("image", "text", "html", "color", "files"):
+            with self.subTest(kind=kind), self.output_context() as context:
+                context.manager.clear_clipboard_history()
+                context.board.setText("older text")
+                payload = QMimeData()
+                if kind == "image":
+                    image = QImage(25, 20, QImage.Format_ARGB32)
+                    image.fill(Qt.red)
+                    payload.setImageData(image)
+                elif kind == "files":
+                    source = context.folder / "document.txt"
+                    source.write_text("example", encoding="utf-8")
+                    payload.setUrls([QUrl.fromLocalFile(str(source))])
+                else:
+                    payload.setText("#125678" if kind == "color" else "new text")
+                    if kind == "html":
+                        payload.setHtml("<b>new text</b>")
+                context.board.setMimeData(payload)
+                keys = list(context.manager.clipboard_history_keys)
+                context.board.writes.clear()
+                for index in range(4):
+                    item = context.manager.paste_clipboard()
+                    self.assertEqual(item.origin["kind"], kind if index % 2 == 0 else "text")
+                    self.assert_same_image(context.board.image(), item.pixmap.toImage())
+                    self.assertEqual(context.manager.clipboard_history_keys, keys)
+                    context.manager._clipboard_changed()  # 同步信号之后到达的重复通知。
+                    self.assertEqual(context.manager.clipboard_history_keys, keys)
+                self.assertEqual(len(context.board.writes), 4)
+                # 再选第一项；原信息保留在贴图，自动输出不附加文字/HTML/文件对象格式。
+                item = context.manager.paste_clipboard()
+                self.assertFalse(context.board.mimeData().hasText())
+                self.assertFalse(context.board.mimeData().hasHtml())
+                self.assertFalse(context.board.mimeData().hasUrls())
+                if kind in ("text", "color", "html"):
+                    self.assertEqual(item.origin["text"], payload.text())
+                if kind == "html":
+                    self.assertEqual(item.origin["html"], payload.html())
+                if kind == "files":
+                    self.assertEqual(item.origin["paths"], [url.toLocalFile() for url in payload.urls()])
+                context.board.setText("external new text")
+                self.assertEqual(context.manager.clipboard_history_index, -1)
+                self.assertEqual(context.manager.clipboard_history[0].text, "external new text")
+
+    def test_clipboard_output_internal_cache_restore_and_recycle_are_silent(self):
+        from PySide6.QtGui import QImage
+
+        with self.output_context(sticker_recycle_enabled=True) as context:
+            source = context.folder / "source.png"
+            Image.new("RGB", (25, 20), "blue").save(source)
+            item = context.manager.add(QImage(str(source)), source, position=QPoint(10, 10))
+            context.manager.persist()
+            context.manager.persist_clipboard_history()
+            item.rotate(90)
+            item.reset_rotation()
+            item.reset_size()
+            context.manager.remove(item)
+            context.manager.recycle_restore(item)
+            context.manager.toggle_hidden()
+            context.manager.restore_input()
+            self.assertEqual(context.board.writes, [])
+            restored = StickerManager(context.settings, clipboard=context.board)
+            try:
+                restored.restore()
+                self.assertEqual(context.board.writes, [])
+            finally:
+                restored.quitting = True
+                restored.close_all()
+                restored._persist_timer.stop()
+                restored._clipboard_persist_timer.stop()
+                restored.deleteLater()
+
+    def test_clipboard_output_mask_copy_and_confirm_copy_keep_session_on_failure(self):
+        from core.screen_capture import to_qimage
+
+        for entry in ("Y", "inline_Y", "confirm_copy"):
+            with self.subTest(entry=entry), self.output_context(
+                    copy_saved_image=False, copy_saved_path=False) as context:
+                if entry == "inline_Y":
+                    editor = self.output_editor(context, True)
+                    mask = editor.view
+                    expected = editor.output_image()
+                else:
+                    bounds = {"left": 0, "top": 0, "width": 160, "height": 120}
+                    mask = MaskWindow(Image.new("RGB", (160, 120), "red"), bounds,
+                                      [bounds], context.settings)
+                    context.masks.append(mask)
+                    mask.selection.rects.append(QRect(20, 20, 80, 60))
+                    expected = to_qimage(mask.image.crop((20, 20, 100, 80)))
+                if entry == "confirm_copy":
+                    context.settings["capture_after_selection"] = "copy"
+                    execute = mask.complete
+                else:
+                    execute = mask.copy_selection_to_clipboard
+                copies, failures = [], []
+                mask.copy_done.connect(copies.append)
+                mask.save_failed.connect(failures.append)
+                with patch("editor.image_effects.clipboard_available", return_value=False), \
+                        patch.object(mask, "close") as close:
+                    execute()
+                    close.assert_not_called()
+                self.assertEqual(context.board.writes, [])
+                self.assertEqual(copies, [])
+                self.assertEqual(len(failures), 1)
+                self.assertFalse(mask.session.closing)
+                self.assertFalse(mask.session.completing)
+                execute()
+                self.assertEqual(len(copies), 1)
+                self.assertEqual(len(context.board.writes), 1)
+                self.assert_same_image(context.board.image(), expected)
+                self.assertEqual(list(context.folder.glob("output*.png")), [])
+
+    def test_clipboard_output_inline_directory_error_does_not_copy_twice(self):
+        with self.output_context(open_dir=True, copy_saved_path=True) as context:
+            editor = self.output_editor(context, True)
+            expected = editor.output_image()
+            emitted = []
+            editor.save_failed.connect(emitted.append)
+            with patch("screenshot.mask_window.os.startfile", side_effect=OSError("explorer unavailable")):
+                editor.execute("paste")
+            path = next(context.folder.glob("output*.png"))
+            self.assert_output_clipboard(context, expected, path)
+            self.assertEqual(emitted, [])
+
+    def test_clipboard_output_switch_to_multi_save_obeys_copy_options(self):
+        from PySide6.QtGui import QImage
+
+        for flags in ((True, False), (False, True), (True, True), (False, False)):
+            with self.subTest(flags=flags), self.output_context(
+                    copy_saved_image=flags[0], copy_saved_path=flags[1]) as context:
+                editor = self.output_editor(context, True)
+                mask = editor.view
+                editor.canvas.scene_data.addItem(shape(
+                    "rect", QPointF(10, 10), QPointF(40, 30), "#ff0000", 3))
+                editor.canvas.checkpoint()
+                expected = editor.output_image()
+                mask.toggle_multi_select_mode()
+                self.assertTrue(mask.session.multi_select_mode)
+                path = next(context.folder.glob("output*.png"))
+                self.assert_same_image(QImage(str(path)), expected)
+                self.assert_output_clipboard(context, expected, path)
+
+    def test_clipboard_output_inline_resize_consumes_pending_space(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QMouseEvent, QImage
+
+        with self.output_context() as context:
+            editor = self.output_editor(context, True)
+            mask = editor.view
+            def mouse(kind, point, buttons):
+                return QMouseEvent(kind, QPointF(*point), QPointF(*point), Qt.LeftButton,
+                                   buttons, Qt.NoModifier)
+            mask.mousePressEvent(mouse(QEvent.MouseButtonPress, (20, 20), Qt.LeftButton))
+            mask.mouseMoveEvent(mouse(QEvent.MouseMove, (12, 12), Qt.LeftButton))
+            mask.trigger_quick_sticker()
+            self.assertTrue(mask.quick_sticker_pending)
+            mask.mouseReleaseEvent(mouse(QEvent.MouseButtonRelease, (12, 12), Qt.NoButton))
+            self.assertEqual(len(context.manager.items), 1)
+            self.assertFalse(mask.quick_sticker_pending)
+            path = next(context.folder.glob("output*.png"))
+            self.assert_output_clipboard(context, QImage(str(path)), path)
+
+    def test_clipboard_output_secondary_release_uses_configured_key(self):
+        from PySide6.QtCore import QEvent
+        from PySide6.QtGui import QKeyEvent
+
+        for binding, key in (("Space", Qt.Key_Space), ("F8", Qt.Key_F8)):
+            with self.subTest(binding=binding), self.output_context(
+                    capture_quick_sticker_shortcut=binding) as context:
+                bounds = {"left": 0, "top": 0, "width": 160, "height": 120}
+                mask = MaskWindow(Image.new("RGB", (160, 120), "red"), bounds,
+                                  [bounds], context.settings)
+                context.masks.append(mask)
+                mask.quick_sticker_shortcut = None  # 副视图不注册重复快捷键。
+                mask.quick_sticker_armed = True
+                mask.keyReleaseEvent(QKeyEvent(QEvent.KeyRelease, key, Qt.NoModifier))
+                self.assertFalse(mask.quick_sticker_armed)
+                self.assertEqual(context.board.writes, [])
+
+    def test_clipboard_output_busy_board_and_writer_errors_do_not_break_saved_paste(self):
+        for inline in (False, True):
+            with self.subTest(inline=inline), self.output_context() as context:
+                editor = self.output_editor(context, inline)
+                with patch("editor.image_effects.clipboard_available", return_value=False):
+                    editor.execute("paste")
+                self.assertEqual(len(list(context.folder.glob("output*.png"))), 1)
+                self.assertEqual(len(context.manager.items), 1)
+                self.assertEqual(context.board.writes, [])
+        from editor.image_effects import copy_image_to_clipboard
+        from PySide6.QtGui import QImage
+
+        with self.output_context() as context:
+            image = QImage(20, 15, QImage.Format_ARGB32)
+            image.fill(Qt.red)
+            with patch.object(context.board, "setMimeData", side_effect=RuntimeError("clipboard unavailable")):
+                self.assertFalse(copy_image_to_clipboard(image))
+            self.assertEqual(context.board.writes, [])
+
+    def test_clipboard_output_explicit_path_saves_once_and_does_not_copy_image(self):
+        for inline in (False, True):
+            with self.subTest(inline=inline), self.output_context() as context:
+                editor = self.output_editor(context, inline)
+                editor.execute("path")
+                path = next(context.folder.glob("output*.png"))
+                self.assertEqual(context.board.text(), str(path))
+                self.assertFalse(context.board.mimeData().hasImage())
+                self.assertEqual(len(context.board.writes), 1)
+                context.board.writes.clear()
+                editor.execute("path")
+                self.assertEqual(len(list(context.folder.glob("output*.png"))), 1)
+                self.assertEqual(len(context.board.writes), 1)
+
+    def test_clipboard_output_live_copy_preferences_apply_without_reopening_editor(self):
+        for inline in (False, True):
+            with self.subTest(inline=inline), self.output_context() as context:
+                editor = self.output_editor(context, inline)
+                context.settings.update(copy_saved_image=False, copy_saved_path=True)
+                path = editor.save(copy_to_clipboard=True)
+                self.assert_output_clipboard(context, editor.output_image(), path)
+                context.board.setText("clipboard sentinel")
+                context.board.writes.clear()
+                context.settings.update(copy_saved_image=False, copy_saved_path=False)
+                editor.save(copy_to_clipboard=True)
+                self.assert_output_clipboard(context, editor.output_image(), path)
+
+    def test_clipboard_output_file_history_excludes_private_image_caches(self):
+        with self.output_context() as context:
+            source = context.folder / "source.png"
+            Image.new("RGB", (25, 20), "blue").save(source)
+            for name in ("sticker_cache", "clipboard_history", "toast_cache"):
+                folder = context.folder / "cache" / name
+                folder.mkdir(parents=True, exist_ok=True)
+                Image.new("RGB", (25, 20), "red").save(folder / "newer.png")
+            self.assertEqual(context.manager.files(), [source])
 
 
 if __name__ == "__main__":

@@ -2527,7 +2527,7 @@ class ConfigTests(CoreTests):
                 self.assertIsNone(editor.view)
                 self.assertEqual(len(mask.selection.rects), 1)
                 if action == "save":
-                    save.assert_called_once_with(automatic=True)
+                    save.assert_called_once_with(automatic=True, copy_to_clipboard=True)
                     self.assertTrue(Path(editor.last_path).is_file())
                 else:
                     save.assert_not_called()
