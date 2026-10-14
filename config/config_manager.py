@@ -261,10 +261,19 @@ DEFAULTS = {
     "sticker_follow_sticker": True,
     "sticker_follow_interval": 120,
     "magnifier": True, "crosshair": True, "crosshair_color": "#ff0000", "crosshair_width": 1,
-    # 2026-10-13：十字线自适应颜色（默认开，默认双色描边；关掉即回到旧的单色行为）。
-    #   adaptive 关 → 用 crosshair_color 单色；开 → 按所在区域实际像素自动换色，
-    #   mode=contrast 双色描边（任意背景都可见，推荐、默认）/ mode=invert 逐像素反色。
-    "crosshair_adaptive": True, "crosshair_adaptive_mode": "contrast",
+    # 2026-10-14（用户要求）：十字线样式改为**三选一**。旧键 `crosshair_adaptive` 与
+    #   `crosshair_adaptive_mode` 已删除，加载/导入时由 migrate_legacy_settings 一次性推导新值。
+    #   solid = 单色（用 crosshair_color）；contrast = 双色描边；invert = 逐像素反色。
+    #   线宽 crosshair_width 对三种样式都生效。
+    "crosshair_mode": "contrast",
+    # 双色描边：亮度低于阈值时用 dark_bg_color 当主线、另一个当描边；高于阈值两者对调
+    #   （默认黑白对 ⇒ 与旧 contrast 行为完全一致）。halo_width 为描边相对主线的加宽量，0 = 不描边。
+    "crosshair_contrast_dark_bg_color": "#ffffff", "crosshair_contrast_light_bg_color": "#000000",
+    "crosshair_contrast_threshold": 128, "crosshair_contrast_halo_width": 2,
+    # 逐像素反色：strength 为反色强度(%)；gap 为交叉点断开间隙（0 = 跟随线宽，保证交叉点只被反色一次）；
+    #   halo_enabled 采样到接近中灰的背景时补一条细描边（反色后对比不足）。
+    "crosshair_invert_strength": 100, "crosshair_invert_gap": 0,
+    "crosshair_invert_halo_enabled": False,
     "mask_color": "#000000", "mask_opacity": 70,
     "window_detection": True, "window_auto_select": False, "element_depth": 8,
     "window_hover_detect": True, "window_uia_detect": True,
@@ -649,8 +658,19 @@ def validate(data):
             raise ValueError("十字线颜色必须是六位十六进制颜色")
         elif key == "crosshair_width" and not 1 <= value <= 8:
             raise ValueError("十字线宽度必须在 1 到 8 像素之间")
-        elif key == "crosshair_adaptive_mode" and value not in ("contrast", "invert"):
-            raise ValueError("未知十字线自适应方式")
+        elif key == "crosshair_mode" and value not in ("solid", "contrast", "invert"):
+            raise ValueError("未知十字线样式")
+        elif key == "crosshair_contrast_threshold" and not 0 <= value <= 255:
+            raise ValueError("十字线亮度阈值必须在 0 到 255 之间")
+        elif key == "crosshair_contrast_halo_width" and not 0 <= value <= 8:
+            raise ValueError("十字线描边加宽量必须在 0 到 8 像素之间")
+        elif key in ("crosshair_contrast_dark_bg_color", "crosshair_contrast_light_bg_color") \
+                and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("十字线双色描边颜色必须是六位十六进制颜色")
+        elif key == "crosshair_invert_strength" and not 0 <= value <= 100:
+            raise ValueError("十字线反色强度必须在 0 到 100 之间")
+        elif key == "crosshair_invert_gap" and not 0 <= value <= 16:
+            raise ValueError("十字线交叉点间隙必须在 0 到 16 像素之间（0 = 跟随线宽）")
         elif key == "mask_opacity" and not 0 <= value <= 100:
             raise ValueError("遮罩透明度必须在 0 到 100 之间")
         elif key == "magnifier_size" and not 100 <= value <= 320:
@@ -812,6 +832,17 @@ def migrate_legacy_settings(data):
         if old_key in migrated:
             migrated.setdefault(new_key, migrated[old_key])
             del migrated[old_key]
+    # 2026-10-14（用户要求）：十字线样式由「自适应开关 + 方式」两键改为单个 `crosshair_mode` 三选一。
+    # 旧值一次性推导成新值，随后旧键被丢弃（不再出现在 DEFAULTS / 设置页 / README）。
+    if "crosshair_mode" not in migrated and "crosshair_adaptive" in migrated:
+        if migrated.get("crosshair_adaptive"):
+            migrated["crosshair_mode"] = ("invert"
+                if str(migrated.get("crosshair_adaptive_mode", "")).lower() == "invert"
+                else "contrast")
+        else:
+            migrated["crosshair_mode"] = "solid"
+    migrated.pop("crosshair_adaptive", None)
+    migrated.pop("crosshair_adaptive_mode", None)
     default_updates = {
         "sound": (False, True),
         "crosshair_color": ("#000000", "#ff0000"),

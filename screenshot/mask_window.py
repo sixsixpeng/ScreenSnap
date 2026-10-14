@@ -59,6 +59,9 @@ INLINE_TRIM_KEEP_RATIO = 0.9
 # 悬停结果复用半径（物理像素）：光标还停在上次识别出的元素内、且移动不超过这个
 # 距离时，直接复用高亮，不重复查询；超过则重查，避免大容器里冒出更小控件时高亮不更新。
 HOVER_REUSE_RADIUS = 8
+# 逐像素反色的「中灰补偿」判定带（亮度）：采样亮度落在阈值 ± 这个范围内时，反色后的
+# 对比度最低（≈ 仍是中灰），此时才额外补一条细描边（2026-10-14 新增可选项）。
+CROSSHAIR_MID_GREY_BAND = 32
 # 复用结果的最长时间：指针停住不动时不能永久沿用父级高亮（细小控件上尤其明显），
 # 超过该秒数就重新查询一次，让高亮最终收敛到光标下真正的最内层控件。
 HOVER_REUSE_SECONDS = 0.35
@@ -3017,59 +3020,90 @@ class MaskWindow(QWidget):
             return None
         return sum(samples) / len(samples)
 
-    def _crosshair_adaptive_colors(self):
-        """按所在区域平均亮度选一对对比色 (主线色, 描边色)；拿不到像素返回 None。
+    def _crosshair_contrast_colors(self):
+        """按亮度阈值给出一对 (主线色, 描边色)；拿不到像素返回 None。
 
-        暗底主线取白、亮底取黑，另附一条反色描边 ⇒ 任意背景（含颜色很丰富）都至少一色可见。
+        亮度低于 `crosshair_contrast_threshold` 视为暗背景 ⇒ 用 `..._dark_bg_color` 当主线、
+        另一个颜色当描边；亮背景两者对调。默认黑白对 ⇒ 与旧的固定黑白行为完全一致。
         """
         luminance = self._crosshair_luminance()
         if luminance is None:
             return None
-        if luminance < 128:
-            return QColor(255, 255, 255), QColor(0, 0, 0)
-        return QColor(0, 0, 0), QColor(255, 255, 255)
+        threshold = int(self.settings.get("crosshair_contrast_threshold", 128) or 0)
+        dark_bg = QColor(self.settings.get("crosshair_contrast_dark_bg_color", "#ffffff"))
+        light_bg = QColor(self.settings.get("crosshair_contrast_light_bg_color", "#000000"))
+        if luminance < threshold:
+            return dark_bg, light_bg
+        return light_bg, dark_bg
 
     def _paint_crosshair(self, painter):
-        """绘制全屏十字线。
+        """绘制全屏十字线；样式由 `crosshair_mode` 三选一决定（solid / contrast / invert）。
 
-        `crosshair_adaptive` 关闭时用单色 `crosshair_color`（**关 = 行为与旧版完全一致**）；
-        开启后（**默认**，默认 `contrast`）按所在区域实际像素换色：
-          - `contrast`（默认，推荐）：亮度自适应主线 + 反色描边，任意背景都可见；
-          - `invert`：差值混合逐像素反色 —— 一次绘制、零采样，颜色随区域自然变化，
-            弱点是背景接近中灰时反色后仍近中灰、对比偏低。
+        · `solid`：用单色 `crosshair_color`（与旧版行为一致）；
+        · `contrast`：按采样亮度取一对颜色，先画更宽的描边、再画主线 ⇒ 任意背景都可见；
+          `crosshair_contrast_halo_width` 为描边相对主线的加宽量（0 = 不描边）；
+        · `invert`：差值混合逐像素反色。`crosshair_invert_strength` 控强度（按不透明度混合）、
+          `crosshair_invert_gap` 为交叉点断开间隙（避免同一像素反色两次而抵消）、
+          `crosshair_invert_halo_enabled` 在采样到接近中灰的背景时补一条细描边。
+
+        `crosshair_width` 对三种样式都生效。
         """
         logical_position = self.to_logical_point(self.position)
         width = self.settings.get("crosshair_width", 1)
-        adaptive = bool(self.settings.get("crosshair_adaptive", False))
-        mode = self.settings.get("crosshair_adaptive_mode", "contrast")
-        if adaptive and mode == "invert":
+        mode = str(self.settings.get("crosshair_mode", "contrast"))
+        vertical = (logical_position.x(), 0, logical_position.x(), self.height())
+        horizontal = (0, logical_position.y(), self.width(), logical_position.y())
+
+        if mode == "invert":
+            strength = max(0, min(100, int(self.settings.get("crosshair_invert_strength", 100) or 0)))
+            if strength <= 0:
+                return   # 强度 0 = 不绘制（等于关掉十字线，但保留整条开关语义）
+            gap = max(0, int(self.settings.get("crosshair_invert_gap", 0) or 0))
+            if self.settings.get("crosshair_invert_halo_enabled", False):
+                # 中灰补偿：反色在中灰背景上对比不足 ⇒ 先补一条更宽的细描边。
+                # 反色只覆盖主线宽度，因此描边外圈得以保留（只在该带内才补）。
+                luminance = self._crosshair_luminance()
+                if luminance is not None:
+                    threshold = int(self.settings.get("crosshair_contrast_threshold", 128) or 0)
+                    if abs(luminance - threshold) <= CROSSHAIR_MID_GREY_BAND:
+                        halo = (QColor(self.settings.get("crosshair_contrast_dark_bg_color", "#ffffff"))
+                                if luminance < threshold else
+                                QColor(self.settings.get("crosshair_contrast_light_bg_color", "#000000")))
+                        painter.setPen(QPen(halo, width + 2))
+                        painter.drawLine(*vertical)
+                        painter.drawLine(*horizontal)
             painter.setCompositionMode(QPainter.CompositionMode_Difference)
             painter.setPen(QPen(QColor(255, 255, 255), width))
-            # 差值混合对同一像素作用两次会抵消（≈ 还原成底色）⇒ 水平线在竖线两侧断开一个线宽，
+            painter.setOpacity(strength / 100.0)
+            painter.drawLine(*vertical)
+            # 差值混合对同一像素作用两次会抵消（≈ 还原成底色）⇒ 水平线在竖线两侧断开 gap，
             # 让十字交叉点（正是光标焦点）只被反色一次；断开处的缝隙由竖线覆盖，视觉无断口。
-            gap = max(1, width)
-            painter.drawLine(logical_position.x(), 0, logical_position.x(), self.height())
-            painter.drawLine(0, logical_position.y(),
-                             logical_position.x() - gap, logical_position.y())
-            painter.drawLine(logical_position.x() + gap, logical_position.y(),
-                             self.width(), logical_position.y())
+            # gap=0 时不断开，交叉点会因两次反色还原成底色（用户可选择）。
+            if gap > 0:
+                painter.drawLine(horizontal[0], horizontal[1], vertical[0] - gap, horizontal[3])
+                painter.drawLine(vertical[0] + gap, horizontal[1], horizontal[2], horizontal[3])
+            else:
+                painter.drawLine(*horizontal)
+            painter.setOpacity(1.0)
             painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
             return
-        if adaptive:
-            colors = self._crosshair_adaptive_colors()
-            if colors is None:
-                painter.setPen(QPen(QColor(self.settings.get("crosshair_color", "#ff0000")), width))
-            else:
+
+        if mode == "contrast":
+            halo_width = max(0, int(self.settings.get("crosshair_contrast_halo_width", 2) or 0))
+            colors = self._crosshair_contrast_colors()
+            if colors is not None and halo_width > 0:
                 main, halo = colors
-                # 先画更宽的描边、再画主线 ⇒ 两种颜色互相衬底。
-                painter.setPen(QPen(halo, width + 2))
-                painter.drawLine(logical_position.x(), 0, logical_position.x(), self.height())
-                painter.drawLine(0, logical_position.y(), self.width(), logical_position.y())
+                painter.setPen(QPen(halo, width + halo_width))
+                painter.drawLine(*vertical)
+                painter.drawLine(*horizontal)
                 painter.setPen(QPen(main, width))
+            else:
+                # 拿不到像素、或用户把描边加宽量设为 0（不要描边）⇒ 退回单色，仍能看见一条线。
+                painter.setPen(QPen(QColor(self.settings.get("crosshair_color", "#ff0000")), width))
         else:
             painter.setPen(QPen(QColor(self.settings.get("crosshair_color", "#ff0000")), width))
-        painter.drawLine(logical_position.x(), 0, logical_position.x(), self.height())
-        painter.drawLine(0, logical_position.y(), self.width(), logical_position.y())
+        painter.drawLine(*vertical)
+        painter.drawLine(*horizontal)
 
     def paintEvent(self, event):
         """遮罩、锚点和 HUD 仅绘制在窗口表面，不写入原始截图。"""

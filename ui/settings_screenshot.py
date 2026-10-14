@@ -77,31 +77,51 @@ class ScreenshotEffectPreview(QWidget):
                 width = self.config.data.get("crosshair_width", 1)
                 vertical = (int(center.x()), int(area.top()), int(center.x()), int(area.bottom()))
                 horizontal = (int(area.left()), int(center.y()), int(area.right()), int(center.y()))
-                # 预览与遮罩 _paint_crosshair 同一口径：随自适应开关/方式换色，不能开了预览却没变化。
-                adaptive = self.config.data.get("crosshair_adaptive", False)
-                invert = (adaptive and
-                          self.config.data.get("crosshair_adaptive_mode", "contrast") == "invert")
-                if invert:
-                    # 差值混合对预览自身的色块逐像素取反；交叉点只反一次（同遮罩，水平线断开）。
-                    painter.setCompositionMode(QPainter.CompositionMode_Difference)
-                    painter.setPen(QPen(QColor(255, 255, 255), width))
-                    gap = max(1, width)
-                    painter.drawLine(*vertical)
-                    painter.drawLine(horizontal[0], horizontal[1],
-                                     vertical[0] - gap, horizontal[3])
-                    painter.drawLine(vertical[0] + gap, horizontal[1],
-                                     horizontal[2], horizontal[3])
-                    painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
-                else:
-                    if adaptive:
-                        # 预览底色以浅灰/近白为主 ⇒ 取「深主线 + 浅描边」这一对代表双色描边效果。
-                        painter.setPen(QPen(QColor(255, 255, 255), width + 2))
+                # 预览与遮罩 _paint_crosshair 同一口径（三选一 + 各样式自己的参数），
+                # 不能"选了样式/改了参数，预览却没变化"。
+                mode = str(self.config.data.get("crosshair_mode", "contrast"))
+                if mode == "invert":
+                    strength = max(0, min(100, int(
+                        self.config.data.get("crosshair_invert_strength", 100) or 0)))
+                    gap = max(0, int(self.config.data.get("crosshair_invert_gap", 0) or 0))
+                    if strength > 0:
+                        if self.config.data.get("crosshair_invert_halo_enabled", False):
+                            # 预览底色偏浅 ⇒ 与遮罩的"亮背景"口径一致，用亮底主线色当补偿描边。
+                            painter.setPen(QPen(QColor(self.config.data.get(
+                                "crosshair_contrast_light_bg_color", "#000000")), width + 2))
+                            painter.drawLine(*vertical)
+                            painter.drawLine(*horizontal)
+                        # 差值混合对预览自身的色块逐像素取反；交叉点只反一次（同遮罩，水平线断开）。
+                        painter.setCompositionMode(QPainter.CompositionMode_Difference)
+                        painter.setPen(QPen(QColor(255, 255, 255), width))
+                        painter.setOpacity(strength / 100.0)
+                        painter.drawLine(*vertical)
+                        if gap > 0:
+                            painter.drawLine(horizontal[0], horizontal[1],
+                                             vertical[0] - gap, horizontal[3])
+                            painter.drawLine(vertical[0] + gap, horizontal[1],
+                                             horizontal[2], horizontal[3])
+                        else:
+                            painter.drawLine(*horizontal)
+                        painter.setOpacity(1.0)
+                        painter.setCompositionMode(QPainter.CompositionMode_SourceOver)
+                elif mode == "contrast":
+                    halo_width = max(0, int(
+                        self.config.data.get("crosshair_contrast_halo_width", 2) or 0))
+                    if halo_width > 0:
+                        # 预览底色以浅灰/近白为主 ⇒ 用「亮底主线色」当主线、另一个颜色当描边。
+                        painter.setPen(QPen(QColor(self.config.data.get(
+                            "crosshair_contrast_dark_bg_color", "#ffffff")), width + halo_width))
                         painter.drawLine(*vertical)
                         painter.drawLine(*horizontal)
-                        painter.setPen(QPen(QColor(0, 0, 0), width))
+                        painter.setPen(QPen(QColor(self.config.data.get(
+                            "crosshair_contrast_light_bg_color", "#000000")), width))
                     else:
-                        color = QColor(self.config.data.get("crosshair_color", "#ff0000"))
-                        painter.setPen(QPen(color, width))
+                        painter.setPen(QPen(QColor(self.config.data.get("crosshair_color", "#ff0000")), width))
+                    painter.drawLine(*vertical)
+                    painter.drawLine(*horizontal)
+                else:
+                    painter.setPen(QPen(QColor(self.config.data.get("crosshair_color", "#ff0000")), width))
                     painter.drawLine(*vertical)
                     painter.drawLine(*horizontal)
             if self.config.data.get("magnifier", True):
@@ -534,20 +554,60 @@ class ScreenshotPage(SettingsPage):
         self.form.addRow("网格颜色", grid_color)
         self._section("十字线")
         self.check("crosshair", "全屏十字线", "在截图遮罩上显示定位辅助线")
+        # 2026-10-14（用户要求）：三种样式改为**一组互斥单选按钮**（原来要「自适应开关 + 自适应方式」
+        # 两个控件才表达出三种状态），并只把**当前样式真正生效**的参数行留在界面上：
+        #   单色 → 十字线颜色；双色描边 → 亮度分界 + 双色 + 描边加宽量；
+        #   逐像素反色 → 反色强度 + 交叉点间隙 + 中灰补偿。线宽三种样式共用，始终显示。
+        crosshair_rows = {"solid": [], "contrast": [], "invert": []}
+        self._crosshair_form = self.form
+        self._crosshair_rows = crosshair_rows
+        self.radios(
+            "crosshair_mode", "十字线样式",
+            [("单色", "solid"), ("双色描边", "contrast"), ("逐像素反色", "invert")],
+            "单色：用「十字线颜色」画一条实心线；\n"
+            "双色描边：按所在区域亮度取两种颜色互为衬底，任意背景都可见；\n"
+            "逐像素反色：对线下方像素取反，颜色随背景自然变化（接近中灰时可开中灰补偿）。",
+            on_change=lambda value: self._sync_crosshair_rows())
         crosshair_color = ColorButton(config.data["crosshair_color"],
                                       lambda color: self.update_value("crosshair_color", color))
-        crosshair_color.setToolTip("设置截图定位十字线颜色")
+        crosshair_color.setToolTip("仅「单色」样式使用；双色描边与逐像素反色各按自己的参数取色")
         self.controls["crosshair_color"] = crosshair_color
         self.form.addRow("十字线颜色", crosshair_color)
+        crosshair_rows["solid"].append(self.form.rowCount() - 1)
         self.number("crosshair_width", "十字线宽度 (px)", 1, 8,
-                    "设置截图定位十字线宽度")
-        self.check("crosshair_adaptive", "十字线自适应颜色",
-                   "按十字线所在区域的实际像素自动换色，任何背景下都清晰可见"
-                   "（默认开启，默认双色描边）；关闭时用上面的单色")
-        self.choice("crosshair_adaptive_mode", "自适应方式",
-                    [("双色描边（推荐）", "contrast"), ("逐像素反色", "invert")],
-                    "双色描边：按亮度取黑/白并加反色描边，任意背景可见；"
-                    "逐像素反色：对十字线下方像素取反（背景接近中灰时对比偏低）")
+                    "三种样式共用的线条宽度（描边加宽量、交叉点间隙都以它为基准）")
+        self.number("crosshair_contrast_threshold", "双色：亮度分界 (0–255)", 0, 255,
+                    "采样亮度低于该值视为暗背景、用「暗底主线色」，高于则两者对调"
+                    "（双色描边；默认 128 与旧的黑白对一致）")
+        crosshair_rows["contrast"].append(self.form.rowCount() - 1)
+        dark_bg = ColorButton(config.data["crosshair_contrast_dark_bg_color"],
+                              lambda color: self.update_value("crosshair_contrast_dark_bg_color", color))
+        dark_bg.setToolTip("暗背景（亮度低于分界值）上的主线色；另一个颜色自动成为它的描边")
+        self.controls["crosshair_contrast_dark_bg_color"] = dark_bg
+        self.form.addRow("双色：暗底主线色", dark_bg)
+        crosshair_rows["contrast"].append(self.form.rowCount() - 1)
+        light_bg = ColorButton(config.data["crosshair_contrast_light_bg_color"],
+                               lambda color: self.update_value("crosshair_contrast_light_bg_color", color))
+        light_bg.setToolTip("亮背景（亮度高于分界值）上的主线色；另一个颜色自动成为它的描边")
+        self.controls["crosshair_contrast_light_bg_color"] = light_bg
+        self.form.addRow("双色：亮底主线色", light_bg)
+        crosshair_rows["contrast"].append(self.form.rowCount() - 1)
+        self.number("crosshair_contrast_halo_width", "双色：描边加宽量 (px)", 0, 8,
+                    "描边比主线加宽多少像素；0 表示不描边（退回单色）")
+        crosshair_rows["contrast"].append(self.form.rowCount() - 1)
+        self.number("crosshair_invert_strength", "反色：强度 (%)", 0, 100,
+                    "按不透明度混合的反色强度：100 = 完全反色，0 = 不绘制；"
+                    "背景偏中灰时可适当调低（逐像素反色）")
+        crosshair_rows["invert"].append(self.form.rowCount() - 1)
+        self.number("crosshair_invert_gap", "反色：交叉点间隙 (px)", 0, 16,
+                    "水平线在竖线两侧断开这么多像素，避免交叉点被反色两次而抵消；"
+                    "0 = 不断开（交叉点会还原成底色）（逐像素反色）")
+        crosshair_rows["invert"].append(self.form.rowCount() - 1)
+        self.check("crosshair_invert_halo_enabled", "反色：中灰补偿描边",
+                   "采样到接近亮度分界的背景时额外补一条细描边，避免反色后对比不足"
+                   "（逐像素反色）")
+        crosshair_rows["invert"].append(self.form.rowCount() - 1)
+        self._sync_crosshair_rows()
         self._section("标尺")
         self.check("ruler_enabled", "标尺", "在截图遮罩边缘显示像素标尺，辅助定位与测量")
         ruler_color = ColorButton(config.data["ruler_color"],
@@ -681,6 +741,8 @@ class ScreenshotPage(SettingsPage):
 
     def sync_controls(self):
         super().sync_controls()
+        # 恢复默认/导入配置后，十字线的行可见性也要跟着当前样式重算。
+        self._sync_crosshair_rows()
         if hasattr(self, "_intruder_list"):
             # 恢复默认/导入后，子项开关的可用状态跟随总开关一起刷新。
             self._intruder_list.set_enabled(self._intruder_master.isChecked())
@@ -695,6 +757,18 @@ class ScreenshotPage(SettingsPage):
         with QSignalBlocker(self.hover_style_combo):
             self.hover_style_combo.setCurrentIndex(
                 self.hover_style_combo.findData(selected))
+
+    def _sync_crosshair_rows(self):
+        """只显示当前十字线样式真正生效的参数行（其余整行隐藏，避免"改了没效果"的项）。"""
+        rows = getattr(self, "_crosshair_rows", None)
+        form = getattr(self, "_crosshair_form", None)
+        if not rows or form is None:
+            return
+        mode = str(self.config.data.get("crosshair_mode", "contrast"))
+        for name, indexes in rows.items():
+            for index in indexes:
+                if 0 <= index < form.rowCount():
+                    form.setRowVisible(index, name == mode)
 
     def _hover_color(self, key, label):
         button = ColorButton(self.config.data[key],
