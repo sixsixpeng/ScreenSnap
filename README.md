@@ -96,7 +96,7 @@ python -m venv .venv
 - 未选区、调整选区和原地编辑时均可显示放大镜；原地编辑按 Esc 直接退出本次截图，不返回选区状态。"显示鼠标"开关只在本次截图存在带/不带鼠标两版时可用。
 - 原地编辑不提供裁剪工具；需要裁剪图片时可在独立编辑窗口中使用。取色后紧凑工具栏的颜色按钮仍只显示色块。
 
-遮罩深浅、锚点样式、十字线颜色和宽度、放大镜、光标捕获及通知均可在设置中调整。遮罩不透明度 0% 表示不遮盖选区外区域，100% 表示完全遮盖。
+遮罩深浅、锚点样式、十字线样式（三选一：单色 / 双色描边 / 逐像素反色）、放大镜、光标捕获及通知均可在设置中调整。遮罩不透明度 0% 表示不遮盖选区外区域，100% 表示完全遮盖。
 
 ### 编辑器
 
@@ -318,7 +318,7 @@ python -m venv .venv
 ## 设置和数据
 
 设置窗口分为常规、截图、快捷键、保存、输出、编辑器、日志、贴图、剪贴板贴图和主题与外观十类：
-每页按使用场景显示带标题的设置组，较长的页面可在页内滚动；同一组件的颜色、线宽及其他参数集中在同一组。设置值在内存中即时更新，配置文件写入合并 250ms 内的连续变化；关闭设置窗口或退出程序时会刷新未写入的最后一次变更。
+每页按使用场景显示带标题的设置组，较长的页面可在页内滚动；同一组件的颜色、线宽及其他参数集中在同一组。**取值不超过 10 个的枚举项（保存格式、截图确认后动作、主题、矩形/椭圆线型、马赛克类型、序号预设组合等）直接铺成一行单选按钮，选项多时自动折成两行 —— 点一下即选，不必先展开下拉；选项更多的（标注工具、箭头样式、字体、序号形状）仍保留下拉。**设置值在内存中即时更新，配置文件写入合并 250ms 内的连续变化；关闭设置窗口或退出程序时会刷新未写入的最后一次变更。
 
 - **常规**：启动与通知。
 - **截图**：截图延迟/光标、截图确认后默认动作（含仅复制）、原地编辑、快速贴图与快速保存、**操作提示**（提示项勾选与拖动排序）、放大镜（开关/尺寸/像素网格）/十字线/标尺、截图取色、窗口与控件识别、遮罩/选区外观及历史范围。悬停识别高亮默认采用 `#168cff` 蓝色、35% 填充不透明度，边线默认同色；遮罩默认采用黑色 `#000000`、60% 不透明度，页面另提供清透蓝、薄荷绿、奶油黄、樱花粉、淡紫等预设，两者都可自定义。
@@ -467,10 +467,16 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `capture_save_shortcut` | `S` | 快速保存按键组合；保存当前选区并应用输出效果及保存选项。 |
 | `magnifier` | `true` | 截图遮罩上是否显示鼠标附近像素放大镜。 |
 | `crosshair` | `true` | 是否显示全屏定位十字线。 |
-| `crosshair_color` | `#ff0000` | 定位十字线颜色；可在"设置 > 截图 > 定位辅助"改色。 |
-| `crosshair_width` | `1` px | 定位十字线宽度，范围 1–8 px。 |
-| `crosshair_adaptive` | `true` | 十字线自适应颜色：按所在区域实际像素自动换色（默认开、默认 `contrast` 双色描边；关掉后仍用 `crosshair_color` 单色，与旧版行为一致）。 |
-| `crosshair_adaptive_mode` | `contrast` | 自适应方式：`contrast` 双色描边（默认、推荐，任意背景可见）/ `invert` 逐像素反色。 |
+| `crosshair_mode` | `contrast` | 十字线样式三选一：`solid` 单色（用 `crosshair_color`）/ `contrast` 双色描边（默认）/ `invert` 逐像素反色；设置页用一组互斥单选按钮呈现，「设置 > 截图 > 定位辅助」。 |
+| `crosshair_color` | `#ff0000` | 「单色」样式的线条颜色；另外两种样式各按自己的参数取色（该项在非单色样式下整行隐藏）。 |
+| `crosshair_width` | `1` px | 线条宽度，范围 1–8 px；三种样式共用（描边加宽量、交叉点间隙都以它为基准）。 |
+| `crosshair_contrast_threshold` | `128` | 双色描边：亮度分界（0–255）；采样亮度低于它视为暗背景、用 `crosshair_contrast_dark_bg_color` 当主线，高于则两者对调（默认与旧的黑白对一致）。 |
+| `crosshair_contrast_dark_bg_color` | `#ffffff` | 双色描边：暗背景上的主线色；另一个颜色自动成为它的描边。 |
+| `crosshair_contrast_light_bg_color` | `#000000` | 双色描边：亮背景上的主线色。 |
+| `crosshair_contrast_halo_width` | `2` px | 双色描边：描边相对主线的加宽量（0–8）；0 表示不描边（退回单色）。 |
+| `crosshair_invert_strength` | `100` | 逐像素反色：反色强度（0–100，按不透明度混合）；100 = 完全反色，0 = 不绘制。 |
+| `crosshair_invert_gap` | `0` px | 逐像素反色：水平线在竖线两侧断开的间隙（0–16），避免交叉点被反色两次而抵消；0（默认）= 不断开，此时交叉点会还原成底色。 |
+| `crosshair_invert_halo_enabled` | `false` | 逐像素反色：采样到接近亮度分界的背景时补一条细描边，避免反色后对比不足。 |
 | `capture_picker_shortcut` | `C` | 在光标处取色一次的按键（一次性动作，无取色态），支持单键、修饰键组合或功能键（如 `Alt+C` / `F2`）；另有选区时按住 `Alt`/`Ctrl` + 左键取样，复制十六进制色值到剪贴板并设为当前标注颜色（避免与左键框选 / UIA 自动识别选择冲突）。 |
 | `capture_copy_shortcut` | `Y` | 选区确认前的「仅复制」键（可配置单键；原地编辑时也可用）。 |
 | `capture_custom_size_shortcut` | `F` | 选区阶段的「自定义尺寸」键。 |
@@ -559,6 +565,7 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `window_hover_text_color` | `#f4fffc` | 随高亮显示的控件尺寸标签文字颜色。 |
 | `window_hover_badge_color` | `#102a31` | 控件尺寸标签底色。 |
 | `window_hover_font_size` | `8` | 控件/选区尺寸标签字号，范围 8–32（2026-10-11 默认由 12 改为 8）。 |
+| `window_hover_badge_hide_margin` | `10` | 尺寸标签隐藏距离，范围 0–400 px；光标进入标签矩形四周该距离内即隐藏标签、移开立即恢复，0 表示只有压在标签本身上才隐藏（2026-10-14 新增，默认由 100 调整为 10）。 |
 | `window_hover_fill_mode` | `reveal` | 候选框显示方式：`reveal` 透出原图，`fill` 半透明填充。 |
 | `window_uia_detect` | `true` | 是否优先查询 Windows UI Automation，以识别浏览器等自绘界面的内部控件。 |
 | `uia_debug_tree` | `false` | 是否记录 UIA 目标祖先及父级组件子树；最多 60 个节点、向下 8 层，优先命中分支；只记录名称、类型和矩形。 |
@@ -576,7 +583,7 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | --- | --- | --- |
 | `hotkeys_enabled` | `true` | 全局热键注册总开关；不影响截图遮罩内的局部按键。 |
 | `capture_hotkey_suppress` | `true` | 是否拦截截图类全局热键的按下/释放，避免透传到前台应用；用户可关闭。 |
-| `hotkey_health_interval` | `4` | 全局热键体检周期（秒，2–600） | 每隔这么久体检一次：① hook 监听线程死了 ⇒ 立刻重装；② 系统近期有键鼠输入而自家钩子没收到（`GetLastInputInfo` 对比观察钩子）⇒ 判定钩子被摘掉并重装；③ 其余情况**什么都不做**（不重装、不打日志，仅每 10 分钟一条汇总）。数值越小恢复越快 |
+| `hotkey_health_interval` | `4` | 全局热键体检周期（秒，2–600） | 每隔这么久体检一次：① hook 监听线程死了 ⇒ 立刻重装；② 某个热键的组合键已被按下、回调却没触发（被其它程序抢占/吞键，2026-10-14 新增）⇒ 判定失效并重装；③ 系统近期有键鼠输入而自家钩子没收到（`GetLastInputInfo` 对比观察钩子）⇒ 判定钩子被摘掉并重装；④ 其余情况**什么都不做**（不重装、不打日志，仅每 10 分钟一条汇总）。数值越小恢复越快 |
 | `hotkeys` | 动作字典 | 全局动作绑定；各动作默认值和行为见"全局热键"表，空字符串表示清除此动作绑定。 |
 
 #### 保存
@@ -1357,7 +1364,7 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 8. 未验证：真实主副屏、浏览器 Inspect 同元素 CSS 对照、不同浏览器页面缩放、两至四屏真实拖动/跨缝微调、hint/放大镜真机可见性、动态拔插/换主屏时正在截图的手感。全部验证使用内存图像与临时配置，未改真实用户数据，未启动主程序。无配置键/默认/类型变更，因此不改导入导出/版本保留清单；日志只在会话采集、边界调整等状态处增加，不逐鼠标移动输出。临时任务、脚本和 HEAD 副本交付前清理，不自动提交。
 9. 收尾检查：13 个改动 Python 文件 py_compile 通过，静态风险扫描三项 0、git diff --check 通过；移除临时 HEAD 副本后跨屏/DPI 关键 7 条通过，新单位文字 1 条、UIA/反向徽标 2 条、共享设置预览 1 条单跑通过。一次提示/端点聚合子集虽有 12 个进度点，但离屏进程以 `3221225477` 无 Ran/OK 摘要退出，按未验证记录，不能用完整模块先前 OK 摘要掩盖这次退出；不新增 skip。最终结构化报告仅备份到临时目录，任务和验证脚本已清理。
 
-### 2026-10-14 当日调整汇总（20 条）
+### 2026-10-14 当日调整汇总（31 条）
 
 #### README 章节归位与调整记录排序
 
@@ -1393,3 +1400,28 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 2. 修复 `apply_style`、方图旋转/恢复方向、隐藏窗口恢复倍率只依赖 resize 事件而沿用旧遮罩的问题；样式、滚轮、重置和旋转显式同步，新增 `DevicePixelRatioChange` 接收晚于移动的跨屏比例通知，并保护构造期状态。遮罩诊断仅在图像/DPR/几何/背景/阴影状态变化时记录，重复30次不刷日志。配置/schema/默认值、鼠标/快捷键语义、截图状态和提示条不变；按用户要求在 AGENTS 补入上一轮跨屏抓取经验，区分事件原生全局点、局部重建点和轮询写端点，仍不把合成事件称作真机验收。
 3. 验证：新增 `python -m unittest tests.test_sticker_mask` 8条，在独立进程 `QT_SCALE_FACTOR=1/1.25/1.5/1.75` 四档实际 Qt 离屏 DPR 下均 OK、退出0；每次生成4档模拟屏幕DPR × 3倍率 × RGB/不透明RGBA/圆角/真实镂空与半透明内容 × 4背景 × 描边/阴影开关，共768种组合，并检查0.1/1.1/2/10倍率和恢复。同尺寸样式/方图旋转回归先失败后修复；DPR事件夹具首次类级替换方法在构造计时器处原生访问违规、无摘要，改为实例级控制初态后四档模块均正常完成。Space 输出边界、独立/原地编辑器按钮、文件选择四入口检查遮罩及保存/源像素一致，内存剪贴板和临时数据隔离，不触碰真实用户配置。
 4. 验证：修改前后同六组命令 `test_sticker_lifecycle`14、`test_sticker -k rounded`3、`-k shadow`3、`test_uia -k sticker_window_size`1、`test_dpi -k screen_change`2、`ClipboardOutputTests`22，共45条次均正常通过。扩展 `test_sticker -k wheel/batch/restore/session/recycle` 分别1/2/7/5/3条，共18条次正常通过；上一轮 `test_capture_pointer`9、截图hover1正常通过。DPI54（既有skip=2）、截图mask22、UIA58（既有skip=1）有 OK 摘要后仍收尾访问违规 `3221225477`，按既有异常单列，不计正常退出；本轮未新增skip。81个生产模块独立导入成功，两个改动Python文件有界 `py_compile` 通过。未重跑全量配置/编辑器/贴图模块；真实 Windows 主副屏可见裁剪/鼠标穿透、混合DPI上下负原点拖动、热插拔和运行中改缩放仍未验收，离屏 QRegion 与渲染断言不能替代原生窗口区域。需要下一次应用启动加载修复，本轮不自动重启或提交；RELEASE_NOTES 按约定不入库。
+
+#### 尺寸提示条单位与标签隐藏距离
+
+1. 调整 `screenshot/hint_items.py::pixel_size_text`：原本文案为「宽 x 高 物理px」，截图尺寸提示条与尺寸标签（子控件 QLabel）都带“物理px”后缀；现在只输出「宽 x 高」，不再显示单位。像素语义不变（尺寸仍是截图物理像素），提示条位置/格式、放大镜、标签配色与字体均未改；同步更新 `tests/test_capture.test_capture_size_text_uses_physical_pixels_in_all_selection_states` 与 `tests/test_uia` 里对该文案的断言。另注：贴图管理面板/回收站的尺寸文案（`ui/sticker_panel.py` 自带的 `物理px`）不属于截图尺寸提示条，本轮未动。验证：断言随文案更新（本轮未执行，待跑 `python run_tests.py test_capture test_uia`）。
+2. 新增配置键 `window_hover_badge_hide_margin`（范围 0–400，**默认按用户要求取 10**，初版曾取 100）：尺寸标签“光标靠近即隐藏”的容差原先在 `MaskWindow._sync_size_badge` 里写死 100px，用户无法调整；现在改为读该键，光标进入标签矩形四周该距离内即隐藏、移开立即恢复，0 表示只在标签本身上隐藏，命中区仍限制在选区内部、不放宽到屏幕其它区域。设置页“截图 > 窗口与控件识别”新增“尺寸标签隐藏距离(px)”，README 配置表补行；`DEFAULTS`/`validate()`（越界拒绝、`repair()` 回默认）/页与全部重置/导入导出随既有生命周期生效；该键属外观参数，不加入 `PRESERVED_ON_VERSION_RESET`。验证：`tests.test_config.test_badge_hide_margin_default_and_bounds`（默认值与 0/400 边界）、`tests.test_capture.test_badge_hide_margin_is_read_from_config`（同一光标位置在该键 0/100 时标签分别保持/隐藏），以及既有 `test_settings_pages_group_related_controls_and_scroll` 分组断言未改契约（本轮未执行，待跑 `python run_tests.py test_config test_capture`）。
+
+#### 热键被抢占后的判定与恢复
+
+1. 修复热键被其它程序抢占后“一直不恢复、也没有日志”的判定缺陷：旧判据只有「系统近期有输入而自家通用钩子没收到」，而抢占方通常**只吞掉某一个组合键**——你敲别的键/动鼠标仍会刷新观察时间戳 ⇒ 判据恒为“健康” ⇒ 从不重装、也不打任何日志。现在新增按热键的判据：通用钩子在键盘链上看到某热键**主键按下且修饰键恰好等于绑定**（多按一个修饰键时 keyboard 根本不会触发该热键），回调却**连续两次**都没触发 ⇒ 判定被抢占/吞键，按 `RETRY_MIN_SECONDS` 限速重装并记一条 WARNING（含动作名与重装次数）；`emit_action` 触发过即清零计数，宽限期内不重复计数。
+   ⚠ **本轮先踩坑后收紧（如实记录）**：第一版在通用钩子回调里调用 `keyboard.is_pressed` 判断修饰键，并且要求"修饰键是绑定的超集"即可——真机 18 个热键**整体失效**（仍显示已注册、通用钩子也能看到按键，但热键回调不再触发），日志里还留下一次 `repeat` 的误报重装。现已**彻底移除钩子回调里的一切 keyboard API 调用与先卸再挂的重装方式**，改为纯 Python 维护按下的修饰键集合 + 精确匹配 + 连续两次判定；并加结构性护栏用例断言 `_note_input` 的源码里不出现 keyboard 调用。
+2. 加固恢复链路，杜绝“静默死掉”与“复活已关闭热键”：`listen()` 以前只捕 `ValueError/OSError`，而 `install()`/`clear()` 的 `keyboard.remove_hotkey` 抛其它异常时会让**监听线程直接退出**（此后所有注册/重装请求石沉大海、且无任何日志）——现在 `listen()` 兜底所有异常并记 ERROR 继续运行，`clear()` 对单个失效句柄也逐个兜住。`hotkeys_enabled` 关闭时清空重装依据 `_last_request`，避免后续体检把上一次启用时的绑定重新注册回来。（重装不再动观察钩子：那会在真实钩子链上卸钩/重挂，正是上一版把热键改坏的一环。）
+3. 新增手动恢复入口（自动判据之外的兜底）：托盘菜单“重新注册全局热键”（不需要任何全局热键即可点开）与设置页“快捷键 > 全局热键 > 重新注册全局热键”按钮，都会立即清空并按当前设置重注册全部热键，并弹出“已重新注册全局热键”通知（`hotkeys_enabled` 关闭时提示“当前已关闭，未注册”）。该入口同时**清除“设置页正在录制”留下的暂停标记**——那个标记卡住时热键会表现为“注册着但按了没反应”；`pause_hotkeys` 现在也会记一条 INFO 留痕（已暂停/已恢复），便于从日志区分“没注册”和“被暂停”。设置页体检说明同步补上“连续两次未触发回调”这条判据。
+4. 验证：`tests.test_misc` 新增 `test_hotkey_intercepted_criterion_triggers_reinstall`（修饰键不精确不计入、一次不判、连续两次判定并留 WARNING、触发后清零、宽限期内忽略，以及“钩子回调不得出现 keyboard 调用”的结构性护栏）与 `test_hotkey_worker_survives_unexpected_errors`（`add_hotkey` 抛 `RuntimeError` 后线程仍存活并能完成下一次注册）；既有 `test_hotkey_health_interval_and_missed_input_detection`、`test_hotkey_callback_trace_is_actually_logged` 契约不变，4 条用例在 `.venv` + offscreen 下 `Ran 4 tests ... OK`。另用 18 个默认热键 + `suppress` 的真实规模复现脚本验证：注册、设置刷新、被判抢占后重装都能完成，且**重装后热键仍能触发**。未做真机验收：第三方程序实际抢占、系统静默摘钩、`suppress` 拦截链路、以及“按键确实被吞时判据是否按预期重装”仍未在真实桌面确认；上一版的真机故障现场只能证明“已注册但回调不触发”，不能反推唯一根因。
+
+#### 十字线样式三选一与新模式参数
+
+1. 调整设置页「截图 > 定位辅助」的十字线配置：原来要「十字线自适应颜色」复选 + 「自适应方式」下拉两个控件才表达出三种状态，关掉开关后"方式"仍显示、可改却无效果；现在改为**一组互斥单选按钮**（单色 / 双色描边 / 逐像素反色），直接对应生效样式。为此在 `ui/widgets/tooltip.py` 新增 `RadioRow` 单选行控件与 `SettingsPage.radios()`（可带联动回调，供本页隐藏无关参数行）。
+2. 新增按样式隐藏无关参数行：`ScreenshotPage._sync_crosshair_rows()` 用 `QFormLayout.setRowVisible` 只显示当前样式真正生效的行（单色 → 十字线颜色；双色描边 → 亮度分界 + 暗底/亮底主线色 + 描边加宽量；逐像素反色 → 反色强度 + 交叉点间隙 + 中灰补偿），线宽三种样式共用故始终显示；切换样式、恢复本页默认（`sync_controls`）与导入配置后都会重算。
+3. 配置键重构（schema 变更，按规则 30 走完整生命周期）：删除 `crosshair_adaptive` / `crosshair_adaptive_mode`，改为 `crosshair_mode`（`solid`/`contrast`/`invert`）并新增两个新模式的 7 个参数（双色：亮度分界、暗底主线色、亮底主线色、描边加宽量；反色：强度、交叉点间隙、中灰补偿开关）。加载与导入时由 `migrate_legacy_settings` 一次性把旧两键推导为新键（关=单色；开 + `invert`=逐像素反色；其余=双色描边）随后丢弃旧键；`DEFAULTS`、`validate()` 边界、`repair()` 回默认、页与全部重置、导入导出、README 配置表与「定位置辅助」说明均已同步；属外观项，不加入 `PRESERVED_ON_VERSION_RESET`。本轮**不升** `APP_VERSION`，不会触发版本闸门清空用户数据，旧配置靠上述迁移平滑过渡。
+4. 遮罩与预览同步：`_paint_crosshair` 与设置页「定位辅助」预览都改为按 `crosshair_mode` 三分支——双色描边支持自定义颜色对与描边加宽量、亮度阈值（默认黑白对 + 128 = 与旧行为一致）；逐像素反色支持强度（按不透明度混合，100 = 完全反色）、交叉点间隙（0 = 不断开，交叉点会被反色两次而还原成底色）与中灰补偿描边（采样亮度落在阈值 ± `CROSSHAIR_MID_GREY_BAND` 内时补一条细描边）。验证：`test_config.test_crosshair_modes_radios_rows_and_rendering` 覆盖旧键迁移、越界校验、三样式行可见性、预览三种样式着色、双色取色对与黑/白底渲染、反色交叉点只反一次与断口外侧；`test_crosshair_color_and_width_are_configurable_and_rendered` 与设置页分组契约用例已同步（本轮未执行，待跑 `python run_tests.py test_config`）。未做真机验收：真实桌面上的观感取舍、`setRowVisible` 在滚动区里的行距表现未在真机确认。
+
+#### 设置页小枚举改单选行与「更多设置」重叠修复
+
+1. 调整设置页：取值不超过 10 个的枚举项从下拉框改为**一组互斥单选按钮**（`ui/widgets/tooltip.py` 的 `RadioRow` 增加折行与取值 API：`value()` / `set_value()` / `changed`），共 31 处（主题、矩形/椭圆线型、文字对齐、马赛克类型、旋转按钮位置/旋转吸附、标注超出画布、直线绘制修饰键、透明区域显示、日志等级/轮转周期、保存格式、自动清理时机、通知方式、取色复制格式、颜色标签内容、截图确认后与全屏/当前显示器/上次区域动作、切换多选处理、显示器间隙填充、候选区域显示方式、选区锚点、贴图背景模式、吸附目标/提示预设/提示线型/显示时机、序号预设组合等）；≤4 项排一行，5–10 项自动折成两行。选项更多的（默认标注工具、箭头样式、序号形状）与动态字体列表仍保留下拉。同步改联动：`window_hover_fill_mode`（置灰填充项）、`sticker_background_mode`（预览）、`sequence_preset`（套用预设）、`settings_window.set_annotation_setting` 的逐键同步统一走 `set_value`（并把漏列的 `sequence_shape` 补进下拉分支）。验证：`test_config.test_small_choice_controls_use_radio_row`（4 项一行点击即落盘 + 恢复默认、8 项折两行、>10 项仍为下拉），以及 `test_dpi`/`test_uia`/`test_config` 中 4 处原依赖 `currentData()`/`setCurrentIndex()` 的断言改为 `value()`/真实点击（本轮未执行，待跑 `python run_tests.py test_config test_dpi test_uia`）。
+2. 修复「更多设置」弹层里控件重叠（用户报告）：橡皮擦的「涂抹模式（自由笔刷）」上次从行 33 挪走时被误放进行 36 第 0 列，而该格已被文字工具的 `QLabel("文字高度")` 占用 ⇒ 文字弹层最下面两行叠在一起、还带着橡皮擦的 tooltip；同时橡皮擦自己的行集仍写着行 33（那是「椭圆填充色」）⇒ 弹层显示别的工具的填充色、看不到自己的自由笔刷开关。现在自由笔刷独占唯一空闲行 14，橡皮擦行集改为 (1, 14, 31)。验证：`test_config.test_option_panel_rows_do_not_cross_tools`（文字弹层无自由笔刷且「文字高度」整行显示、橡皮擦弹层无椭圆填充色、并加结构性护栏「选项面板内除第 0 行的互斥颜色按钮外任何两个控件不得落在同一格」）；静态扫描确认剩余同格仅为第 0 行颜色按钮的互斥项（本轮未执行，待跑 `python run_tests.py test_config`）。
