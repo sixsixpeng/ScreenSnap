@@ -343,7 +343,7 @@ python -m venv .venv
 
 **冲突与总开关**：同一组合键不能分配给多个动作，重复分配会弹提示并回退原值；页面顶部的「启用全局热键」可整体暂停常驻绑定，「拦截截图快捷键输入」决定截图热键被系统钩子吞掉后是否转发给前台应用。
 
-**失效时的排查入口**：本页下方的「状态与体检」「自动恢复」分组和诊断面板（重新注册、复制脱敏报告、限时详细诊断、只读按键核对、10 秒引导验证），详见「配置参数详解 > 热键健康与恢复、诊断和截图键盘兼容性」。注意"重新注册"只重建绑定表，不重装 Windows 底层钩子。
+**失效时的排查入口**：本页下方的「状态与体检」「自动恢复」分组和诊断面板（重新注册、复制脱敏报告、限时详细诊断、只读按键核对、10 秒引导验证），详见「配置参数详解 > 热键健康与恢复、诊断和截图键盘兼容性」。注意"重新注册"会重建绑定表并清理记录里「系统已未按下」的残留按键，但**不重装** Windows 底层钩子；底层钩子或库线程真的失效时仍只能重启程序。
 
 | 动作 | 默认值 | 修改位置 |
 | --- | --- | --- |
@@ -509,7 +509,7 @@ Windows 图片提示优先使用带缩略图的原生图片 Toast；无法导入
 
 ```python
 # core/version.py
-APP_VERSION = "1.0.14"   # ← 发布新版本时只改这一行
+APP_VERSION = "1.0.17"   # ← 发布新版本时只改这一行
 ```
 
 改动流程：
@@ -760,7 +760,7 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `hotkey_startup_grace` | `5` | 启动后自动判定宽限，0–60秒。 |
 | `hotkey_wake_grace` | `5` | 解锁/唤醒后宽限，0–60秒；会话通知或长计时空档丢弃旧输入证据。 |
 | `hotkey_status_visible` | `true` | 显示状态文本；关闭不隐藏手动诊断/恢复按钮。 |
-| `hotkey_recovery_enabled` | `true` | 异常时重建本程序拥有的绑定，不重启原生钩子或库线程。 |
+| `hotkey_recovery_enabled` | `true` | 异常时重建本程序拥有的绑定，不重启原生钩子或库线程；判定到卡住的按键记录时一并清理。 |
 | `hotkey_diagnostic_only` | `false` | 只记录异常，覆盖有效自动恢复为关闭，不改保存的恢复开关。 |
 | `hotkey_retry_mode` | `fixed` | `fixed` 固定间隔，`backoff` 逐次倍增至上限。 |
 | `hotkey_retry_interval` | `30` | 固定/初始自动间隔，30–600秒；从实际安装开始计时，不从排队时刻计数。 |
@@ -769,7 +769,7 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `hotkey_retry_exhausted` | `stop` | `stop` 停止；`cooldown` 冷却后允许新批次，仍须存在异常证据。 |
 | `hotkey_retry_cooldown` | `300` | 批次冷却，30–3600秒。 |
 | `hotkey_manual_bypass` | `true` | 显式恢复绕过间隔/停止/冷却；关闭则先判断原策略是否允许。 |
-| `hotkey_manual_reset` | `true` | 被接受的手动恢复重置批次计数，不清底层按键状态，不借重置绕过禁止策略。 |
+| `hotkey_manual_reset` | `true` | 被接受的手动恢复重置批次计数与冷却，不借重置绕过禁止策略；卡住的按键记录由恢复过程单独清理。 |
 | `hotkey_defer_busy` | `true` | 已排队截图、可见遮罩及独立编辑器期间延后自动恢复；原地编辑由遮罩覆盖。 |
 | `hotkey_install_timeout` | `5` | 注册停滞告警，1–60秒；不杀线程、不启动竞争安装。 |
 | `hotkey_failure_notice` | `first` | `off` 不提示、`first` 每次故障首次、`repeat` 按间隔重复；普通通知/声音总开关继续生效。 |
@@ -778,6 +778,7 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `hotkey_criterion_threads` | `true` | 检查实际监听/处理线程，未知属性不判死。 |
 | `hotkey_criterion_misses` | `true` | 检查独立组合键尝试无回调；长按重复不累计，修饰键精确匹配。 |
 | `hotkey_criterion_input` | `true` | 检查系统与观察器输入滞后；系统输入包含键鼠，不据此断言摘钩。 |
+| `hotkey_criterion_phantom` | `true` | 用 `GetAsyncKeyState` 核对「记为按下」的键；残留键（记录里有、系统显示未按下）判为异常并清理，连续两次成立才处置。关闭后不自动核对与清理，手动「重新注册」仍会清理。 |
 | `hotkey_sensitivity` | `standard` | `conservative`/`standard`/`fast`/`custom`；预设不覆盖保存的自定义值。 |
 | `hotkey_miss_count` | `2` | 自定义连续未触发次数，2–5。 |
 | `hotkey_miss_window` | `10` | 自定义证据窗口，5–60秒；旧证据到期丢弃。 |
@@ -1594,7 +1595,7 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 8. 修复offscreen无可用兜底仍创建应用级输入桥，干扰原地Escape、菜单位置、连续手柄微调和放大镜的四条回归；工作区外同解释器HEAD副本116条OK，修正桥创建条件后当前截图116条也有OK摘要，但仍收尾访问违规 `3221225477`。最终完整配置123条仅既有 `test_mask_inline_edit_keeps_magnifier_settings_and_updates_position` 失败（预期70,50、实际50,50），skip=1及同一原生收尾异常；中途一次目录导入的临时文件替换 `PermissionError: [WinError 5]` 在单跑和整模块有界复核未再现，未宣称已修复。扩展阶段misc45/app12/DPI54（skip=2）/UIA58（skip=1）有OK摘要但原生收尾异常，提示条9、快速贴图2正常；不以skip或删除用例隐藏问题。
 9. 补齐报告复制/导出的兼容状态白名单、程序文件扩展名保护及附件数量超限提示，三条新增端到端回归已纳入31条；附日志每次确认且测试启动目录隔离。全量配置审计279键默认校验通过、41项策略均有保留/控件/消费/生命周期接线，README补齐九个既有漏项并更正十字线旧键迁移说明；记忆状态例外为hotkeys动作字典、last_capture_rect、save_as_dir，矩形/椭圆填充与线色保持独立。27个改动Python文件编译通过，90个生产模块独立导入全部退出0，RELEASE保留历史方案并追加具体实现，不改Git跟踪状态、不暂存。测试用临时用户目录和假backend，不操作当前实例；真实Windows锁屏唤醒消息、主副屏/混合DPI/负原点输入拥有权与穿透未验收，未重跑全部贴图/编辑器模块，也未实现系统钩子重建。未自动重启、提交或修改AGENTS；运行实例需下次启动加载。
 
-### 2026-10-16 当日调整汇总（21 条）
+### 2026-10-16 当日调整汇总（24 条）
 
 #### 日志获取统一入口与彩色定位输出
 
@@ -1772,3 +1773,47 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 4. 同步测试：`tests/test_config.py::test_new_canvas_uia_and_cache_settings_validate` 的 `rejected` 表补 4 项（`anchor_style="double"`、`mosaic_mode="pixel"`、`mosaic_size=1`、`mosaic_size=101`）。
 5. 验证：`tests.test_config -k new_canvas_uia_and_cache` **Ran 1 / OK**（含新增的 4 条拒收断言）；`py_compile` 通过（含 `run_tests.py`）；runner 正常路径用**非 GUI 模块**验证 —— `run_tests.py test_supervisor` → `6 条 OK 6.1s`、`判定：全部通过` ✓；新 `TIMEOUT` 分支**被动实测到**：`run_tests.py test_ui` 时 `tests.test_uia` 跑到 **181.1s** 被判 `TIMEOUT` 并终止回收（`不计通过`）✓。注意 `tests.test_uia` / `tests.test_ui` 在本机**离屏沙箱**里直跑（不经 runner）同样 `0xC0000005` 崩溃且无摘要 —— 属环境性 Qt 收尾崩溃（既有 C4 类），与本次改动无关，故未以它们判通过。
 6. 文档一致性（规则 37）：清理 5 处历史条目里的"用户叙事"写法（`用户实测反馈：`→直接写实测数据、`按用户最终指定`→`改法`、`待用户确认`→`待确认`、`用户实测"…"`→`现象 —— …`、`用户实测主屏 …`→`实测主屏 …`）；AGENTS D48 的两处"（用户确认）"同样去除。`用户内容`/`交回用户决定` 属产品语义、非叙事，保留。
+
+#### 热键「卡住的按键记录」：真机故障取证、判据与清理
+
+1. 现象（真机日志 `logs/2026-10/app.log` 22:39:36–22:41:44）：前台切到任务管理器后按 `F1` 无反应，关闭后仍不恢复；托盘「重新注册」两次都报 `installed-bindings-only`、`handles: 18`、`failed: 0` 却依旧无效；`checks` 从 20 涨到 26、`reinstalls` 只来自手动操作，**全程没有 fault、没有任何 WARNING**。指纹：`callbacks`（库的热键回调次数）冻结在 3，而 `keyboard_events` 持续增长（通用钩子仍在收事件）、`listening/native_thread/processing_thread` 全为 True、`pressed_count` 与 `local_pressed_count` 长时间保持 1（而最近一次键盘事件已在 2.67 秒前）。
+2. 根因（读 `keyboard 0.13.5` 源码，非猜测）：库按"当前按下的全部键"的**精确集合**查表派发热键（`hotkey = tuple(sorted(_pressed_events))` → `blocking_hotkeys` / `nonblocking_hotkeys[hotkey]`），而 `_pressed_events` **只在收到该键的 KEY_UP 时**才删条目、库内没有任何其它清理 ⇒ 只要有一个 KEY_UP 没被钩子收到（前台切到提权窗口、安全桌面等），残留项就让**所有**热键一起失灵。三条既有判据在这里全部不成立：线程判据（线程都活着）、输入滞后判据（通用钩子仍在收事件）、组合键未触发判据（`_note_input` 要求"恰好只按主键+绑定修饰键"，残留项在 `_pressed_names` 里 ⇒ 整个检测被静默跳过）。同时 `install()` 只做 `clear()` + `add_hotkey()`、**不碰**库的按键表 ⇒ "重新注册"是结构性的假成功，不是偶发。
+3. 修复：`hotkey/diagnostics.py` 抽出 `backend_pressed_codes` / `physically_up_codes` / `stale_pressed_codes`（用 `GetAsyncKeyState` 证伪"记为按下"的键；`scan_code` 为 0 的键按库的 `-vk` 约定直取虚拟键码；`physical_pressed_summary` 改为复用，字段与面板口径不变）。`hotkey/hotkey_manager.py` 新增：`_confirmed_stale_pressed()` 连续 2 次成立（`PHANTOM_CONFIRM_CHECKS`，防"键刚释放"的瞬时竞态）才算证据，故障原因记为 `phantom-pressed:N`；`_clear_stale_pressed()` 只删锁内复核仍判定为未按下的键（真正按住的必须保留，否则会把"组合键未触发"判据变成误报源），同步清 `active_modifiers` / `modifier_states` 与本程序记录；库表暂时不可写时返回 `None`，体检**不重建绑定**并留 `stale-pressed-unwritable:retry-later`，不重复本次事故的假恢复。手动恢复（托盘/诊断面板「重新注册」）先清理再重建，且**不受判据开关影响**（手动兜底的意义就是能救回自动判据关掉时的状态）。事件侧按名记录扫描码（`_pressed_scans`），本程序记录也精确对账而不是整体清空。日志口径：候选首次 DEBUG、确认清理 WARNING，各一次；判据只在低频体检与手动恢复路径调用，热键回调路径仍只做纯 Python 判断。
+4. 配置与文档同步：新增 `hotkey_criterion_phantom`（默认 true，「快捷键 → 高级判定 → 检查卡住的按键记录」），走完整生命周期（`core/hotkey_policy.py` 的 PREFERENCES ⇒ DEFAULTS / `validate()` / `repair()` / 版本重置保留清单 / 设置页控件 + tooltip）；`hotkey_recovery_enabled`、`hotkey_manual_reset`、托盘「重新注册全局热键」与诊断面板按钮的 tooltip 按新行为改写（不再声称"不清底层按键状态"）；README 配置表补行并更正「重新注册」说明；`health_evidence()` 增加 `phantom_pressed`（只给数量，不含键名/扫描码）。
+5. 验证：`tests.test_hotkey_diagnostics` **Ran 17 / OK**（原 12 条 + 新增 5 条：读不到库表必须报"无法判定"、只清"系统证明未按下"的项且保留真正按住的键、连续两次才处置并真的重建绑定、库表被占时不装作已恢复也不重建、关掉判据后不自动清理但手动恢复仍清理）；`tests.test_hotkey_policy` + `tests.test_hotkey_lifecycle` **Ran 48 / OK**；`tests.test_config -k preserved -k settings_window -k navigation -k new_canvas_uia_and_cache` **Ran 6 / OK**（含"每个默认键都有设置入口"，确认新键在设置页可见）；6 个改动文件 `py_compile` 通过；离屏实例化 `HotkeyPage` 实测该行为「检查卡住的按键记录」+ 完整 tooltip；`validate(DEFAULTS)` 通过，`hotkey_criterion_phantom` 默认 True、在版本重置保留清单内、非法类型被拒（`配置项 hotkey_criterion_phantom 类型错误`）。
+6. 未验收边界：未在真机复现"切到提权窗口后丢 KEY_UP"这一触发条件（没有提权窗口/安全桌面的自动化手段），因此本轮只证明"判据能识别并清理残留、手动与自动路径都会清"，**不声称已复现并消除该现象的触发源**；底层原生钩子被系统真正摘除或库线程死亡仍不在恢复范围内（只能重启程序，与既有结论一致）。诊断不记录键名与扫描码的既有口径未变。
+
+#### 热键第二轮真机复测：清理顺序修正与两种失效的区分
+
+1. 复测现场（真机日志 23:10:27–23:12:21，应用已带上一轮改动重启）：判据命中并**自动自愈**一次 —— 23:12:03 `热键按键状态待确认`（候选）→ 23:12:07 `热键按键状态卡住: 已清理库按键记录 1 个、本程序记录 1 个`（前台=任务管理器）→ 23:12:07 `installed-bindings-only` → 23:12:09 `callback-reached-qt` / `触发热键: capture`，热键恢复。
+2. 修复上一轮引入的**顺序缺陷**：清理原先排在 `permit()` 之后，退避/冷却/尝试上限/`hotkey_defer_busy` 任意一条拒绝就被跳过 —— 现场正是 `23:11:47` 候选、`23:11:51` 只留下 `恢复策略: 退避等待中，剩余 6.0s` 而**没有清理行**，热键在这段时间持续不可用。现在清理紧跟 `recovery_effective` 判定、排在门禁**之前**执行（清理是纯状态修复，没有注销/重注册那 ~4ms 空窗，不该被限速拦住），绑定重建仍由门禁决定；库表暂时不可写时依旧不重建绑定，留 `stale-pressed-unwritable:retry-later`。
+3. 清理行补入卡住键的可读名（`按键名=f1` / `按键名未知`）：没有它就只能猜"卡住的是 F1 还是 Esc"，而两者的修法完全不同。这是一处**故障边界**日志例外（与既有 `注册热键失败 %s=%s` 同类）；诊断快照与导出报告仍只记数量、不记键名与扫描码。
+4. 同一份日志确认了**第二种、与按键表无关的失效**：`23:11:27 新故障 reason=input-stale 动作数=18`，同快照 `keyboard_age=21.05s`、`keyboard_events=20`，而 `mouse_events=10350`、`mouse_age=3.92s` ⇒ 21 秒内**键盘事件一个都没到**、鼠标一直正常（鼠标观察器来自另一个库，不能当作键盘钩子存活的证据）；该时段前台是任务管理器。即"提权窗口在前台时键盘低层钩子被饿死"，与按键表污染无关，绑定重建救不了（既有结论），只能等焦点离开提权窗口；`input-stale` 判据已识别并留痕。
+5. 验证：`tests.test_hotkey_diagnostics` **Ran 18 / OK**（新增 `test_stale_pressed_is_cleared_even_when_recovery_gate_waits`：门禁退避时仍清库表、且不顺带重建绑定）；`py_compile` 通过。清理行的 `按键名=` 是否保留为长期约定、「故障边界例外」是否写入 AGENTS，均待确认。
+
+#### 启动耗时根因（剪贴板历史身份键）+ 热键提示与高频日志两处打磨
+
+1. 启动慢的定位（实测，非推测）：`python -X importtime -c "import main"` = **0.82 s**（导入不是问题）；启动日志 `23:10:19,919 → 23:10:27,390` 有 **7.47 s 无日志空档**，位置正是 `migrate_cache_dirs()` 之后、`StickerManager` 里「恢复剪贴板历史: 10 条」之前；之后还有 1.03 s（读剪贴板 + 两次 `render_html_card`：346 ms + 529 ms）与 0.4 s（注册 18 个热键 + 贴图会话 + 通知身份）。
+2. 那 7.47 s 的归因（用真实历史数据跑等价操作测得）：JSON 解析 0.000 s、10 张图解码 0.611 s、**`_clipboard_source_key()` 重新 PNG 压缩 + sha256 = 7.595 s**（5120×974 三张各 ≈1.40 s、2144×1247 四张各 0.52–1.04 s）。即"每次算身份键都要 zlib 压一遍整张图"，图越大、条数越多越慢 —— 历史里攒了双屏大截图后暴露。代码出处为 `6ad0821`（不是本轮热键改动）。
+3. 修复（[sticker_manager.py](file:///e:/code/ScreenSnap/sticker/sticker_manager.py#L69-L84)）：身份键改为「先 `convertToFormat(Format_ARGB32)` 归一像素格式，再对 `constBits()` 的原始字节做 sha256」，不再 PNG 往返。真实数据端到端复测 **0.694 s（解码 0.600 + 身份键 0.095）**，比原 8.206 s 少约 **7.5 s**。归一格式是必要步骤而非可选项：实时剪贴板来的图常是预乘格式、落盘再读回来是 ARGB32，不归一会让同一画面算出两个键（历史出现重复条目）；已是 ARGB32 时该调用不复制（10 张合计 0.005 s，实测）。语义不变（同一函数仍供实时剪贴板、历史加载、落盘三处）；文件名算法随之变化 ⇒ 下一次 `persist` 按新名重写这 10 个 PNG、并按 `referenced` 清理旧文件（[第 205-211 行](file:///e:/code/ScreenSnap/sticker/sticker_manager.py#L205-L211) 已有），一次性且自清理，**不写旧版兼容**。
+4. `input-stale` 提示改为可操作：新增 `HotkeyManager._fault_notice(reason)` —— 该判据（系统有输入、而键盘观察器长时间收不到键盘事件）实测出现在前台为**提权窗口**（任务管理器）时：非提权进程拿不回被挡住的键盘输入、重建绑定无效，用户此前在界面上看不到任何可操作信息。现在这一类提示「键盘输入未到达本程序：前台可能是以管理员身份运行的程序；切换到其它窗口后重试即可，重建绑定对这种情况无效」；其余判据保持通用措辞（不猜原因）。**决策：接受现状**，不以管理员身份运行（避免 UAC 与开机自启复杂度），只把可操作方向给到用户。
+5. 尺寸徽标「隐藏」分支日志节流（规则 14）：该分支**每次鼠标移动都会执行**，原先逐次 `DEBUG` ⇒ 把日志调到 DEBUG 后两分钟 256 KB 的日志基本由它刷出，而它只是在说"此刻没有可标注的元素"。改用 `log_every(get_logger(), DEBUG, "size-badge-none", state, 2.0, ...)`：状态一变立即记录、不变时每 2 秒最多一条。
+6. 验证：`tests.test_hotkey_diagnostics` **Ran 19 / OK**（新增：`input-stale` 文案含"管理员/切换"、`unfired:` 与 `phantom-pressed:` 保持通用）；`tests.test_sticker -k clipboard` **Ran 40 / OK**（新增两条：键必须等于"归一格式后原始字节"的摘要 —— 把 PNG 往返挡在门外；RGB32/ARGB32/预乘同一画面必须同键、来源信息不同必须异键）；`tests.test_capture -k size_badge` **Ran 1 / OK**（状态不变时连续 30 次调用只留一条、状态变化立即再记）；真实数据端到端复测见第 3 条；四个改动文件 `py_compile` 通过。
+7. 未验收：未实测"重启后的启动总时长"（运行中的实例仍是旧代码，需下次启动加载）；启动时两次 HTML 卡片渲染那约 0.9 s 本轮未优化（若要，可推迟到事件循环之后）。
+8. 版本号 1.0.16 → 1.0.17（`core/version.py`，同步修正 README「版本号在哪里设置」里过期的示例值 1.0.14 → 1.0.17）。按本轮口径**不写旧版兼容**：下次启动检测到版本变化会触发一次数据重置（清空用户数据目录后按默认值重建，`PRESERVED_ON_VERSION_RESET` 里的习惯类键保留），启动提示会告知旧版本号；截图保存在 `save_dir`、不在数据目录，不受影响。这同时清掉了剪贴板历史缓存文件名算法变化带来的一次性遗留。
+9. 严格验收（规则 36 + C13 口径：一进程一目标、输出重定向到文件不走管道、可见计时、真超时并回收进程树）。先做**全量导入自检**：93 个生产文件 `py_compile` 0 失败、逐个独立导入 0 失败。逐模块实测（均为当前代码、独立进程）：
+
+    | 目标 | 结果 | 判定 |
+    | --- | --- | --- |
+    | `tests.test_hotkey_diagnostics` / `_policy` / `_lifecycle` | 19 / 31 / 17 条 OK（1.0 / 2.5 / 3.7 s） | 通过 |
+    | `tests.test_config` | 127 条，失败 1、skip 1（76.4 s） | 仅既有 `test_mask_inline_edit_keeps_magnifier_settings_and_updates_position` |
+    | `tests.test_capture` | 125 条，失败 2（22.3 s；收尾不退出＝既有 C4） | 2 条既有环境敏感（见下） |
+    | `tests.test_capture_pointer` | 9 条 OK（9.2 s） | 通过 |
+    | `tests.test_sticker -k clipboard` | 40 条 OK（88.2 s，正常退出） | 通过 |
+    | `tests.test_sticker_mask` / `_lifecycle` | 8 / 14 条 OK（3.9 / 6.1 s） | 通过 |
+    | `tests.test_misc` / `test_app` / `test_dpi` | 45 / 12 / 54 条 OK（skip=2）（摘要 2.4 / 0.7 / 33.8 s，收尾均不退出＝既有 C4，单列） | 通过（收尾异常单列） |
+    | `tests.test_uia -k sticker` | 5 条 OK | 通过 |
+    | `tests.test_ui -k preview` | 无摘要 + 退出码 `3221225477` | **未验证**：HEAD 副本同条件同样崩溃 ⇒ 既有环境崩溃 |
+
+    `tests.test_capture` 那 2 条（`test_inline_escape_from_canvas_or_toolbar_closes_capture`、`test_inline_repeated_handle_nudges_keep_cursor_on_handle`）单跑均通过，且按 C7 用工作区外 HEAD 副本在同解释器/同命令/同超时下再跑两遍（首遍 124 条 OK、次遍同样这 2 条失败）⇒ 判定为既有的真光标/前台窗口敏感失败，非本轮引入。首轮曾按"17 个模块串一个大跑 + 输出走管道 + 无界等待"执行，得到 6 个 180 s 超时，属不合格跑法（C13）；已全部改为逐模块单进程重测，上表为逐模块实测值。
+10. 验收过程中发现并修掉两处**本轮自己**引入的问题：① 新写的节流用例依赖 `logger.log_rate` 的**进程级**节流表已有状态（同进程其它用例先记过同一状态 ⇒ 那 30 次调用全被节流、断言拿到 0 条）→ 改用只属于该用例的悬停矩形当状态键，使其与执行顺序无关；② 空图时 `constBits()` 返回 `None`，`bytes(None)` 会抛 `TypeError`（旧实现只是得到空摘要）→ 空图按空字节算 sha256，与旧语义等价且摘要始终为 32 字节。
