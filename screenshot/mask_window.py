@@ -247,6 +247,10 @@ class MagnifierOverlay(QWidget):
             self.hide()
             return
         frame = view.magnifier_frame()
+        # 记下这个框：paintEvent 必须用**同一个**框来平移与绘制。重新算一遍是危险的 ——
+        # `magnifier_frame()` 把提示条预留计入组翻转判定，触底/触右时可能与只算放大镜的
+        # 结果翻到不同侧，内容就被画到窗口外、放大镜一片空白（2026-10-16 修复）。
+        self.frame_rect = QRect(frame)
         self.setGeometry(QRect(view.mapToGlobal(frame.topLeft()), frame.size()))
         if not self.isVisible():
             self.show()
@@ -260,7 +264,9 @@ class MagnifierOverlay(QWidget):
             return
         painter = QPainter(self)
         painter.fillRect(self.rect(), QColor("white"))
-        frame = view.magnifier_frame()
+        frame = getattr(self, "frame_rect", None)
+        if frame is None or frame.isEmpty():
+            frame = view.magnifier_frame()
         painter.translate(-frame.x(), -frame.y())
         paint_magnifier(painter, view.preview, view.to_logical_point(view.position),
                         view.rect(), view.position,
@@ -270,7 +276,8 @@ class MagnifierOverlay(QWidget):
                         offset=view.magnifier_offset(),
                         crosshair=view.settings.get("magnifier_crosshair_enabled", True),
                         crosshair_color=view.settings.get("magnifier_crosshair_color",
-                                                          MAGNIFIER_CROSSHAIR_COLOR))
+                                                          MAGNIFIER_CROSSHAIR_COLOR),
+                        frame=frame)
 
 
 class InfoBar(QWidget):

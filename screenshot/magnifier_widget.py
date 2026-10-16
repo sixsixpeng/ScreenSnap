@@ -65,10 +65,14 @@ def magnifier_rect(point, bounds, size=MAGNIFIER_DEFAULT_SIZE, reserve_x=0, rese
 def paint_magnifier(painter, image, point, bounds, source_point=None, grid=False,
                     grid_color=None, size=MAGNIFIER_DEFAULT_SIZE, zoom=MAGNIFIER_ZOOM,
                     offset=MAGNIFIER_OFFSET, crosshair=True,
-                    crosshair_color=MAGNIFIER_CROSSHAIR_COLOR):
+                    crosshair_color=MAGNIFIER_CROSSHAIR_COLOR, frame=None):
     """把光标周围的小块原图放大绘制到遮罩上的悬浮区域。
 
     `crosshair` 为假时不画采样点十字；`crosshair_color` 为十字颜色（默认红）。
+    `frame` 已由调用方算好时必须传进来：遮罩浮层用 `MaskWindow.magnifier_frame()`
+    定位窗口，而那个框把**提示条预留**计入了组翻转判定；这里若自行用
+    `magnifier_rect()` 重算，触边时可能翻到另一侧 ⇒ 内容画到窗口外、放大镜一片空白
+    （2026-10-16 修复：位置与内容必须出自同一个框）。
     """
     source_point = point if source_point is None else source_point
     side = sample_size(size, zoom)
@@ -79,7 +83,8 @@ def paint_magnifier(painter, image, point, bounds, source_point=None, grid=False
         min(max(0, source_point.y() - sample_height // 2), image.height() - sample_height),
         sample_width, sample_height,
     )
-    frame = magnifier_rect(point, bounds, size, offset=offset)
+    if frame is None:
+        frame = magnifier_rect(point, bounds, size, offset=offset)
     target = frame.adjusted(2, 2, -2, -2)
     painter.fillRect(frame, QColor("#ffffff"))
     painter.drawImage(target, image, sample)

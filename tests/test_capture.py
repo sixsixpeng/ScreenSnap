@@ -1104,6 +1104,75 @@ class CaptureTests(CoreTests):
         self.assertGreater(color_count(green, "#00ff00"), 0)
         self.assertEqual(color_count(green, "#ff0000"), 0)
 
+    def test_magnifier_keeps_content_inside_its_window_across_layouts(self):
+        """放大镜的「窗口位置」与「绘制位置」必须同源 —— 组合矩阵回归（2026-10-16 修复）。
+
+        回归：窗口用 `MaskWindow.magnifier_frame()`（把提示条宽/高计入"整组翻转"判定）定位，
+        而 `paint_magnifier()` 内部又用只算放大镜的 `magnifier_rect()` 重算一次 ⇒ 触底/触右
+        （或提示条较长导致提前翻转）时两者翻到不同侧，镜片被画到窗口外：用户看到"窗口还在、
+        但没有放大"（实测窗口内非白像素 = 0）。
+
+        组合覆盖（单机只跑了 900×700 一例，这里按 AGENTS 的多情况要求铺开）：
+        · 放大镜尺寸 100/140/320（下限/默认/上限）× 偏移 8/80（下限/上限）；
+        · 提示条 关 / 默认 / 每行 1 条（条更高、更容易触发组翻转）；
+        · 视图大小 大（≥ 4× 尺寸 ⇒ 提示条预留参与翻转）/ 小（< 4× 尺寸 ⇒ 预留不参与）；
+        · 光标位置 四角 + 四边中点 + 居中。
+        逐例断言窗口中心仍是镜片内容（白色 = 内容被画到窗口外）。
+        """
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QPoint
+        from screenshot.mask_window import MaskWindow
+
+        hint_modes = {"关": [], "默认": list(DEFAULTS["capture_hint_order"]),
+                      "每行1条": list(DEFAULTS["capture_hint_order"])}
+        for view_width, view_height in ((1400, 1000), (500, 400)):
+            pattern = Image.new("RGB", (view_width, view_height))
+            for x in range(view_width):
+                for y in range(view_height):
+                    pattern.putpixel((x, y), (x % 256, y % 256, 128))   # 任何取样处都非纯白
+            bounds = {"left": 0, "top": 0, "width": view_width, "height": view_height}
+            settings = {**DEFAULTS, "magnifier": True, "mask_opacity": 0}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(pattern, bounds, [bounds], settings)
+            mask.show()
+            try:
+                overlay = mask.magnifier_overlay
+                margin = 8
+                positions = [QPoint(view_width // 2, view_height // 2)]
+                positions += [QPoint(x, y) for x in (margin, view_width - margin)
+                              for y in (margin, view_height - margin)]
+                positions += [QPoint(view_width // 2, margin), QPoint(view_width // 2, view_height - margin),
+                              QPoint(margin, view_height // 2), QPoint(view_width - margin, view_height // 2)]
+                for size in (100, 140, 320):
+                    for offset in (8, 80):
+                        for hint_name, hint_order in hint_modes.items():
+                            for i, position in enumerate(positions):
+                                with self.subTest(view=(view_width, view_height), size=size,
+                                                  offset=offset, hints=hint_name,
+                                                  position=(position.x(), position.y())):
+                                    mask.settings["magnifier_size"] = size
+                                    mask.settings["magnifier_offset"] = offset
+                                    mask.settings["capture_hint_order"] = hint_order
+                                    mask.settings["capture_hint_per_line"] = 1 if hint_name == "每行1条" else 0
+                                    mask.position = position
+                                    app = self.app
+                                    app.processEvents()
+                                    overlay.sync()
+                                    app.processEvents()
+                                    self.assertTrue(overlay.isVisible())
+                                    # 窗口与镜片必须出自同一个框：内容没画进来时中心是白色填充
+                                    painted = overlay.grab().toImage()
+                                    frame = overlay.frame_rect
+                                    self.assertEqual(overlay.geometry().size(), frame.size())
+                                    center = painted.pixelColor(painted.width() // 2,
+                                                                painted.height() // 2)
+                                    self.assertNotEqual(
+                                        center.name(), "#ffffff",
+                                        f"第 {i} 个位置（{position.x()},{position.y()}）镜片内容"
+                                        f"落在窗口外：窗口框={frame.getRect()}")
+            finally:
+                mask.close()
+
     def test_anchor_sizes_clamp_and_stay_independent(self):
         """四角与四边中点锚点尺寸各自夹取、互不影响；非法值回落默认。"""
         from screenshot.mask_window import _anchor_sizes
