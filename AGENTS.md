@@ -80,7 +80,7 @@
 
     这一条同时约束**报告口径**：只报"已实测通过"的部分，未完成项必须逐条点名（含文件与症状），不得用"基本完成/应该可用"含糊带过。
 
-34. **"最终总检查"= 对当前全部未提交/未推送改动做全量复盘，并把配置生命周期完整过一遍。** 当用户要求做最后的总检查（或说"整体检查一下/收尾"），**且全量测试已经跑过**时，不要只复述测试数字就结束：必须针对**当前工作区全部未提交 + 本地未推送的提交**做一次系统复盘，并按下面的清单**逐项给出结论**（有问题的点名到 文件:行号 + 症状 + 证据；没问题的也要写"已查 ✓"）：
+34. **"最终总检查"= 对当前全部未提交/未推送改动做全量复盘，并把配置生命周期完整过一遍。** 当做最后的总检查（或说"整体检查一下/收尾"），**且全量测试已经跑过**时，不要只复述测试数字就结束：必须针对**当前工作区全部未提交 + 本地未推送的提交**做一次系统复盘，并按下面的清单**逐项给出结论**（有问题的点名到 文件:行号 + 症状 + 证据；没问题的也要写"已查 ✓"）：
 
     - **A. 改动面复盘（防误伤）**：`git status` + `git diff --stat` + `git log --oneline @{u}..HEAD` 列出全部改动；**逐文件、逐函数**读 diff，对每个改动问三句：① 谁还会调用它（`grep` 符号/信号/配置键，规则 27 爆炸半径）？② 两个编辑器（`EditorWindow` / `InlineEditor`，规则 7）是否都覆盖？③ 主屏与副屏、混合 DPI、负原点排布是否都成立（规则 26）？把"检查过的入口"和"没检查的入口"分开列。
     - **B. 既有 bug 排查（防引入/防放大）**：对每处改动写出它可能触及的**历史行为**以及验证方式（规则 31 的 Gate 2/3）；明确回答"这次改动会不会让某个原本能用的路径失效"，并给出对应的 `-k` 子集与结果。
@@ -103,6 +103,8 @@
     - **超时立即处理**：标记 `TIMEOUT`，保留已经产生的 stdout/stderr、命令和日志路径；终止并回收本次测试的进程树，再有限等待退出。Windows 可按本次 PID 使用 `taskkill /PID <pid> /T /F`；清理也要有超时，不得批量杀掉用户的其他 Python/应用进程。禁止测试跑着时继续编辑它所读取的生产代码或用例。
     - **结束必须显示**：结束时间、实际耗时、退出码、`Ran N` 与 `OK/FAILED`。`Ran 0` 不算有效验证；已知原生退出异常即使有 `Ran N / OK` 也单列“摘要通过、收尾异常”，不能说正常退出；无摘要、超时或未知非零退出均不得算通过，只允许有界重试/分块定位。
     - **不因提交检查而例外**：提交前验证也遵守本规则。测试脚本若没有子进程超时，必须由满足本规则的外层逐模块执行器托管；仅给工具设置后台标志或打印一个时间戳不等于有超时保护。
+
+37. **文档（README / RELEASE_NOTES / AGENTS）只写「是什么、怎么做」，不写「谁要求、我做了什么」的前因叙述。** 调整记录、发布说明、经验条目里禁止出现「用户要求…」「用户报告…」「按用户要求…」「我改成…」这类叙事，直接给结论、行为、参数与验证方式即可。例如不要写「用户要求把默认工具改成记号笔，于是我把 `annotation_tool` 默认值改为 `marker`」，直接写「默认标注工具为记号笔（`annotation_tool` 默认 `marker`）；旧工具名 `wide`/`square` 迁移到该默认值」。有效信息是日期、键名、`文件:行号`、命令与预期结果；动机与对话过程不是。例外：经验条目允许写「现象」，但只描述**可观察现象**（报错、日志、截图、断言差异），不写"用户当时说了什么"。
 
 - **D35 绘制期绝不改可见性（子控件与场景图元都不行）**
   - 现象：给"全屏截图松开后尺寸标签消失"做修复时，我在 `drawForeground`（绘制期）里直接 `show()` 一个子控件 `QLabel` ✗ ⇒ `tests.test_capture -k mask` 由 **Ran 22 OK** 变成**摘要前原生崩溃**（`exit=-1073740791` / `0xC0000409` ✓ 无 Ran ✓）。另一次同族隐患：`_paint_erased_composite` → `_cached_annotation_layer` 在绘制期 `base.hide() … scene.render() … base.show()` ✗（改的是**场景图元**可见性 ✓ 同样属风险族 ✓）。
@@ -373,7 +375,7 @@
   - 避免：任何"改状态后要立刻可见"的刷新，都要 `for view in session.views:` 逐视图刷新（`view.update()` + 各浮层 `sync()`），并用 `getattr(..., "sync", None)` 守卫；与 D8 的"输入源只建一份"是同一类多屏缺陷，**报告里必须写明刷了哪些视图**。
 
 - **D26 改共享绘制/组件前先核实"它到底画了什么"——否则会实现一个永远不会被画出来的参数**
-  - 现象：用户要求"放大镜下面的取色提示跟随 `X` 切换"。我准备方案 B（给 `paint_magnifier` 加 `color_text=`），先读代码才发现 `screenshot/magnifier_widget.py::paint_magnifier` **只画图像/网格/准线，没有任何 `drawText`** ⇒ 那个参数会变成死代码（规则 33 禁止）。用户看到的"提示"其实是 `InfoBar`（提示条）。
+  - 现象："放大镜下面的取色提示跟随 `X` 切换"。我准备方案 B（给 `paint_magnifier` 加 `color_text=`），先读代码才发现 `screenshot/magnifier_widget.py::paint_magnifier` **只画图像/网格/准线，没有任何 `drawText`** ⇒ 那个参数会变成死代码（规则 33 禁止）。用户看到的"提示"其实是 `InfoBar`（提示条）。
   - 排查：动手前 `grep -n "drawText\|setText" <该组件>` 确认它是否真的渲染这段内容；对"某处文字不更新"类问题，先定位**是哪个部件画的**再改。
   - 避免：新增参数/分支前证明它会被消费（谁读、什么条件画）；前提不成立时按 D1/D3 **明确更正**并给出证据（文件:行号），不要为了"完成任务"塞死代码。
 
@@ -432,7 +434,7 @@
   - 避免：内容一致性断言先转换为明确的共同格式（本轮用预乘 ARGB32）并核对尺寸/像素；若测试的是编码或存储格式，就另设断言，不以归一化掩盖该契约。逐像素/字节比较须处理行填充与透明像素，不用扩大容差让真实内容差异变绿。
 
 - **D41 混合 DPI 跨屏抓取不能用来源窗口局部点重建全局点**
-  - 现象：2026-10-14 用户报告上大下小排布拖框进入下屏后回跳，光标已到底部而高亮仍留在上屏；上屏4K@125%、物理原点 `(-751,-2160)`，下屏1920×1200@100%，Qt 原生布局存在纵向间隙。独立全局字段的合成轨迹复现约270物理像素后的映射反跳；不能把这项证据写成真实桌面投递模型已验收。
+  - 现象：2026-10-14 上大下小排布拖框进入下屏后回跳，光标已到底部而高亮仍留在上屏；上屏4K@125%、物理原点 `(-751,-2160)`，下屏1920×1200@100%，Qt 原生布局存在纵向间隙。独立全局字段的合成轨迹复现约270物理像素后的映射反跳；不能把这项证据写成真实桌面投递模型已验收。
   - 排查：对照日志中的物理/Qt 原生屏幕矩形，比较 `event.globalPosition()` 与 `mapToGlobal(event.position())` 重建值；追踪 `MaskWindow._mouse_event_position`、`InlineEditor.eventFilter` 及徽标轮询对共享端点的写入。`tests.test_capture_pointer` 的 `test_reported_vertical_gap_does_not_jump_back_after_270_pixels` 和连续336种抓取组合使用独立全局/局部字段复现旧错误，避免测试夹具把错误假设复制进预期值。
   - 避免：鼠标抓取的 press/move/release 直接转换事件的 Qt 原生 `globalPosition()`，转发时保留该字段，浮点保留至物理转换；禁止按来源屏幕 DPR 重建跨屏端点，也不能用当前 `QCursor.pos()` 代替事件落点。徽标等轮询只读取实时光标，不抢写拖动/键盘接管中的交互端点。修改前后覆盖主副屏双向、上下错位/负原点/混合DPI/布局间隙、两种局部事件模型、释放补末段/吸附/取色/快速贴图；合成回归与真机验收分开报告，真机还要验证原地已有选区跨屏调整后的编辑层重建。
 
@@ -440,6 +442,36 @@
   - 现象：设置页里大量只有 2–4 个互斥值的配置（模式选择、开关式枚举、后端选择）长期用 `QComboBox`，用户必须点开才看得到全部选项、多一次点击；2026-10-14 十字线三选一（实线/对比色/反色）初版仍沿下拉，与"选项少就该一眼可见、一键切换"的预期不符。
   - 排查：逐页冒烟清点全部枚举控件并按选项数分类：本轮共 **32 处**改为单选行；保留下拉的只有选项 >10 个或动态/长文本的 5 处——`annotation_tool`(12)、`arrow_style`(11)、`sequence_shape`(13)、`font`、`text_sticker_font`。
   - 避免：① 新增/改动设置项时，互斥选项 **≤10 个**一律优先单选行（本项目 `SettingsPage.radios(key, label, options, help_text)`，组件在 `ui/widgets/tooltip.py::RadioRow`），不要默认 `QComboBox`；② 排版阈值：≤4 项一行，5–10 项自动折两行；>10 项、文本很长或列表动态（如字体列表）才保留下拉；③ 契约要点：帮助文本要设在 RadioRow **容器自身**（`setToolTip`），联动读写走 `.value()` / `set_value()`（不发信号）/ `changed` 信号，按模式隐藏整行走 `QFormLayout.setRowVisible`；④ 换控件类型即改契约——同步改测试断言（下拉 `currentData/currentIndex` → `.value()` 与点击 `_buttons["x"]`）、设置窗口的 `set_annotation_setting` 分发、README 与分组契约用例。
+
+- **D43 获取日志器一律走 `logger.get_logger()`，不要手写 `logging.getLogger("screensnap")`**
+  - 现象：统一入口之前，全项目 **49 个文件、约 300 处**手写 `logging.getLogger("screensnap")`，并混用 4 种写法（内联直调、函数内局部变量、模块级常量、临时 `_logger()` 辅助函数），连引号都有单/双两种。
+  - 排查：`logging.getLogger(name)` 本身是标准库单例、开销可忽略，问题在**魔法字符串重复**——改名要全库替换；更糟的是**拼错（如 `"screansnap"`）不会报错**，而是静默创建另一个 logger，日志既不落盘也不进控制台且无任何异常，排查代价极高。
+  - 避免：① 取日志器统一 `from logger import get_logger`（入口定义在 `logger/log_setup.py`，由 `logger/__init__.py` 重导出），调用 `get_logger()`；需要分模块过滤时用 `get_logger("screenshot")` 得到 `screensnap.screenshot` 子日志器。**不要**用 `logging.getLogger(__name__)`：会脱离 `screensnap` 层级，绕过统一 handler/等级与 `ContextFilter`。② 固定名集中在 `logger.log_setup.LOGGER_NAME`，业务代码不要重复字面量。③ 替换后若该文件已不再使用 `logging.`（常量/类），删掉 `import logging`；仍用则保留。④ **不要**改字符串形式的日志器名（`assertLogs("screensnap", ...)`、`LogRecord("screensnap", ...)`）——那不是“获取日志器”。⑤ 高频路径（定时器 tick、指针移动、绘制、轮询、回调）不得写日志，用 `logger.log_rate.log_every` 节流或只在状态转移时记录（规则 13/14）。
+
+- **D44 功能性调整先过一遍「设置面」：新行为是否会与已有设置项冲突、重叠或语义重复**
+  - 现象：把默认标注工具改为记号笔后，`annotation_tool` 默认值的变化连带"取色更新哪个颜色键""工具栏设置按钮显示什么文本"一起改变，4 个既有用例随即失败；此前把橡皮擦的「涂抹模式」放进矩形工具「圆角半径」所用的行 14，也属同类冲突（一个布局格被两个工具共用）。单看任何一处改动都"正确"，冲突只在组合后才暴露。
+  - 排查：改默认值/工具/控件位置前，先 `grep` 它的**全部消费者**——配置键 → 读取该键的模块；控件 → 所在布局的行列与 `_refresh_option_rows` 的行集；术语 → 文档、UI、测试里的同义写法。受影响模块里，凡断言与「默认状态 / 固定文本 / 固定行号」绑定的用例都可能因此失败。
+  - 避免：① 功能改动前后各做一次设置面检查：该键还有谁读、该位置还有谁占、该术语还有几种写法；② 默认值、术语、控件位置这类全局共享事实尽量**单一来源**（如 `DEFAULT_ANNOTATION_TOOL` 常量），不要多处硬编码；③ 同一功能不留两套命名（本次实例：工具栏叫「记号笔」而设置页叫「荧光笔」，且并无对应的旧配置键）；④ 改完必跑受影响的 `-k` 子集，不要只看新增用例。
+
+- **D45 新增配置项必须给完整 tooltip：作用 + 取值范围 + 对其它功能的影响，长句按语义换行**
+  - 现象：新增键常只写一句「只影响对应工具」甚至不给提示，用户只能靠试；设置页 tooltip 是界面里唯一解释参数的地方，缺失即无法自助理解。
+  - 排查：新增键时核对四处是否齐全（DEFAULTS、validate/repair、设置页控件 + tooltip、README 参数表），其中 tooltip 最易漏。另注意 `QWidget.setToolTip` **不会自动换行**，超长单行提示在窄栏里会显示成细长一条。
+  - 避免：① tooltip 至少含三要素：**作用**（控制什么）、**取值**（范围/单位/默认值，0 或特殊值的含义要写明）、**影响**（与其它设置或工具的联动、何时不生效）；② 长句按语义拆成 2–4 行（用 `\n` 换行，如「作用一行 / 取值一行 / 联动一行」），不要写成超过整宽的一整句；③ 统一用 `ui/widgets/tooltip.py` 的 `rich_tooltip(标题, 详细)` 保持风格；④ 新增控件后跑 tooltip 契约用例（如 `test_settings_pages_group_related_controls_and_scroll`，它要求容器自身也带 tooltip）。
+
+- **D46 识别层给 UI 层补信息时用「可选参数 + 默认形态不变」，并让数据与可见性同源写入**
+  - 现象：尺寸标签要显示悬停控件名，控件类型只在 `element_chain()` 的查询内部可得。若直接把返回值从「矩形链」改成「(矩形链, 控件名)」，4 处既有调用与大量测试全部作废；反之若把控件名存成遮罩上的独立字段，又出现「上一次悬停的控件名被标到这一次的选区上」的错位。
+  - 排查：给跨层函数加返回值前，先确认两件事——① 现有调用方是否都只关心旧形态（那就能用默认参数兼容）；② 新信息的「生命周期」是否与某个已有字段完全一致（一致就成对写入、成对清空，由同一处消费）。
+  - 避免：① 用 `with_label=False` 之类的可选开关新增二元组返回，默认仍返回旧形态（本次：UIA 与句柄两条路径都在 `deepest_only` 下支持 `(矩形链, 控件名)`）；② 新增字段（如 `hover_element_label`）与它的可见性判据（如 `hover_rect`）在**同一函数内成对赋值/清空**，消费端只在判据成立时读取，避免读到上一轮的残留值；③ 昂贵属性（UIA 控件类型）走同次查询里已建好的属性缓存，不加新的跨进程往返；④ 取值缺失/异常时**退回旧文案**（如只显示宽高），不显示半截内容。
+
+- **D47 Qt 的 Python override 里抛异常＝进程直接崩溃，绘制分支必须有「全分支渲染」用例覆盖**
+  - 现象：`paintEvent` 里用了**未导入**的 `QRect`（新增的取色预览分支），PySide6 打印 `NameError: Error calling Python override of QWidget::paintEvent(): name 'QRect' is not defined` 后**直接终止进程**（本地复现退出码 `0xC0000409`）；`crash.log` 只有 `Fatal Python error: Aborted`，只有 `logs/YYYY-MM/app.log` 才留下那行 NameError。普通 `unittest` 不会失败 —— 因为没有任何用例渲染过那个分支（取色预览从未被 `grab()` 过）。
+  - 排查：用户报「点某个按钮就崩」时，先看 `logs/YYYY-MM/app.log` 的 `未捕获异常（事件类型 …，接收者 <类名>）`——事件类型 `0xc` 即绘制期；再看 `crash.log` 的 `Current thread`（若栈里只有 `Fatal Python error` 而无 Python 帧，说明崩在 Qt 的 Python override 里）。修之前先复现该分支的渲染（`grab()`），不要靠猜。
+  - 避免：① 新增或修改任何 `paintEvent` / `QGraphicsItem.paint()` 分支后，跑「该控件全部 kind 各渲染一次」的用例：`tests/test_ui.py::test_annotation_preview_all_kinds_render_without_error`（`AnnotationPreview` 的 12 个分支）与 `tests/test_config.py::test_all_settings_page_previews_render`（设置页所有页的 `previews`），新增分支要一并纳入；② 验证用例真的有效：临时还原缺陷（如删掉 import）应能复现崩溃，再恢复；③ 不要用 `try/except` 静默绘制异常来"防崩"——那会把同类问题藏起来，靠用例覆盖；④ 事件类型 `0xc`、`0x2`（Paint）等绘制期 `override` 里的任何未定义名字都是同一风险类别。
+
+- **D48 两个"刻意不做"的边界：贴图窗口圆角不做抗锯齿、热键不重建原生钩子**
+  - 贴图圆角：`StickerItem.update_input_mask` 用 `setMask(QRegion)` 同时定义**显示范围**与**鼠标命中范围**（圆角外侧的透明区因此不吃鼠标）。QRegion 是逐像素二值形状，想抗锯齿就必须去掉 setMask、改由 `QPainterPath` 绘制并**另建命中判定**，还要处理圆角外的 `WM_NCHITTEST` 穿透 —— 属交互语义变更。**已决策不做**（用户确认），别再当作缺陷重复提出；改它要按"分层窗口 + 命中重做"立项并真机验收。
+  - 热键：`keyboard` 库的 remove/add 只改它内部回调表，**不重新安装** Windows 底层钩子、不重启已死亡的库线程。因此"重新注册"只能重建绑定、是**一次请求**而非修复；钩子被系统摘除或线程死亡时只能重启程序。**已决策保持现状**（不实现钩子重建；用户确认）。任何"重注册保证恢复"的表述都是错的。
+  - 上述两条的对外口径写在 `ACCEPTANCE.md`「已知限制」；改这两处前先看那里，避免把既定取舍当 bug 修。
 
 ## Validation
 
@@ -449,6 +481,10 @@
 - Focused regressions also live in `tests.test_capture_pointer`, `tests.test_sticker_lifecycle`, and `tests.test_sticker_mask`; include them explicitly rather than assuming `run_tests.py` lists every module. For sticker clipping, run `tests.test_sticker_mask` in fresh processes with `QT_SCALE_FACTOR=1/1.25/1.5/1.75` as well as its mocked-DPR matrix; an instance method mock is not evidence about the actual Qt platform DPR or the Windows native window region.
 - Each test module runs standalone (`python tests/test_app.py`), via `python -m unittest tests.test_app`, or under `discover` from either the repository root or the `tests/` directory; modules bootstrap the repository root onto `sys.path`, so never rely on the caller's cwd.
 - Qt widget tests run offscreen in CI and may emit platform clipboard or window warnings. Report test counts and failures from unittest's final summary, not from those warnings.
+- **Quit the running app instance before running the suite.** A live tray instance holds the real data directory (`%APPDATA%\ScreenSnap`), which surfaces as `PermissionError: ...clipboard_history.tmp`, `PermissionError: ...toast_cache` / `...sticker_cache`, and turns `tests.test_config.ConfigTests.test_group_settings_dialog_applies_explicit_targets` and `tests.test_dpi.DpiTests.test_native_toast_caches_image_and_dispatches_async_click` red even though the code is fine. It also makes cursor/focus-sensitive cases flaky.
+- **One process per module.** `python -m unittest` accepts a single module path, and packing several modules into one process lets earlier modules pollute later ones: measured false failures are `tests.editor.test_zoom` (`test_annotation_items_resize_from_multiple_handles_and_undo`, `test_corner_resize_keeps_aspect_after_rotation_and_free_with_modifier`) and `tests.test_sticker` (`test_sticker_session_and_closed_item`), both green when run alone. Use one `python -m unittest <module>` command per module (a `foreach` loop of separate processes is fine).
+- **Time budget per module** (offscreen, this machine): `test_canvas` 98 ≈ 57s, `test_config` 127 ≈ 74s, `test_capture` 119 ≈ 26s, `test_sticker` 93 ≈ 127s, `tests.test_dpi` 54 ≈ 32s, `tests.test_uia` 61 ≈ 12s, `tests.test_ui` 18 ≈ 3s. Chained or unbounded runs of several big modules can appear to hang (the shell buffers output until exit) — run them one at a time and poll with `CheckCommandStatus`, or stop with `StopCommand` instead of re-issuing the same command.
+- **Known pre-existing failures, do not "fix" by weakening assertions**: `test_config.ConfigTests.test_mask_inline_edit_keeps_magnifier_settings_and_updates_position` (cross-case pollution; passes alone), `tests.test_sticker` closing with the native `0xC0000005` / `3221225477` teardown exception while its summary says OK, and the platform-sensitive pair already documented in README (first-hover magnifier visibility, inline keyboard-nudge focus). Always re-run a suspicious case alone before attributing it to a change.
 - Real global hotkeys, mixed-DPI display geometry, UI Automation providers, and click-through behavior require Windows desktop verification when a change affects them.
 - The suite is 500+ Qt tests; a single-process run can stall or crash natively at offscreen shutdown. Prefer chunked runs (e.g. 20 tests per subprocess with the enforced deadline in rule 36). A positive `Ran N / OK` with a known native shutdown exception is reported as summary passed with abnormal shutdown, not normal exit; no summary, zero collected tests, timeout or an unexplained non-zero exit is not a pass. Tests that genuinely need a real desktop screen follow rule 19; never remove coverage or add a skip to hide a regression.
 
