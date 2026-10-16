@@ -12,8 +12,8 @@
 """
 
 from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QColor, QFont, QPen
-from screenshot.hint_items import pixel_size_text
+from PySide6.QtGui import QColor, QFont, QPainter, QPen
+from screenshot.hint_items import badge_text
 
 from config.config_manager import HINT_BAR_FILL_ALPHA, HINT_BAR_WARNING_FILL_ALPHA
 
@@ -161,6 +161,8 @@ def paint_info_bar(painter, bar, rows, style=None, metrics=None, align_right=Fal
     border = QColor(style.get("border_color") or fill.name())
     radius = max(0, int(style.get("radius", 5) or 0)) if style.get("rounded", True) else 0
     painter.save()
+    # 圆角提示条必须抗锯齿，否则圆弧边缘会出现台阶（2026-10-16 统一补齐）。
+    painter.setRenderHint(QPainter.Antialiasing, True)
     painter.setPen(QPen(border, 1))
     painter.setBrush(fill)
     painter.drawRoundedRect(bar, radius, radius)
@@ -205,12 +207,15 @@ def paint_info(painter, anchor, area, items, warning=None, element_rect=None,
 def paint_info_badge(painter, area, element_rect, element_size=None,
                      element_border_color="#00d7aa", element_text_color="#ffffff",
                      element_background_color="#141c22", element_font_size=12,
-                     element_border_width=1, bar=None, cursor=None):
+                     element_border_width=1, bar=None, cursor=None, badge_content="size",
+                     badge_label=None):
     """在遮罩上画控件/选区尺寸徽标（三级降级避让）。
 
     `bar` 是要避开的矩形（提示条与工具条，二者取并集 ✓）；`cursor` 是鼠标位置（遮罩逻辑坐标 ✓）——
     徽标必须与光标保持间距 ✓（用户 2026-10-11 要求：鼠标靠近时徽标换到别的位置 ✓）。
     候选顺序：环绕（上/下/内侧顶底/左右）→ 屏角（右上/左上/左下/右下）→ 兜底（离光标最远的角 ✓）。
+    `badge_content` 为 `window_hover_badge_content` 的取值，`size_pos` 时附元素左上角坐标、
+    `size_class` 时附 `badge_label` 控件名（缺失时只显示宽高）。
     """
     if element_rect is None or element_rect.isEmpty():
         return QRect()
@@ -219,9 +224,12 @@ def paint_info_badge(painter, area, element_rect, element_size=None,
     font.setPixelSize(max(1, int(element_font_size)))
     painter.save()
     painter.setFont(font)
+    # 尺寸徽标同样是圆角矩形：统一开启抗锯齿（此前缺这一处，圆角有锯齿）。
+    painter.setRenderHint(QPainter.Antialiasing, True)
     badge_metrics = painter.fontMetrics()
     size = element_size or (element_rect.width(), element_rect.height())
-    label = pixel_size_text(size)
+    label = badge_text(size, (element_rect.left(), element_rect.top()), badge_content,
+                       label=badge_label)
     label_width = badge_metrics.horizontalAdvance(label) + 16
     label_height = badge_metrics.height() + 8
     # 2026-10-11（用户指定最终规则，**彻底取代**此前所有避让计算 ✗）：

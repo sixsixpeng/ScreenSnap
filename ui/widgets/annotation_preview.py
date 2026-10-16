@@ -1,6 +1,6 @@
 """设置页标注参数的实时预览画布。"""
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import (QColor, QFont, QLinearGradient, QImage, QPainter, QPainterPath,
                            QPen, QPixmap)
 from PySide6.QtWidgets import (QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsRectItem,
@@ -242,7 +242,7 @@ class AnnotationPreview(QWidget):
                 cursor.setBrush(Qt.NoBrush)
             scene.addItem(cursor)
         elif self.kind == "marker":
-            # 与画布 stroke_pen 保持一致：不透明度只作用于荧光笔，宽度额外放大。
+            # 与画布 stroke_pen 保持一致：不透明度只作用于记号笔，宽度额外放大。
             marker = QColor(settings.get("marker_color", color))
             marker.setAlpha(round(settings.get("marker_opacity", 38) * 255 / 100))
             path = QPainterPath(QPointF(width * 0.12, height * 0.66))
@@ -294,7 +294,8 @@ class AnnotationPreview(QWidget):
                 item.setPos(offset[0], offset[1])
                 scene.addItem(item)
         elif self.kind == "picker":
-            # 取色工具预览：放大镜（可叠加像素网格）+ 中心十字线 + 取到的色值与十六进制色号。
+            # 取色工具预览：方形放大镜（可叠加像素网格）+ 采样点十字 + 取到的色值与十六进制色号。
+            # 2026-10-16：镜片由圆形改为**方形**，与截图遮罩上的放大镜（magnifier_widget）口径一致。
             preview_image = QImage(max(1, int(width)), max(1, int(height)), QImage.Format_ARGB32)
             preview_image.fill(QColor("#f1f3f4"))
             painter = QPainter(preview_image)
@@ -303,34 +304,31 @@ class AnnotationPreview(QWidget):
                                       Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
             painter.drawImage(0, 0, scaled)
             center_x, center_y = width / 2, height / 2
-            radius = min(width, height) * 0.34
-            lens = QRectF(center_x - radius, center_y - radius, radius * 2, radius * 2)
-            lens_path = QPainterPath()
-            lens_path.addEllipse(lens)
-            painter.save()
-            painter.setClipPath(lens_path)
-            inner = background.scaled(int(radius * 2), int(radius * 2),
-                                     Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
-            painter.drawImage(lens.topLeft(), inner)
+            side = min(width, height) * 0.66
+            lens = QRectF(center_x - side / 2, center_y - side / 2, side, side)
+            # 取中心一小块原图放大到镜片：倍率与截图放大镜默认一致（7×）。
+            src_side = max(1, int(round(side / 7)))
+            src_left = min(max(0, int(center_x - src_side / 2)), max(0, scaled.width() - src_side))
+            src_top = min(max(0, int(center_y - src_side / 2)), max(0, scaled.height() - src_side))
+            painter.drawImage(lens, scaled, QRect(src_left, src_top, src_side, src_side))
             if settings.get("magnifier_grid", True):
                 grid_color = QColor(settings.get("magnifier_grid_color", "#cccccc"))
                 painter.setPen(QPen(grid_color, 1, Qt.DotLine))
-                cells = 8
+                cells = max(3, min(src_side, 8))
                 for index in range(1, cells):
-                    offset = radius * 2 * index / cells
+                    offset = side * index / cells
                     painter.drawLine(lens.left() + offset, lens.top(),
                                      lens.left() + offset, lens.bottom())
                     painter.drawLine(lens.left(), lens.top() + offset,
                                      lens.right(), lens.top() + offset)
-            painter.restore()
             painter.setPen(QPen(QColor("#273b44"), 2))
             painter.setBrush(Qt.NoBrush)
-            painter.drawEllipse(lens)
-            painter.setPen(QPen(QColor("#e34b5f"), 2))
-            painter.drawLine(center_x - radius * 0.5, center_y,
-                             center_x + radius * 0.5, center_y)
-            painter.drawLine(center_x, center_y - radius * 0.5,
-                             center_x, center_y + radius * 0.5)
+            painter.drawRect(lens)
+            # 采样点十字与截图放大镜同源：可关闭、颜色读同一份配置。
+            if settings.get("magnifier_crosshair_enabled", True):
+                painter.setPen(QPen(QColor(settings.get("magnifier_crosshair_color", "#ff5252")), 2))
+                painter.drawLine(lens.left(), center_y, lens.right(), center_y)
+                painter.drawLine(center_x, lens.top(), center_x, lens.bottom())
             sample = scaled.pixelColor(int(center_x), int(center_y))
             swatch = QRectF(width - 92, height - 28, 20, 20)
             painter.setPen(QPen(QColor("#333333"), 1))

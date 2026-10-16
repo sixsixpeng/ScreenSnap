@@ -248,15 +248,14 @@ class CapturePointerTests(CoreTests):
             self.assertEqual(position, self.native_point(context, start).toPoint())
 
     def test_coordinate_mismatch_diagnostics_are_throttled(self):
-        import logging
-        from logger import log_rate
+        from logger import get_logger, log_rate
 
         with self.fixture() as context:
             view = context.views[0]
             event = self.mouse(context, 0, QPoint(800, 300), QEvent.Type.MouseMove, Qt.MouseButton.RightButton)
             with patch.dict(log_rate._stamps, {}, clear=True), \
                     patch("logger.log_rate.time.monotonic", return_value=1.0), \
-                    patch.object(logging.getLogger("screensnap"), "log") as write:
+                    patch.object(get_logger(), "log") as write:
                 for _ in range(30):
                     view._mouse_event_position(event)
                 self.assertEqual(write.call_count, 1)

@@ -13,6 +13,7 @@ from ctypes import wintypes
 
 from core.window_snap import top_window_at
 from core.window_snap import ignored_mask_window
+from logger import get_logger
 
 # 自绘界面里过小的控件没有识别价值；4 像素仍能选中图标这类小控件。
 MIN_SIZE = 4
@@ -60,10 +61,11 @@ def _record_query_cost(cost, now, logger, deepest_only):
 
 _limits = {"read_budget": PROPERTY_READ_BUDGET,
            "children_limit": CHILDREN_FETCH_LIMIT,
-           "slow_seconds": SLOW_SECONDS}
+           "slow_seconds": SLOW_SECONDS,
+           "slow_cooldown": SLOW_COOLDOWN_SECONDS}
 
 
-def set_limits(read_budget=None, children_limit=None, slow_seconds=None):
+def set_limits(read_budget=None, children_limit=None, slow_seconds=None, slow_cooldown=None):
     """按设置覆盖性能参数；传 None 表示保持当前值。"""
     if read_budget:
         _limits["read_budget"] = max(1, int(read_budget))
@@ -71,6 +73,8 @@ def set_limits(read_budget=None, children_limit=None, slow_seconds=None):
         _limits["children_limit"] = max(1, int(children_limit))
     if slow_seconds:
         _limits["slow_seconds"] = max(0.05, float(slow_seconds))
+    if slow_cooldown:
+        _limits["slow_cooldown"] = max(0.1, float(slow_cooldown))
 # 这些控件类型视为“容器”，命中后继续向里钻以找出真正可点的子项（列表项、树节点、
 # 分组里的按钮等）；其余类型（按钮、文本框、图标、列表项本身）当作原子目标，命中即
 # 止，避免一路钻到按钮里的 20x20 小图标这类无意义层级。ControlFromPoint 对虚拟化列表
@@ -216,7 +220,7 @@ def module():
     except (ImportError, OSError):
         if not _warned:
             _warned = True
-            logging.getLogger("screensnap").warning(
+            get_logger().warning(
                 "未安装 uiautomation 库，UIA 识别不可用，已退回窗口句柄识别；"
                 "需要时用 pip install uiautomation 安装")
         return None
@@ -288,7 +292,7 @@ def _handle_of(control, cache):
 
 
 def element_chain(point, max_depth=3, exclude_hwnd=None, debug_tree=False,
-                  deepest_only=False):
+                  deepest_only=False, with_label=False):
     """返回覆盖该点的 UIA 控件矩形链（由外到内）；不可用时返回空列表。
 
     出错或过慢都会熔断，避免界面被无障碍查询拖死。这个函数（以及它内部的
@@ -296,31 +300,38 @@ def element_chain(point, max_depth=3, exclude_hwnd=None, debug_tree=False,
     exclude_hwnd 是置顶的截图遮罩句柄：查询瞬间让它命中穿透，UIA 才能越过它
     命中下面的真实窗口（ControlFromPoint 没有 Z 序概念，会打在遮罩上）。
     deepest_only=True 时只返回最内层控件（悬停高亮用），跳过整套父链上溯。
+    with_label=True（仅 deepest_only 有意义）时返回 ``(矩形链, 控件名)``，
+    控件名是最内层控件类型的中文名（见 type_label），取不到为空串；
+    默认 False 保持只返回矩形链，老调用方无需改动。
     """
     global _disabled_until
     if time.monotonic() < _disabled_until:
-        return []
+        return ([], "") if with_label else []
     automation = module()
     if automation is None:
-        logging.getLogger("screensnap").debug("未安装 uiautomation，跳过 UIA 识别")
-        return []
-    logger = logging.getLogger("screensnap")
+        get_logger().debug("未安装 uiautomation，跳过 UIA 识别")
+        return ([], "") if with_label else []
+    logger = get_logger()
     started = time.monotonic()
     try:
         return query(automation, point, int(max_depth), logger, exclude_hwnd, debug_tree,
-                     deepest_only)
+                     deepest_only, with_label=with_label)
     finally:
         cost = time.monotonic() - started
         _record_query_cost(cost, started + cost, logger, deepest_only)
         if cost > _limits["slow_seconds"]:
-            _disabled_until = time.monotonic() + SLOW_COOLDOWN_SECONDS
+            _disabled_until = time.monotonic() + _limits["slow_cooldown"]
             logger.warning("UIA 查询耗时 %.2f 秒，暂停 %.1f 秒后重试",
-                           cost, SLOW_COOLDOWN_SECONDS)
+                           cost, _limits["slow_cooldown"])
 
 
 def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=False,
-          deepest_only=False):
-    """真正执行一次 UIA 查询，调用方负责计时与异常兜底。"""
+          deepest_only=False, with_label=False):
+    """真正执行一次 UIA 查询，调用方负责计时与异常兜底。
+
+    with_label=True 时返回 ``(矩形链, 控件名)``（仅 deepest_only 路径会取控件名，
+    其余路径控件名给空串）；默认只返回矩形链。
+    """
     global _disabled_until, _last_debug_signature
     x, y = int(point[0]), int(point[1])
     # 同一次查询里对同一控件的属性只读一次，避免反复跨进程取值。
@@ -331,11 +342,11 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
         handle = top_window_at(x, y, skip_stickers=False)
         if not handle:
             logger.debug("UIA 之前未取到外部窗口: 物理点(%d,%d)", x, y)
-            return []
+            return ([], "") if with_label else []
         win_rect = physical_rect_of(handle)
         control = control_at(automation, x, y, handle, logger, exclude_hwnd, cache)
         if control is None:
-            return []
+            return ([], "") if with_label else []
         if debug_tree:
             # 结构诊断才需要这组属性；常规识别下取它纯属浪费跨进程调用。
             signature = (handle, _type_of(control, cache), _name_of(control, cache),
@@ -350,10 +361,18 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
             # 悬停只需要最内层：跳过父链上溯（element_depth 层，每层约两次跨进程读取）。
             rect = _rect_of(control, cache)
             if rect is None:
-                return []
+                return ([], "") if with_label else []
             if win_rect is not None:
                 rect = _clamp_rect(rect, win_rect)
-            return [rect]
+            if not with_label:
+                return [rect]
+            # 尺寸标签的控件名：同次查询里类型属性已被 cache 覆盖，这里不额外增加往返；
+            # 读取异常（跨进程取属性偶发失败）时给空串，标签退回只显示宽高。
+            try:
+                label = type_label(_type_of(control, cache))
+            except Exception:
+                label = ""
+            return [rect], label
         # Tab 的层级链必须从【与悬停相同的最深控件】往上爬：
         # 只用 control_at 的结果时，虚拟化列表/资源管理器常常只给到列表容器，
         # 于是 Tab 只能在窗口和几个大容器之间循环，回不到鼠标下的小元素
@@ -367,13 +386,15 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
         # 默认（None）仍按 DEBUG 逐条记 ⇒ 排查单点问题时可直接调用 climb() 拿到细节 ✓。
         chain = climb(deep, handle, max_depth, logger, win_rect, cache, verbose=False)
         logger.debug("UIA 识别到 %d 层元素: %s", len(chain), chain)
-        return chain
+        # 非 deepest_only 路径不取控件名，但 with_label=True 时仍返回二元组，
+        # 让调用方只需按一个形态解包（否则解包长度会随链层数变化）。
+        return (chain, "") if with_label else chain
     except Exception as error:
         # UIA 调用偶发失败，交回句柄识别，不让识别功能整体失效。
-        _disabled_until = time.monotonic() + SLOW_COOLDOWN_SECONDS
+        _disabled_until = time.monotonic() + _limits["slow_cooldown"]
         logger.warning("UIA 识别失败，暂停 %.1f 秒后重试并退回窗口句柄识别: %s",
-                   SLOW_COOLDOWN_SECONDS, error)
-        return []
+                   _limits["slow_cooldown"], error)
+        return ([], "") if with_label else []
 
 
 def control_at(automation, x, y, handle, logger, exclude_hwnd=None, cache=None):
@@ -685,6 +706,58 @@ def type_of(control):
         return control.ControlTypeName
     except Exception:
         return ""
+
+
+# UIA 控件类型 → 尺寸标签里显示的中文名（悬停元素「宽 x 高 · 控件名」）。
+# 只收录常见类型；未收录的类型由 type_label() 去掉 Control 后缀后原样显示英文。
+CONTROL_TYPE_LABELS = {
+    "ButtonControl": "按钮",
+    "SplitButtonControl": "拆分按钮",
+    "EditControl": "编辑框",
+    "DocumentControl": "文档",
+    "TextControl": "文本",
+    "HyperlinkControl": "链接",
+    "CheckBoxControl": "复选框",
+    "RadioButtonControl": "单选按钮",
+    "ComboBoxControl": "下拉框",
+    "ListControl": "列表",
+    "ListItemControl": "列表项",
+    "TreeControl": "树",
+    "TreeItemControl": "树节点",
+    "DataItemControl": "数据项",
+    "DataGridControl": "表格",
+    "TableControl": "表格",
+    "MenuControl": "菜单",
+    "MenuItemControl": "菜单项",
+    "MenuBarControl": "菜单栏",
+    "TabControl": "选项卡",
+    "TabItemControl": "选项卡项",
+    "SliderControl": "滑块",
+    "ProgressBarControl": "进度条",
+    "ScrollBarControl": "滚动条",
+    "SpinnerControl": "加载圈",
+    "GroupControl": "分组",
+    "PaneControl": "面板",
+    "WindowControl": "窗口",
+    "TitleBarControl": "标题栏",
+    "ToolBarControl": "工具栏",
+    "ToolTipControl": "提示框",
+    "ImageControl": "图片",
+    "ThumbControl": "缩略图",
+    "CalendarControl": "日历",
+    "StatusBarControl": "状态栏",
+    "NavigationBarControl": "导航栏",
+    "AppBarControl": "应用栏",
+    "CustomControl": "自定义",
+}
+
+
+def type_label(type_name):
+    """把 UIA ControlTypeName 转成尺寸标签用的简短控件名；未知类型去 Control 后缀。"""
+    name = str(type_name or "").strip()
+    if not name:
+        return ""
+    return CONTROL_TYPE_LABELS.get(name, name[:-7] if name.endswith("Control") else name)
 
 
 def format_control_tree(control, logger, node_limit=60, max_depth=8):

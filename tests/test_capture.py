@@ -14,9 +14,29 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
                         ConfigManager, resolved_dir, AnnotationCanvas, shape,
                         EditorWindow, SelectionRects, StickerItem, StickerManager,
                         SettingsWindow, HotkeyEdit)
+from logger import get_logger
 
 
 class CaptureTests(CoreTests):
+    def test_overlay_rounded_drawings_enable_antialiasing(self):
+        """提示条与尺寸徽标都是圆角矩形，绘制前必须开启抗锯齿（2026-10-16 统一补齐）。"""
+        from unittest.mock import Mock
+        from PySide6.QtGui import QFont, QFontMetrics, QPainter
+        from screenshot import overlay_info
+
+        metrics = QFontMetrics(QFont())
+        painter = Mock()
+        painter.fontMetrics.return_value = metrics
+        overlay_info.paint_info_bar(painter, QRect(0, 0, 160, 24), ["Esc取消"],
+                                    overlay_info.FALLBACK_HINT_BAR_STYLE, metrics, False)
+        painter.setRenderHint.assert_any_call(QPainter.Antialiasing, True)
+
+        painter = Mock()
+        painter.fontMetrics.return_value = metrics
+        overlay_info.paint_info_badge(painter, QRect(0, 0, 240, 200),
+                                      QRect(20, 20, 120, 60), (120, 60))
+        painter.setRenderHint.assert_any_call(QPainter.Antialiasing, True)
+
     def test_capture_operation_tips_have_contrast_backdrop(self):
         from PySide6.QtGui import QColor, QImage, QPainter
         from screenshot.overlay_info import paint_info
@@ -1006,6 +1026,60 @@ class CaptureTests(CoreTests):
         self.assertEqual(mask.grab().toImage().pixelColor(88, 68).name(), "#0000ff")
         mask.close()
 
+    def test_magnifier_crosshair_toggle_and_color(self):
+        """放大镜采样点十字：开启时按配置颜色画出，关闭时不画；换色同样生效。"""
+        from PySide6.QtCore import QPoint, QRect
+        from PySide6.QtGui import QColor, QImage, QPainter
+        from screenshot.magnifier_widget import paint_magnifier
+
+        image = QImage(400, 400, QImage.Format_ARGB32)
+        image.fill(QColor("#101010"))
+        bounds = QRect(0, 0, 400, 400)
+        point = QPoint(200, 200)
+
+        def render(crosshair, color):
+            canvas = QImage(400, 400, QImage.Format_ARGB32)
+            canvas.fill(QColor("#000000"))
+            painter = QPainter(canvas)
+            paint_magnifier(painter, image, point, bounds, source_point=point,
+                            size=100, zoom=7.0, offset=8,
+                            crosshair=crosshair, crosshair_color=color)
+            painter.end()
+            return canvas
+
+        def color_count(canvas, rgb):
+            want = QColor(rgb)
+            count = 0
+            for y in range(206, 312):
+                for x in range(206, 312):
+                    pixel = canvas.pixelColor(x, y)
+                    if (abs(pixel.red() - want.red()) <= 20
+                            and abs(pixel.green() - want.green()) <= 20
+                            and abs(pixel.blue() - want.blue()) <= 20):
+                        count += 1
+            return count
+
+        # 开启：镜片内出现红色十字；关闭：一点红色都不剩（只剩放大后的原图）。
+        self.assertGreater(color_count(render(True, "#ff0000"), "#ff0000"), 0)
+        self.assertEqual(color_count(render(False, "#ff0000"), "#ff0000"), 0)
+        # 自定义颜色同样生效，且不再有原来的红色。
+        green = render(True, "#00ff00")
+        self.assertGreater(color_count(green, "#00ff00"), 0)
+        self.assertEqual(color_count(green, "#ff0000"), 0)
+
+    def test_anchor_sizes_clamp_and_stay_independent(self):
+        """四角与四边中点锚点尺寸各自夹取、互不影响；非法值回落默认。"""
+        from screenshot.mask_window import _anchor_sizes
+
+        self.assertEqual(_anchor_sizes({}), (6, 6))
+        self.assertEqual(_anchor_sizes({"anchor_corner_size": 15, "anchor_edge_size": 5}), (15, 5))
+        # 越界各自夹回边界，互不影响。
+        self.assertEqual(_anchor_sizes({"anchor_corner_size": 99, "anchor_edge_size": 1}), (21, 4))
+        self.assertEqual(_anchor_sizes({"anchor_corner_size": 2, "anchor_edge_size": 99}), (5, 21))
+        # 非法类型回落默认（不抛异常）。
+        self.assertEqual(_anchor_sizes({"anchor_corner_size": "big", "anchor_edge_size": None}),
+                         (6, 6))
+
     def test_mask_selection_previews_capture_round_corners(self):
         from config.config_manager import DEFAULTS
         from screenshot.mask_window import MaskWindow
@@ -1715,14 +1789,13 @@ class CaptureTests(CoreTests):
 
     def test_capture_does_no_preprocessing_of_own_windows(self):
         """抓屏前不动本程序的任何窗口：截图就是截图，不替用户关通知/贴图/设置。"""
-        import logging
         from PySide6.QtWidgets import QWidget
         from main import Application
 
         app = Application.__new__(Application)
         app.mask = None
         app.config = Mock(data={})
-        app.logger = logging.getLogger("screensnap")
+        app.logger = get_logger()
         notice = QWidget()
         notice.show()
         app.capture_notice = notice

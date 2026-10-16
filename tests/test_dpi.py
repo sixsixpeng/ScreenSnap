@@ -13,6 +13,7 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
                         ConfigManager, resolved_dir, AnnotationCanvas, shape,
                         EditorWindow, SelectionRects, StickerItem, StickerManager,
                         SettingsWindow, HotkeyEdit)
+from logger import get_logger
 
 
 class DpiTests(CoreTests):
@@ -1171,7 +1172,6 @@ class DpiTests(CoreTests):
             mask.close()
 
     def test_restart_capture_forwards_monitor_context_or_last_editor_region(self):
-        import logging
         from main import Application
 
         monitor = {"left": 1920, "top": 0, "width": 2560, "height": 1440}
@@ -1179,7 +1179,7 @@ class DpiTests(CoreTests):
         app = Application.__new__(Application)
         app.mask = Mock()
         app.config = Mock(data={"last_capture_rect": rect})
-        app.logger = logging.getLogger("screensnap")
+        app.logger = get_logger()
         app.start_capture = Mock()
         with patch("app.capture_flow.QTimer.singleShot") as schedule:
             app.restart_capture({"monitor": monitor, "rect": rect})

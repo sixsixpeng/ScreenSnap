@@ -314,7 +314,8 @@ class UiaTests(CoreTests):
             released = []
             mask._install_escape_fallback = lambda: (installed.append("esc"), "hook")[1]
             mask._release_escape_fallback = lambda: released.append("released")
-            with patch.object(mask_window, "ESCAPE_FALLBACK_ENABLED", True):
+            with patch.object(mask_window, "ESCAPE_FALLBACK_ENABLED", True), \
+                    patch("screenshot.keyboard_compatibility.fallback_state", return_value="enabled"):
                 with patch.object(mask, "isActiveWindow", return_value=False):
                     mask._sync_escape_fallback()
                 self.assertEqual(mask.escape_fallback, "hook")
@@ -587,8 +588,9 @@ class UiaTests(CoreTests):
                                      editor.toolbar.width())
                 self.assertGreaterEqual(button.height(), 40)
             drawing_buttons = list(editor.toolbar.tool_buttons.values())
-            drawing_buttons.append(next(button for button in editor.toolbar.findChildren(QToolButton)
-                                        if button.text() == "更多设置"))
+            # 直接引用设置按钮：其文本会随当前工具变化（"更多设置" / "记号笔设置" 等），
+            # 不能按固定文本查找（默认工具改为记号笔后即为"记号笔设置"）。
+            drawing_buttons.append(editor.toolbar.options_button)
             drawing_buttons.append(editor.toolbar.cursor_switch)
             rectangles = [QRect(button.mapTo(editor.toolbar, QPoint(0, 0)), button.size())
                           for button in drawing_buttons]
@@ -1090,6 +1092,27 @@ class UiaTests(CoreTests):
             self.assertEqual(window_elements.element_chain((1, 1), 3, use_uia=True),
                              [(0, 0, 1, 1)])
 
+    def test_element_chain_with_label_returns_pair_on_both_paths(self):
+        """with_label 时 UIA 与句柄回退两条路径都返回 (矩形链, 控件名)。"""
+        from core import window_elements
+
+        with patch("core.window_uia.element_chain", return_value=([(5, 5, 6, 6)], "按钮")), \
+                patch.object(window_elements, "collect",
+                             return_value=([(0, 0, 1, 1)], "Notepad")) as fallback:
+            self.assertEqual(
+                window_elements.element_chain((1, 1), 3, use_uia=True, with_label=True),
+                ([(5, 5, 6, 6)], "按钮"))
+            fallback.assert_not_called()
+        with patch("core.window_uia.element_chain", return_value=([], "")), \
+                patch.object(window_elements, "collect", return_value=([(0, 0, 1, 1)], "Notepad")):
+            self.assertEqual(
+                window_elements.element_chain((1, 1), 3, use_uia=True, with_label=True),
+                ([(0, 0, 1, 1)], "Notepad"))
+        # 句柄路径的名称压缩：折叠空白并截断，空值给空串。
+        self.assertEqual(window_elements._short_label("  Notepad  Class "), "Notepad Class")
+        self.assertEqual(window_elements._short_label("x" * 40), "x" * window_elements.ELEMENT_LABEL_MAX)
+        self.assertEqual(window_elements._short_label(None), "")
+
     def test_element_chain_survives_uia_flag(self):
         from core import window_elements
 
@@ -1510,6 +1533,50 @@ class UiaTests(CoreTests):
             rects = window_uia.element_chain((30, 30), 8, deepest_only=True)
         self.assertEqual(rects, [(10, 10, 50, 40)])
         climb.assert_not_called()
+
+    def test_uia_deepest_only_with_label_returns_control_name(self):
+        """deepest_only + with_label 时返回 (矩形链, 控件名)；默认形态仍是只返回矩形链。"""
+        from types import SimpleNamespace
+        from core import window_uia
+
+        class Control:
+            NativeWindowHandle = 7
+            BoundingRectangle = SimpleNamespace(left=10, top=10, right=50, bottom=40)
+            ControlTypeName = "ButtonControl"
+            Name = "确定"
+
+            def GetParentControl(self):
+                return None
+
+        def run(**kwargs):
+            options = {"deepest_only": True}
+            options.update(kwargs)
+            with patch.object(window_uia, "module", return_value=object()), \
+                    patch.object(window_uia, "top_window_at", return_value=999), \
+                    patch.object(window_uia, "physical_rect_of", return_value=(0, 0, 100, 100)), \
+                    patch.object(window_uia, "control_at", return_value=Control()):
+                return window_uia.element_chain((30, 30), 8, **options)
+
+        rects, label = run(with_label=True)
+        self.assertEqual(rects, [(10, 10, 50, 40)])
+        self.assertEqual(label, "按钮")
+        # 默认（with_label=False）保持老形态，老调用方不需要改动。
+        self.assertEqual(run(), [(10, 10, 50, 40)])
+        # 非 deepest_only 路径（父链上溯）在 with_label=True 时同样返回二元组，控件名给空串，
+        # 调用方不必按链层数分支解包。
+        layered = run(with_label=True, deepest_only=False)
+        self.assertEqual(layered, ([(10, 10, 50, 40)], ""))
+
+    def test_type_label_translates_known_types_and_strips_suffix(self):
+        from core.window_uia import type_label
+
+        self.assertEqual(type_label("ButtonControl"), "按钮")
+        self.assertEqual(type_label("TreeItemControl"), "树节点")
+        # 未收录的类型去掉 Control 后缀保留英文名；空值给空串。
+        self.assertEqual(type_label("FooBarControl"), "FooBar")
+        self.assertEqual(type_label("Pane"), "Pane")
+        self.assertEqual(type_label(""), "")
+        self.assertEqual(type_label(None), "")
 
     def test_uia_click_through_guards_and_caches_original_exstyle(self):
         """鼠标按下时不切换穿透（避免点击透传）；原始扩展样式按句柄只读一次。"""

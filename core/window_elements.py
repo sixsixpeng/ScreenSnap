@@ -11,6 +11,7 @@ import os
 from ctypes import wintypes
 
 from core.window_snap import top_window_at
+from logger import get_logger
 from logger.log_rate import log_every
 
 # 比 DEBUG 更细的级别，只放最啰嗦的清单。
@@ -25,32 +26,48 @@ MIN_SIZE = 8
 
 
 def element_chain(point, max_depth=3, use_uia=False, exclude_hwnd=None,
-                  debug_tree=False, deepest_only=False):
+                  debug_tree=False, deepest_only=False, with_label=False):
     """返回覆盖该点的窗口矩形链，由外到内；失败或非 Windows 时返回空列表。
 
     use_uia 为真时先用 UIA 识别自绘界面内部的控件，拿不到结果再退回窗口句柄。
     exclude_hwnd 是置顶遮罩句柄，查询瞬间让它命中穿透，UIA 才能越过它命中真实窗口。
     deepest_only=True 只取最内层（悬停高亮用），省掉父链上溯。
+    with_label=True 时返回 ``(矩形链, 控件名)``：UIA 路径给控件类型中文名
+    （如「按钮」），句柄回退路径给窗口类名（空则窗口标题）；默认只返回矩形链。
     """
     if os.name != "nt" or max_depth < 1:
-        return []
+        return ([], "") if with_label else []
     if use_uia:
         from core.window_uia import element_chain as uia_chain
 
-        chain = uia_chain(point, int(max_depth), exclude_hwnd, debug_tree=debug_tree,
-                          deepest_only=deepest_only)
+        result = uia_chain(point, int(max_depth), exclude_hwnd, debug_tree=debug_tree,
+                           deepest_only=deepest_only, with_label=with_label)
+        chain, label = result if with_label else (result, "")
         if chain:
-            return chain
+            return (chain, label) if with_label else chain
     try:
-        return collect(point, int(max_depth), use_uia)
+        return collect(point, int(max_depth), use_uia, with_label=with_label)
     except Exception as error:  # 系统 API 偶发失败，降级为不识别元素。
-        logging.getLogger("screensnap").warning("识别窗口元素失败: %s", error)
-        return []
+        get_logger().warning("识别窗口元素失败: %s", error)
+        return ([], "") if with_label else []
 
 
-def collect(point, max_depth, use_uia=False):
-    """按鼠标位置取最内层窗口，再逐级上溯到顶层窗口。"""
-    logger = logging.getLogger("screensnap")
+# 句柄路径带给尺寸标签的名称最大长度（窗口类名/标题偶尔很长，标签不能被撑出屏幕）。
+ELEMENT_LABEL_MAX = 24
+
+
+def _short_label(text):
+    """把类名/标题整理成标签里可用的短名称：去空白、截断；为空返回空串。"""
+    compact = " ".join(str(text or "").split())
+    return compact[:ELEMENT_LABEL_MAX]
+
+
+def collect(point, max_depth, use_uia=False, with_label=False):
+    """按鼠标位置取最内层窗口，再逐级上溯到顶层窗口。
+
+    with_label=True 时额外返回最内层窗口的类名（类名为空则用标题）作为控件名。
+    """
+    logger = get_logger()
     user32 = ctypes.windll.user32
     probe = wintypes.POINT(int(point[0]), int(point[1]))
     # 遮罩属于本进程且置顶，直接取它下面第一个覆盖鼠标的外部窗口。
@@ -60,9 +77,13 @@ def collect(point, max_depth, use_uia=False):
     if not handle:
         log_every(logger, logging.DEBUG, "element-miss", (probe.x, probe.y), 1.0,
                   "元素识别没有命中覆盖鼠标的外部窗口: 物理点(%d,%d)", probe.x, probe.y)
-        return []
+        return ([], "") if with_label else []
     root = user32.GetAncestor(handle, GA_ROOT) or handle
     chain = []
+    # 尺寸标签用的控件名：取**最内层**句柄的窗口类名（如 Notepad），类名为空再用标题。
+    label = ""
+    if with_label:
+        label = _short_label(class_of(user32, handle) or title_of(user32, handle))
     current = handle
     while current:
         rectangle = rectangle_of(user32, current)
@@ -87,7 +108,7 @@ def collect(point, max_depth, use_uia=False):
         log_every(logger, logging.DEBUG, "element-hint", None, 5.0,
                   "只有 1 层元素且未启用 UIA：这可能是浏览器、Qt、Java 等自绘界面，"
                   "开启设置中的“优先用无障碍识别 (UIA)”才能读到它内部的控件")
-    return candidates
+    return (candidates, label) if with_label else candidates
 
 
 def process_of(user32, handle):

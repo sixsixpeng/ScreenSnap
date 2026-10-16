@@ -30,6 +30,25 @@ def pixel_size_text(size):
     return f"{size[0]} x {size[1]}"
 
 
+def badge_text(size, origin=None, content="size", label=None):
+    """尺寸徽标（QLabel / 画布徽标）的显示文本。
+
+    `content` 由设置 `window_hover_badge_content` 决定：
+      · ``size``       —— 只显示「宽 x 高」（默认，与旧行为一致）；
+      · ``size_pos``   —— 追加元素的物理左上角坐标「宽 x 高  @ x,y」；
+      · ``size_class`` —— 追加悬停控件名「宽 x 高 · 按钮」。
+    `origin` 为物理左上角坐标；``size_pos`` 下缺失坐标时退回纯尺寸，不显示半截。
+    `label` 为控件名（UIA 控件类型中文名，未开 UIA 时为窗口类名）；
+    ``size_class`` 下缺失或为空时同样退回纯尺寸。
+    """
+    text = pixel_size_text(size)
+    if content == "size_pos" and origin is not None:
+        text = f"{text}  @ {int(origin[0])},{int(origin[1])}"
+    elif content == "size_class" and label:
+        text = f"{text}  · {label}"
+    return text
+
+
 def hint_texts(settings, position, selection, inline=False,
                toolbar_hidden=False, multi_select=False,
                right_capture=False):
@@ -48,7 +67,7 @@ def hint_texts(settings, position, selection, inline=False,
     picker_format_key = str(settings.get("capture_picker_format_shortcut", "X") or "X")
     picker_format = {"hex": "十六进制", "rgb": "rgb", "rgba": "rgba",
                      "hsl": "hsl", "all": "全部三行"}.get(
-        str(settings.get("picker_copy_format", "hex") or "hex").lower(), "十六进制")
+        str(settings.get("picker_copy_format", "all") or "all").lower(), "全部三行")
     fixed_key = str(settings.get("capture_custom_size_shortcut", "F"))
     quick = (str(settings.get("capture_quick_sticker_shortcut", "Space"))
              if settings.get("capture_quick_sticker_enabled", False) else "")
