@@ -3518,6 +3518,49 @@ class CaptureTests(CoreTests):
             self.assertEqual((point.x(), point.y()), (30, 40))
         finally:
             mask.close()
+
+    def test_picker_samples_the_requested_image_pixel_on_offset_desktops(self):
+        """取色按"图像下标"取样，不得再叠加一次桌面原点（2026-10-16 修复）。
+
+        回归：`sample_color_at()` 原先 `x = point.x() + bounds["left"]`，而两个调用方
+        （`sample_color_at_cursor`、`_mouse_event_position`）给的都是**已减去桌面原点**的下标
+        （与选区裁剪同口径）⇒ 虚拟桌面原点不为 0 时（副屏在上方/左侧）取样点整体平移，
+        取到的是别处的颜色（用户实测：副屏在上方时垂直偏 459px，取色一直"颜色不对"）；
+        单屏主屏在 (0,0) 时原点为 0，所以这个 bug 长期没暴露。
+        图案编码：像素 (x, y) = RGB(x, y, 0) ⇒ 由色值可直接反推取到的下标。
+        """
+        from config.config_manager import DEFAULTS
+        from PySide6.QtCore import QPoint
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import patch as patcher
+
+        image = Image.new("RGB", (40, 30))
+        for x in range(40):
+            for y in range(30):
+                image.putpixel((x, y), (x, y, 0))
+        settings = dict(DEFAULTS, magnifier=False, crosshair=False, sound=False)
+        for left, top in ((0, 0), (0, -8), (8, 0), (-12, -20)):
+            with self.subTest(origin=(left, top)):
+                bounds = {"left": left, "top": top, "width": 40, "height": 30}
+                with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+                    mask = MaskWindow(image, bounds, [bounds], settings)
+                try:
+                    picked = []
+                    mask.picker_copied.connect(picked.append)
+                    mask.sample_color_at(QPoint(20, 15))
+                    self.assertEqual(picked, ["#140f00"],     # RGB(20, 15, 0)：下标就是它自己
+                                     f"桌面原点 ({left},{top}) 时取色被平移了")
+                    # 快捷键路径：光标全局点 = 桌面原点 + 目标下标，取到的仍必须是指标那一点
+                    picked.clear()
+                    with patcher("screenshot.mask_window.QCursor.pos",
+                                 return_value=QPoint(left + 20, top + 15)), \
+                            patcher.object(mask, "focus_view_for_position", return_value=mask):
+                        mask.sample_color_at_cursor()
+                    self.assertEqual(picked, ["#140f00"],
+                                     f"桌面原点 ({left},{top}) 时光标取色被平移了")
+                finally:
+                    mask.close()
+
     def test_capture_action_targets_the_view_that_owns_the_selection(self):
         """两屏：选区在副屏时，主屏视图上的快捷键动作必须落到副屏视图（回归 E/S/F 跑错屏）。
 

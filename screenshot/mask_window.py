@@ -3396,12 +3396,21 @@ class MaskWindow(QWidget):
         return picked_color_text(self.settings, self, color)
 
     def sample_color_at(self, point):
-        """在给定的**局部物理点**取样（从 mousePressEvent 原样抽出，逻辑未改）。"""
-        x = point.x() + self.bounds["left"]
-        y = point.y() + self.bounds["top"]
+        """在给定的**图像下标（物理局部点）**取样。
+
+        两个调用方给的都是"图像下标"：`sample_color_at_cursor` 与 `_mouse_event_position`
+        都已经减掉了 `physical_bounds.topLeft()`（见 `DisplayMapper.physical_global_to_local`），
+        选区裁剪（`_selected_image`）也是同一口径。这里**不能再加一次桌面原点** ——
+        2026-10-16 修复：原先 `x = point.x() + bounds["left"]` 把下标又当全局点用，
+        虚拟桌面原点不为 0 时（副屏在上方/左侧）取样点整体平移 ⇒ 取到的是**偏移几百像素
+        处**的颜色（用户实测：副屏在上方时垂直偏 459px，取色颜色一直不对）；
+        单屏且主屏在 (0,0) 时原点为 0，所以这个 bug 一直没被发现。
+        """
+        x, y = int(point.x()), int(point.y())
         get_logger().debug(
-            "取色取样：视图=%s 鼠标物理点=(%d,%d) 取样点=(%d,%d) inline=%s",
-            self.monitor_rect.getRect(), point.x(), point.y(), x, y, self.inline_active())
+            "取色取样：视图=%s 图像下标=(%d,%d) 桌面原点=(%s,%s) inline=%s",
+            self.monitor_rect.getRect(), x, y, self.bounds["left"], self.bounds["top"],
+            self.inline_active())
         if 0 <= x < self.image.width and 0 <= y < self.image.height:
             r, g, b = self.image.convert("RGB").getpixel((x, y))
             color = "#%02x%02x%02x" % (r, g, b)
