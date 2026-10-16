@@ -19,17 +19,20 @@ def _hint_items(*args, **kwargs):
     return hint_items(*args, **kwargs)
 
 
-def _draw_magnifier(painter, image, point, bounds, source_point, grid, grid_color, size):
+def _draw_magnifier(painter, image, point, bounds, source_point, grid, grid_color, size,
+                    zoom=None, offset=None, crosshair=True, crosshair_color=None):
     from screenshot.magnifier_widget import paint_magnifier
 
     paint_magnifier(painter, image, point, bounds, source_point, grid=grid,
-                    grid_color=grid_color, size=size)
+                    grid_color=grid_color, size=size, zoom=zoom, offset=offset,
+                    crosshair=crosshair, crosshair_color=crosshair_color)
 
 
-def _magnifier_rect(point, bounds, size):
+def _magnifier_rect(point, bounds, size, offset=None):
     from screenshot.magnifier_widget import magnifier_rect
 
-    return magnifier_rect(point, bounds, size)
+    # offset 为 None 时由 magnifier_rect 内部回落到默认偏移（它自带 try/except 兜底）。
+    return magnifier_rect(point, bounds, size, offset=offset)
 
 
 def _bar_layout(metrics, area, anchor, items, per_line=0, cursor=None, gap=0):
@@ -102,11 +105,17 @@ class HintBarPreview(QWidget):
         frame = QRect()
         if data.get("magnifier", True):
             size = int(data.get("magnifier_size", 140) or 140)
-            frame = _magnifier_rect(cursor, inner, size)
+            offset = data.get("magnifier_offset", 32)
+            # 倍率 / 偏移距离 / 采样十字都取当前配置：改这几项时预览必须跟着动
+            # （2026-10-16 审查发现：原先只跟随尺寸与网格，改倍率/偏移/十字预览纹丝不动）。
+            frame = _magnifier_rect(cursor, inner, size, offset=offset)
             painter.setClipRect(inner)
             _draw_magnifier(painter, self._sample_image(), cursor, inner, cursor,
                             data.get("magnifier_grid", True),
-                            data.get("magnifier_grid_color", "#cccccc"), size)
+                            data.get("magnifier_grid_color", "#cccccc"), size,
+                            zoom=data.get("magnifier_zoom", 7.0), offset=offset,
+                            crosshair=bool(data.get("magnifier_crosshair_enabled", True)),
+                            crosshair_color=data.get("magnifier_crosshair_color", "#ff5252"))
             painter.setClipping(False)
         anchor = frame if not frame.isEmpty() else QRect(cursor.x() + 32, cursor.y() + 32, 8, 8)
         items = _hint_items(data, (cursor.x(), cursor.y()), (240, 160))
