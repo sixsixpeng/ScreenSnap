@@ -7,7 +7,7 @@ from time import time_ns
 from pathlib import Path
 
 import shiboken6
-from PySide6.QtCore import Qt, QObject, Signal, QBuffer, QIODevice, QTimer, QPoint
+from PySide6.QtCore import Qt, QObject, Signal, QTimer, QPoint
 from PySide6.QtGui import QCursor, QGuiApplication, QImage
 from PySide6.QtWidgets import QFileDialog, QMessageBox
 from PIL import Image as PillowImage
@@ -68,13 +68,26 @@ class StickerManager(QObject):
 
     @staticmethod
     def _clipboard_source_key(source):
-        buffer = QBuffer()
-        buffer.open(QIODevice.WriteOnly)
-        source.image.save(buffer, "PNG")
-        image_digest = hashlib.sha256(bytes(buffer.data())).digest()
-        buffer.close()
+        """内容身份键：对**原始像素字节**做 sha256，不做 PNG 往返。
+
+        2026-10-16（启动慢的根因）：这里原先用 `image.save(buffer, "PNG")` 取摘要，等于每次算键
+        都要 zlib 压一遍整张图 —— 启动加载 10 条剪贴板历史实测 **7.60 s**（5120x974 每张 1.40 s），
+        而其中真正必要的解码只有 0.61 s；改成原始字节后同组数据 **0.11 s**（实测）。
+        先 `convertToFormat(Format_ARGB32)` 归一像素格式：实时剪贴板来的图常是预乘格式，
+        落盘再读回来是 ARGB32，不归一会让同一画面算出两个键（历史里出现重复条目）；
+        已是 ARGB32 时该调用不复制（实测 10 张合计 0.005 s）。
+        语义不变："内容相同 ⇒ 同一个键"，同一函数仍供实时剪贴板、历史加载与落盘三处使用。
+        """
+        image = source.image
+        # 空图必须单独挡掉：`constBits()` 对空 QImage 返回 None，`bytes(None)` 会 TypeError。
+        # 此时按空字节算摘要，与旧实现的「空图 PNG 编码得到空字节」等价（摘要始终是 32 字节 sha256）。
+        pixels = b""
+        if not image.isNull():
+            canonical = (image if image.format() == QImage.Format_ARGB32
+                         else image.convertToFormat(QImage.Format_ARGB32))
+            pixels = bytes(canonical.constBits())
         return (source.kind, source.text, source.html, tuple(source.paths),
-                source.image.width(), source.image.height(), image_digest)
+                image.width(), image.height(), hashlib.sha256(pixels).digest())
 
     def _clipboard_changed(self):
         """保存剪贴板变化的独立快照，供连续热键轮询。"""

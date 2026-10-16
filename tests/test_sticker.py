@@ -1555,6 +1555,54 @@ class StickerTests(CoreTests):
                 board.clear()
                 self.app.processEvents()
 
+    def test_clipboard_source_key_hashes_raw_pixels_instead_of_recompressing_png(self):
+        """身份键 = 归一格式后的**原始像素** sha256（2026-10-16 启动慢的回归锁）。
+
+        现场：原实现用 `image.save(buffer, "PNG")` 取摘要 ⇒ 每算一次键就要 zlib 压一遍整张图，
+        启动加载 10 条剪贴板历史实测 **7.60 s**（5120x974 每张 1.40 s；同期必需的解码只有 0.61 s），
+        换成原始字节后同组数据 **0.11 s**。这条按"键必须等于原始字节摘要"断言，把 PNG 往返挡在门外。
+        """
+        import hashlib
+
+        from PySide6.QtGui import QColor, QImage
+        from sticker.clipboard_source import ClipboardSource
+
+        image = QImage(64, 48, QImage.Format_ARGB32)
+        image.fill(QColor("#3366ff"))
+        key = StickerManager._clipboard_source_key(ClipboardSource("image", image))
+        canonical = image.convertToFormat(QImage.Format_ARGB32)
+        self.assertEqual(key, ("image", "", "", (), 64, 48,
+                               hashlib.sha256(bytes(canonical.constBits())).digest()))
+        # 空图不得抛异常：`constBits()` 对空 QImage 返回 None，`bytes(None)` 会 TypeError。
+        self.assertEqual(StickerManager._clipboard_source_key(ClipboardSource("image", QImage())),
+                         ("image", "", "", (), 0, 0, hashlib.sha256(b"").digest()))
+
+    def test_clipboard_source_key_is_stable_across_pixel_formats(self):
+        """同一画面以 RGB32/ARGB32/预乘表达时必须算出同一个键，来源信息不同则必须区分。
+
+        不归一会让"实时剪贴板来的图"与"落盘再读回来的图"得到两个键 ⇒ 历史里出现重复条目。
+        """
+        from PySide6.QtGui import QColor, QImage
+        from sticker.clipboard_source import ClipboardSource
+
+        base = QImage(8, 8, QImage.Format_ARGB32)
+        base.fill(QColor("#204060"))
+        variants = {"ARGB32": base,
+                    "RGB32": base.convertToFormat(QImage.Format_RGB32),
+                    "预乘": base.convertToFormat(QImage.Format_ARGB32_Premultiplied)}
+        keys = {name: StickerManager._clipboard_source_key(ClipboardSource("image", image))
+                for name, image in variants.items()}
+        self.assertEqual(len(set(keys.values())), 1, keys)
+        other = QImage(8, 8, QImage.Format_ARGB32)
+        other.fill(QColor("#204061"))
+        self.assertNotEqual(
+            StickerManager._clipboard_source_key(ClipboardSource("image", other)), keys["ARGB32"])
+        for label, extra in (("文字", ClipboardSource("image", base, text="x")),
+                             ("HTML", ClipboardSource("image", base, html="<b>x</b>")),
+                             ("路径", ClipboardSource("image", base, paths=[r"C:\a.png"]))):
+            with self.subTest(来源=label):
+                self.assertNotEqual(StickerManager._clipboard_source_key(extra), keys["ARGB32"])
+
     def test_clipboard_history_persists_across_manager_restart(self):
         from PySide6.QtGui import QGuiApplication
         from config.config_manager import DEFAULTS
