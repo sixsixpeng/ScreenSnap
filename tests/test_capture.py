@@ -160,6 +160,15 @@ class CaptureTests(CoreTests):
         notification = CaptureNotification(saved, title="图片已保存", detail="capture.png")
         self.assertEqual(notification.preview.pixmap().toImage().pixelColor(15, 10).name(), "#23bc58")
         notification.close()
+        # 2026-10-16（通知扩展检查）：竖长/小图时预览控件会被标题或路径行撑宽，
+        # pixmap 必须居中 —— 否则贴在左边、右边空一大块，看上去像渲染坏了。
+        tall = QImage(20, 200, QImage.Format_RGB32)
+        tall.fill(QColor("#23bc58"))
+        notification = CaptureNotification(tall, title="图片已保存", detail="capture.png")
+        stretched = notification.preview.width() > notification.preview.pixmap().width()
+        self.assertTrue(stretched, "该尺寸下预览控件本应比 pixmap 宽（用例前提）")
+        self.assertTrue(bool(notification.preview.alignment() & Qt.AlignHCenter), "pixmap 必须水平居中")
+        notification.close()
 
     def test_capture_notification_async_toast_failure_shows_local_preview(self):
         from ui.capture_notification import CaptureNotification

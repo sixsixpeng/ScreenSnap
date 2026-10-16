@@ -44,6 +44,9 @@ class CaptureNotification(QWidget):
         layout.addWidget(heading)
         self.preview = QLabel(self)
         self.preview.setAttribute(Qt.WA_TransparentForMouseEvents)
+        # 缩略图比标题/路径行窄时（竖长截图、小图）标签会被布局拉到整窗宽：不设对齐的话
+        # pixmap 贴在左边、右边留一大块空白，看上去像渲染坏了（2026-10-16 通知扩展检查发现）。
+        self.preview.setAlignment(Qt.AlignCenter)
         if isinstance(image, QImage):
             pixmap = QPixmap.fromImage(image).scaled(240, 140, Qt.KeepAspectRatio, Qt.SmoothTransformation)
         else:
