@@ -13,6 +13,7 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
                         ConfigManager, resolved_dir, AnnotationCanvas, shape,
                         EditorWindow, SelectionRects, StickerItem, StickerManager,
                         SettingsWindow, HotkeyEdit)
+from logger import get_logger
 
 
 class ConfigTests(CoreTests):
@@ -806,7 +807,7 @@ class ConfigTests(CoreTests):
         with tempfile.TemporaryDirectory() as folder:
             manager = ConfigManager(Path(folder) / "settings.json")
             settings = SettingsWindow(manager)
-            directory = settings.page("日志").findChild(FilePathEdit)
+            directory = settings.page("日志与诊断").findChild(FilePathEdit)
             directory.input.setText(str(Path(folder) / "logs"))
             directory.input.editingFinished.emit()
             settings.flush_persist()
@@ -1235,7 +1236,7 @@ class ConfigTests(CoreTests):
     def test_option_panel_rows_do_not_cross_tools(self):
         """回归（2026-10-14 用户报告）：文字「更多设置」最下面的「文字高度」与橡皮擦的
         「涂抹模式（自由笔刷）」被放进同一格 ⇒ 文字弹层里两行叠在一起、还带着橡皮擦的 tooltip。
-        现在自由笔刷独占空闲行 14，且行 33（椭圆填充色）不再串进橡皮擦弹层。"""
+        现在自由笔刷独占空闲行 14（0–36 中唯一未被任何工具占用的行），且行 33（椭圆填充色）不再串进橡皮擦弹层。"""
         from config.config_manager import DEFAULTS
         from editor.toolbar_widget import ToolbarWidget
 
@@ -1471,6 +1472,81 @@ class ConfigTests(CoreTests):
         self.assertIn("editor_toolbar_shadow_strength", dropped)
         self.assertIn("editor_toolbar_shadow_color", dropped)
 
+    def test_config_save_logs_each_key_change_with_description(self):
+        """2026-10-16：配置落盘逐键记录「键名 = 旧值 → 新值（功能说明）」，不再只笼统记一条。"""
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            manager.set_description_provider(
+                lambda key: "编辑器 · 记号笔线宽" if key == "marker_width" else "")
+            manager.data["marker_width"] = manager.data["marker_width"] + 3
+            with self.assertLogs("screensnap", level="INFO") as captured:
+                manager.save()
+            messages = "\n".join(captured.output)
+            self.assertIn("配置更新: marker_width", messages)
+            self.assertIn("编辑器 · 记号笔线宽", messages)
+            # 字典型（hotkeys）逐子键展开记录，而不是整段 dict。
+            manager.data["hotkeys"]["capture"] = "ctrl+shift+f9"
+            with self.assertLogs("screensnap", level="INFO") as subkeys:
+                manager.save()
+            self.assertIn("配置更新: hotkeys.capture", "\n".join(subkeys.output))
+            # 没有改动时不再产生「配置更新」行。
+            import logging
+            records: list[str] = []
+            handler = logging.Handler()
+            handler.emit = lambda record: records.append(record.getMessage())
+            target = logging.getLogger("screensnap")
+            target.addHandler(handler)
+            try:
+                manager.save()
+            finally:
+                target.removeHandler(handler)
+            self.assertFalse([line for line in records if "配置更新" in line], records)
+
+    def test_new_zoom_offset_ruler_and_badge_settings_drive_drawing(self):
+        """2026-10-16：放大镜倍率/偏移、标尺刻度、尺寸标签内容等新键真正驱动绘制，而非只看默认值。"""
+        from screenshot.hint_items import badge_text
+        from screenshot.magnifier_widget import magnifier_rect, sample_size
+
+        # 倍率：采样区域 = 尺寸 ÷ 倍率（倍率被夹在 3–12×）。
+        self.assertEqual(sample_size(140, 7.0), 20)
+        self.assertEqual(sample_size(140, 3.0), 47)
+        self.assertEqual(sample_size(140, 12.0), 12)
+        self.assertEqual(sample_size(140, 99.0), sample_size(140, 12.0))
+
+        # 偏移距离：越大离光标越远（同一光标/尺寸下 x 单调变大）。
+        point, area = QPoint(200, 200), QRect(0, 0, 1200, 900)
+        near = magnifier_rect(point, area, 100, offset=8)
+        far = magnifier_rect(point, area, 100, offset=80)
+        self.assertLess(near.x(), far.x())
+        self.assertLess(near.y(), far.y())
+
+        # 尺寸标签内容：size 只给宽高，size_pos 追加物理左上角坐标，size_class 追加控件名。
+        self.assertEqual(badge_text((120, 32)), "120 x 32")
+        self.assertEqual(badge_text((120, 32), (480, 360), "size"), "120 x 32")
+        self.assertEqual(badge_text((120, 32), (480, 360), "size_pos"), "120 x 32  @ 480,360")
+        # size_pos 缺坐标时退回纯尺寸，不显示半截。
+        self.assertEqual(badge_text((120, 32), None, "size_pos"), "120 x 32")
+        self.assertEqual(badge_text((120, 32), None, "size_class", label="按钮"),
+                         "120 x 32  · 按钮")
+        # size_class 缺控件名时同样退回纯尺寸。
+        self.assertEqual(badge_text((120, 32), None, "size_class"), "120 x 32")
+        self.assertEqual(badge_text((120, 32), None, "size_class", label=""), "120 x 32")
+
+    def test_editor_page_auxiliary_previews_render(self):
+        """编辑器页的透明棋盘/编辑区边框/工具栏光晕三块新预览要能真正渲染出内容。"""
+        with tempfile.TemporaryDirectory() as folder:
+            settings = SettingsWindow(ConfigManager(Path(folder) / "settings.json"))
+            settings.show()
+            self.app.processEvents()
+            editor = settings.page("编辑器")
+            aux = [preview for preview in editor.previews
+                   if preview.kind in ("transparent", "editor_border", "toolbar_shadow")]
+            self.assertEqual({preview.kind for preview in aux},
+                             {"transparent", "editor_border", "toolbar_shadow"})
+            for preview in aux:
+                self.assertFalse(preview.grab().isNull(), preview.kind)
+            settings.close()
+
     def test_settings_pages_group_related_controls_and_scroll(self):
         from PySide6.QtWidgets import QGroupBox, QScrollArea
 
@@ -1483,29 +1559,45 @@ class ConfigTests(CoreTests):
                 ("截图", "截图后", ("inline_edit", "capture_after_selection",
                                   "capture_fullscreen_action", "capture_monitor_action",
                                   "capture_repeat_action")),
-                ("截图", "定位辅助", ("crosshair", "crosshair_color", "crosshair_width",
-                                  "crosshair_mode", "crosshair_contrast_threshold",
-                                  "crosshair_contrast_dark_bg_color",
-                                  "crosshair_contrast_light_bg_color",
-                                  "crosshair_contrast_halo_width",
-                                  "crosshair_invert_strength", "crosshair_invert_gap",
-                                  "crosshair_invert_halo_enabled",
-                                  "magnifier_size", "magnifier_grid")),
+                ("截图", "十字线", ("crosshair", "crosshair_color", "crosshair_width",
+                              "crosshair_mode", "crosshair_contrast_threshold",
+                              "crosshair_contrast_dark_bg_color",
+                              "crosshair_contrast_light_bg_color",
+                              "crosshair_contrast_halo_width",
+                              "crosshair_invert_strength", "crosshair_invert_gap",
+                              "crosshair_invert_halo_enabled")),
+                ("截图", "放大镜", ("magnifier_size", "magnifier_zoom", "magnifier_offset",
+                                 "magnifier_grid", "magnifier_crosshair_enabled",
+                                 "magnifier_crosshair_color")),
+                ("截图", "标尺", ("ruler_enabled", "ruler_step", "ruler_major_multiple",
+                               "ruler_color")),
                 ("截图", "截图快捷操作", ("capture_quick_sticker_enabled", "capture_quick_sticker_shortcut",
                                      "capture_save_shortcut", "capture_custom_size_shortcut",
                                      "capture_recapture_shortcut", "capture_window_edit_shortcut",
                                      "capture_multi_select_shortcut", "capture_multi_edit_action",
                                      "capture_copy_shortcut", "capture_toolbar_hide_shortcut")),
                 ("截图", "操作提示", ("capture_hints_enabled", "capture_hint_order",
-                                  "capture_hint_per_line", "capture_hint_gap",
-                                  "intruder_warning_enabled",
-                                  "intruder_warning_items", "hint_bar_style",
-                                  "hint_bar_warning_style")),
-                ("截图", "窗口与控件识别", ("window_detection", "window_auto_select", "window_hover_detect",
-                                      "window_hover_color", "window_hover_opacity", "window_uia_detect",
-                                      "window_hover_interval", "element_depth",
-                                      "window_hover_badge_hide_margin")),
-                ("截图", "遮罩与选区", ("mask_color", "mask_opacity", "selection_border_color", "anchor_style")),
+                                  "capture_hint_per_line", "capture_hint_gap")),
+                ("截图", "选区内含本程序窗口时提示", ("intruder_warning_enabled",
+                                          "intruder_warning_items")),
+                ("截图", "提示条外观", ("hint_bar_style",)),
+                ("截图", "警示条外观", ("hint_bar_warning_style",)),
+                ("截图", "窗口与控件识别", ("window_detection", "window_auto_select", "window_hover_detect")),
+                ("截图", "候选框外观", ("window_hover_fill_mode", "window_hover_color",
+                                    "window_hover_opacity", "window_hover_border_color",
+                                    "window_hover_border_width")),
+                ("截图", "数字尺寸显示", ("window_hover_text_color", "window_hover_badge_color",
+                                     "window_hover_font_size", "window_hover_badge_hide_margin",
+                                     "window_hover_badge_content")),
+                ("截图", "无障碍识别与精度", ("window_uia_detect", "window_hover_interval",
+                                       "element_depth", "uia_slow_cooldown")),
+                ("截图", "遮罩与选区", ("mask_color", "mask_opacity", "selection_border_color",
+                                   "selection_border_width", "anchor_style", "anchor_color",
+                                   "anchor_corner_size", "anchor_edge_size")),
+                # 2026-10-16（用户要求）：「键盘兼容性」由截图页移到快捷键页（含对照面板）。
+                ("快捷键", "键盘兼容性", ("capture_toolbar_hotkey_fallback",
+                                   "capture_quick_sticker_hotkey_fallback",
+                                   "capture_escape_hotkey_fallback")),
                 ("剪贴板贴图", "文字贴图", ("text_sticker_font", "text_sticker_font_size")),
                 ("剪贴板贴图", "颜色贴图", ("color_sticker_width", "color_sticker_height")),
                 ("剪贴板贴图", "文件贴图", ("file_sticker_path", "file_sticker_width")),
@@ -1519,7 +1611,7 @@ class ConfigTests(CoreTests):
                                     "rect_corner_enabled", "rect_corner_radius")),
                 ("编辑器", "椭圆", ("ellipse_color", "ellipse_width", "ellipse_style")),
                 ("编辑器", "箭头", ("arrow_color", "arrow_style", "arrow_width")),
-                ("编辑器", "荧光笔", ("marker_color", "marker_width")),
+                ("编辑器", "记号笔", ("marker_color", "marker_width")),
                 ("编辑器", "文字", ("text_color", "font", "font_size", "line_spacing")),
                 ("编辑器", "橡皮擦", ("eraser_width",)),
                 ("编辑器", "马赛克", ("mosaic_mode", "mosaic_size")),
@@ -1536,9 +1628,11 @@ class ConfigTests(CoreTests):
                     control = page.controls.get(key) or page.color_buttons[key]
                     self.assertTrue(box.isAncestorOf(control), (title, key))
             preview_groups = {
-                "截图": {"assist": "定位辅助", "hover": "窗口与控件识别",
+                "截图": {"magnifier": "放大镜", "crosshair": "十字线", "ruler": "标尺",
+                         "hover": "窗口与控件识别", "hover_box": "候选框外观",
+                         "hover_badge": "数字尺寸显示",
                          "selection": "遮罩与选区", "hints": "操作提示",
-                         "hint_style": "操作提示", "hint_warning_style": "操作提示"},
+                         "hint_style": "提示条外观", "hint_warning_style": "警示条外观"},
                 "剪贴板贴图": {"text": "文字贴图", "color": "颜色贴图", "file": "文件贴图"},
             }
             for page_title, kinds in preview_groups.items():
@@ -1561,7 +1655,8 @@ class ConfigTests(CoreTests):
                     screenshot_previews = {preview.kind: preview
                                for preview in settings.page("截图").previews}
                     self.assertEqual(set(screenshot_previews),
-                                     {"assist", "hover", "selection", "hints",
+                                     {"magnifier", "crosshair", "ruler", "hover", "hover_box",
+                                      "hover_badge", "selection", "hints",
                                       "hint_style", "hint_warning_style"})
                     self.assertTrue(all(not preview.grab().isNull()
                             for preview in screenshot_previews.values()))
@@ -1597,6 +1692,8 @@ class ConfigTests(CoreTests):
             self.assertFalse(archive_day.isChecked())
             for index in range(settings.pages.count()):
                 page = settings.pages.widget(index)
+                if not page.controls:
+                    continue          # 导航分组标题的占位页，不参与分组契约检查
                 self.assertTrue(page.findChildren(QGroupBox), index)
                 self.assertIsNotNone(page.findChild(QScrollArea))
             editor_scroll = settings.page("编辑器").findChild(QScrollArea)
@@ -1760,6 +1857,8 @@ class ConfigTests(CoreTests):
             manager = ConfigManager(Path(folder) / "settings.json")
             settings = SettingsWindow(manager)
             editor = EditorWindow(Image.new("RGB", (40, 30), "white"), manager.data)
+            # 默认标注工具已改为记号笔；显式切到画笔，"当前工具颜色"才对应 pen_color。
+            editor.toolbar.tool_buttons["pen"].click()
             editor.pen_color_changed.connect(settings.set_pen_color)
             with patch("ui.widgets.color_button.color_dialog") as dialog_factory:
                 dialog_factory.return_value.exec.return_value = QColorDialog.Accepted
@@ -2086,6 +2185,7 @@ class ConfigTests(CoreTests):
         self.assertEqual(actions, ["capture"])
 
     def test_hotkey_suppression_only_applies_to_capture_actions(self):
+        import time
         from hotkey.hotkey_manager import HotkeyManager
 
         manager = HotkeyManager()
@@ -2097,13 +2197,19 @@ class ConfigTests(CoreTests):
 
         with patch("hotkey.hotkey_manager.keyboard.add_hotkey", side_effect=add_hotkey), \
                 patch("hotkey.hotkey_manager.keyboard.remove_hotkey"):
-            manager.install({"enabled": True, "suppress_capture": True,
-                             "bindings": {"capture": "f1", "repeat": "f2",
-                                          "fullscreen": "f3", "monitor": "f4",
-                                          "paste": "f5"}})
-            self.assertEqual(registered, [("f1", True), ("f2", True),
-                                          ("f3", True), ("f4", True), ("f5", False)])
-            manager.stop()
+            try:
+                # 经正式入口生成有效代次，不绕过安装中撤销所需的生命周期合同。
+                manager.register({"hotkeys_enabled": True, "capture_hotkey_suppress": True,
+                                  "hotkeys": {"capture": "f1", "repeat": "f2",
+                                              "fullscreen": "f3", "monitor": "f4", "paste": "f5"}})
+                deadline = time.monotonic() + 3
+                while manager._registration_completed != manager._registration_requested and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(manager._registration_state, "completed")
+                self.assertEqual(registered, [("f1", True), ("f2", True),
+                                             ("f3", True), ("f4", True), ("f5", False)])
+            finally:
+                manager.stop()
 
     def test_selected_shape_fill_settings_update_live(self):
         from config.config_manager import DEFAULTS
@@ -2233,7 +2339,7 @@ class ConfigTests(CoreTests):
             {"crosshair_mode": "solid", "crosshair_adaptive": True})["crosshair_mode"], "solid")
 
         # 2) 校验：默认值与各样式参数的越界。
-        self.assertEqual(validate({})["crosshair_mode"], "contrast")
+        self.assertEqual(validate({})["crosshair_mode"], "invert")
         with self.assertRaises(ValueError):
             validate({"crosshair_mode": "unknown"})
         for bad in ({"crosshair_contrast_threshold": 256},
@@ -2249,11 +2355,12 @@ class ConfigTests(CoreTests):
             config = ConfigManager(Path(folder) / "settings.json")
             page = ScreenshotPage(config, config.save)
             group = page.controls["crosshair_mode"]
-            self.assertTrue(group._buttons["contrast"].isChecked(), "默认应是双色描边 ✗")
+            # 2026-10-16（用户要求）：默认样式改为「逐像素反色」。
+            self.assertTrue(group._buttons["invert"].isChecked(), "默认应是逐像素反色 ✗")
             self.assertTrue(page.controls["crosshair_color"].isHidden(),
-                            "双色描边下「十字线颜色」应整行隐藏 ✗")
-            self.assertFalse(page.controls["crosshair_contrast_halo_width"].isHidden())
-            self.assertTrue(page.controls["crosshair_invert_strength"].isHidden())
+                            "逐像素反色下「十字线颜色」应整行隐藏 ✗")
+            self.assertTrue(page.controls["crosshair_contrast_halo_width"].isHidden())
+            self.assertFalse(page.controls["crosshair_invert_strength"].isHidden())
             group._buttons["solid"].click()
             self.assertFalse(page.controls["crosshair_color"].isHidden(),
                              "单色下「十字线颜色」应显示 ✗")
@@ -2266,13 +2373,13 @@ class ConfigTests(CoreTests):
             self.assertTrue(page.controls["crosshair_color"].isHidden())
             self.assertEqual(ConfigManager(config.path).data["crosshair_mode"], "invert")
 
-            preview = next(item for item in page.previews if item.kind == "assist")
+            preview = next(item for item in page.previews if item.kind == "crosshair")
             # 钉死预览尺寸：滚动区会把内容控件拉到视口宽度，size 不定断言点就会落进别的色块。
             preview.setFixedSize(260, 100)
             # 线宽调到 3：中心像素被线条完全覆盖，避免 1px 抗锯齿半透混合让断言依赖覆盖率的细节。
             page.controls["crosshair_width"].setValue(3)
             area = preview.rect().adjusted(1, 1, -1, -1)
-            # 断言点取竖线上的 (center.x, top+8)：避开放大镜镜片（中心 ±27px）与三条灰色横线。
+            # 断言点取竖线上的 (center.x, top+8)：十字线预览顶部没有其它色块，采样即竖线本身。
             line_x, line_y = int(area.center().x()), int(area.top()) + 8
 
             def crosshair_pixel():
@@ -2790,6 +2897,7 @@ class ConfigTests(CoreTests):
             app.qt = self.app
             app.tray = Mock()
             app.hotkey_recording = True
+            app.hotkeys = Mock()
             app.editors = [window]
             app.stickers = Mock()
             config.data.update(arrow_width=17, arrow_style="double_open", annotation_tool="arrow",
@@ -3402,12 +3510,11 @@ class ConfigTests(CoreTests):
             self.assertEqual(schedule.call_args.args[0], 150)
 
     def test_capture_delay_setting_adds_wait_before_capture(self):
-        import logging
         from main import Application
 
         app = Application.__new__(Application)
         app.mask = None
-        app.logger = logging.getLogger("screensnap")
+        app.logger = get_logger()
         app.config = Mock(data={"last_capture_rect": [1, 2, 3, 4], "capture_delay": 800})
         app.show_mask = Mock()
         with patch("app.capture_flow.QTimer.singleShot") as schedule:
@@ -3564,6 +3671,13 @@ class ConfigTests(CoreTests):
                     "editor_checker_tile_size": 8, "editor_text_click_delay": 180,
                     "window_hover_reuse_radius": 8, "uia_read_budget": 180,
                     "uia_children_limit": 128, "uia_slow_seconds": 0.4,
+                    "uia_slow_cooldown": 1.0,
+                    "magnifier_zoom": 7.0, "magnifier_offset": 32,
+                    "ruler_step": 10, "ruler_major_multiple": 5,
+                    "anchor_color": "#00d7aa", "anchor_corner_size": 6,
+                    "anchor_edge_size": 6,
+                    "selection_border_width": 1, "window_hover_badge_content": "size_class",
+                    "magnifier_crosshair_enabled": True, "magnifier_crosshair_color": "#ff5252",
                     "cache_clear_clipboard": True, "cache_clear_toast": True,
                     "cache_clear_sticker": True, "cache_cleanup_timing": "off"}
         validated = validate(dict(DEFAULTS))
@@ -3576,11 +3690,25 @@ class ConfigTests(CoreTests):
                     ("editor_overcanvas_mode", "stretch"), ("editor_checker_tile_size", 3),
                     ("editor_text_click_delay", 10), ("window_hover_reuse_radius", 21),
                     ("uia_read_budget", 10), ("uia_children_limit", 999),
-                    ("uia_slow_seconds", 5), ("cache_clear_clipboard", "yes"),
+                    ("uia_slow_seconds", 5), ("uia_slow_cooldown", 9),
+                    ("magnifier_offset", 4), ("magnifier_offset", 81),
+                    ("ruler_step", 30), ("ruler_major_multiple", 3),
+                    ("anchor_color", "teal"), ("anchor_corner_size", 3),
+                    ("anchor_corner_size", 22), ("anchor_edge_size", 3),
+                    ("anchor_edge_size", 22),
+                    ("selection_border_width", 5),
+                    ("magnifier_crosshair_color", "red"),
+                    ("window_hover_badge_content", "both"),
+                    ("cache_clear_clipboard", "yes"),
                     ("cache_cleanup_timing", "later"))
         for key, bad in rejected:
             with self.assertRaises(ValueError, msg=key):
                 validate({"hotkeys": DEFAULTS["hotkeys"], key: bad})
+        # size_class 是合法取值，不能被判非法。
+        self.assertEqual(
+            validate({"hotkeys": DEFAULTS["hotkeys"],
+                      "window_hover_badge_content": "size_class"})["window_hover_badge_content"],
+            "size_class")
 
     def test_every_setting_has_an_entry_in_settings_window(self):
         from config.config_manager import DEFAULTS
@@ -3673,7 +3801,9 @@ class ConfigTests(CoreTests):
             page = settings.page("编辑器")
             previews = {preview.kind: preview for preview in page.previews}
             self.assertEqual(sorted(previews),
-                             ["arrow", "crop", "ellipse", "eraser", "marker", "mosaic", "pen", "picker", "rect", "sequence", "text"])
+                             ["arrow", "crop", "editor_border", "ellipse", "eraser", "marker",
+                              "mosaic", "pen", "picker", "rect", "sequence", "text",
+                              "toolbar_shadow", "transparent"])
             page.controls["font_size"].setValue(42)
             text = previews["text"]
             self.assertIsNone(text.scene)
@@ -3696,14 +3826,39 @@ class ConfigTests(CoreTests):
                 self.assertGreater(len(built.items()), 1, kind)
             settings.close()
 
+    def test_all_settings_page_previews_render(self):
+        """设置页的每个预览都必须能渲染。
+
+        2026-10-16 实机崩溃（「选择标注 → 取色 → 更多设置」）：`AnnotationPreview` 的 picker
+        分支用了未导入的 `QRect`，`paintEvent` 抛 NameError ⇒ PySide6 直接终止进程（0xC0000409），
+        既不是测试失败、也留不下 Python 栈。这里遍历所有页的预览各渲染一次，把整类问题挡在提交前。
+        """
+        with tempfile.TemporaryDirectory() as folder:
+            settings = SettingsWindow(ConfigManager(Path(folder) / "settings.json"))
+            settings.show()
+            self.app.processEvents()
+            rendered = 0
+            for index in range(settings.pages.count()):
+                page = settings.pages.widget(index)
+                for preview in getattr(page, "previews", []):
+                    preview.resize(320, 120)
+                    label = (settings.navigation.item(index).text(),
+                             getattr(preview, "kind", type(preview).__name__))
+                    self.assertFalse(preview.grab().isNull(), label)
+                    rendered += 1
+            self.assertGreater(rendered, 0, "设置页应至少有一块预览")
+            settings.close()
+
     def test_settings_navigation_page_order(self):
         with tempfile.TemporaryDirectory() as folder:
             settings = SettingsWindow(ConfigManager(Path(folder) / "settings.json"))
             titles = [settings.navigation.item(index).text()
                       for index in range(settings.navigation.count())]
+            # 2026-10-16（用户要求）：「快捷键」移到「启动与通知」与「截图」之间；原独立页
+            # 「热键健康与恢复」已并入快捷键页，末段不可选分组标题随之取消；「常规」改名为「启动与通知」。
             self.assertEqual(titles, [
-                "常规", "快捷键", "截图", "编辑器", "贴图", "剪贴板贴图",
-                "主题与外观", "保存与输出", "日志",
+                "启动与通知", "快捷键", "截图", "编辑器", "贴图", "剪贴板贴图", "保存与输出",
+                "主题与外观", "日志与诊断",
             ])
             settings.close()
 
@@ -3913,7 +4068,7 @@ class ConfigTests(CoreTests):
                 self.assertEqual(
                     screenshot_page.controls["capture_gap_fill"].value(),
                     "transparent")
-                self.assertTrue(settings.page("常规").controls["sound"].isChecked())
+                self.assertTrue(settings.page("启动与通知").controls["sound"].isChecked())
                 self.assertTrue(settings.page("编辑器").controls["rect_corner_enabled"].isChecked())
                 sticker_page = settings.page("贴图")
                 self.assertFalse(sticker_page.controls["sticker_shadow_enabled"].isChecked())
@@ -4110,7 +4265,6 @@ class ConfigTests(CoreTests):
         回归：闸门原先跑在 configure_logging 之前，两行提示只打到 stderr、没有格式、
         也不进日志文件；且 core/path_utils 用的是 __name__ logger，不属于 screensnap。
         """
-        import logging
 
         from config.config_manager import DEFAULTS
         from core.path_utils import clear_data_directory
@@ -4130,8 +4284,8 @@ class ConfigTests(CoreTests):
                     lock_path.write_text("locked")
                     with lock_path.open("r+"):
                         clear_data_directory()          # 应记录「跳过被占用条目」
-                logging.getLogger("screensnap").warning("版本变化提示占位")
-                for handler in logging.getLogger("screensnap").handlers:
+                get_logger().warning("版本变化提示占位")
+                for handler in get_logger().handlers:
                     handler.flush()
                 text = (log_dir / "app.log").read_text(encoding="utf-8")
             finally:

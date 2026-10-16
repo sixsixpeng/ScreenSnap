@@ -1,14 +1,15 @@
 """设置表单共享控件与提示文案绑定。"""
 
 import copy
-import logging
 
 from PySide6.QtCore import QSignalBlocker, Signal
+from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (QWidget, QFormLayout, QCheckBox, QSpinBox, QDoubleSpinBox,
                                QLineEdit, QComboBox, QGroupBox, QHBoxLayout, QScrollArea,
                                QVBoxLayout, QPushButton, QStyle, QRadioButton, QButtonGroup,
-                               QGridLayout)
+                               QGridLayout, QKeySequenceEdit)
 
+from logger import get_logger
 from ui.widgets.color_button import ColorButton
 from ui.widgets.file_path_edit import FilePathEdit
 
@@ -119,7 +120,7 @@ class SettingsPage(QWidget):
         self.sync_controls()
         self.changed()
         self.refresh_previews()
-        logging.getLogger("screensnap").info("恢复本页默认设置: %s 页 %d 项",
+        get_logger().info("恢复本页默认设置: %s 页 %d 项",
                                             type(self).__name__, len(set(keys)))
 
     def sync_controls(self):
@@ -139,6 +140,8 @@ class SettingsPage(QWidget):
                     widget.set_value(value or "")
                 elif isinstance(widget, QLineEdit):
                     widget.setText(str(value or ""))
+                elif isinstance(widget, QKeySequenceEdit):
+                    widget.setKeySequence(QKeySequence(str(value or "")))
                 elif hasattr(widget, "set_value"):
                     # 复合控件（如提示项列表）自带 set_value，用来把配置写回界面。
                     widget.set_value(copy.deepcopy(value))
@@ -157,6 +160,8 @@ class SettingsPage(QWidget):
     def bind(self, key, widget, signal, getter, label, help_text):
         """信号到达时读取控件的最新值，而非创建时的默认值。"""
         widget.setToolTip(help_text)
+        # 记录界面标签：配置变更日志用它把键名翻译成用户看得懂的功能说明。
+        widget._setting_label = label
         self.controls[key] = widget
         self.form.addRow(label, widget)
         signal.connect(lambda *args: self.update_value(key, getter()))
@@ -214,6 +219,9 @@ class SettingsPage(QWidget):
         container.setLayout(row)
         box.setToolTip(help_text)
         spin.setToolTip(help_text)
+        # 记录界面标签：配置变更日志用它把键名翻译成用户看得懂的功能说明。
+        box._setting_label = label
+        spin._setting_label = label
         self.controls[check_key] = box
         self.controls[number_key] = spin
         self.form.addRow(label, container)
@@ -250,6 +258,8 @@ class SettingsPage(QWidget):
                 on_change(value)
 
         widget = RadioRow(options, self.config.data[key], help_text, change)
+        # 记录界面标签：配置变更日志用它把键名翻译成用户看得懂的功能说明。
+        widget._setting_label = label
         self.controls[key] = widget
         self.form.addRow(label, widget)
         return widget
@@ -259,6 +269,8 @@ class SettingsPage(QWidget):
         button = ColorButton(self.config.data[key],
                              lambda value, current=key: self.update_value(current, value))
         button.setToolTip(help_text)
+        # 记录界面标签：配置变更日志用它把键名翻译成用户看得懂的功能说明。
+        button._setting_label = label
         self.controls[key] = button
         self.color_buttons[key] = button
         self.form.addRow(label, button)

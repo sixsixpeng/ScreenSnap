@@ -1,9 +1,16 @@
-"""全局热键录制与冲突检查。"""
+"""全局热键录制与冲突检查，以及热键健康、自动恢复与诊断。
 
-from PySide6.QtWidgets import QMessageBox, QWidget, QHBoxLayout, QPushButton, QStyle
+2026-10-16（用户要求）：原独立导航页「热键健康与恢复」并入本页 —— 两者都只服务热键这一件事，
+拆成两个入口后用户要来回切换；现在「快捷键」页自上而下是：常驻热键绑定 → 健康/自动恢复偏好
+→ 有效策略与诊断面板。
+"""
+
+from PySide6.QtWidgets import (QLabel, QMessageBox, QWidget, QHBoxLayout, QPushButton, QStyle)
 
 from core.constants import HOTKEY_LABELS
-from config.config_manager import CAPTURE_SHORTCUT_KEYS, DEFAULTS, canonical_hotkey
+from core.hotkey_policy import THRESHOLD_KEYS, effective_policy
+from config.config_manager import (CAPTURE_SHORTCUT_KEYS, DEFAULTS, canonical_hotkey, validate)
+from ui.settings_health import DiagnosticPanel, add_preferences, sync_preference_rows
 from ui.widgets.hotkey_edit import HotkeyEdit
 from ui.widgets.tooltip import SettingsPage
 
@@ -11,27 +18,14 @@ SCREENSHOT_HOTKEY_ACTIONS = CAPTURE_SHORTCUT_KEYS
 
 
 class HotkeyPage(SettingsPage):
-    """通过 Qt 录制组合键并在写入配置前检查动作冲突。"""
+    """通过 Qt 录制组合键并在写入配置前检查动作冲突；同时承载热键健康与恢复。"""
 
-    def __init__(self, config, changed, recording=None, restore_hotkeys=None):
+    def __init__(self, config, changed, recording=None, restore_hotkeys=None, tools=None):
         super().__init__(config, changed)
         self.group("全局热键")
-        self.check("hotkeys_enabled", "启用全局热键", "关闭后所有全局快捷键暂停注册")
-        self.number("hotkey_health_interval", "热键体检周期 (秒)", 2, 600,
-                    "每隔这么久体检一次全局热键：① hook 监听线程死了 ⇒ 立刻重装；\n"
-                    "② 某个热键的组合键已被按下、回调却没触发（被其它程序抢占/吞键）⇒ 判定失效并重装；\n"
-                    "③ 系统近期有键鼠输入、而自家钩子没收到 ⇒ 判定钩子被摘掉并重装；\n"
-                    "④ 其余情况什么都不做（不会平白重装、也不打日志）。数值越小恢复越快。\n"
-                    "被安全软件拦截导致热键失灵时，动一下鼠标/键盘即可触发判定。默认 4 秒，最小 2 秒")
-        if restore_hotkeys is not None:
-            # 2026-10-14：热键被其它程序抢占时，自动判据之外还要有一个用户能主动按的兜底入口。
-            restore = QPushButton("重新注册全局热键")
-            restore.setIcon(self.style().standardIcon(QStyle.SP_BrowserReload))
-            restore.setToolTip("立即清空并重新注册所有全局热键。\n"
-                               "快捷键被其它程序抢占、或系统把钩子摘掉后失灵时，用它兜底；\n"
-                               "等于一次无需重启程序的“重启热键”。")
-            restore.clicked.connect(restore_hotkeys)
-            self.form.addRow(restore)
+        self.check("hotkeys_enabled", "启用全局热键",
+                   "关闭常驻全局动作绑定；截图临时兜底由截图页独立控制。\n"
+                   "体检与自动恢复策略见本页下方的「状态与体检」「自动恢复」等分组。")
         self.group("截图快捷键")
         self.check("capture_hotkey_suppress", "拦截截图快捷键输入",
                "启用后，截图热键按下/释放会由系统钩子拦截，不传给当前前台应用；释放按键后解除拦截。某些系统权限策略可能限制此能力")
@@ -70,8 +64,66 @@ class HotkeyPage(SettingsPage):
                  "把画布缩放复位到 100%，默认 Ctrl+0；仅独立编辑器可用（原地编辑器没有画布缩放）。")):
             self.text(key, label, tip)
 
+        # 原「热键健康与恢复」页内容（状态与体检 / 自动恢复 / 失败与恢复提示 / 高级判定）。
+        add_preferences(self, "health")
+        self.group("有效策略与诊断")
+        self.summary = QLabel()
+        self.summary.setWordWrap(True)
+        self.summary.setToolTip("预设和只记录模式仅覆盖运行时有效值；切回自定义保留原值。")
+        self.form.addRow(self.summary)
+        self.validation_message = QLabel()
+        self.validation_message.setWordWrap(True)
+        self.form.addRow(self.validation_message)
+        tools = dict(tools or {})
+        if restore_hotkeys is not None:
+            # 手动兜底入口：热键被其它程序抢占时不必等到自动判据触发（面板里的「重新注册」同一动作）。
+            tools["recover"] = restore_hotkeys
+        self.panel = DiagnosticPanel(tools)
+        self.form.addRow(self.panel)
+        # 2026-10-16（用户要求）：原「截图 > 键盘兼容性」分组与本页的对照面板整体移到本页，
+        # 与热键绑定、健康/自动恢复放在一起（工具栏隐藏键 / 快速贴图键 / Escape 的临时全局兜底）。
+        add_preferences(self, "compatibility")
+        self.compatibility_panel = DiagnosticPanel(tools, compatibility=True)
+        self.form.addRow(self.compatibility_panel)
+        self.sync_visibility()
+        self.sync_controls()
+        self.refresh_previews()
+
+    def update_value(self, key, value):
+        """健康偏好之间有联动约束：先整体校验，非法值只报错、不写配置。"""
+        message = getattr(self, "validation_message", None)
+        candidate = dict(self.config.data, **{key: value})
+        try:
+            validate(candidate)
+        except ValueError as error:
+            if message is not None:
+                message.setText(str(error))
+            self.sync_controls()
+            return
+        if message is not None:
+            message.clear()
+        super().update_value(key, value)
+        self.sync_visibility()
+
+    def sync_visibility(self):
+        """按当前偏好刷新隐藏行、有效策略摘要与状态面板可见性。"""
+        sync_preference_rows(self)
+        if not hasattr(self, "summary"):
+            return
+        policy = effective_policy(self.config.data)
+        detail = "；".join(f"{key}={policy[key]}" for key in THRESHOLD_KEYS)
+        self.summary.setText(
+            f"有效自动恢复={'开启' if policy['recovery_effective'] else '关闭'}；{detail}\n"
+            "重建绑定不等于重启原生钩子；未按键保持尚未验证。")
+        self.panel.status.setVisible(self.config.data["hotkey_status_visible"])
+
+    def sync_controls(self):
+        super().sync_controls()
+        if hasattr(self, "panel"):
+            self.sync_visibility()
+
     def reset_page(self):
-        """本页恢复默认：开关与全部热键绑定一起回到出厂值。"""
+        """本页恢复默认：开关、全部热键绑定与健康偏好一起回到出厂值。"""
         super().reset_page()
         for action, binding in DEFAULTS["hotkeys"].items():
             self.config.data["hotkeys"][action] = binding

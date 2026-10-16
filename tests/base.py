@@ -105,7 +105,16 @@ class CoreTests(unittest.TestCase):
         QTest.mouseClick(button, Qt.LeftButton)
         self.app.processEvents()
         self.assertEqual(opened[0][:4], (True, True, True, False))
-        self.assertGreaterEqual(opened[0][4], toolbar.option_panel_width("rect"))
+        # 2026-10-16：弹层宽度改为由当前可见内容决定（不再查每个工具写死的宽度表）。
+        # 直接对「内容 sizeHint + 边距 ⇒ 夹取后的宽度」断言，不依赖子控件此刻是否已完成布局。
+        panel = menu.actions()[0].defaultWidget()
+        hint = panel.layout().sizeHint()
+        margins = panel.layout().contentsMargins()
+        expected = max(toolbar.OPTIONS_PANEL_MIN_WIDTH,
+                       min(hint.width() + margins.left() + margins.right(),
+                           toolbar.OPTIONS_PANEL_MAX_WIDTH))
+        self.assertEqual(panel.width(), expected)
+        self.assertEqual(menu.width(), panel.width())
         self.assertEqual(rect.pen().width(), 7)
         self.assertEqual(editor.settings[TOOL_WIDTH_KEYS["rect"]], 7)
         self.assertEqual(toolbar.pen_width_label.text(), "7 px")

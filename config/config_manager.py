@@ -2,13 +2,15 @@
 
 import copy
 import json
-import logging
 from time import time_ns
 import re
 
 from core.color_format import FORMATS as COLOR_FORMATS  # 取色复制格式（validate 用它校验）
 from core.sound import SOUND_KINDS  # 通知音效取值（validate 用它校验）
+from core.hotkey_policy import (DEFAULTS as HOTKEY_POLICY_DEFAULTS, SPECS as HOTKEY_POLICY_SPECS,
+                                validate_preference, validate_relations)
 from pathlib import Path
+from logger import get_logger
 
 # 工具线宽键的间接映射：标注画布按工具名解析对应的 *_width 配置键，
 # 因此 rect_width/ellipse_width/arrow_width/pen_width/marker_width/eraser_width 不会以字面量
@@ -133,6 +135,8 @@ PRESERVED_ON_VERSION_RESET = (
     "sound_copy", "sound_save", "sound_sticker", "sound_picker", "sound_operation",
     # 功能开关：用户显式关掉过的能力（识别、放大镜、标尺、诊断、回收站等）必须记住
     "window_detection", "window_hover_detect", "magnifier", "magnifier_size", "magnifier_grid",
+    "magnifier_crosshair_enabled",
+    "magnifier_zoom", "magnifier_offset", "ruler_step", "ruler_major_multiple",
     "cursor", "ruler_enabled", "uia_debug_tree", "sticker_recycle_enabled",
     "intruder_warning_enabled", "capture_delay", "capture_hotkey_suppress",
     "logging_enabled", "log_monthly_folder",
@@ -147,6 +151,9 @@ PRESERVED_ON_VERSION_RESET = (
     "cache_clear_clipboard", "cache_clear_sticker", "cache_clear_toast", "cache_cleanup_timing",
     "history_limit", "file_sticker_max",
 )
+# 热键兼容、恢复和日志参数属于环境习惯；运行中的计数/快照/临时覆盖不进配置。
+PRESERVED_ON_VERSION_RESET += tuple(key for key in HOTKEY_POLICY_DEFAULTS
+                                  if key not in PRESERVED_ON_VERSION_RESET)
 # 明确**不保留**（走 DEFAULTS，让新版本的观感与语义生效）：
 #   * 样式类：sticker_*、editor_*、rect_*、arrow_*、pen_*、marker_*、mosaic_*、hint_bar_*、
 #     capture_hint_*、sequence_*、window_hover_* 的颜色/宽度/透明度/圆角/阴影；
@@ -157,7 +164,12 @@ PRESERVED_ON_VERSION_RESET = (
 #     capture_multi_edit_action、capture_fullscreen_action（与当前屏幕/上次操作有关）；
 #   * app_version 本身（重置后写回内置版本）。
 
+# 默认标注工具（2026-10-15 用户要求改为记号笔）。独立常量：DEFAULTS 可能被就地修改，
+# 而 validate 的旧工具名迁移必须始终指向“当前默认值”，不能跟着被改动的字典漂移。
+DEFAULT_ANNOTATION_TOOL = "marker"
+
 DEFAULTS = {
+    **HOTKEY_POLICY_DEFAULTS,
     "hotkeys_enabled": True,
     "start_on_boot": False,
     "hotkeys": {
@@ -175,12 +187,7 @@ DEFAULTS = {
     },
     "capture_delay": 0,
     "capture_hotkey_suppress": True,
-    # 全局热键体检周期（秒）：每跳先探活（线程死了立刻重装），正常时做一次预防性重装。
-    # 真机实测无法用合成键探测「Windows 静默摘钩」（keyboard 不响应自身注入的事件），
-    # 所以改为定期刷新钩子。单次重装实测约 4ms（clear + 18 个 add_hotkey），
-    # 因此周期越短，按键落在重装空窗里的概率越高：4 秒 ≈ 0.1%，15 秒 ≈ 0.003%。
-    # 用户 2026-10-11 明确要求：默认 4 秒，最小可设 2 秒。
-    "hotkey_health_interval": 4,
+    # 体检周期/恢复/诊断/兼容参数共用core.hotkey_policy契约；绑定重建不等于原生钩子重启。
     "theme": "system",
     "bubble": True, "notification_backend": "legacy",  # 默认走旧版应用通知（自绘、必定带缩略图）
     "notification_timeout": 2,
@@ -246,8 +253,9 @@ DEFAULTS = {
     "color_sticker_labels": "follow",   # 颜色贴图标签：follow/hex/rgb/rgba/hsl/all/name/off
     # 颜色贴图标签内容（2026-10-11 A/B）：follow=跟随「取色复制格式」；off=只显示色块。
     # 取色复制的文本表达（2026-10-11 用户要求）：hex / rgb / rgba / hsl / all（多行全都给）；
+    # 2026-10-16（用户要求）默认改为 all —— 一次复制三行（hex / rgb / hsl），逐行取用。
     # picker_accumulate 打开后连续取色会累积成多行文本，一次粘贴拿到一组配色。
-    "picker_copy_format": "hex", "picker_accumulate": False,
+    "picker_copy_format": "all", "picker_accumulate": False,
     "file_sticker_path": True, "file_sticker_max": 8, "file_sticker_width": 360,
     "sticker_panel_thumb": 96,
     "sticker_snap_enabled": True, "sticker_snap_threshold": 8,
@@ -265,7 +273,8 @@ DEFAULTS = {
     #   `crosshair_adaptive_mode` 已删除，加载/导入时由 migrate_legacy_settings 一次性推导新值。
     #   solid = 单色（用 crosshair_color）；contrast = 双色描边；invert = 逐像素反色。
     #   线宽 crosshair_width 对三种样式都生效。
-    "crosshair_mode": "contrast",
+    #   2026-10-16（用户要求）默认改为 invert（逐像素反色）：颜色随背景自然变化，任何底色都可见。
+    "crosshair_mode": "invert",
     # 双色描边：亮度低于阈值时用 dark_bg_color 当主线、另一个当描边；高于阈值两者对调
     #   （默认黑白对 ⇒ 与旧 contrast 行为完全一致）。halo_width 为描边相对主线的加宽量，0 = 不描边。
     "crosshair_contrast_dark_bg_color": "#ffffff", "crosshair_contrast_light_bg_color": "#000000",
@@ -283,6 +292,8 @@ DEFAULTS = {
     "app_version": "",
     "window_hover_reuse_radius": 8,
     "uia_read_budget": 180, "uia_children_limit": 128, "uia_slow_seconds": 0.4,
+    # UIA 熔断冷却时长（秒，0.2–5.0）：单次查询超过熔断阈值后暂停多久再重试（退回窗口句柄识别）。
+    "uia_slow_cooldown": 1.0,
     "window_hover_interval": 80, "window_hover_color": "#168cff",
     "window_hover_border_color": "#168cff",
     "window_hover_text_color": "#f4fffc",
@@ -292,11 +303,22 @@ DEFAULTS = {
     # 2026-10-14（用户要求可配置；默认先取 10）：尺寸标签“光标靠近即隐藏”的容差（像素，0–400）。
     # 光标进入标签矩形四周该距离内即隐藏，移开立即恢复；0 表示只有压在标签本身上才隐藏。
     "window_hover_badge_hide_margin": 10,
+    # 尺寸标签内容：size = 只显示「宽 x 高」；size_pos = 追加元素物理左上角坐标「宽 x 高 @ x,y」；
+    # size_class = 追加悬停控件名（UIA 控件类型中文名，未开 UIA 时为窗口类名）「宽 x 高 · 按钮」。
+    # 2026-10-16（用户要求）默认改为 size_class：直接看出宽高与控件类型。
+    "window_hover_badge_content": "size_class",
     "window_hover_opacity": 35, "window_hover_fill_mode": "reveal",
-    "anchor_style": "border", "selection_border_color": "#168cff",
+    # 2026-10-16（用户要求）默认改为 fill（实心）：控制点更醒目、更容易抓住。
+    "anchor_style": "fill", "selection_border_color": "#168cff",
+    # 选区锚点（四角/四边控制点）：颜色与尺寸。四角与四边中点尺寸各自独立配置：
+    # 2026-10-16（用户要求）两者默认都改为 6px（原 11 / 9），更少遮挡画面。
+    "anchor_color": "#00d7aa",
+    "anchor_corner_size": 6, "anchor_edge_size": 6,
+    # 选区边框宽度（像素，1–4）：与候选框边线宽度口径一致。
+    "selection_border_width": 1,
     "cursor": False, "history_limit": 10,
     "last_capture_rect": [],
-    "annotation_tool": "select", "text_alignment": "left", "arrow_style": "filled",
+    "annotation_tool": DEFAULT_ANNOTATION_TOOL, "text_alignment": "left", "arrow_style": "filled",
     "arrow_chain": False,
     "pen_chain": False, "marker_chain": False,
     "rect_style": "solid", "ellipse_style": "solid",
@@ -332,14 +354,20 @@ DEFAULTS = {
     # 2026-10-11 用户要求：橡皮擦对齐马赛克工具的用法 ⇒ 默认「涂抹模式（自由笔刷）」；
     # 关闭后为**拖框选矩形**擦除 ✓（类型校验由 validate 的"与默认值同类型"分支自动覆盖 ✓）
     "eraser_brush": True,
-    # 2026-10-12 用户要求：直线绘制（画笔 / 荧光笔 / 马赛克 / 橡皮擦按住拖动）的触发修饰键做成配置 ✓
+    # 2026-10-12 用户要求：直线绘制（画笔 / 记号笔 / 马赛克 / 橡皮擦按住拖动）的触发修饰键做成配置 ✓
     # 取值：either（Ctrl 或 Alt 任一 ✓ 默认）/ ctrl / alt / off（关闭直线 ✓ 全部按自由笔迹 ✓）
     "editor_straight_modifier": "either",
     # 截图取色与定位辅助增强
     "capture_picker_shortcut": "C",
     "magnifier_grid": True, "magnifier_grid_color": "#cccccc",
+    # 放大镜采样点十字：标记镜片中心被采样的那个像素；可关闭、颜色可自定义。
+    "magnifier_crosshair_enabled": True, "magnifier_crosshair_color": "#ff5252",
     # 放大镜尺寸（像素，正方形边长）：采样区域按同一缩放倍率等比换算，见 magnifier_widget。
     "magnifier_size": 140,
+    # 放大镜缩放倍率（3–12×）：倍率越大采样区域越小、看到的范围越窄、单个像素越大。
+    "magnifier_zoom": 7.0,
+    # 放大镜相对光标的偏移距离（像素，8–80）：调大离光标更远、不易遮挡，但贴边翻转更频繁。
+    "magnifier_offset": 32,
     # 提示条要显示的提示项，**列表本身就是开关与顺序**：不在列表里的不显示，
     # 顺序即显示顺序（设置页里勾选与拖动排序，顺序以用户添加的为准）。
     "capture_hint_order": list(HINT_ITEM_IDS),
@@ -357,6 +385,9 @@ DEFAULTS = {
     "hint_bar_style": copy.deepcopy(DEFAULT_HINT_BAR_STYLE),
     "hint_bar_warning_style": copy.deepcopy(DEFAULT_HINT_BAR_WARNING_STYLE),
     "ruler_enabled": True, "ruler_color": "#00ad91",
+    # 标尺刻度间距（10/20/50/100 像素）与主刻度倍数（2/5/10）：主刻度 = 间距 × 倍数，带数值。
+    # 2026-10-16（用户要求）默认间距改为 10px（更密、定位更精确）；主刻度倍数仍为 5。
+    "ruler_step": 10, "ruler_major_multiple": 5,
     # 标注：序号
     "sequence_font_size": 14, "sequence_start": 1,
     "sequence_shape": "circle", "sequence_text_color": "#ffffff",
@@ -471,6 +502,9 @@ def validate(data):
     for key, value in data.items():
         if key not in result:
             continue
+        if key in HOTKEY_POLICY_SPECS:
+            result[key] = validate_preference(key, value)
+            continue
         if key == "hotkeys":
             if not isinstance(value, dict):
                 raise ValueError("快捷键配置格式错误")
@@ -512,8 +546,8 @@ def validate(data):
             raise ValueError("滚轮缩放步进必须是 1 到 50 之间的整数")
         elif key == "editor_rotation_snap" and value not in (0, 5, 15, 45):
             raise ValueError("旋转吸附角度只能是 0、5、15 或 45 度")
-        elif key == "editor_overcanvas_mode" and value not in ("clip", "block"):
-            raise ValueError("画布外标注处理只能是裁切或禁止移出")
+        elif key == "editor_overcanvas_mode" and value not in ("clip", "block", "allow"):
+            raise ValueError("画布外标注处理只能是裁切、禁止移出或允许超出")
         elif key == "editor_rotation_handle" and value not in ("center", "top"):
             raise ValueError("旋转按钮位置只能是标注中心或顶部外侧")
         elif key == "editor_checker_tile_size" and (
@@ -534,6 +568,9 @@ def validate(data):
         elif key == "uia_slow_seconds" and (
                 type(value) not in (int, float) or not 0.1 <= value <= 2.0):
             raise ValueError("UIA 熔断阈值必须是 0.1 到 2.0 之间的秒数")
+        elif key == "uia_slow_cooldown" and (
+                type(value) not in (int, float) or not 0.2 <= value <= 5.0):
+            raise ValueError("UIA 熔断冷却时长必须是 0.2 到 5.0 之间的秒数")
         elif key == "picker_notification" and not isinstance(value, bool):
             raise ValueError("「取色通知」必须是布尔值")
         elif key == "save_as_dir" and not isinstance(value, str):
@@ -678,6 +715,32 @@ def validate(data):
             raise ValueError("遮罩透明度必须在 0 到 100 之间")
         elif key == "magnifier_size" and not 100 <= value <= 320:
             raise ValueError("放大镜尺寸必须在 100 到 320 像素之间")
+        elif key == "magnifier_zoom" and (
+                type(value) not in (int, float) or not 3.0 <= float(value) <= 12.0):
+            raise ValueError("放大镜缩放倍率必须是 3.0 到 12.0 之间的数值")
+        elif key == "magnifier_offset" and (
+                type(value) is not int or not 8 <= value <= 80):
+            raise ValueError("放大镜偏移距离必须是 8 到 80 之间的整数像素")
+        elif key == "ruler_step" and value not in (10, 20, 50, 100):
+            raise ValueError("标尺刻度间距只能是 10、20、50 或 100 像素")
+        elif key == "ruler_major_multiple" and value not in (2, 5, 10):
+            raise ValueError("标尺主刻度倍数只能是 2、5 或 10")
+        elif key == "anchor_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("选区锚点颜色必须是六位十六进制颜色")
+        elif key == "anchor_corner_size" and (
+                type(value) is not int or not 5 <= value <= 21):
+            raise ValueError("四角锚点大小必须是 5 到 21 之间的整数像素")
+        elif key == "anchor_edge_size" and (
+                type(value) is not int or not 4 <= value <= 21):
+            raise ValueError("四边中点锚点大小必须是 4 到 21 之间的整数像素")
+        elif key == "selection_border_width" and (
+                type(value) is not int or not 1 <= value <= 4):
+            raise ValueError("选区边框宽度必须是 1 到 4 之间的整数像素")
+        elif key == "magnifier_crosshair_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError("放大镜采样点十字颜色必须是六位十六进制颜色")
+        elif key == "window_hover_badge_content" and value not in (
+                "size", "size_pos", "size_class"):
+            raise ValueError("尺寸标签内容只能是宽高、宽高加坐标或宽高加控件名")
         elif key == "capture_hint_per_line" and not 0 <= value <= 8:
             raise ValueError("每行提示数必须在 0 到 8 之间（0 表示按宽度自动换行）")
         elif key == "capture_hint_gap" and not 0 <= value <= 40:
@@ -719,7 +782,7 @@ def validate(data):
         elif key == "window_hover_badge_hide_margin" and not 0 <= value <= 400:
             raise ValueError("尺寸标签隐藏距离必须在 0 到 400 像素之间")
         elif key == "marker_opacity" and not 1 <= value <= 100:
-            raise ValueError("荧光笔不透明度必须在 1 到 100 之间")
+            raise ValueError("记号笔不透明度必须在 1 到 100 之间")
         elif key == "font_size" and not 6 <= value <= 200:
             raise ValueError("字号必须在 6 到 200 之间")
         elif key == "text_width" and not 0 <= value <= 2000:
@@ -738,7 +801,9 @@ def validate(data):
             "mosaic", "picker", "crop", "marker", "number"
         ):
             if value in ("wide", "square"):
-                result[key] = "select"
+                # 旧版工具名（宽画笔/方块）迁移为默认标注工具；用模块常量而不是 DEFAULTS 取值，
+                # 避免 DEFAULTS 被就地修改（测试/运行期）时把迁移结果带偏。
+                result[key] = DEFAULT_ANNOTATION_TOOL
             else:
                 raise ValueError("未知标注工具")
         elif key == "text_alignment" and value not in ("left", "center", "right"):
@@ -801,6 +866,7 @@ def validate(data):
         raise ValueError("截图快捷键冲突：不能为多个截图操作设置同一按键")
     if result["archive_by_month"] and result["archive_by_day"]:
         raise ValueError("按月和按日归档不能同时开启")
+    validate_relations(result)
     # 颜色值统一规范为小写，避免大小写不一致带来的比较/日志隐患（如 #168CFF 与 #168cff）。
     # 仅作用于六位十六进制颜色字符串；同时兜底历史配置或手改的大写值。
     for key, value in result.items():
@@ -927,9 +993,9 @@ def migrate_legacy_settings(data):
             merged = rest[:len(head)] + wanted + rest[len(head):]
             if merged != order:
                 migrated["capture_hint_order"] = merged
-                logging.getLogger("screensnap").info(
+                get_logger().info(
                     "提示条顺序把 左键/UIA/Tab 三项整组移到最早位置（其余项不动）")
-            logging.getLogger("screensnap").info(
+            get_logger().info(
                 "提示条顺序表补齐新增项（默认勾选）: %s", missing)
     return migrated
 
@@ -942,7 +1008,8 @@ def repair(data):
         if key not in result or key == "hotkeys":
             continue
         try:
-            result[key] = validate({key: value})[key]
+            # 新策略键先独立修复再检查组合，不能用默认的另一半否定有效自定义参数。
+            result[key] = validate_preference(key, value) if key in HOTKEY_POLICY_SPECS else validate({key: value})[key]
         except ValueError:
             dropped.append(key)
     hotkeys = data.get("hotkeys")
@@ -958,6 +1025,13 @@ def repair(data):
         for key in CAPTURE_SHORTCUT_KEYS:
             result[key] = DEFAULTS[key]
         dropped.append("capture_shortcuts")
+    if result["hotkey_retry_mode"] == "backoff" and result["hotkey_retry_max_interval"] < result["hotkey_retry_interval"]:
+        result["hotkey_retry_max_interval"] = max(HOTKEY_POLICY_DEFAULTS["hotkey_retry_max_interval"], result["hotkey_retry_interval"])
+        dropped.append("hotkey_retry_max_interval")
+    if result["hotkey_sensitivity"] == "custom" and result["hotkey_missed_input_ms"] <= result["hotkey_recent_input_ms"]:
+        result["hotkey_recent_input_ms"] = HOTKEY_POLICY_DEFAULTS["hotkey_recent_input_ms"]
+        result["hotkey_missed_input_ms"] = HOTKEY_POLICY_DEFAULTS["hotkey_missed_input_ms"]
+        dropped.extend(("hotkey_recent_input_ms", "hotkey_missed_input_ms"))
     return result, dropped
 
 
@@ -966,6 +1040,10 @@ class ConfigManager:
 
     def __init__(self, path):
         self.path = Path(path)
+        # 快照与说明提供者必须在 load() 之前就绪：load() 内部会触发一次 save_safely()。
+        # 上次落盘后的快照 + 可选的「键 → 中文说明」提供者：记录具体配置变更（键名、旧值 → 新值、功能说明）。
+        self._saved_snapshot = None
+        self._describe = None
         self.data = self.load()
 
     def load(self):
@@ -973,7 +1051,7 @@ class ConfigManager:
         # 本次载入的现场：哪些键被回退成默认、哪些未知旧键被忽略（供启动提示与日志使用）。
         self.repaired_keys = []
         self.dropped_keys = []
-        logger = logging.getLogger("screensnap")
+        logger = get_logger()
         if not self.path.exists():
             self.data = copy.deepcopy(DEFAULTS)
             self.save_safely()
@@ -1000,7 +1078,7 @@ class ConfigManager:
                 self.repaired_keys = list(dropped or [])
                 self.dropped_keys = [k for k in loaded
                                    if k not in self.data]
-                logging.getLogger("screensnap").warning(
+                get_logger().warning(
                     "配置修复：回退 %d 项 %s；忽略未知键 %d 项 %s",
                     len(self.repaired_keys), self.repaired_keys[:8],
                     len(self.dropped_keys), self.dropped_keys[:8])
@@ -1028,7 +1106,7 @@ class ConfigManager:
         try:
             self.path.replace(backup)
         except OSError as error:
-            logging.getLogger("screensnap").error("无法备份配置文件 %s: %s", self.path, error)
+            get_logger().error("无法备份配置文件 %s: %s", self.path, error)
             return None
         return backup
 
@@ -1038,8 +1116,41 @@ class ConfigManager:
             self.save()
             return True
         except OSError as error:
-            logging.getLogger("screensnap").error("无法写入配置文件 %s: %s", self.path, error)
+            get_logger().error("无法写入配置文件 %s: %s", self.path, error)
             return False
+
+    def set_description_provider(self, provider):
+        """注入「配置键 -> 中文说明」查询函数（由设置界面提供），供变更日志补上功能说明。"""
+        self._describe = provider
+
+    def _describe_setting(self, key):
+        """取配置键的中文说明；没有提供者或查询失败时返回空串（不得影响配置写入）。"""
+        if self._describe is None:
+            return ""
+        try:
+            return self._describe(key) or ""
+        except Exception:  # noqa: BLE001  说明提供者是可选的辅助信息，绝不能阻断保存
+            return ""
+
+    def _log_changes(self, previous):
+        """逐键比对上次落盘内容，记录具体改动：键名、旧值 → 新值、功能说明。"""
+        logger = get_logger()
+        for key in sorted(set(previous) | set(self.data)):
+            old, new = previous.get(key), self.data.get(key)
+            if old == new:
+                continue
+            hint = self._describe_setting(key)
+            suffix = f"（{hint}）" if hint else ""
+            if isinstance(old, dict) or isinstance(new, dict):
+                # 字典型（如 hotkeys）逐子键记录，避免日志里只看到一个整 dict。
+                old_items = old if isinstance(old, dict) else {}
+                new_items = new if isinstance(new, dict) else {}
+                for sub in sorted(set(old_items) | set(new_items)):
+                    if old_items.get(sub) != new_items.get(sub):
+                        logger.info("配置更新: %s.%s = %s → %s%s", key, sub,
+                                    old_items.get(sub, "<无>"), new_items.get(sub, "<无>"), suffix)
+                continue
+            logger.info("配置更新: %s = %s → %s%s", key, old, new, suffix)
 
     def save(self):
         """先校验再替换目标文件，避免写到一半留下损坏的 JSON。"""
@@ -1050,6 +1161,11 @@ class ConfigManager:
         temporary = self.path.with_suffix(".tmp")
         temporary.write_text(json.dumps(self.data, ensure_ascii=False, indent=2), encoding="utf-8")
         temporary.replace(self.path)
+        if self._saved_snapshot is None:
+            get_logger().info("配置文件已建立: %s（共 %d 项）", self.path, len(self.data))
+        else:
+            self._log_changes(self._saved_snapshot)
+        self._saved_snapshot = copy.deepcopy(self.data)
 
     def export_to(self, path):
         """导出经过校验的当前设置，不改变程序正在使用的配置路径。"""

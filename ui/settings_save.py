@@ -1,12 +1,11 @@
 """统一保存目录、归档与图片缓存管理。"""
 
-import logging
-
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QStyle
 
 from core.path_utils import configured_dir, data_dir
+from logger import get_logger
 from ui.widgets.confirmation import yes_no_dialog
 from ui.widgets.file_path_edit import FilePathEdit
 from ui.widgets.tooltip import SettingsPage
@@ -122,7 +121,7 @@ class SaveOutputPage(SettingsPage):
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except OSError as error:
-            logging.getLogger("screensnap").warning("无法创建缓存目录 %s: %s", directory, error)
+            get_logger().warning("无法创建缓存目录 %s: %s", directory, error)
             QMessageBox.warning(self, "无法打开缓存目录", str(error))
             return
         QDesktopServices.openUrl(QUrl.fromLocalFile(str(directory)))
@@ -139,10 +138,10 @@ class SaveOutputPage(SettingsPage):
         try:
             result = self.clear_cache_callback()
         except (OSError, ValueError) as error:
-            logging.getLogger("screensnap").error("清理图片缓存失败: %s", error, exc_info=True)
+            get_logger().error("清理图片缓存失败: %s", error, exc_info=True)
             QMessageBox.warning(self, "清理缓存失败", str(error))
             return
-        logging.getLogger("screensnap").info("设置页清理可重建缓存: %s", result)
+        get_logger().info("设置页清理可重建缓存: %s", result)
         QMessageBox.information(
             self, "缓存清理完成",
             "剪贴板历史：{clipboard_entries} 条；剪贴板图片：{clipboard_images} 张；"

@@ -1,7 +1,6 @@
 """设置导航容器。"""
 
 import copy
-import logging
 
 from PySide6.QtCore import Signal, QSignalBlocker, QTimer
 from PySide6.QtWidgets import (QApplication, QWidget, QHBoxLayout, QVBoxLayout, QListWidget, QStackedWidget,
@@ -9,6 +8,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QHBoxLayout, QVBoxLayout, 
 
 from config.config_manager import DEFAULTS
 from core.path_utils import data_dir
+from logger import get_logger
 from ui.settings_general import GeneralPage
 from ui.settings_screenshot import ScreenshotPage
 from ui.settings_appearance import AppearancePage
@@ -30,13 +30,14 @@ class SettingsWindow(QWidget):
     recording = Signal(bool)
 
     def __init__(self, config, clear_clipboard_history=None, clear_cache=None,
-                 reset_all_user_data=None, restore_hotkeys=None):
+                 reset_all_user_data=None, restore_hotkeys=None, diagnostic_tools=None):
         super().__init__()
         self.config = config
         self.clear_clipboard_history_callback = clear_clipboard_history
         self.reset_all_user_data_callback = reset_all_user_data
         # 热键恢复入口由 main 注入（设置窗口不直接持有 HotkeyManager）。
         self.restore_hotkeys_callback = restore_hotkeys
+        self.diagnostic_tools = diagnostic_tools or {}
         # 缓存清理由 main 注入：设置窗口不直接依赖贴图管理器，避免 ui 反向依赖 sticker。
         self.clear_cache_callback = clear_cache
         self._saved_start_on_boot = config.data["start_on_boot"]
@@ -52,13 +53,13 @@ class SettingsWindow(QWidget):
         outer = QVBoxLayout(self)
         row = QHBoxLayout()
         self.navigation = QListWidget()
-        self.navigation.setFixedWidth(130)
+        self.navigation.setFixedWidth(160)
         self.pages = QStackedWidget()
         row.addWidget(self.navigation)
         row.addWidget(self.pages)
         outer.addLayout(row)
         self.populate()
-        self.navigation.currentRowChanged.connect(lambda index: self.pages.setCurrentIndex(index))
+        self.navigation.currentRowChanged.connect(self._activate_page)
         self.navigation.setCurrentRow(0)
         buttons = QHBoxLayout()
         hints = {
@@ -81,6 +82,7 @@ class SettingsWindow(QWidget):
             ),
         }
         for label, icon, method in [("导入配置", QStyle.SP_DialogOpenButton, self.import_settings),
+                                    ("导出配置", QStyle.SP_DialogSaveButton, self.export_settings),
                                     ("恢复全部默认", QStyle.SP_DialogResetButton, self.reset_defaults),
                                     ("清理贴图会话", QStyle.SP_DialogDiscardButton,
                                      self.clear_sticker_session)]:
@@ -105,29 +107,66 @@ class SettingsWindow(QWidget):
         outer.addLayout(buttons)
 
     def populate(self):
-        """将每个设置分类注册为独立页面。"""
-        for title, icon, page in [("常规", QStyle.SP_DesktopIcon, GeneralPage),
-                      ("快捷键", QStyle.SP_ComputerIcon, HotkeyPage),
-                      ("截图", QStyle.SP_DesktopIcon, ScreenshotPage),
-                      ("编辑器", QStyle.SP_FileDialogDetailedView, EditorPage),
-                      ("贴图", QStyle.SP_DesktopIcon, StickerPage),
-                      ("剪贴板贴图", QStyle.SP_FileDialogContentsView, ClipboardPage),
-                      ("主题与外观", QStyle.SP_ComputerIcon, AppearancePage),
-                      ("保存与输出", QStyle.SP_DialogSaveButton, SaveOutputPage),
-                      ("日志", QStyle.SP_FileIcon, LogPage)]:
+        """注册各设置分类页；顺序即左侧导航顺序。"""
+        plan = [
+            ("启动与通知", QStyle.SP_DesktopIcon, GeneralPage),
+            # 2026-10-16（用户要求）：「快捷键」前移到「启动与通知」与「截图」之间；原独立页
+            # 「热键健康与恢复」已并入快捷键页，末段的不可选分组标题随之取消（导航只剩真实页面）。
+            # 同日另据用户要求：原「常规」页改名为「启动与通知」（与页内分组同名）。
+            ("快捷键", QStyle.SP_ComputerIcon, HotkeyPage),
+            ("截图", QStyle.SP_DesktopIcon, ScreenshotPage),
+            ("编辑器", QStyle.SP_FileDialogDetailedView, EditorPage),
+            ("贴图", QStyle.SP_DesktopIcon, StickerPage),
+            ("剪贴板贴图", QStyle.SP_FileDialogContentsView, ClipboardPage),
+            ("保存与输出", QStyle.SP_DialogSaveButton, SaveOutputPage),
+            ("主题与外观", QStyle.SP_ComputerIcon, AppearancePage),
+            ("日志与诊断", QStyle.SP_FileIcon, LogPage),
+        ]
+        for title, icon, page in plan:
             custom_icon = {"截图": "camera", "主题与外观": "settings",
-                           "保存与输出": "output", "日志": "logs",
-                           "贴图": "sticker"}.get(title)
-            icon = action_icon(custom_icon) if custom_icon else self.style().standardIcon(icon)
-            self.navigation.addItem(QListWidgetItem(icon, title))
+                           "保存与输出": "output", "日志与诊断": "logs",
+                           "贴图": "sticker", "剪贴板贴图": "clipboard_image"}.get(title)
+            item_icon = action_icon(custom_icon) if custom_icon else self.style().standardIcon(icon)
+            self.navigation.addItem(QListWidgetItem(item_icon, title))
             if page is HotkeyPage:
                 widget = page(self.config, self.persist, self.recording.emit,
-                              self.restore_hotkeys_callback)
+                              self.restore_hotkeys_callback, self.diagnostic_tools)
             elif page is SaveOutputPage:
                 widget = page(self.config, self.persist, self.clear_cache_callback)
+            elif page is ScreenshotPage:
+                widget = page(self.config, self.persist, self.recording.emit)
+            elif page is LogPage:
+                widget = page(self.config, self.persist, self.diagnostic_tools)
             else:
                 widget = page(self.config, self.persist)
             self.pages.addWidget(widget)
+        # 注入说明提供者：配置落盘时按「键名 + 旧值 → 新值 + 功能说明」记录具体改动。
+        self.config.set_description_provider(self._describe_setting)
+
+    def _activate_page(self, index):
+        """切到某个分类：先按当前配置刷新该页，再显示。
+
+        跨页联动的行只有刷新后才正确 —— 例如「快捷键 > 键盘兼容性」的兜底开关是否显示，
+        取决于「截图 > 截图快捷操作」里的快速贴图开关；不刷新就会看到上一次的可见状态。
+        """
+        page = self.pages.widget(index) if index >= 0 else None
+        sync = getattr(page, "sync_controls", None)
+        if callable(sync):
+            sync()
+        self.pages.setCurrentIndex(index)
+
+    def _describe_setting(self, key):
+        """把配置键翻译成「页面 · 控件标签」，供配置变更日志说明改的是哪一项。"""
+        for index in range(self.pages.count()):
+            page = self.pages.widget(index)
+            control = (getattr(page, "controls", {}).get(key)
+                       or getattr(page, "color_buttons", {}).get(key))
+            if control is None:
+                continue
+            label = getattr(control, "_setting_label", "") or control.toolTip().split("\n")[0]
+            title = self.navigation.item(index).text()
+            return f"{title} · {label}" if label else title
+        return ""
 
     def persist(self):
         """合并短时间内的设置变化，避免滑块连续操作反复写入整份 JSON。"""
@@ -184,12 +223,12 @@ class SettingsWindow(QWidget):
         key = "pen_color" if tool == "pen" else f"{tool}_color"
         page = self.page("编辑器")
         if key not in page.color_buttons:
-            logging.getLogger("screensnap").warning("编辑器报告未知工具颜色: %s", tool)
+            get_logger().warning("编辑器报告未知工具颜色: %s", tool)
             return
         self.config.data[key] = color
         page.color_buttons[key].set_color(color)
         page.refresh_previews()
-        logging.getLogger("screensnap").debug("同步标注工具颜色: tool=%s color=%s", tool, color)
+        get_logger().debug("同步标注工具颜色: tool=%s color=%s", tool, color)
         self.persist()
 
     def set_annotation_setting(self, key, value):
@@ -274,15 +313,15 @@ class SettingsWindow(QWidget):
                 try:
                     set_start_on_boot(previous["start_on_boot"])
                 except (OSError, ValueError) as startup_error:
-                    logging.getLogger("screensnap").warning("恢复默认失败后还原启动设置失败: %s", startup_error)
+                    get_logger().warning("恢复默认失败后还原启动设置失败: %s", startup_error)
             if pending_persist:
                 self._persist_timer.start()
-            logging.getLogger("screensnap").error("恢复默认设置失败: %s", error)
+            get_logger().error("恢复默认设置失败: %s", error)
             QMessageBox.warning(self, "恢复默认设置失败", str(error))
             return
         self._saved_start_on_boot = self.config.data["start_on_boot"]
         self.rebuild_pages()
-        logging.getLogger("screensnap").info("已恢复默认设置，原配置备份到 %s", backup)
+        get_logger().info("已恢复默认设置，原配置备份到 %s", backup)
         QMessageBox.information(self, "已恢复默认设置", f"原配置已备份到：\n{backup}")
 
     def clear_sticker_session(self):
@@ -304,10 +343,10 @@ class SettingsWindow(QWidget):
                 file.unlink()
                 removed += 1
         except OSError as error:
-            logging.getLogger("screensnap").warning("清理贴图会话失败: %s", error)
+            get_logger().warning("清理贴图会话失败: %s", error)
             QMessageBox.warning(self, "清理未完成", str(error))
             return
-        logging.getLogger("screensnap").info("清理贴图会话: 删除 %d 个文件", removed)
+        get_logger().info("清理贴图会话: 删除 %d 个文件", removed)
         QMessageBox.information(self, "已清理贴图会话", f"共删除 {removed} 个文件。")
 
     def reset_all_user_data(self):
@@ -325,18 +364,18 @@ class SettingsWindow(QWidget):
             "此操作不可撤销且不创建备份。是否继续？"
         )
         if yes_no_dialog(self, "清空全部 ScreenSnap 数据", confirmation).exec() != QMessageBox.Yes:
-            logging.getLogger("screensnap").info("已取消清空全部用户数据")
+            get_logger().info("已取消清空全部用户数据")
             return
         try:
             accepted = callback()
         except (OSError, RuntimeError, ValueError) as error:
-            logging.getLogger("screensnap").error("无法启动彻底重置流程: %s", error, exc_info=True)
+            get_logger().error("无法启动彻底重置流程: %s", error, exc_info=True)
             QMessageBox.warning(self, "无法清空用户数据", str(error))
             return
         if accepted is False:
             return
         self._persist_timer.stop()
-        logging.getLogger("screensnap").warning("用户确认清空全部数据目录并退出: %s", directory)
+        get_logger().warning("用户确认清空全部数据目录并退出: %s", directory)
 
     def clear_clipboard_history(self):
         """确认后清空 StickerManager 持有的内存剪贴板历史。"""
@@ -353,13 +392,18 @@ class SettingsWindow(QWidget):
 
     def populate_pages_only(self):
         """配置导入后重建页面内容，保留原有导航分类和选中项。"""
+        # 顺序与 populate() 一致。
         for page in (GeneralPage, HotkeyPage, ScreenshotPage, EditorPage, StickerPage,
-                 ClipboardPage, AppearancePage, SaveOutputPage, LogPage):
+                 ClipboardPage, SaveOutputPage, AppearancePage, LogPage):
             if page is HotkeyPage:
                 widget = page(self.config, self.persist, self.recording.emit,
-                              self.restore_hotkeys_callback)
+                              self.restore_hotkeys_callback, self.diagnostic_tools)
             elif page is SaveOutputPage:
                 widget = page(self.config, self.persist, self.clear_cache_callback)
+            elif page is ScreenshotPage:
+                widget = page(self.config, self.persist, self.recording.emit)
+            elif page is LogPage:
+                widget = page(self.config, self.persist, self.diagnostic_tools)
             else:
                 widget = page(self.config, self.persist)
             self.pages.addWidget(widget)

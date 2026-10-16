@@ -49,6 +49,10 @@ class MiscTests(CoreTests):
                                   "hotkeys": {"capture": "ctrl+alt+a"},
                                   "capture_hotkey_suppress": False,
                                   "hotkey_health_interval": 20})
+                deadline = _time.monotonic() + 3
+                while manager._registration_completed != manager._registration_requested and _time.monotonic() < deadline:
+                    _time.sleep(0.01)
+                self.app.processEvents()
                 self.assertEqual(manager.health_timer.interval(), 20_000)
                 # ② 越界与非法值一律夹紧/回落，绝不让定时器跑飞
                 manager.set_health_interval(1)
@@ -70,6 +74,9 @@ class MiscTests(CoreTests):
                 manager._observed_input = _time.monotonic() - 10.0
                 with _patch.object(hm, "last_input_seconds", lambda: 0.2):
                     manager.check_health()
+                deadline = _time.monotonic() + 3
+                while manager.reinstall_count < 1 and _time.monotonic() < deadline:
+                    _time.sleep(0.01)
                 self.assertEqual(manager.reinstall_count, 1, "判定失效后必须重装")
                 deadline = _time.monotonic() + 3
                 while not manager.handles and _time.monotonic() < deadline:
@@ -107,7 +114,15 @@ class MiscTests(CoreTests):
                 pass
 
         def press(manager, name, event_type="down"):
+            if event_type == "down" and name == "a":
+                manager._note_input(SimpleNamespace(name=name, event_type="up"))
             manager._note_input(SimpleNamespace(name=name, event_type=event_type))
+            if event_type == "down" and name == "a":
+                # 纯元数据提前至宽限外，不真实等待或查询keyboard按键状态。
+                for stamps in manager._pending_attempts.values():
+                    for index in range(len(stamps)):
+                        stamps[index] -= hm.FIRED_GRACE_SECONDS + 0.01
+                manager._intercepted_hotkey()
 
         with _patch.object(hm, "keyboard", FakeKeyboard()):
             manager = hm.HotkeyManager()
@@ -120,6 +135,7 @@ class MiscTests(CoreTests):
                 deadline = _time.monotonic() + 3
                 while not manager.handles and _time.monotonic() < deadline:
                     _time.sleep(0.02)
+                self.app.processEvents()
                 self.assertTrue(manager.handles, "注册后应重建热键句柄")
                 self.assertEqual(manager._hotkey_keys["save"], (set(), "s"))
 
@@ -134,6 +150,8 @@ class MiscTests(CoreTests):
                 # ② 一次未触发还不足以判定（偶发不算被抢占）
                 press(manager, "a")
                 self.assertEqual(manager._misses["probe"][0], 1)
+                manager._note_input(SimpleNamespace(name="a", event_type="down"))
+                self.assertEqual(len(manager._pending_attempts["probe"]), 1, "长按重复不算第二次独立尝试")
                 manager.check_health()
                 self.assertEqual(manager.intercept_reinstalls, 0, "只差一次不应重装")
 
@@ -144,8 +162,12 @@ class MiscTests(CoreTests):
                 with _patch.object(hm, "last_input_seconds", lambda: 30.0), \
                         self.assertLogs("screensnap", level="WARNING") as captured:
                     manager.check_health()
+                    deadline = _time.monotonic() + 3
+                    while manager._registration_completed != manager._registration_requested and _time.monotonic() < deadline:
+                        _time.sleep(0.01)
                 self.assertEqual(manager.reinstall_count, before + 1, "判定被抢占后必须重装")
                 self.assertEqual(manager.intercept_reinstalls, 1)
+                self.app.processEvents()
                 self.assertTrue(any("未触发回调" in line for line in captured.output),
                                 "被抢占必须留下可核对的日志（本次诉求之一）")
 
@@ -263,29 +285,46 @@ class MiscTests(CoreTests):
                     _time.sleep(0.02)
                 self.assertTrue(manager.handles, "应完成一次安装")
                 self.assertTrue(manager.listener_alive())
+                self.app.processEvents()
                 manager.check_health()
                 self.assertEqual(manager.reinstall_count, 0, "监听线程正常时不应重装")
                 # 模拟钩子被系统摘掉：库监听线程没了
                 fake._listener = None
                 self.assertFalse(manager.listener_alive())
                 manager.check_health()
+                deadline = _time.monotonic() + 3
+                while manager._registration_completed != manager._registration_requested and _time.monotonic() < deadline:
+                    _time.sleep(0.01)
+                self.app.processEvents()
                 self.assertEqual(manager.reinstall_count, 1, "监听线程不可用时应重装一次")
                 manager.check_health()
                 self.assertEqual(manager.reinstall_count, 1, "重装必须限速，不能刷屏")
                 manager._last_retry = 0.0
+                manager.recovery.next_at = 0.0
                 manager.check_health()
+                deadline = _time.monotonic() + 3
+                while manager._registration_completed != manager._registration_requested and _time.monotonic() < deadline:
+                    _time.sleep(0.01)
+                self.app.processEvents()
                 self.assertEqual(manager.reinstall_count, 2, "超过限速窗口后允许再次重装")
                 # 按需体检（托盘双击截图）：不受限速约束，必须能立刻恢复
                 manager._last_retry = _time.monotonic()
                 manager.check_health()
                 self.assertEqual(manager.reinstall_count, 2, "自动体检仍受限速约束")
                 manager.check_health(force=True)
+                deadline = _time.monotonic() + 3
+                while manager._registration_completed != manager._registration_requested and _time.monotonic() < deadline:
+                    _time.sleep(0.01)
+                self.app.processEvents()
                 self.assertEqual(manager.reinstall_count, 3, "按需体检应跳过限速，立刻重装")
                 # 关键：监听线程看起来正常时，按需体检也必须重装 ——
                 # Windows 静默摘钩时监听线程仍然存活，只靠标志位判断永远恢复不了。
                 fake._listener = FakeListener()
                 self.assertTrue(manager.listener_alive())
                 manager.check_health(force=True)
+                deadline = _time.monotonic() + 3
+                while manager._registration_completed != manager._registration_requested and _time.monotonic() < deadline:
+                    _time.sleep(0.01)
                 self.assertEqual(manager.reinstall_count, 4, "监听线程正常也应按需重装")
             finally:
                 manager.stop()
@@ -761,13 +800,13 @@ class MiscTests(CoreTests):
         self.assertTrue(any(0 < alpha < 255 for alpha in corner_alphas))
         self.assertEqual(rounded.getpixel((20, 0))[:3], (255, 255, 255))
 
-    def test_highlighter_opacity_validation_and_legacy_wide_tool(self):
+    def test_marker_opacity_validation_and_legacy_wide_tool(self):
         from config.config_manager import DEFAULTS, validate
         for opacity in (0, 101):
             with self.assertRaises(ValueError):
                 validate({"marker_opacity": opacity})
-        self.assertEqual(validate({"annotation_tool": "wide"})["annotation_tool"], "select")
-        self.assertEqual(validate({"annotation_tool": "square"})["annotation_tool"], "select")
+        self.assertEqual(validate({"annotation_tool": "wide"})["annotation_tool"], "marker")
+        self.assertEqual(validate({"annotation_tool": "square"})["annotation_tool"], "marker")
         self.assertEqual(validate({"marker_opacity": 1})["marker_opacity"], 1)
         settings = dict(DEFAULTS, marker_opacity=100)
         canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), settings)
