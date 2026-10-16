@@ -1,6 +1,5 @@
 """编辑器工具栏。"""
 
-import logging
 from functools import lru_cache
 
 from PySide6.QtCore import Signal, Qt, QSize, QTimer, QSignalBlocker, QEvent, QRect, QRectF
@@ -18,6 +17,7 @@ from ui.window_bounds import anchored_popup_geometry
 from ui.action_icons import action_icon
 from config.config_manager import DEFAULTS, TOOL_WIDTH_KEYS
 from core.constants import shortcut_label
+from logger import get_logger
 
 # 每个工具在“更多设置”里对应的实时预览类型。
 PREVIEW_KINDS = {"pen": "pen", "rect": "rect", "ellipse": "ellipse", "arrow": "arrow",
@@ -235,7 +235,7 @@ class ToolbarWidget(QWidget):
             button.setAccessibleName(label)
             button.setCheckable(True)
             button.toggled.connect(
-                lambda checked, selected=key: logging.getLogger("screensnap").debug(
+                lambda checked, selected=key: get_logger().debug(
                     "标注工具选中状态切换: %s", selected) if checked else None)
             button.setMinimumHeight(40)
             button.setSizePolicy(QSizePolicy.Preferred, QSizePolicy.Fixed)
@@ -244,7 +244,8 @@ class ToolbarWidget(QWidget):
             self.tool_buttons[key] = button
             tool_grid.addWidget(button, (len(self.tool_buttons) - 1) // 6,
                                 (len(self.tool_buttons) - 1) % 6)
-        self.tool_buttons[settings.get("annotation_tool", "select") if settings.get("annotation_tool") in self.tool_buttons else "select"].setChecked(True)
+        # 默认工具（2026-10-15 用户要求改为「记号笔」）：未知/失效值时同样回退到记号笔。
+        self.tool_buttons[settings.get("annotation_tool", "marker") if settings.get("annotation_tool") in self.tool_buttons else "marker"].setChecked(True)
         self.tool_grid = tool_grid
         self.tool_widths = {tool: settings.get(key, DEFAULTS[key])
                     for tool, key in TOOL_WIDTH_KEYS.items()}
@@ -286,7 +287,7 @@ class ToolbarWidget(QWidget):
         self.marker_opacity.setValue(settings.get("marker_opacity", 38))
         self.marker_opacity.setMinimumWidth(220)
         self.marker_opacity.setMinimumHeight(38)
-        self.marker_opacity.setToolTip("荧光笔不透明度；数值越低，底图越清晰")
+        self.marker_opacity.setToolTip("记号笔不透明度；数值越低，底图越清晰")
         self.marker_opacity_label = QLabel(f"{self.marker_opacity.value()}%")
         self.marker_opacity_label.setMinimumWidth(52)
         self.marker_opacity_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
@@ -513,7 +514,6 @@ class ToolbarWidget(QWidget):
         options.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(options)
         panel = _OptionsPanel(menu)
-        panel.setMinimumWidth(430)
         panel_layout = QGridLayout(panel)
         panel_layout.setContentsMargins(8, 6, 8, 6)
         panel_layout.setHorizontalSpacing(12)
@@ -616,11 +616,10 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(self.mosaic_brush, 30, 0, 1, 3)
         panel_layout.addWidget(self.eraser_erase_base, 31, 0, 1, 3)
         # 2026-10-14 修复（用户报告：文字「更多设置」底部两行叠在一起、还带橡皮擦的 tooltip ✗）：
-        # 上次把橡皮擦的「涂抹模式（自由笔刷）」从行 33 挪走后**误放进行 36 的第 0 列** —— 该格
-        # 已被文字工具的 `QLabel("文字高度")` 占用（行 36 已有 text_height 占 1..2 列）⇒ 同一格里
-        # 两个控件重叠，且 `_refresh_option_rows` 把行 36 给文字工具 ⇒ 文字弹层里必然叠在一起 ✓。
-        # 现在独占**唯一的空闲行 14**（<37 里只有 14 没人用 ✓）：橡皮擦可见行数不变 ⇒ 面板高度不变 ✓
-        # （行 37 会撑高 6px ✗ 触发"multirow 选项要放得下"的高度预算用例 ✗）。
+        # 原先把橡皮擦的「涂抹模式（自由笔刷）」从行 33 挪走时**误放进行 36 的第 0 列** —— 该格
+        # 已被文字工具的 `QLabel("文字高度")` 占用 ⇒ 同格重叠，文字弹层里两行叠在一起。
+        # 现在独占**行 14**：它是 0–36 之间唯一没有任何工具占用的行（序号在 19–24、擦原图 31、
+        # 文字宽度 35、文字高度 36 等），既不产生跨工具串行冲突，也不把面板撑高（<37 ⇒ 高度预算不变 ✓）。
         panel_layout.addWidget(self.eraser_brush, 14, 0, 1, 3)
         # 序号标注专属参数：形状、填充色、文字色、字号、起始值与预设组合。
         sequence_shape_options = (
@@ -688,13 +687,15 @@ class ToolbarWidget(QWidget):
         self.option_rows = [tuple(panel_layout.itemAtPosition(row, column).widget()
                     for column in range(3) if panel_layout.itemAtPosition(row, column))
                     for row in range(option_row_count)]
-        # 任何参数变化都重绘预览，弹窗尺寸随后按内容重新计算。
-        self.setting_changed.connect(lambda *args: self.refresh_previews())
-        self.crop_style_changed.connect(lambda *args: self.refresh_previews())
-        self.color_changed.connect(lambda *args: self.refresh_previews())
+        # 任何参数变化都重绘预览；弹层可见时顺带按新内容重算宽高（如文字宽度输入框内容变长）。
+        self.setting_changed.connect(lambda *args: self._on_option_content_changed())
+        self.crop_style_changed.connect(lambda *args: self._on_option_content_changed())
+        self.color_changed.connect(lambda *args: self._on_option_content_changed())
         panel_action = QWidgetAction(menu)
         panel_action.setDefaultWidget(panel)
         menu.addAction(panel_action)
+        # 每次弹出前重算一次：字体/DPI/内容可能在上次关闭后变过（弹层尺寸只在需要时才算）。
+        menu.aboutToShow.connect(self._relayout_options_panel)
         self.appearance_panel = QWidget()
         appearance_outer = QVBoxLayout(self.appearance_panel)
         appearance_outer.setContentsMargins(10, 8, 10, 8)
@@ -864,7 +865,6 @@ class ToolbarWidget(QWidget):
         # 也不是 QMenu/QDialog，过去会被采进画面却连警示都没有；自报标签后遮罩才能点名。
         self.appearance_menu.setProperty("screensnap_self_window", "外观弹层")
         self.appearance_menu.setMaximumWidth(960)
-        self.appearance_panel.setMinimumWidth(944)
         self.appearance_panel.setObjectName("outputAppearancePanel")
         self.appearance_scroll = QScrollArea()
         self.appearance_scroll.setWidgetResizable(True)
@@ -903,7 +903,7 @@ class ToolbarWidget(QWidget):
             if self.shadow_effect is not None:
                 self.setGraphicsEffect(None)
                 self.shadow_effect = None
-                logging.getLogger("screensnap").debug("编辑工具栏阴影光晕已关闭")
+                get_logger().debug("编辑工具栏阴影光晕已关闭")
             return
         strength = max(0, min(100, int(self.settings.get("editor_toolbar_shadow_strength", 60))))
         color = QColor(self.settings.get("editor_toolbar_shadow_color", "#000000"))
@@ -918,7 +918,7 @@ class ToolbarWidget(QWidget):
             self.setGraphicsEffect(effect)
         effect.setBlurRadius(max(4, round(strength * 0.4)))
         effect.setColor(color)
-        logging.getLogger("screensnap").debug(
+        get_logger().debug(
             "编辑工具栏阴影光晕: 强度=%d 模糊=%.0f 颜色=%s",
             strength, effect.blurRadius(), color.name())
 
@@ -981,7 +981,7 @@ class ToolbarWidget(QWidget):
              pressed, border, foreground)
         if self.styleSheet() != stylesheet:
             self.setStyleSheet(stylesheet)
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "标注工具选中样式刷新: %s", "深色" if dark else "浅色")
 
     def refresh_previews(self):
@@ -1012,7 +1012,8 @@ class ToolbarWidget(QWidget):
         if tool == "eraser":
             # 2026-10-11：橡皮擦对齐马赛克 ⇒ 宽度滑杆（行 1）+ 涂抹开关（行 14）+ 擦原图（行 31）✓
             # 2026-10-14 修复：这里原来写的是行 33（那是「椭圆填充色」✗）⇒ 橡皮擦弹层一直显示别的
-            # 工具的填充色、看不到自己的涂抹开关；现在换成自由笔刷真正所在的行 14 ✓。
+            # 工具的填充色、看不到自己的涂抹开关；现在换成自由笔刷真正所在的行 14 ✓
+            # （行 14 是 0–36 中唯一未被任何工具占用的行；测试期望同步见 tests/editor/test_tools）。
             rows.update((1, 14, 31))
             self.tool_widths[tool] = max(10, min(100, self.tool_widths[tool]))
             with QSignalBlocker(self.pen_width):
@@ -1106,23 +1107,8 @@ class ToolbarWidget(QWidget):
             with QSignalBlocker(self.pen_width):
                 self.pen_width.setValue(self.tool_widths[tool])
             self.pen_width_label.setText(f"{self.pen_width.value()} px")
-        panel = self.options_button.menu().actions()[0].defaultWidget()
-        panel.setMinimumWidth(0)
-        panel.setMaximumWidth(16777215)
-        panel.setMinimumWidth(self.option_panel_width(tool))
-        panel_layout = panel.layout()
-        panel_layout.invalidate()
-        panel_layout.activate()
-        panel.setFixedWidth(max(self.option_panel_width(tool), panel.sizeHint().width()))
-        panel.updateGeometry()
-        panel.adjustSize()
-        panel_layout.invalidate()
-        panel_layout.activate()
-        menu = self.options_button.menu()
-        menu.setFixedWidth(panel.width())
-        menu.setMinimumHeight(0)
-        menu.setMinimumHeight(panel.sizeHint().height() + 4)
-        menu.adjustSize()
+        # 参数行与标签都更新完，再按当前可见内容重算弹层宽高。
+        self._relayout_options_panel()
 
     def set_selected_tool(self, tool):
         """记录选择工具下当前选中的标注类型，并刷新「更多设置」参数行。"""
@@ -1130,7 +1116,7 @@ class ToolbarWidget(QWidget):
         if selected_tool == self.selected_tool:
             return
         self.selected_tool = selected_tool
-        logging.getLogger("screensnap").debug(
+        get_logger().debug(
             "标注设置上下文切换: %s", selected_tool or "无单选标注")
         if self.tool_buttons["select"].isChecked():
             self.set_tool_mode("select")
@@ -1141,7 +1127,8 @@ class ToolbarWidget(QWidget):
         if tool == "eraser":
             # 2026-10-11：橡皮擦对齐马赛克 ⇒ 宽度滑杆（行 1）+ 涂抹开关（行 14）+ 擦原图（行 31）✓
             # 2026-10-14 修复：这里原来写的是行 33（那是「椭圆填充色」✗）⇒ 橡皮擦弹层一直显示别的
-            # 工具的填充色、看不到自己的涂抹开关；现在换成自由笔刷真正所在的行 14 ✓。
+            # 工具的填充色、看不到自己的涂抹开关；现在换成自由笔刷真正所在的行 14 ✓
+            # （行 14 是 0–36 中唯一未被任何工具占用的行；测试期望同步见 tests/editor/test_tools）。
             rows.update((1, 14, 31))
         elif tool == "marker":
             rows.update((2, 27))
@@ -1165,22 +1152,65 @@ class ToolbarWidget(QWidget):
             rows.update(self.sequence_rows)
         return rows
 
-    @staticmethod
-    def option_panel_width(tool):
-        """不同工具的选项数量不同，动态控制更多设置弹窗宽度。"""
-        widths = {
-            "arrow": 760,
-            "text": 540,
-            "marker": 480,
-            "mosaic": 430,
-            "crop": 430,
-            "rect": 480,
-            "ellipse": 480,
-            "pen": 480,
-            "eraser": 340,
-            "number": 480,
-        }
-        return widths.get(tool, 340)
+    # 「更多设置」弹层：宽度完全由当前可见内容决定，这里只做可用性上下限的夹取。
+    OPTIONS_PANEL_MIN_WIDTH = 300
+    OPTIONS_PANEL_MAX_WIDTH = 720
+
+    def _options_panel_widget(self):
+        """「更多设置」里的参数面板（QMenu 中唯一 QWidgetAction 的 widget）。"""
+        menu = self.options_button.menu()
+        actions = menu.actions()
+        return actions[0].defaultWidget() if actions else None
+
+    def _on_option_content_changed(self):
+        """参数/颜色变化：重绘预览；弹层正在显示时再按新内容重算宽高。"""
+        self.refresh_previews()
+        if self.options_button.menu().isVisible():
+            self._relayout_options_panel()
+
+    def _relayout_options_panel(self):
+        """按当前可见控件重算「更多设置」弹层宽高，并同步菜单尺寸。
+
+        2026-10-16（用户报告「有的过高过宽、更新不及时」）：原先每个工具查一张写死的宽度表
+        （arrow 760 / text 540 / …），与真实内容无关 —— 内容少时过宽，内容多时靠 sizeHint 硬兜底；
+        隐藏的行还可能让 QMenu 沿用上一次的高度。现在统一改成问布局要尺寸：
+          ① 先清掉上一轮的宽高约束，否则上次的固定值会参与本次计算；
+          ② activate 后取布局 sizeHint（隐藏控件不参与，整行隐藏的行不占高度）；
+          ③ 宽度按内容夹在最小/最大之间，再按屏幕可用宽度夹一次；
+          ④ 宽度定下来后重取高度（文字换行等与宽度相关），最后让菜单贴合内容高度。
+        """
+        panel = self._options_panel_widget()
+        if panel is None or panel.layout() is None:
+            return
+        layout = panel.layout()
+        panel.setMinimumWidth(0)
+        panel.setMaximumWidth(16777215)
+        panel.setMinimumHeight(0)
+        panel.setMaximumHeight(16777215)
+        layout.invalidate()
+        layout.activate()
+        margins = layout.contentsMargins()
+        hint = layout.sizeHint()
+        width = max(self.OPTIONS_PANEL_MIN_WIDTH,
+                    min(hint.width() + margins.left() + margins.right(),
+                        self.OPTIONS_PANEL_MAX_WIDTH))
+        screen = self.screen() or QGuiApplication.primaryScreen()
+        if screen is not None:
+            width = min(width, max(240, screen.availableGeometry().width() - 40))
+        panel.setFixedWidth(width)
+        layout.invalidate()
+        layout.activate()
+        height = panel.sizeHint().height()
+        menu = self.options_button.menu()
+        menu.setMaximumHeight(16777215)
+        menu.setFixedWidth(width)
+        # 高度只给下限（QMenu 会再补自己的边框内边距）；上限不设，内容超出屏高时由菜单自行滚动。
+        menu.setMinimumHeight(height)
+        menu.adjustSize()
+        menu.updateGeometry()
+        panel.updateGeometry()
+        get_logger().debug("更多设置弹层尺寸: %dx%d（内容 %dx%d）",
+                           width, height, hint.width(), hint.height())
 
     def group(self, title):
         """标题紧贴自己的操作，不依赖其他组的宽度。"""
@@ -1572,7 +1602,12 @@ class ToolbarWidget(QWidget):
                   or QGuiApplication.primaryScreen())
         available = screen.availableGeometry() if screen else QRect(0, 0, 960, 720)
         max_height = max(80, available.height() - 16)
-        popup_width = min(960, max(1, available.width() - 16))
+        # 2026-10-16（用户报告弹层过宽）：原先宽度直接取 min(960, 屏宽) 且内容面板写死
+        # 最小宽 944 ⇒ 内容不多时也占满 944。现在按内容面板的 sizeHint 定宽，只做上限与屏宽夹取。
+        self.appearance_panel.setMinimumWidth(0)
+        self.appearance_panel.adjustSize()
+        content_width = self.appearance_panel.sizeHint().width()
+        popup_width = min(960, max(320, content_width + 4), max(1, available.width() - 16))
         self.appearance_menu.setFixedWidth(popup_width)
         self.appearance_panel.adjustSize()
         panel_height = self.appearance_panel.sizeHint().height()
@@ -1584,7 +1619,7 @@ class ToolbarWidget(QWidget):
         self.appearance_menu.move(popup_geometry.topLeft())
         self.appearance_menu.show()
         self.appearance_menu.raise_()
-        logging.getLogger("screensnap").debug("打开输出外观弹层")
+        get_logger().debug("打开输出外观弹层")
 
     def eventFilter(self, watched, event):
         if watched is self.appearance_menu and event.type() == QEvent.Hide:
@@ -1616,7 +1651,7 @@ class ToolbarWidget(QWidget):
         if self.appearance_toggle.isChecked():
             with QSignalBlocker(self.appearance_toggle):
                 self.appearance_toggle.setChecked(False)
-        logging.getLogger("screensnap").debug("关闭输出外观弹层")
+        get_logger().debug("关闭输出外观弹层")
 
     def _remove_appearance_event_filter(self):
         app = QGuiApplication.instance()

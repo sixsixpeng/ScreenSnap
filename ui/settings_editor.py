@@ -1,8 +1,126 @@
 """编辑器工具的默认样式。"""
 
-from PySide6.QtGui import QFontDatabase
+from PySide6.QtCore import QRectF, Qt
+from PySide6.QtGui import QBrush, QColor, QFontDatabase, QPainter, QPen, QPixmap
+from PySide6.QtWidgets import QSizePolicy, QWidget
+
 from ui.widgets.color_button import ColorButton
 from ui.widgets.tooltip import SettingsPage
+
+
+class EditorEffectPreview(QWidget):
+    """编辑器页的辅助预览：透明棋盘 / 编辑区边框 / 工具栏光晕。
+
+    这三项都是"改了只能靠反复打开编辑器看效果"的显示类设置，因此各给一块小预览，
+    直接读当前配置绘制；与 `SettingsPage.preview` 生成的标注预览一样支持 refresh()，
+    设置变化后即时重绘。
+    """
+
+    def __init__(self, config, kind):
+        super().__init__()
+        self.config = config
+        self.kind = kind
+        self.setMinimumWidth(260)
+        self.setFixedHeight(84)
+        self.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+
+    def refresh(self):
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.Antialiasing)
+        area = QRectF(self.rect()).adjusted(1, 1, -1, -1)
+        data = self.config.data
+        if self.kind == "transparent":
+            self._paint_transparent(painter, area, data)
+        elif self.kind == "editor_border":
+            self._paint_border(painter, area, data)
+        else:
+            self._paint_toolbar_shadow(painter, area, data)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(QColor("#c3ced6"), 1))
+        painter.drawRect(area)
+        painter.end()
+
+    @staticmethod
+    def _clamped(data, key, default, low, high):
+        try:
+            value = int((data or {}).get(key, default))
+        except (TypeError, ValueError):
+            return default
+        return min(max(value, low), high)
+
+    def _paint_transparent(self, painter, area, data):
+        """透明像素预览底纹：与画布 `transparent_checker_brush` 同一套配色/边长逻辑。"""
+        mode = str(data.get("editor_transparent_background", "theme"))
+        tile = self._clamped(data, "editor_checker_tile_size", 8, 4, 32)
+        dark_theme = self.palette().base().color().lightness() < 128
+        if mode == "transparent":
+            painter.fillRect(area, self.palette().base().color())
+            painter.setPen(QColor("#6b767c"))
+            painter.drawText(area, Qt.AlignCenter, "纯透明：不画棋盘，透明处与画布底色一致")
+            return
+        if mode == "dark_checker":
+            first, second = "#252525", "#3b3b3b"
+        elif mode == "light_checker":
+            first, second = "#f0f0f0", "#c8c8c8"
+        elif dark_theme:
+            first, second = "#3b3f45", "#4c5158"
+        else:
+            first, second = "#e0e3e6", "#f1f3f5"
+        pixmap = QPixmap(tile * 2, tile * 2)
+        pixmap.fill(QColor(first))
+        tile_painter = QPainter(pixmap)
+        tile_painter.fillRect(0, 0, tile, tile, QColor(second))
+        tile_painter.fillRect(tile, tile, tile, tile, QColor(second))
+        tile_painter.end()
+        painter.fillRect(area, QBrush(pixmap))
+        # 叠一个半透明色块示意"这里本来有内容"。
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor(0, 173, 145, 170))
+        painter.drawEllipse(QRectF(area.center().x() - 26, area.center().y() - 18, 52, 36))
+        painter.setPen(QColor("#33413f"))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawText(area.adjusted(6, 0, -6, -4), Qt.AlignBottom | Qt.AlignHCenter,
+                         f"透明棋盘 {tile}px（只影响编辑显示，不写入图片）")
+
+    def _paint_border(self, painter, area, data):
+        """编辑区边框：宽度/颜色直接反映在预览外框上。"""
+        width = self._clamped(data, "editor_border_width", 1, 1, 12)
+        color = QColor(data.get("editor_border_color", "#000000"))
+        painter.fillRect(area, QColor("#e8edf0"))
+        inner = area.adjusted(10, 10, -10, -10)
+        painter.fillRect(inner, QColor("#4b91a5"))
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(color, width))
+        painter.drawRect(area.adjusted(width / 2, width / 2, -width / 2, -width / 2))
+        painter.setPen(QColor("#eef4f6"))
+        painter.drawText(inner, Qt.AlignCenter, f"编辑区边框 {width}px（不写入导出图片）")
+
+    def _paint_toolbar_shadow(self, painter, area, data):
+        """编辑工具栏光晕：开关/强度/颜色直接反映在小工具栏四周的阴影上。"""
+        enabled = bool(data.get("editor_toolbar_shadow_enabled", True))
+        strength = self._clamped(data, "editor_toolbar_shadow_strength", 60, 0, 100)
+        color = QColor(data.get("editor_toolbar_shadow_color", "#000000"))
+        painter.fillRect(area, QColor("#cfd8dd"))
+        bar = QRectF(area.center().x() - 92, area.center().y() - 15, 184, 30)
+        if enabled and strength:
+            blur = max(2, round(strength * 0.4))
+            offset = max(1, round(blur * 0.3))
+            for expand in range(blur, 0, -max(1, blur // 3)):
+                alpha = round(255 * strength / 100 * (1 - expand / (blur + 1)))
+                shade = QColor(color)
+                shade.setAlpha(max(0, alpha))
+                painter.setPen(Qt.NoPen)
+                painter.setBrush(shade)
+                painter.drawRoundedRect(
+                    bar.adjusted(-expand, -expand + offset, expand, expand + offset), 8, 8)
+        painter.setPen(Qt.NoPen)
+        painter.setBrush(QColor("#f7f9fa"))
+        painter.drawRoundedRect(bar, 8, 8)
+        painter.setPen(QColor("#5b666c"))
+        painter.drawText(bar, Qt.AlignCenter, "编辑工具栏")
 
 
 class EditorPage(SettingsPage):
@@ -14,7 +132,7 @@ class EditorPage(SettingsPage):
         self.group("默认工具")
         self.choice("annotation_tool", "默认标注工具",
                     [(label, key) for label, key in (("选择", "select"), ("矩形", "rect"),
-                        ("椭圆", "ellipse"), ("箭头", "arrow"), ("画笔", "pen"), ("荧光笔", "marker"),
+                        ("椭圆", "ellipse"), ("箭头", "arrow"), ("画笔", "pen"), ("记号笔", "marker"),
                         ("橡皮擦", "eraser"), ("文字", "text"), ("序号", "number"),
                         ("马赛克", "mosaic"), ("取色", "picker"), ("裁剪", "crop"))], "新建编辑器时默认启用的工具")
         self.group("箭头")
@@ -67,18 +185,18 @@ class EditorPage(SettingsPage):
         self.radios("editor_straight_modifier", "直线绘制修饰键", [
             ("Ctrl 或 Alt（任一）", "either"), ("仅 Ctrl", "ctrl"), ("仅 Alt", "alt"),
             ("关闭（全部按自由笔迹）", "off")],
-            "画笔 / 荧光笔 / 马赛克 / 橡皮擦**按住拖动**时，按住所选修饰键即切换为直线；选「关闭」则始终为自由笔迹")
+            "画笔 / 记号笔 / 马赛克 / 橡皮擦**按住拖动**时，按住所选修饰键即切换为直线；选「关闭」则始终为自由笔迹")
         self.check("eraser_brush", "涂抹模式（自由笔刷）",
                    "默认：按住拖动沿笔迹擦除（按住 Ctrl 或 Alt 可直线擦除）；关闭后改为拖框选矩形，擦除框内内容")
         self.check("eraser_erase_base", "同时擦除原图",
                    "开启后新擦除会同时擦掉截图原图（只影响之后的擦除）；关闭则只擦标注、露出原图（非破坏性）。已有擦除可在该处右键单独设置")
-        self.group("荧光笔")
+        self.group("记号笔")
         self.preview("marker")
-        self.add_color("marker_color", "荧光笔颜色")
-        self.number("marker_width", "荧光笔线宽", 1, 50, "只影响对应工具")
-        self.number("marker_opacity", "荧光笔不透明度", 1, 100, "越低越能看清原图；荧光笔也使用标注颜色")
-        self.check("marker_chain", "荧光笔多段绘制",
-                   "开启后，荧光笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
+        self.add_color("marker_color", "记号笔颜色")
+        self.number("marker_width", "记号笔线宽", 1, 50, "只影响对应工具")
+        self.number("marker_opacity", "记号笔不透明度", 1, 100, "越低越能看清原图；记号笔也使用标注颜色")
+        self.check("marker_chain", "记号笔多段绘制",
+                   "开启后，记号笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
                    "按鼠标右键结束连续绘制并保留已画图形。")
         self.group("文字")
         self.preview("text", 120)
@@ -128,17 +246,20 @@ class EditorPage(SettingsPage):
                     "涂抹模式下的笔刷直径，数值越大单次涂抹覆盖越宽")
         self.add_color("mosaic_cursor_color", "示意圈颜色")
         self.group("编辑区边框")
+        self._effect_preview("editor_border")
         self.number("editor_border_width", "编辑区边框粗细", 1, 12,
                     "只在编辑画布中显示，不写入图片")
         self.add_color("editor_border_color", "编辑区边框颜色")
         # 透明像素的预览底色：只影响编辑画布显示，导出仍按真实 alpha 写出，所以单独成组。
         self.group("透明背景")
+        self._effect_preview("transparent")
         self.radios("editor_transparent_background", "透明区域显示",
                     [("跟随主题棋盘", "theme"), ("暗色棋盘", "dark_checker"),
                      ("亮色棋盘", "light_checker"), ("纯透明", "transparent")],
                     "编辑画布中透明像素（多显示器间隙、擦除镂空、圆角外）的预览底色；"
                     "只影响编辑时的显示，不写入导出图片")
         self.group("编辑工具栏")
+        self._effect_preview("toolbar_shadow")
         self.check("editor_toolbar_shadow_enabled", "工具栏阴影光晕",
                    "给编辑工具栏加一圈阴影光晕，编辑大图且整片接近底色（如都是浅色）时也能一眼找到工具栏")
         self.color("editor_toolbar_shadow_color", "阴影颜色", "工具栏阴影/光晕颜色；建议选与画面成对比的深色或浅色")
@@ -152,8 +273,16 @@ class EditorPage(SettingsPage):
         self.radios("editor_rotation_handle", "旋转按钮位置",
                     [("标注中心", "center"), ("顶部外侧", "top")],
                     "单选标注时旋转按钮画在哪里。\n标注中心：按钮随图形移动/旋转、永远在图形内，缩放或旋转后一定点得到；代价是它会盖住标注中心的内容（细窄的箭头、线段尤其明显）。\n顶部外侧：不挡内容、更接近常见习惯；代价是标注贴近画布上缘、或放大后顶边跑到可视区外时，按钮会看不见也点不到。\n只影响单选；多选时按包围盒中心旋转。")
-        self.radios("editor_overcanvas_mode", "标注超出画布", [("直接裁切", "clip"), ("禁止移出", "block")],
-                    "把标注拖到画布之外时的处理方式。\n直接裁切：标注位置完全不动，超出的部分在编辑视图与导出里都裁掉 —— 贴边填充的矩形能真正填满边缘，但拖出去的部分会“看不见了”。\n禁止移出：把标注平移回画布内（只平移、不缩放），避免误拖到画面外；代价是想把标注紧贴边缘摆放时会觉得“推不出去”。\n只影响本次编辑的标注，不改变已保存的图片。")
+        self.radios("editor_overcanvas_mode", "标注超出画布",
+                    [("直接裁切", "clip"), ("禁止移出", "block"), ("允许超出", "allow")],
+                    "把标注画/拖到画布之外时的处理方式。\n"
+                    "直接裁切（默认）：标注位置完全不动，超出的部分在编辑视图与导出里都裁掉 —— "
+                    "贴边填充的矩形能真正填满边缘，但拖出去的部分会“看不见了”。\n"
+                    "禁止移出：把标注平移回画布内（只平移、不缩放），避免误拖到画面外；"
+                    "代价是想把标注紧贴边缘摆放时会觉得“推不出去”。\n"
+                    "允许超出：绘制与拖动时不再把落点夹到画布边缘，可以正常画到画布之外"
+                    "（编辑视图可见超出的部分；导出仍按画布尺寸裁切）。\n"
+                    "只影响本次编辑的标注，不改变已保存的图片。")
         self.number("editor_checker_tile_size", "棋盘格边长 (px)", 4, 32,
                     "透明像素预览棋盘的方格边长，范围 4–32 像素。\n调小：格子密、更接近“这里真的透明”的观感，但可能显得花、有摩尔纹。\n调大：更清楚，但会盖住较多细节，小面积透明处反而看不清。\n只影响显示，不会写进导出的图片。")
         self.number("editor_text_click_delay", "文字单击等待 (ms)", 60, 400,
@@ -177,13 +306,20 @@ class EditorPage(SettingsPage):
         for sub_key, value in preset.items():
             self.update_value(sub_key, value)
 
+    def _effect_preview(self, kind):
+        """插入编辑器页专用的显示类预览（透明棋盘 / 编辑区边框 / 工具栏光晕）。"""
+        preview = EditorEffectPreview(self.config, kind)
+        self.previews.append(preview)
+        self.form.addRow(preview)
+        return preview
+
     def add_color(self, key, label):
         help_text = {
             "pen_color": "画笔描边颜色，用于画笔工具绘制的线条。",
             "rect_color": "矩形**边框**颜色（填充色见下一项，两者各自独立）。",
             "ellipse_color": "椭圆边框颜色；开启椭圆填充时也作为填充颜色。",
             "arrow_color": "箭头线条与箭头头部的颜色。",
-            "marker_color": "荧光笔颜色；与荧光笔不透明度共同决定覆盖效果。",
+            "marker_color": "记号笔颜色；与记号笔不透明度共同决定覆盖效果。",
             "text_color": "新建文字标注的默认文字颜色。",
             "sequence_fill_color": "新建序号标注标记的底色（形状填充颜色）。",
             "sequence_text_color": "新建序号标注中数字的文字颜色。",
@@ -198,5 +334,7 @@ class EditorPage(SettingsPage):
         button = ColorButton(self.config.data[key],
                              lambda color: self.update_value(key, color))
         button.setToolTip(help_text)
+        # 记录界面标签：配置变更日志用它把键名翻译成用户看得懂的功能说明。
+        button._setting_label = label
         self.form.addRow(label, button)
         self.color_buttons[key] = button

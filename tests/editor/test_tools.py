@@ -504,7 +504,7 @@ class ToolsTests(CoreTests):
         for tool, rows in (("pen", (0, 1, 12)), ("marker", (0, 1, 2, 12)),
              ("text", (0, 3, 4, 5, 12)), ("mosaic", (6, 7, 12)),
              ("arrow", (0, 1, 8, 12)),
-             ("rect", (0, 1, 10, 12, 13, 14, 15, 16)),
+             ("rect", (0, 1, 10, 12, 13, 15, 16)),
              ("ellipse", (0, 1, 11, 12, 17, 18)),
              ("eraser", (1, 12)), ("crop", (0, 9, 12))):
             toolbar.tool_buttons[tool].click()
@@ -552,7 +552,8 @@ class ToolsTests(CoreTests):
                                    "double_dashed", "line", "dashed_line", "rect_filled",
                                    "rect_open", "rect_dashed"})
                 self.assertTrue(toolbar.choice_buttons["arrow_style"]["open"].isChecked() is False)
-                self.assertGreaterEqual(panel.minimumWidth(), 760)
+                # 2026-10-16：弹层宽度改为由内容决定，不再写死 760（旧值比实际内容宽一倍）。
+                self.assertLessEqual(panel.minimumWidth(), toolbar.OPTIONS_PANEL_MAX_WIDTH)
             if tool in ("rect", "ellipse"):
                 self.assertLessEqual(panel.minimumWidth(), 520)
         panel.close()

@@ -327,6 +327,8 @@ class RoundedRectItem(AnnotationPaintMixin, QGraphicsRectItem):
             super().paint(painter, option, widget)
             return
         painter.save()
+        # 圆角矩形标注：显式开启抗锯齿，不依赖调用方（视图/导出画笔）的 renderHint。
+        painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setPen(self.pen())
         painter.setBrush(self.brush())
         rect = self.rect()
@@ -550,6 +552,8 @@ class AnnotationSequenceItem(QGraphicsItem):
     def paint(self, painter, option, widget=None):
         radius = self._radius
         painter.save()
+        # 序号形状含圆/圆角气泡等曲线：显式开启抗锯齿，不依赖调用方的 renderHint。
+        painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(self.sequence_fill_color))
         points = sequence_shape_points(self.sequence_shape, radius)

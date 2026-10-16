@@ -582,7 +582,7 @@ class EraseTests(CoreTests):
         """2026-10-12 用户要求：直线绘制的触发修饰键要做成配置 ✓（规则 4：持久偏好 ⇒ 可配置 ✓）。
 
         取值 either（Ctrl 或 Alt 任一 ✓ 默认）/ ctrl / alt / off（关闭 ⇒ 全部自由笔迹 ✓）。
-        影响范围：画笔 / 荧光笔 / 马赛克 / 橡皮擦的按住拖动（它们共用 `_straight_gesture_active` ✓）。
+        影响范围：画笔 / 记号笔 / 马赛克 / 橡皮擦的按住拖动（它们共用 `_straight_gesture_active` ✓）。
         """
         from editor.annotation_canvas import AnnotationCanvas
         from PySide6.QtCore import Qt

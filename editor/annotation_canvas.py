@@ -1,6 +1,5 @@
 """图片画布、标注事件和可撤销操作。"""
 
-import logging
 import math
 
 from PIL import Image, ImageFilter
@@ -21,6 +20,7 @@ from editor.annotation_items import (shape, text_item, editable, RoundedRectItem
                                      AnnotationPixmapItem, AnnotationSequenceItem,
                                      EraseMaskItem, auto_text_width,
                                      apply_text_format, read_text_format)
+from logger import get_logger
 
 # 直线/折线模式下单段最短位移（像素），低于此值视为“未确定第二点”，不绘制。
 STRAIGHT_MIN_DISTANCE = 3
@@ -446,7 +446,7 @@ class AnnotationCanvas(QGraphicsView):
         if key != self._applied_cursor_key:
             self._applied_cursor_key = key
             self.setCursor(cursor)
-            logging.getLogger("screensnap").debug("标注操作光标切换：%s", key)
+            get_logger().debug("标注操作光标切换：%s", key)
         return True
 
     def _apply_tool_cursor(self):
@@ -734,7 +734,7 @@ class AnnotationCanvas(QGraphicsView):
 
     def refresh_transparency_preview(self):
         """透明棋盘样式变化（设置/主题）后重建笔刷并重绘。"""
-        logging.getLogger("screensnap").debug(
+        get_logger().debug(
             "重建透明棋盘预览: 样式=%s", self.settings.get("editor_transparent_background", "theme"))
         self.corner_preview_brush = self.transparent_checker_brush()
         self._checker_palette_base = self.palette().base().color()
@@ -774,17 +774,20 @@ class AnnotationCanvas(QGraphicsView):
     OVERFLOW_MARGIN = -1
 
     def image_point(self, point):
-        """把场景点转成**用于标注几何**的图片坐标：最远只到画布边缘。
+        """把场景点转成**用于标注几何**的图片坐标：默认最远只到画布边缘。
 
-        2026-10-11 明确的行为划分（用户要求）：
-        · 标注（画笔、箭头、矩形、椭圆、文字、擦除、马赛克笔刷）最远只到画布边缘 —— 指针可以
-          自由移出画布，但落在画布外的位置会被夹到边缘这一点；
+        · 标注（画笔、箭头、矩形、椭圆、文字、擦除、马赛克笔刷）默认最远只到画布边缘 ——
+          指针可以自由移出画布，但落在画布外的位置会被夹到边缘这一点；
+        · **`editor_overcanvas_mode=allow`（"允许超出"）不夹取**：几何按真实落点取点，
+          可以正常画到画布之外（2026-10-15 用户要求新增的分支；clip/block 行为完全不变）；
         · 指针本身从不被移动；
         · **框选（选区橡皮筋）不走这里** —— mouseMoveEvent 里 selection_end 用原始场景点，
           这样框选可拖到画布外，也不会把画布外的按下/右键算成边缘那一点（原先会影响选择与菜单）；
-        · 超出画布的部分仍按 editor_overcanvas_mode 处理：clip（默认）在编辑视图与导出时裁掉，
-          block 由 constrain_selected_to_canvas() 在编辑结束时把标注平移回画布内。
+        · 编辑结束时的处理：clip（默认）在编辑视图与导出时裁掉，block 由
+          `constrain_selected_to_canvas()` 把标注平移回画布内，allow 保持画出的位置不动。
         """
+        if str(self.settings.get("editor_overcanvas_mode", "clip")) == "allow":
+            return QPointF(point)   # 允许超出：不夹取（导出仍按画布尺寸裁切）
         margin = self.OVERFLOW_MARGIN
         bounds = self.sceneRect().adjusted(-margin, -margin, margin, margin)
         return QPointF(min(max(point.x(), bounds.left()), bounds.right()),
@@ -1135,7 +1138,7 @@ class AnnotationCanvas(QGraphicsView):
             self.history, self.cursor_index, self.original, self.original_alternate = previous
             self.restore_checkpoint()
             raise
-        logging.getLogger("screensnap").info("已恢复编辑历史：节点=%d 当前=%d 重做=%d",
+        get_logger().info("已恢复编辑历史：节点=%d 当前=%d 重做=%d",
                                              len(self.history), index, len(self.history) - index - 1)
 
     def restore_checkpoint(self):
@@ -1198,7 +1201,7 @@ class AnnotationCanvas(QGraphicsView):
         self.renumber_sequence_items()
         self._on_selection_changed()
         self.checkpoint()
-        logging.getLogger("screensnap").debug(
+        get_logger().debug(
             "标注删除完成: 删除=%d, 剩余=%d, 选中类型=%s",
             len(selected), len(self.annotations()), self.selected_annotation_tool() or "无")
 
@@ -1469,7 +1472,7 @@ class AnnotationCanvas(QGraphicsView):
         line_style = Qt.DashLine if self.tool in ("rect", "ellipse") and \
             self.settings.get(f"{self.tool}_style", "solid") == "dash" else Qt.SolidLine
         if self.tool == "marker":
-            # 百分比只作用于荧光笔，普通画笔保持不透明；预览与提交共用同一画笔。
+            # 百分比只作用于记号笔，普通画笔保持不透明；预览与提交共用同一画笔。
             color.setAlpha(round(self.settings.get("marker_opacity", 38) * 255 / 100))
             width = max(12, width * 5)
         return QPen(color, width, line_style, Qt.RoundCap, Qt.RoundJoin)
@@ -1629,7 +1632,7 @@ class AnnotationCanvas(QGraphicsView):
             if not self.erase_items():
                 self._annotation_layer_cache = (None, None, None)
                 if getattr(self, "_annotation_cache_mode", None) is not None:
-                    logging.getLogger("screensnap").debug("标注缓存模式：无擦除，恢复原生绘制")
+                    get_logger().debug("标注缓存模式：无擦除，恢复原生绘制")
                     self._annotation_cache_mode = None
                 return
             # 2026-10-12（D35 收尾）：标注一变就**在这里**（非绘制期 ✓）排一次延迟重建 ✓
@@ -1706,7 +1709,7 @@ class AnnotationCanvas(QGraphicsView):
         mode = "prefix" if top_erase_above_all else "ordered"
         if getattr(self, "_annotation_cache_mode", None) != mode:
             self._annotation_cache_mode = mode
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "标注缓存模式切换：%s 擦除层=%d 标注=%d", mode, len(erase_layers), len(annotation_levels))
         self._annotation_layer_cache = (key, image, full)
         self.viewport().update()      # 缓存就绪 ⇒ 请当帧用缓存重画 ✓
@@ -1758,7 +1761,7 @@ class AnnotationCanvas(QGraphicsView):
         super().paintEvent(event)
         elapsed = (_time.perf_counter() - started) * 1000.0
         if elapsed >= 8.0:
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "编辑器慢帧: 重绘 %.1f ms 区域=%s 标注=%d",
                 elapsed, event.rect().size(), len(self.annotations()))
 
@@ -1987,7 +1990,7 @@ class AnnotationCanvas(QGraphicsView):
         """开始旋转：以项包围盒中心为支点，记录起始角度与当前旋转值。"""
         self.rotating = item
         self.setCursor(self.rotation_cursor)
-        logging.getLogger("screensnap").debug("标注旋转开始")
+        get_logger().debug("标注旋转开始")
         center_local = item.boundingRect().center()
         # 改旋转支点会让「已带旋转的图元」整体平移一个常量（缩放过、或刚缩放过时支点并不是中心），
         # 先记下同一局部点的场景位置，改完再把这段位移补回去，避免按下瞬间“闪”到别处。
@@ -2076,7 +2079,7 @@ class AnnotationCanvas(QGraphicsView):
         if overlay is None:
             return
         bounds, out = overlay
-        logging.getLogger("screensnap").debug("马赛克笔刷提交：复用预览=%s 尺寸=%sx%s", reuse,
+        get_logger().debug("马赛克笔刷提交：复用预览=%s 尺寸=%sx%s", reuse,
                                              bounds.width(), bounds.height())
         item = editable(AnnotationPixmapItem(QPixmap.fromImage(out)))
         item.setOffset(QPointF(bounds.left(), bounds.top()))
@@ -2131,7 +2134,7 @@ class AnnotationCanvas(QGraphicsView):
         if event.button() == Qt.LeftButton:
             _press_point = self.mapToScene(event.position().toPoint())
             _selected = self.scene_data.selectedItems()
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "左键按下: tool=%s 选中=%d 旋转手柄=%s 缩放手柄=%s",
                 self.tool, len(_selected),
                 [self.rotation_handle_at(i, _press_point) for i in _selected],
@@ -2210,7 +2213,7 @@ class AnnotationCanvas(QGraphicsView):
             # D13 留痕（2026-10-11 用户反馈"按住旋转手柄却移动了整个标注"）：一次按下即可看清是
             # 哪道门挡下的 —— ① 没进这个分支（tool 非 select 且 handle_hit=False）；② 进了但选中数≠1；
             # ③ 旋转命中为 False（命中区太小）；④ 缩放手柄抢先命中。
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "按下判定: tool=%s handle_hit=%s 选中=%d 缩放手柄=%s 旋转手柄=%s",
                 self.tool, handle_hit, len(selected),
                 [self.resize_handle_at(self.item_resize_handles(i), point) for i in selected],
@@ -2362,7 +2365,7 @@ class AnnotationCanvas(QGraphicsView):
             before = self.rotating.rotation()
             self._rotate_to(point)
             if abs(self.rotating.rotation() - before) > 0.01:   # 低频：只在角度真变化时记（规则 14）
-                logging.getLogger("screensnap").debug(
+                get_logger().debug(
                     "旋转中：角度 %.1f → %.1f（位置未变）",
                     before, self.rotating.rotation())
             event.accept()
@@ -2852,7 +2855,7 @@ class AnnotationCanvas(QGraphicsView):
             self._applied_cursor_key = None
             self._apply_tool_cursor()
         if self.rotating is not None:
-            logging.getLogger("screensnap").debug("标注旋转结束")
+            get_logger().debug("标注旋转结束")
             self.rotating = None
             self.checkpoint()
             self.viewport().update()
@@ -3211,7 +3214,7 @@ class AnnotationCanvas(QGraphicsView):
         for item in items:
             bounds = item.boundingRect()
             if bounds.width() < 2 or bounds.height() < 2:
-                logging.getLogger("screensnap").debug(
+                get_logger().debug(
                     "手柄键盘缩放：跳过过小的标注 %s", type(item).__name__)
                 continue
             _outward = self.HANDLE_DIRECTIONS.get(name)
@@ -3274,7 +3277,7 @@ class AnnotationCanvas(QGraphicsView):
             after = item.mapToScene(item.boundingRect().center())
             item.setPos(item.pos() + before - after)
             changed = True
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "手柄键盘缩放：%s 手柄=%s dx=%s dy=%s 比例=%.4f/%.4f 尺寸=%sx%s",
                 type(item).__name__, name or "(默认右下)", dx, dy, factor_x, factor_y,
                 round(bounds.width() * factor_x, 1), round(bounds.height() * factor_y, 1))
@@ -3303,7 +3306,7 @@ class AnnotationCanvas(QGraphicsView):
         self.resize_transform = item.transform()
         self.resize_scale = item.scale()
         self.text_resize_origin = None
-        logging.getLogger("screensnap").debug(
+        get_logger().debug(
             "键盘缩放后更新鼠标拖拽基准：手柄=%s", self.resize_handle)
 
     def handle_global_point(self, name=None, precise=False):
@@ -3364,7 +3367,7 @@ class AnnotationCanvas(QGraphicsView):
         # 2026-10-12 诊断（用户要求"多加日志排查" ✓ 按键级 ✓ 非高频 ✗）：一次按键一条 ✓
         #   手柄/目标浮点/当前光标/实际落点/两轴位移 ⇒ 一眼看出"哪条轴没动、是否跳变" ✓。
         _cur = QCursor.pos()
-        logging.getLogger("screensnap").debug(
+        get_logger().debug(
             "指针跟随：手柄=%s 目标=(%.1f,%.1f) 当前=(%d,%d) 落点=(%d,%d) 位移=(%d,%d)",
             self.active_handle(), target.x(), target.y(), _cur.x(), _cur.y(),
             point.x(), point.y(), point.x() - _cur.x(), point.y() - _cur.y())
@@ -3380,7 +3383,7 @@ class AnnotationCanvas(QGraphicsView):
                 return
             current = QCursor.pos()
             if (current - point).manhattanLength() > 2:
-                logging.getLogger("screensnap").debug(
+                get_logger().debug(
                     "指针跟随校正：目标=%s 实际=%s", point, current)
                 self._mark_programmatic_cursor_move(point)
                 QCursor.setPos(point)
@@ -3516,7 +3519,7 @@ class AnnotationCanvas(QGraphicsView):
                     # 否则指针跟随会让命中在 手柄/边/标注内部/对角手柄 之间跳 ✗ ⇒ 手柄一变方向就翻转 ✓
                     # = 用户看到的四个键莫名全放大或全缩小 ✓；鼠标移动时清除 ✓（见 mouseMoveEvent）。
                     self._active_handle_name = handle_name
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "画布按键去向：手柄=%s（悬停=%s）dx=%s dy=%s 分支=%s",
                 self.active_handle(), handle_name, dx, dy,
                 "旋转" if handle_name == "rotate" else ("缩放" if handle_name else "移动/无手柄"))
@@ -3554,25 +3557,25 @@ class AnnotationCanvas(QGraphicsView):
             # 平移改用右键/中键拖动。D8 ⑤：Space 会被画布用 ShortcutOverride 吞掉，挂在上面的
             # QShortcut 收不到（全应用同键也会一并失效）⇒ 就在画布自己的 keyPressEvent 里直接发信号。
             if not event.isAutoRepeat():
-                logging.getLogger("screensnap").info("画布 Space 按下 ⇒ 触发贴图")
+                get_logger().info("画布 Space 按下 ⇒ 触发贴图")
                 self.sticker_shortcut.emit()
             event.accept()
         elif event.key() == Qt.Key_S and event.modifiers() == Qt.NoModifier:
             # 2026-10-11：单键 S = 保存（由画布处理；W/A/S/D 微调分支在更上面 ⇒ 微调语境先被它消费）。
-            logging.getLogger("screensnap").info("画布 S 按下 ⇒ 触发保存")
+            get_logger().info("画布 S 按下 ⇒ 触发保存")
             self.save_requested.emit()
             event.accept()
         elif event.key() == Qt.Key_S and (event.modifiers() & Qt.ControlModifier):
             # Ctrl+S = 保存（2026-10-11 用户反馈原地编辑器无效）：与 A/空格 一样在画布内处理，
             # 不依赖「哪块屏 / 哪种选区入口」创建的编辑器窗口，主副屏与三种选区入口都一致。
-            logging.getLogger("screensnap").info("画布 Ctrl+S 按下 ⇒ 触发保存")
+            get_logger().info("画布 Ctrl+S 按下 ⇒ 触发保存")
             self.save_requested.emit()
             event.accept()
         elif self._binding_matches(event, "editor_save_as_shortcut", "A"):
             # 2026-10-11：另存为键**按配置**判定（默认 A；审查 H1 实测原来硬编码 ⇒ 改键无效 ✗）。
             # 上面的 W/A/S/D 分支只在"按住微调"语境生效（那时 A=左移，在这里之前就 return 了）⇒
             # 不在微调语境时才轮到这里 = 另存为；不用 QShortcut 是为了避开双语义"抢先"（D14 ✓）。
-            logging.getLogger("screensnap").info(
+            get_logger().info(
                 "画布另存为键按下 ⇒ 触发另存为（键=%s）",
                 self.settings.get("editor_save_as_shortcut", "A") if getattr(self, "settings", None) else "A")
             self.save_as_requested.emit()
@@ -3580,7 +3583,7 @@ class AnnotationCanvas(QGraphicsView):
         elif (event.key() == Qt.Key_0 and event.modifiers() & Qt.ControlModifier
               and self.wheel_zoom_enabled):
             # 复位缩放到 100%（Ctrl+0）：直接在画布内执行，避免又被吞掉。
-            logging.getLogger("screensnap").info("画布 Ctrl+0 ⇒ 复位缩放到 100%%")
+            get_logger().info("画布 Ctrl+0 ⇒ 复位缩放到 100%%")
             self.set_zoom(100)
             event.accept()
         elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
@@ -3631,7 +3634,7 @@ class AnnotationCanvas(QGraphicsView):
         self.set_zoom(percent)
         if self.zoom_percent != previous:
             # 只在比例真的变化时记一行；滚轮连滚不会刷屏。
-            logging.getLogger("screensnap").debug("Ctrl+滚轮缩放显示比例: %d%% -> %d%%",
+            get_logger().debug("Ctrl+滚轮缩放显示比例: %d%% -> %d%%",
                                                   previous, self.zoom_percent)
         after = self.mapToScene(viewport_position)
         shift = after - before

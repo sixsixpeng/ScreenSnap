@@ -1,7 +1,8 @@
 """导出时对编辑结果应用圆角、边框和阴影。"""
 
-import logging
 import os
+
+from logger import get_logger
 
 from PIL import Image, ImageChops, ImageDraw, ImageFilter
 
@@ -30,7 +31,7 @@ def copy_saved_to_clipboard(path, image, settings, force_image=False,
     两个开关都关时不动剪贴板；只写图片和路径文字，不附加文件对象格式。
     内部缓存、恢复和预览不得调用本函数。失败返回 False，不重试、不增加通知。
     """
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     copy_path = bool(settings.get("copy_saved_path")) and path is not None
     copy_image = bool(settings.get("copy_saved_image")) or bool(force_image)
     if not (copy_path or copy_image):

@@ -385,6 +385,42 @@ class CanvasTests(CoreTests):
         self.assertIn("sceneRect", source, "image_point 仍按画布矩形夹取")
         editor.close()
 
+    def test_allow_mode_lets_annotation_be_drawn_outside_canvas(self):
+        """2026-10-15（用户要求新增分支）：`editor_overcanvas_mode=allow`（设置页「允许超出」）下，
+        标注几何不再夹到画布边缘 —— 画布外的落点按原样用于绘制（可正常画出画布）；
+        默认 clip 的夹取契约必须完全不变。
+        """
+        from config.config_manager import DEFAULTS, validate
+
+        # 配置层：allow 是合法取值
+        self.assertEqual(validate({"editor_overcanvas_mode": "allow"})["editor_overcanvas_mode"], "allow")
+
+        editor = EditorWindow(Image.new("RGB", (80, 60), "white"),
+                              dict(DEFAULTS, editor_overcanvas_mode="allow"))
+        try:
+            canvas = editor.canvas
+            bounds = canvas.sceneRect()
+            outside = QPointF(bounds.left() - 40, bounds.bottom() + 30)
+            self.assertEqual(canvas.image_point(outside), outside,
+                             "allow 模式下画布外的落点必须原样保留（可正常画出画布）")
+            inside = QPointF(bounds.center())
+            self.assertEqual(canvas.image_point(inside), inside, "画布内的点同样保持不变")
+            # allow 不属于 block：编辑结束时不得把标注平移回画布内（此调用应无副作用）
+            canvas.constrain_selected_to_canvas()
+        finally:
+            editor.close()
+
+        editor = EditorWindow(Image.new("RGB", (80, 60), "white"),
+                              dict(DEFAULTS, editor_overcanvas_mode="clip"))
+        try:
+            canvas = editor.canvas
+            bounds = canvas.sceneRect()
+            outer = QPointF(bounds.left() - 40, bounds.center().y())
+            self.assertNotEqual(canvas.image_point(outer), outer,
+                                "clip（默认）必须仍然把落点夹到画布边缘")
+        finally:
+            editor.close()
+
     def test_text_input_dialog_is_kept_on_top_of_the_mask(self):
         """回归（2026-10-10 真机反馈）：原地编辑里文字输入弹窗被置顶遮罩挡住看不见。
 
@@ -570,7 +606,7 @@ class CanvasTests(CoreTests):
                                     canvas._apply_tool_cursor()
                                     self.assertEqual(canvas.cursor().shape(), expected)
                                     if tool == "pen" and rotation == 0 and handle == "e":
-                                        with patch("editor.annotation_canvas.logging.getLogger") as logger:
+                                        with patch("editor.annotation_canvas.get_logger") as logger:
                                             for _ in range(30):
                                                 canvas._update_resize_cursor(QPoint(-60, -60))
                                             logger.return_value.debug.assert_not_called()
@@ -1465,6 +1501,8 @@ class CanvasTests(CoreTests):
         from config.config_manager import DEFAULTS
 
         editor = EditorWindow(Image.new("RGB", (40, 30), "white"), dict(DEFAULTS))
+        # 默认标注工具已改为记号笔；这里显式切到画笔，验证「取色更新当前工具的标注颜色」。
+        editor.toolbar.tool_buttons["pen"].click()
         editor.apply_picked_color("#123456")
         self.assertEqual(editor.settings["pen_color"], "#123456")
         self.assertEqual(editor.canvas.settings["pen_color"], "#123456")
@@ -2198,8 +2236,14 @@ class CanvasTests(CoreTests):
             mask.complete()
             editor = mask.session.inline_editor
             viewport = editor.canvas.viewport()
-            inside = QPoint(50, 50)
-            event = QMouseEvent(QEvent.MouseButtonPress, QPointF(inside), QPointF(inside),
+            # 合成事件必须像真实事件那样区分两路坐标：`position()` 是接收者(viewport)局部坐标，
+            # `globalPosition()` 是真实全局点 —— 遮罩的 `_mouse_event_position` 按 global 换算
+            # 物理局部点（跨屏抓取修复后不再用来源窗口局部点重建）；两路都填同一个视口坐标会让
+            # 命中点算错，此处按 mask 坐标分别映射。
+            inside_mask = QPoint(50, 50)
+            inside = viewport.mapFrom(mask, inside_mask)
+            event = QMouseEvent(QEvent.MouseButtonPress, QPointF(inside),
+                                QPointF(mask.mapToGlobal(inside_mask)),
                                 Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
             self.assertFalse(editor.eventFilter(viewport, event))
             start = QPoint(58, 30)
@@ -2210,15 +2254,19 @@ class CanvasTests(CoreTests):
             self.assertEqual(mask.selection.rects, [QRect(45, 38, 100, 80)])
             self.assertEqual(editor.canvas.image.getpixel((0, 0)), (255, 0, 0))
             self.assertEqual(editor.canvas.geometry(), mask.to_logical_rect(mask.selection.rects[0]).toRect())
-            border = viewport.mapFrom(mask, QPoint(73, 39))
-            moved = viewport.mapFrom(mask, QPoint(83, 45))
-            press = QMouseEvent(QEvent.MouseButtonPress, QPointF(border), QPointF(border),
+            border_mask, moved_mask = QPoint(73, 39), QPoint(83, 45)
+            border = viewport.mapFrom(mask, border_mask)
+            moved = viewport.mapFrom(mask, moved_mask)
+            press = QMouseEvent(QEvent.MouseButtonPress, QPointF(border),
+                                QPointF(mask.mapToGlobal(border_mask)),
                                 Qt.LeftButton, Qt.LeftButton, Qt.NoModifier)
             self.assertTrue(editor.eventFilter(viewport, press))
-            move = QMouseEvent(QEvent.MouseMove, QPointF(moved), QPointF(moved),
+            move = QMouseEvent(QEvent.MouseMove, QPointF(moved),
+                               QPointF(mask.mapToGlobal(moved_mask)),
                                Qt.NoButton, Qt.LeftButton, Qt.NoModifier)
             self.assertTrue(editor.eventFilter(viewport, move))
-            release = QMouseEvent(QEvent.MouseButtonRelease, QPointF(moved), QPointF(moved),
+            release = QMouseEvent(QEvent.MouseButtonRelease, QPointF(moved),
+                                  QPointF(mask.mapToGlobal(moved_mask)),
                                   Qt.LeftButton, Qt.NoButton, Qt.NoModifier)
             self.assertTrue(editor.eventFilter(viewport, release))
             self.assertEqual(mask.selection.rects, [QRect(55, 44, 100, 80)])
@@ -2295,6 +2343,21 @@ class CanvasTests(CoreTests):
             settings["save_dir"] = folder
             self.assertEqual(mask.session.inline_editor.save(automatic=True).name, "inline.png")
             mask.close()
+
+    def test_annotation_rounded_shapes_enable_antialiasing(self):
+        """圆角矩形标注与序号形状在自身 paint 里显式开启抗锯齿（不依赖调用方的 renderHint）。"""
+        from unittest.mock import Mock
+        from PySide6.QtCore import QRectF
+        from PySide6.QtGui import QPainter
+        from editor.annotation_items import AnnotationSequenceItem, RoundedRectItem
+
+        painter = Mock()
+        RoundedRectItem(QRectF(0, 0, 40, 30), 8).paint(painter, None)
+        painter.setRenderHint.assert_any_call(QPainter.Antialiasing, True)
+
+        painter = Mock()
+        AnnotationSequenceItem(1, "#ff0000", "#ffffff", 14, "bubble").paint(painter, None)
+        painter.setRenderHint.assert_any_call(QPainter.Antialiasing, True)
 
     def test_inline_options_button_opens_after_keyboard_nudge(self):
         from PySide6.QtCore import QPoint, QTimer
@@ -3005,9 +3068,10 @@ class CanvasTests(CoreTests):
         toolbar.tool_buttons["pen"].click()
         panel = next(action.defaultWidget() for action in toolbar.options_button.menu().actions()
                      if isinstance(action, QWidgetAction))
-        self.assertGreaterEqual(panel.minimumWidth(), 340)
-        self.assertLessEqual(panel.minimumWidth(), 500)
-        self.assertGreaterEqual(toolbar.options_button.menu().sizeHint().width(), 320)
+        # 2026-10-16：面板宽度由内容决定（不再有写死的 430 下限 / 每工具宽度表）。
+        self.assertGreaterEqual(panel.minimumWidth(), 240)
+        self.assertLessEqual(panel.minimumWidth(), toolbar.OPTIONS_PANEL_MAX_WIDTH)
+        self.assertGreaterEqual(toolbar.options_button.menu().sizeHint().width(), 240)
         panel.show()
         self.app.processEvents()
         for row in (1,):

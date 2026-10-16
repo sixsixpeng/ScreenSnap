@@ -49,9 +49,14 @@ class ZoomTests(CoreTests):
                             self.assertLessEqual(widget.geometry().right(), panel.width(), tool)
                 menu.hide()
                 self.app.processEvents()
-            self.assertGreater(widths[0], widths[1], widths)
-            self.assertGreater(widths[2], widths[3], widths)
+            # 2026-10-16：弹层宽度改为「按当前可见内容计算」（不再有每个工具的写死宽度表）。
+            # 断言意图随之更新为：① 切换工具确实按内容重算（宽度不全相同）；
+            #                    ② 同一工具重复打开尺寸稳定；③ 宽度落在可用区间内。
+            self.assertGreater(len(set(widths)), 1, widths)
             self.assertEqual(widths[0], widths[4], widths)
+            for width in widths:
+                self.assertGreaterEqual(width, toolbar.OPTIONS_PANEL_MIN_WIDTH, widths)
+                self.assertLessEqual(width, toolbar.OPTIONS_PANEL_MAX_WIDTH, widths)
             mask.close()
 
     def test_corner_resize_keeps_aspect_after_rotation_and_free_with_modifier(self):
@@ -592,7 +597,11 @@ class ZoomTests(CoreTests):
             self.app.processEvents()
             widths.append(menu.width())
             self.assertGreaterEqual(menu.width(), panel.width(), (tool, menu.size(), panel.size()))
-            self.assertGreaterEqual(panel.width(), toolbar.option_panel_width(tool), tool)
+            # 2026-10-16：宽度由内容决定 —— 内容不被裁，也不留大片空白（原来的写死宽度表已删除）。
+            visible_right = max((widget.geometry().right() for row in toolbar.option_rows
+                                 for widget in row if widget.isVisible()), default=0)
+            self.assertLessEqual(visible_right, panel.width(), (tool, panel.size()))
+            self.assertLessEqual(panel.width() - visible_right, 60, tool)
             for row in toolbar.option_rows:
                 for widget in row:
                     if widget.isVisible():
@@ -600,9 +609,11 @@ class ZoomTests(CoreTests):
                                              (tool, widget.geometry(), panel.size()))
             menu.hide()
             self.app.processEvents()
-        self.assertGreater(widths[0], widths[1], widths)
-        self.assertGreater(widths[2], widths[3], widths)
+        self.assertGreater(len(set(widths)), 1, widths)
         self.assertEqual(widths[0], widths[4], widths)
+        for width in widths:
+            self.assertGreaterEqual(width, toolbar.OPTIONS_PANEL_MIN_WIDTH, widths)
+            self.assertLessEqual(width, toolbar.OPTIONS_PANEL_MAX_WIDTH, widths)
         toolbar.close()
 
 

@@ -16,6 +16,26 @@ from tests.base import (CoreTests, Mock, patch, Path, tempfile, json, unittest, 
 
 
 class UiTests(CoreTests):
+    def test_annotation_preview_all_kinds_render_without_error(self):
+        """标注预览的每个分支都必须能渲染。
+
+        2026-10-16 用户实机崩溃（「选择标注 → 取色 → 更多设置」）：`picker` 分支里用了
+        未导入的 `QRect`，`paintEvent` 抛 NameError ⇒ Qt 直接终止进程。任何分支内的异常
+        都属同一类风险，所以这里把全部分支各渲染一次（`grab()` 会强制走 paintEvent）。
+        """
+        from config.config_manager import DEFAULTS
+        from ui.widgets.annotation_preview import AnnotationPreview
+
+        kinds = ("output", "text", "arrow", "rect", "ellipse", "pen", "eraser",
+                 "marker", "mosaic", "crop", "sequence", "picker")
+        settings = dict(DEFAULTS)
+        for kind in kinds:
+            preview = AnnotationPreview(settings, kind, 104)
+            preview.resize(240, 104)
+            image = preview.grab().toImage()
+            self.assertFalse(image.isNull(), kind)
+            preview.deleteLater()
+
     def test_hint_preview_magnifier_and_text_share_the_same_coordinates(self):
         from ui.widgets.hint_preview import HintBarPreview
 

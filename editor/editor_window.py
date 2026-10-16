@@ -2,7 +2,6 @@
 
 import os
 import re
-import logging
 from datetime import datetime
 from pathlib import Path
 
@@ -22,6 +21,7 @@ from editor.image_effects import (apply_output_effects, copy_saved_to_clipboard,
 from core.screen_capture import qimage_to_pillow
 from editor.image_transform import transform
 from editor.toolbar_widget import ToolbarWidget
+from logger import get_logger
 
 # 2026-10-11：这个模块级助手**必须放在 class 之前** —— 上一版误插进类体内（列 0）⇒ 类提前结束、
 # 之后所有方法都变成它的嵌套函数 ⇒ AttributeError（test_tools/test_zoom/test_app 共 9 条 ERROR）。
@@ -49,7 +49,7 @@ def _ensure_chinese_dialogs():
     if translator.load("qtbase_zh_CN", path) or translator.load("qt_zh_CN", path):
         app.installTranslator(translator)
         app._screensnap_translator = translator
-        logging.getLogger("screensnap").debug("已装载 Qt 中文翻译: %s", path)
+        get_logger().debug("已装载 Qt 中文翻译: %s", path)
 
 
 def build_save_dialog(parent, suggested, settings, anchor=None, is_stub=False):
@@ -193,14 +193,14 @@ class EditorWindow(QMainWindow):
             registered.append(f"{zoom_sequence.toString()} ⇒ 画布缩放复位")
 
         if registered:
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "编辑器快捷键已注册（%d 个）：%s", len(registered), "；".join(registered))
         # 窗口编辑器支持 Ctrl+滚轮缩放（原地编辑画布太小、没有缩放控件，不启用）。
         self.canvas.wheel_zoom_enabled = True
         self.canvas.set_round_corner_preview(
             self.round_corners, settings.get("editor_image_corner_radius", 16))
         self.canvas.set_tool(next((key for key, button in self.toolbar.tool_buttons.items()
-                       if button.isChecked()), "select"))
+                       if button.isChecked()), "marker"))
         self.last_color_tool = self.canvas.tool if self.canvas.tool in ANNOTATION_COLOR_TOOLS else "pen"
         self.toolbar.set_active_tool(self.canvas.tool, self.last_color_tool)
         self.canvas.setDragMode(QGraphicsView.RubberBandDrag if self.canvas.tool == "select"
@@ -410,7 +410,7 @@ class EditorWindow(QMainWindow):
     def save(self, automatic=False, copy_to_clipboard=False, force_copy_image=False,
              result=None):
         """首次保存分配文件名；后续保存覆盖同一路径，避免重复文件。"""
-        logger = logging.getLogger("screensnap")
+        logger = get_logger()
         path = (self.last_path if matches_saved_format(self.last_path, self.settings)
             else self.allocate_path(automatic))
         result = self.output_image() if result is None else result
@@ -431,12 +431,12 @@ class EditorWindow(QMainWindow):
             try:
                 os.startfile(str(path.parent))
             except OSError as error:
-                logging.getLogger("screensnap").warning("打开保存目录失败 %s: %s", path.parent, error)
+                get_logger().warning("打开保存目录失败 %s: %s", path.parent, error)
         return path
 
     def copy_to_clipboard_only(self):
         """仅把当前合成图复制到剪贴板，不落盘并退出编辑。"""
-        logger = logging.getLogger("screensnap")
+        logger = get_logger()
         result = self.output_image()
         if not copy_image_to_clipboard(result):
             self.status.emit("复制图片失败：剪贴板不可用，请重试")
@@ -498,7 +498,7 @@ class EditorWindow(QMainWindow):
         result = self.output_image()
         if not save_image(result, path, save_settings):
             raise OSError(f"图片保存失败：{path}")
-        logging.getLogger("screensnap").info(
+        get_logger().info(
             "另存为图片: %s（%sx%s，%s）", path, result.width(), result.height(),
             self.settings["save_format"])
         self.image_saved.emit(str(path), result)          # 触发既有保存通知
@@ -588,7 +588,7 @@ class EditorWindow(QMainWindow):
 
     def execute(self, action):
         """分发工具栏命令；图片变换同步处理光标替代版本。"""
-        logging.getLogger("screensnap").debug("编辑器操作: %s", action)
+        get_logger().debug("编辑器操作: %s", action)
         if action in ("undo", "redo", "reset"):
             getattr(self.canvas, action)()
         elif action == "reset_rotation":
@@ -626,7 +626,7 @@ class EditorWindow(QMainWindow):
             self.canvas.checkpoint()
         elif action == "paste":
             image = self.output_image()
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "编辑器请求创建贴图: %dx%d", image.width(), image.height())
             self.sticker_saved_path = None
             self.suppress_save_notification = True
@@ -636,7 +636,7 @@ class EditorWindow(QMainWindow):
                     automatic=True, copy_to_clipboard=True, result=image)
             except OSError as error:
                 save_error = error
-                logging.getLogger("screensnap").error(
+                get_logger().error(
                     "编辑器贴图保存失败，继续贴图并按设置复制图像: %s", error, exc_info=True)
                 copy_saved_to_clipboard(None, image, self.settings)
             finally:
