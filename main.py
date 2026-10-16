@@ -37,7 +37,7 @@ def enable_windows_app_id():
     try:
         ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID(APP_USER_MODEL_ID)
     except (AttributeError, OSError) as error:
-        logging.getLogger("screensnap").warning("无法设置任务栏应用标识: %s", error)
+        get_logger().warning("无法设置任务栏应用标识: %s", error)
 
 
 enable_windows_dpi_awareness()
@@ -57,6 +57,7 @@ from core.startup import set_start_on_boot
 from editor import EditorWindow
 from hotkey import HotkeyManager
 from logger import configure_logging
+from logger import get_logger
 from screenshot import MaskWindow
 from screenshot.mask_window import window_label
 from sticker import StickerManager
@@ -73,13 +74,15 @@ from app.notifications import NotificationBridge, drawn_icon, tray_icon
 from app.capture_flow import CaptureFlowMixin
 from app.notification_flow import NotificationMixin
 from app.sticker_flow import StickerFlowMixin
+from app.hotkey_flow import HotkeyControlMixin
+from core.session_monitor import SessionMonitor
 
 
-class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
+class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
     """集中连接托盘、热键和窗口；具体业务交由各模块处理。"""
 
     # 日志处理器随设置重建，logger 对象本身保持不变。
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
 
     def __init__(self):
         self.qt = QApp(sys.argv)
@@ -111,6 +114,12 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         # 键盘监听在工作线程执行，Qt 信号把热键动作送回 GUI 主线程。
         self.hotkeys.triggered.connect(self.dispatch)
         self.hotkeys.failed.connect(self.hotkey_error)
+        self.hotkeys.notice.connect(lambda message: self.notify(message))
+        self.hotkeys.busy_check = self.hotkey_busy
+        self._session_monitor = SessionMonitor()
+        self._session_monitor.available_changed.connect(self.hotkeys.session_changed)
+        self._capture_pending = 0
+        self._next_capture_comparison = False
         # 图片缓存迁移（2026-10-11）：把旧位置 %APPDATA% 里的贴图缓存/剪贴板历史图搬到
         # <保存目录>/cache 下，只搬一次；搬不动只记 WARNING，绝不阻塞启动。
         from core.path_utils import migrate_cache_dirs
@@ -125,7 +134,7 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
             self.config, self.stickers.clear_clipboard_history,
             self.stickers.clear_rebuildable_cache,
             reset_all_user_data=self.request_full_user_data_reset,
-            restore_hotkeys=self.restore_hotkeys)
+            restore_hotkeys=self.restore_hotkeys, diagnostic_tools=self.hotkey_tools())
         self.settings_window.changed.connect(self.refresh)
         self.settings_window.recording.connect(self.pause_hotkeys)
         self.hotkey_recording = False
@@ -155,6 +164,8 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         # 持有顶层窗口引用，防止截图完成后窗口被 Python 提前回收。
         self.mask = None
         self.hotkeys.register(self.config.data)
+        self._applied_hotkey_settings = self.hotkey_binding_settings()
+        self._applied_logging_settings = self.logging_settings()
         self.stickers.restore()
         self.qt.aboutToQuit.connect(self.shutdown)
         # 托盘显示后等事件循环启动，再请求系统显示就绪提示。
@@ -290,12 +301,7 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
     def tray_clicked(self, reason):
         """仅在托盘双击时启动自由截图，右键留给菜单。"""
         if reason == QSystemTrayIcon.DoubleClick:
-            # 按需体检（用户 2026-10-11 建议）：托盘双击说明用户就在机器前，顺手确认一次全局热键
-            # 是否还活着；否则被安全软件摘掉钩子后最多要等 10 秒的定时体检才恢复。
-            try:
-                self.hotkeys.check_health(force=True)
-            except Exception:  # noqa: BLE001 体检失败绝不能影响截图
-                pass
+            # 普通截图不是恢复命令；无证据重注册会绕过只记录模式并与新遮罩竞态。
             self.start_capture("capture")
 
 
@@ -327,7 +333,11 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         """配置落盘后更新热键、日志和已打开编辑器的标注颜色。"""
         self.stickers.refresh_selection_visuals()
         apply_theme(self.qt, self.config.data["theme"])
-        configure_logging(self.config.data)
+        logging_settings = self.logging_settings()
+        if logging_settings != getattr(self, "_applied_logging_settings", None):
+            configure_logging(self.config.data)
+            self._applied_logging_settings = logging_settings
+        self.hotkeys.configure_policy(self.config.data)
         self.menu = make_tray_menu(
             self.qt, lambda: self.start_capture("capture", from_tray=True), self.open_settings, self.quit_app,
             lambda: self.dispatch("edit_clipboard"), lambda: self.dispatch("open_image"),
@@ -339,8 +349,10 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
             restore_hotkeys=self.restore_hotkeys,
         )
         self.tray.setContextMenu(self.menu)
-        if not self.hotkey_recording:
+        binding_settings = self.hotkey_binding_settings()
+        if not self.hotkey_recording and binding_settings != getattr(self, "_applied_hotkey_settings", None):
             self.hotkeys.register(self.config.data)
+            self._applied_hotkey_settings = binding_settings
         inline_editor = self.mask.session.inline_editor if isinstance(self.mask, MaskWindow) else None
         if isinstance(self.mask, MaskWindow):
             for view in self.mask.session.views:
@@ -348,6 +360,7 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
                 view.sync_capture_save_shortcut(self.config.data)
                 view.sync_capture_action_shortcuts(self.config.data)
                 view.update()
+            self.mask.sync_keyboard_compatibility()
         for editor in [*self.editors, *([inline_editor] if inline_editor is not None else [])]:
             for key in editor.toolbar.tool_color_buttons:
                 value = self.config.data.get(key)
@@ -419,6 +432,13 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         self.stickers.refresh_style()
         self.logger.info("配置已更新")
 
+    def hotkey_binding_settings(self):
+        return dict(enabled=self.config.data["hotkeys_enabled"], bindings=dict(self.config.data["hotkeys"]),
+                    suppress=self.config.data["capture_hotkey_suppress"])
+
+    def logging_settings(self):
+        return {key: self.config.data[key] for key in ("logging_enabled", "log_level", "log_dir", "log_when",
+                                                     "log_monthly_folder", "log_backup_count")}
 
     def pause_hotkeys(self, recording):
         """录制期间注销全局热键，结束后按最新配置重新注册。"""
@@ -427,6 +447,9 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         # 日志里必须能一眼看出是暂停导致的。
         self.logger.info("全局热键%s（设置页录制）", "已暂停" if recording else "已恢复")
         self.hotkeys.set_paused(recording)
+        if isinstance(self.mask, MaskWindow):
+            self.mask.session.keyboard_recording = bool(recording)
+            self.mask.sync_keyboard_compatibility()
         settings = dict(self.config.data)
         settings["hotkeys_enabled"] = False if recording else self.config.data["hotkeys_enabled"]
         self.hotkeys.register(settings)
@@ -438,19 +461,27 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         self.notify(f"热键注册失败: {message}")
 
     def restore_hotkeys(self):
-        """手动兜底：立即清空并按当前设置重新注册所有全局热键。
+        """手动兜底：提交按当前设置重建绑定的请求，不宣称底层原生钩子已恢复。
 
-        快捷键被其它程序抢占、或系统静默摘掉钩子导致失灵时，这是无需重启程序的恢复入口；
-        即使此前从未成功注册过（`_last_request` 为空）也能靠 register() 重新建立。
+        即使此前从未成功注册过（`_last_request` 为空）也能靠 register() 再次尝试。
+        keyboard 的线程死亡、系统摘钩或残留状态不能靠绑定重建保证恢复。
         同时清掉「设置页正在录制」留下的暂停标记 —— 那个标记卡住时热键会表现为
         「注册着但按了没反应」，这个入口必须能把它救回来。
         """
         self.logger.info("用户请求重新注册全局热键（暂停标记一并清除）")
+        self.hotkeys.log_diagnostics("manual-before-unpause")
         self.hotkeys.set_paused(False)
         self.hotkey_recording = False
-        self.hotkeys.register(self.config.data)
+        mask = getattr(self, "mask", None)
+        if isinstance(mask, MaskWindow):
+            mask.session.keyboard_recording = False
+            mask.sync_keyboard_compatibility()
+        accepted = self.hotkeys.manual_recover(self.config.data)
+        if accepted is False:
+            self.notify("未提交重注册：当前冷却/停止策略或注册线程不可用；请查看诊断")
+            return
         if self.config.data.get("hotkeys_enabled", True):
-            self.notify("已重新注册全局热键")
+            self.notify("已请求重新注册全局热键；仍无效请保留日志后重启")
         else:
             self.notify("全局热键当前已关闭，未注册")
 
@@ -537,6 +568,9 @@ class Application(CaptureFlowMixin, StickerFlowMixin, NotificationMixin):
         # 会话先落盘再清理缓存，避免把本会话还引用着的贴图源文件当成孤儿删掉。
         self.cleanup_cache_if_scheduled("exit")
         self.hotkeys.stop()
+        monitor = getattr(self, "_session_monitor", None)
+        if monitor is not None:
+            monitor.close()
         self.tray.hide()
         self.logger.info("已退出")
 
@@ -564,7 +598,7 @@ def delete_user_data_after_shutdown(instance_lock):
 def _crash_test_fault():
     """仅供 --crash-test 使用：制造一次真实的原生访问违规（0xC0000005），"""
     """用来验证「崩溃 → faulthandler 落盘 → 看护 1 秒后自动重启」这条链路。"""
-    logging.getLogger("screensnap").warning("崩溃复现开关触发：即将制造访问违规（--crash-test）")
+    get_logger().warning("崩溃复现开关触发：即将制造访问违规（--crash-test）")
     # 注意：ctypes.string_at(0) 在本环境会被 Python 转成 OSError 并被
     # bootstrap 的未捕获异常钩子接住 —— 进程不死，看护也就不会重启（实测）。
     # faulthandler._sigsegv() 是真正的段错误，不可被 Python 捕获，进程直接终止。

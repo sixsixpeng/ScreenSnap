@@ -1,7 +1,6 @@
 """应用启动辅助：QApp、单实例锁、异常钩子与日志周期。"""
 
 import ctypes
-import logging
 import os
 import subprocess
 import sys
@@ -18,6 +17,7 @@ from core.startup import set_start_on_boot
 from editor import EditorWindow
 from hotkey import HotkeyManager
 from logger import configure_logging
+from logger import get_logger
 from screenshot import MaskWindow
 from screenshot.mask_window import window_label
 from sticker import StickerManager
@@ -34,7 +34,7 @@ class QApp(QApplication):
         try:
             return super().notify(receiver, event)
         except Exception:
-            logging.getLogger("screensnap").exception(
+            get_logger().exception(
                 "未捕获异常（事件类型 0x%x，接收者 %s）",
                 event.type() if event is not None else -1,
                 type(receiver).__name__ if receiver is not None else None)
@@ -44,7 +44,7 @@ class QApp(QApplication):
 
 def _log_uncaught(exc_type, exc_value, exc_traceback):
     """把未捕获异常写入 screensnap 日志；若日志尚未配置处理器，额外兜底写入文件。"""
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     logger.exception("未捕获的全局异常", exc_info=(exc_type, exc_value, exc_traceback))
     # 日志处理器在 Application.__init__ 中才配置；在此之前崩溃也要保证写进文件。
     if not logger.handlers:
