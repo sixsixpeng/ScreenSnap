@@ -5,6 +5,7 @@ build/
 dist/
 *.spec
 .idea/
+.vscode/
 .codebuddy/
 pyvenv.cfg
 
