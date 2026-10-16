@@ -58,16 +58,70 @@ class ClipboardSource:
         return "剪贴板图片"
 
 
+def _hsl_expression_color(inner):
+    """把 `hsl(h, s%, l%)` / `hsla(h, s%, l%, a)` 的参数转成 #RRGGBB；失败返回 None。
+
+    「取色复制格式」的 hsl 行就是这个写法，转回十六进制后卡片才能显示成色块。
+    """
+    parts = [part.strip() for part in inner.split(",")]
+    if len(parts) < 3:
+        return None
+    try:
+        hue = (float(parts[0]) % 360) / 360
+        saturation = min(max(float(parts[1].rstrip("%")) / 100, 0.0), 1.0)
+        lightness = min(max(float(parts[2].rstrip("%")) / 100, 0.0), 1.0)
+    except ValueError:
+        return None
+    if saturation == 0:
+        grey = round(lightness * 255)
+        return "#%02x%02x%02x" % (grey, grey, grey)
+    if lightness < 0.5:
+        high = lightness * (1 + saturation)
+    else:
+        high = lightness + saturation - lightness * saturation
+    low = 2 * lightness - high
+
+    def channel(offset):
+        offset %= 1
+        if offset < 1 / 6:
+            return low + (high - low) * 6 * offset
+        if offset < 1 / 2:
+            return high
+        if offset < 2 / 3:
+            return low + (high - low) * (2 / 3 - offset) * 6
+        return low
+
+    red, green, blue = (channel(hue + 1 / 3), channel(hue), channel(hue - 1 / 3))
+    return "#%02x%02x%02x" % tuple(round(value * 255) for value in (red, green, blue))
+
+
 def parse_color(text):
     """识别常见颜色写法，其他文本返回 None。
 
     支持：#RGB、#RRGGBB、#RRGGBBAA（忽略 alpha）、裸六位十六进制、0xRRGGBB、
-    rgb(r,g,b) / rgba(r,g,b,a)、以及裸的 R,G,B（2026-10-11 扩展：用户从别的工具复制颜色时
-    常常不是纯十六进制，识别不了就会退化成"绿底文字卡片"）。
+    rgb(r,g,b) / rgba(r,g,b,a)、hsl(h, s%, l%)、裸的 R,G,B，以及**多行**（2026-10-16）：
+    每行都能解析、且各行说的是同一个颜色时才算颜色 —— 「取色复制格式 = 全部三行」写进剪贴板的
+    就是 `#RRGGBB` + `rgb(...)` + `hsl(...)` 三行，只按整串匹配会失败并退化成"绿底文字卡片"，
+    用户看到的现象是"取色后不管点什么颜色，出来的都是黑色/黑白的卡片"。
+    多色列表（累积模式一次贴多个颜色）或普通多行文本仍然返回 None，保持文字卡片。
     """
     value = str(text or "").strip().strip('"\'')
     if not value:
         return None
+    if "\n" in value or "\r" in value:
+        lines = [line for line in value.splitlines() if line.strip()]
+        colors = [parse_color(line) for line in lines]
+        if not colors or any(color is None for color in colors):
+            return None
+        first = QColor(colors[0])
+        for color in colors[1:]:
+            actual = QColor(color)
+            # hsl 只有整数百分比，转回十六进制可能与原始值差 1-2 级 ⇒ 用容差；
+            # 差得多说明这是"多个不同颜色"的列表，不能被截成第一个颜色。
+            if any(abs(getattr(actual, channel)() - getattr(first, channel)()) > 2
+                   for channel in ("red", "green", "blue")):
+                return None
+        return colors[0]
     lowered = value.lower().replace(" ", "")
     body = None
     if lowered.startswith("#"):
@@ -85,17 +139,19 @@ def parse_color(text):
             return "#" + "".join(char * 2 for char in body).lower()
         return None
     numbers = re.fullmatch(r"rgba?\(([^)]*)\)", lowered)
-    if numbers is None:
-        numbers = re.fullmatch(r"(\d{1,3}),(\d{1,3}),(\d{1,3})", lowered)
-        if numbers is not None:
-            channels = numbers.groups()
-        else:
-            return None
-    else:
+    if numbers is not None:
         parts = [part for part in numbers.group(1).split(",") if part]
         if len(parts) < 3:
             return None
         channels = parts[:3]
+    else:
+        hsl = re.fullmatch(r"hsla?\(([^)]*)\)", lowered)
+        if hsl is not None:
+            return _hsl_expression_color(hsl.group(1))
+        numbers = re.fullmatch(r"(\d{1,3}),(\d{1,3}),(\d{1,3})", lowered)
+        if numbers is None:
+            return None
+        channels = numbers.groups()
     try:
         rgb = [max(0, min(255, int(float(channel)))) for channel in channels]
     except (TypeError, ValueError):
@@ -106,6 +162,44 @@ def card_font(settings, key, fallback_size):
     """文字类贴图共用字体设置，未指定字体时使用系统默认中文字体。"""
     font = QFont(str(settings.get(key) or "") or "Microsoft YaHei")
     font.setPointSize(int(settings.get("text_sticker_font_size", fallback_size)))
+    return font
+
+
+# 自动缩小字号的下限：再小就看不清了。用户把字号设得比它还小时，以用户字号为下限
+# （只缩不放），并用省略号兜住放不下的情况。
+COLOR_LABEL_MIN_POINT_SIZE = 8
+# 色值底板四周的留白：横向 10px×2、纵向 8px×2（与 render_color_card 的绘制口径一致）。
+COLOR_LABEL_PADDING = 8
+
+
+def fitted_card_font(settings, labels, width, height):
+    """按卡片可用宽高求出能放下全部标签的字号（**只缩不放**）。
+
+    默认字号配上 `rgb(...)`/`hsl(...)`/「全部三行」这些长标签时，文字横向会超出卡片、
+    右侧被裁；色块调矮时后面的行也会画到画布外（2026-10-16 检查发现）。这里从设置字号
+    往下试，取第一个宽高都放得下的。
+
+    下限是 `min(COLOR_LABEL_MIN_POINT_SIZE, 用户字号)` —— 下限**不得高于**用户设定，
+    否则把字号设成 6pt 时标签反而被放大到 8pt，而且循环条件立刻为假、根本不做适配。
+    """
+    try:
+        configured = int(settings.get("text_sticker_font_size", 18) or 18)
+    except (TypeError, ValueError):
+        configured = 18
+    size = max(1, configured)
+    floor = min(COLOR_LABEL_MIN_POINT_SIZE, size)
+    font = card_font(settings, "text_sticker_font", size)
+    available_width = max(20, width - 20)
+    available_height = max(20, height - 10)
+    longest_labels = [label for label in labels if label]
+    while size > floor:
+        metrics = QFontMetrics(font)
+        longest = max((metrics.horizontalAdvance(label) for label in longest_labels), default=0)
+        needed_height = metrics.height() * len(longest_labels) + COLOR_LABEL_PADDING * 2
+        if longest <= available_width and needed_height <= available_height:
+            break
+        size -= 1
+        font.setPointSize(size)
     return font
 
 
@@ -209,11 +303,12 @@ def render_color_card(color, settings):
     # 色值底板是圆角矩形：一并开启几何抗锯齿（2026-10-16 统一补齐）。
     painter.setRenderHint(QPainter.Antialiasing, True)
     if labels:
-        font = card_font(settings, "text_sticker_font", 14)
+        # 标签可能很长（rgb/rgba/hsl/全部三行）：按卡片宽高自动缩字号，避免右侧与底部被裁。
+        font = fitted_card_font(settings, labels, width, height)
         metrics = QFontMetrics(font)
         painter.setFont(font)
         line_height = metrics.height()
-        pad = 8
+        pad = COLOR_LABEL_PADDING
         text_width = max(metrics.horizontalAdvance(text) for text in labels)
         box_width = min(width - 20, text_width + pad * 2)
         box_height = line_height * len(labels) + pad * 2
@@ -226,7 +321,13 @@ def render_color_card(color, settings):
         luminance = 0.299 * rgb.red() + 0.587 * rgb.green() + 0.114 * rgb.blue()
         painter.setPen(QColor("black") if luminance > 150 else QColor("white"))
         for index, text in enumerate(labels):
-            painter.drawText(10 + pad, box_top + pad + line_height * index + metrics.ascent(), text)
+            line = text
+            # 字号已到下限（8pt）仍放不下时（色块宽度调到最小 80px 这种极端设置），
+            # 用省略号标出截断 —— 硬裁在卡片边缘会被当成"真正的色值"读，更糟。
+            available = max(10, box_width - pad * 2)
+            if metrics.horizontalAdvance(line) > available:
+                line = metrics.elidedText(line, Qt.ElideRight, available)
+            painter.drawText(10 + pad, box_top + pad + line_height * index + metrics.ascent(), line)
     if mode == "all":
         # 色阶条：4 段同色系明度，贴在卡片底部（只在“全部”模式下画）。
         base = QColor(color)

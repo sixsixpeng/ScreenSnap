@@ -75,7 +75,9 @@ class StickerTests(CoreTests):
                                ("#12345678", "#123456"), ("#abc", "#aabbcc")):
             with self.subTest(text=text):
                 self.assertEqual(parse_color(text), expected)
-        self.assertIsNone(parse_color("hsl(210,65%,20%)"), "未支持的写法应返回 None（走文字卡片）")
+        # 2026-10-16 契约扩展：hsl() 也算颜色 —— 「取色复制格式 = hsl」写出的就是这个写法，
+        # 认不出来就会退化成绿底文字卡片（与下面「全部三行」同因）。
+        self.assertEqual(parse_color("hsl(210, 65%, 20%)"), "#123354")
         board = QGuiApplication.clipboard()
         self.addCleanup(board.clear)
         mime = QMimeData()
@@ -1370,8 +1372,96 @@ class StickerTests(CoreTests):
         # 否则会被当成普通文字 ⇒ 渲染成默认绿底文字卡片。
         self.assertEqual(parse_color("rgb(1, 2, 3)"), "#010203")
         self.assertEqual(parse_color("#12345678"), "#123456")
-        for value in ("", "hello", "#12", "#12345", "hsl(210,65%,20%)"):
+        for value in ("", "hello", "#12", "#12345"):
             self.assertIsNone(parse_color(value))
+
+    def test_picker_copy_formats_survive_clipboard_color_detection(self):
+        """取色写进剪贴板的每一种格式都必须还能被识别成颜色（2026-10-16 回归）。
+
+        用户实测：取色后贴出来/看通知缩略图时"不管点到什么颜色，出来的都是黑色卡片"。
+        根因：`picker_copy_format` 默认「全部三行」写出的是三行文本，`parse_color` 只按整串匹配
+        ⇒ 识别失败 ⇒ 退化成默认深色文字卡片（`text_sticker_background` #1f6f5c + 白字 = 黑白色）。
+        """
+        from PySide6.QtCore import QMimeData
+        from PySide6.QtGui import QColor, QGuiApplication
+        from config.config_manager import DEFAULTS
+        from core.color_format import FORMATS, format_color
+        from sticker.clipboard_source import parse_color, read_clipboard, render_color_card
+
+        picked = "#3f51b5"
+        wanted = QColor(picked)
+        board = QGuiApplication.clipboard()
+        self.addCleanup(board.clear)
+        for mode in FORMATS:
+            with self.subTest(mode=mode):
+                text = format_color(picked, mode)
+                parsed = parse_color(text)
+                self.assertIsNotNone(parsed, f"{mode}: {text!r} 被当成了普通文字")
+                # hsl 只有整数百分比，转回来可能差 1-2 级；十六进制行本身必须精确一致。
+                actual = QColor(parsed)
+                for channel in ("red", "green", "blue"):
+                    self.assertLessEqual(
+                        abs(getattr(actual, channel)() - getattr(wanted, channel)()),
+                        2, f"{mode}: {parsed} 与取到的颜色差太多")
+                mime = QMimeData()
+                mime.setText(text)
+                board.setMimeData(mime)
+                self.assertEqual(read_clipboard(dict(DEFAULTS), board).kind, "color",
+                                 f"{mode}: 必须走颜色卡片，不能退化成文字卡片")
+                card = render_color_card(parsed, DEFAULTS)
+                self.assertEqual(card.pixelColor(card.width() // 2, 4).name(), QColor(parsed).name(),
+                                 f"{mode}: 卡片底色应是取到的颜色（不是默认深色底）")
+        # 反面：多色列表（累积模式一次贴多个颜色）与普通多行文本不能被截成第一个颜色，
+        # 仍按普通文字走文字卡片。
+        for text in ("#ff0000\n#00ff00",
+                     "说明文字\n#ff0000",
+                     "\n".join(format_color(color, "all") for color in ("#ff0000", "#00ff00"))):
+            with self.subTest(text=repr(text)[:24]):
+                self.assertIsNone(parse_color(text))
+
+    def test_color_card_labels_shrink_into_the_card(self):
+        """颜色卡片标签要按卡片宽高自动缩字号，不得硬裁在卡片边缘（2026-10-16 检查发现）。
+
+        回归：字号固定 18pt 时 `hsl(231, 48%, 48%)` 需要 432px，而默认卡片只有 260px
+        （底板最多 240px）⇒ 文字右侧被裁；色块调矮时后面的行还会画到画布外。
+        """
+        from PySide6.QtGui import QColor, QFontMetrics
+        from config.config_manager import DEFAULTS
+        from core.color_format import label_lines
+        from sticker.clipboard_source import fitted_card_font, render_color_card
+
+        color = "#3f51b5"
+        base = QColor(color)
+        width = DEFAULTS["color_sticker_width"]
+        height = DEFAULTS["color_sticker_height"]
+        for label_mode, mode in (("hex", "hex"), ("rgb", "rgb"), ("rgba", "rgba"),
+                                 ("hsl", "hsl"), ("all", "all"), ("name", "hex")):
+            with self.subTest(labels=label_mode):
+                settings = dict(DEFAULTS, color_sticker_labels=label_mode)
+                labels = label_lines(color, mode, with_name=label_mode in ("all", "name"))
+                font = fitted_card_font(settings, labels, width, height)
+                self.assertLessEqual(font.pointSize(), int(settings["text_sticker_font_size"]),
+                                     "自动适配只允许缩小，不该放大用户设的字号")
+                metrics = QFontMetrics(font)
+                self.assertLessEqual(max(metrics.horizontalAdvance(line) for line in labels),
+                                     width - 20, "缩到下限仍放不下时应改用省略号，不能画到卡片外")
+                self.assertLessEqual(metrics.height() * len(labels) + 16, height - 10,
+                                     "整块色值底板必须落在卡片内")
+                card = render_color_card(color, settings)
+                rows = range(int(height * 0.25), height - 11)      # 排除底部色阶条
+                self.assertFalse(
+                    any(card.pixelColor(width - 1 - offset, y) != base
+                        for y in rows for offset in range(3)),
+                    "标签文字不得越过卡片右边缘")
+        # 边界：字号设得比 8pt 下限还小（6–7pt 合法）时标签**不得被反向放大**，
+        # 也不能因此跳过适配（下限必须取 min(8, 用户字号)）。
+        labels = label_lines(color, "all", with_name=True)
+        for small_size in (6, 7):
+            with self.subTest(configured=small_size):
+                small = dict(DEFAULTS, color_sticker_labels="all",
+                             text_sticker_font_size=small_size)
+                self.assertLessEqual(fitted_card_font(small, labels, width, height).pointSize(),
+                                     small_size, "标签字号被放大到了用户设定之上")
 
     def test_clipboard_source_renders_text_color_and_file_cards(self):
         from PySide6.QtCore import QMimeData, QUrl
