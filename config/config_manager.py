@@ -727,6 +727,8 @@ def validate(data):
             raise ValueError("标尺主刻度倍数只能是 2、5 或 10")
         elif key == "anchor_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("选区锚点颜色必须是六位十六进制颜色")
+        elif key == "anchor_style" and value not in ("border", "fill"):
+            raise ValueError("选区锚点样式只能是边框或填充")
         elif key == "anchor_corner_size" and (
                 type(value) is not int or not 5 <= value <= 21):
             raise ValueError("四角锚点大小必须是 5 到 21 之间的整数像素")
@@ -793,6 +795,11 @@ def validate(data):
             raise ValueError("橡皮擦直径必须在 10 到 100 之间")
         elif key == "mosaic_width" and not 4 <= value <= 100:
             raise ValueError("马赛克涂抹笔刷宽度必须在 4 到 100 之间")
+        elif key == "mosaic_mode" and value not in ("blocks", "blur", "fine"):
+            raise ValueError("马赛克类型只能是方块、毛玻璃或细粒")
+        elif key == "mosaic_size" and (
+                type(value) is not int or not 2 <= value <= 100):
+            raise ValueError("马赛克方块大小必须是 2 到 100 之间的整数像素")
         elif key in ("pen_width", "rect_width", "ellipse_width", "arrow_width",
                      "marker_width") and not 1 <= value <= 50:
             raise ValueError("标注线宽必须在 1 到 50 之间")

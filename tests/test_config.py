@@ -3696,6 +3696,8 @@ class ConfigTests(CoreTests):
                     ("anchor_color", "teal"), ("anchor_corner_size", 3),
                     ("anchor_corner_size", 22), ("anchor_edge_size", 3),
                     ("anchor_edge_size", 22),
+                    ("anchor_style", "double"),
+                    ("mosaic_mode", "pixel"), ("mosaic_size", 1), ("mosaic_size", 101),
                     ("selection_border_width", 5),
                     ("magnifier_crosshair_color", "red"),
                     ("window_hover_badge_content", "both"),
