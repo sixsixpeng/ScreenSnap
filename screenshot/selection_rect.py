@@ -20,6 +20,26 @@ class SelectionRects:
         self.nudge_corner = None
         self.nudge_index = None
 
+    def reset(self):
+        """回到"没有任何选区"的状态：清空选区并复位全部交互记忆。
+
+        清空 `rects` 时必须**同时**复位 `start`/`nudge_corner`/`nudge_index` 等记忆值：
+        `move_last()` 会拿记录的下标直接写 `rects[index]`，选区已被清空时按方向键就会
+        IndexError（"R 清选区后按方向键崩溃"的根因）。只 `rects.clear()` 不够。
+        """
+        self.rects.clear()
+        self.start = None
+        self.active = None
+        self.dragging = None
+        self.drag_origin = None
+        self.resizing = None
+        self.resize_anchor = None
+        self.resize_point = None
+        self.resize_axis = None
+        self.resize_original = None
+        self.nudge_corner = None
+        self.nudge_index = None
+
     @staticmethod
     def handles_for(rect):
         """返回四角和四边中点的控制柄、固定锚点、光标方向与缩放轴。"""
@@ -158,16 +178,22 @@ class SelectionRects:
             self.finish()
         if self.nudge_corner is not None:
             index, anchor, point, axis, original = self.nudge_corner
-            if axis == "x":
-                dy = 0
-            elif axis == "y":
-                dx = 0
-            point = point + QPoint(dx, dy)
-            self.rects[index] = self.resized_rect(anchor, point, axis, original)
-            self.nudge_corner = (index, anchor, point, axis, original)
-            return
+            if index < len(self.rects):
+                if axis == "x":
+                    dy = 0
+                elif axis == "y":
+                    dx = 0
+                point = point + QPoint(dx, dy)
+                self.rects[index] = self.resized_rect(anchor, point, axis, original)
+                self.nudge_corner = (index, anchor, point, axis, original)
+                return
+            # 记忆里的下标已经越界（选区被清空或重建过）：丢掉这段记忆，绝不用它写 rects，
+            # 否则 list 赋值直接 IndexError。下面按"整体平移"继续处理。
+            self.nudge_corner = None
         if self.rects:
             index = self.nudge_index if self.nudge_index is not None else len(self.rects) - 1
+            if not 0 <= index < len(self.rects):
+                index = len(self.rects) - 1
             self.rects[index].translate(dx, dy)
 
     def fixed(self, point, width, height):

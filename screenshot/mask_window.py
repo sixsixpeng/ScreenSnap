@@ -1833,6 +1833,24 @@ class MaskWindow(QWidget):
         self.sync_capture_action_shortcuts(self.settings)
         return dirty
 
+    def _clear_hover_highlights(self):
+        """清掉会话里**所有**视图的悬停高亮与识别记忆。
+
+        悬停高亮是**每视图独立**的（每个显示器一块遮罩各自识别），而"单击选中元素 / 清空
+        选区 / 同步选区尺寸"这些动作只发生在其中一块屏上。只清当前视图会让其它屏残留的
+        元素框与尺寸徽标一直挂在屏幕上（`hover_rect`/`hover_element_label` 必须在
+        `detect_hover` 之外成对清理，口径与 `cycle_element` 一致）。
+        """
+        views = list(self.session.views or [])
+        if self not in views:
+            views.append(self)
+        for view in views:
+            view.hover_rect = None
+            view.hover_element_label = ""
+            view.hover_source_rect = None
+            view.hover_stamp = 0.0
+            view.hover_query_point = None
+
     def clear_selection(self):
         """清除当前选择，回到"未选择"状态：不重新抓屏、不移动鼠标。
 
@@ -1842,16 +1860,18 @@ class MaskWindow(QWidget):
         if self.inline_active():
             self._dismiss_inline_editor()
         had = len(self.selection.rects)   # 必须在 if 之外：日志在两种路径下都要用到
-        self.selection.rects.clear()
+        # 选区与**全部交互记忆**一起清（reset()）：只清 rects 会让 nudge_corner/nudge_index
+        # 记着旧下标，之后按方向键就拿它去写越界的 rects[index] ⇒ IndexError
+        # （用户实测：R 清掉选区后再按方向键进程崩溃）。
+        self.selection.reset()
         self.session.automatic_regions.clear()
-        self.selection.active = None
-        self.selection.dragging = None
-        self.selection.resizing = None
         self.session.multi_select_mode = False
         self.session.right_capture_mode = False
         self.session.element_selected = False
         self.session.fixed_size_rect = None
         self.press_position = None
+        self._nudge_hold = False        # 键盘微调接管标记属于"本次交互"，一并复位
+        self._clear_hover_highlights()  # 否则旧元素的悬停框/尺寸徽标会一直留在屏幕上
         self.update_all()
         get_logger().debug("清除选区：回到未选择状态（原有 %d 个区域）", had)
 
@@ -2312,6 +2332,9 @@ class MaskWindow(QWidget):
                     _badge.raise_()
             QTimer.singleShot(0, _raise_size_badge_after_inline)
             editor.toolbar.setParent(view)
+        # 选区尺寸已变：内联编辑分支的 mouseMoveEvent 会提前 return、绕过"拖动时清悬停高亮"的收尾，
+        # 残留的 hover_rect 会让高亮框停在旧矩形上 ⇒ 在这里统一清掉（松手同步新尺寸时必经此处）。
+        self._clear_hover_highlights()
         editor.reset_region(rect, selected, other, cursor_enabled)
         if canvas_focused:
             editor.canvas.setFocus(Qt.ActiveWindowFocusReason)
@@ -3528,7 +3551,7 @@ class MaskWindow(QWidget):
             # 十字线就落在指针后面。推迟到本轮事件处理完之后，先按新位置把十字线画出来。
             self.schedule_hover()
         else:
-            self.hover_rect = None
+            self._clear_hover_highlights()
         self.update_all()
 
     def mouseReleaseEvent(self, event):
@@ -4304,6 +4327,10 @@ class MaskWindow(QWidget):
         self.selection.rects.append(QRect(rect))
         self.session.automatic_regions.append((self.selection.rects[-1], QRect(rect)))
         self.selection.active = None
+        # 选中后由选区自身承担高亮：残留的悬停高亮框会一直停在**旧**元素矩形上
+        # （用户反馈：进入原地编辑后调整选区尺寸，尺寸变了、高亮还是原来的）。
+        # 与"避免同时出现两个高亮"的既有口径一致 ⇒ 选中即清，光标移动后由 detect_hover 重新识别。
+        self._clear_hover_highlights()
         self.session.element_selected = True
         get_logger().info(
             "单击选中窗口元素: (%d,%d,%dx%d)", rect.x(), rect.y(), rect.width(), rect.height())
@@ -4317,6 +4344,8 @@ class MaskWindow(QWidget):
         self.selection.rects.clear()
         self.selection.rects.append(local)
         self.session.automatic_regions[:] = [(local, QRect(local))]
+        # 与 select_hover 同口径：Tab 切层级选中后同样不能留旧的悬停高亮框。
+        self._clear_hover_highlights()
         self.selection.active = None
         self.session.element_selected = True
         visible = local.intersected(self.monitor_rect)

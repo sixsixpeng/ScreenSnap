@@ -1034,8 +1034,8 @@ python run_tests.py --list               # 列出模块
 - **窗口类用例不依赖真实屏幕**：`setUpClass` 创建唯一的 `QApplication`（`QApplication.instance() or QApplication([])`），不注册全局热键、不读真实显示器几何。需要在无桌面环境（CI/远程）跑时设置 `QT_QPA_PLATFORM=offscreen`；离屏环境 DPR 为 1、逻辑坐标与设备像素 1:1，按固定坐标采样是确定的。需要真实像素时用 `QImage` + `QPainter` 自己画再取 `pixelColor`，避免依赖屏幕抓取。
 - **覆盖边界**：用例不覆盖 Windows 原生 Toast、真实全局热键权限、真实混合 DPI 与系统窗口管理器行为，这些仍需桌面手动验收（见"未支持与待桌面验收"）。
 - **几何断言读控件而非截图**：工具栏、按钮、网格布局用 `geometry()`、`grid.getItemPosition()`、`spacing()` 等直接断言，比像素比对稳定。
-- **配置用例用临时目录**：`tempfile.TemporaryDirectory()` + `ConfigManager(path)`，不读写用户真实配置；默认值断言直接对比 `DEFAULTS`。
-- **跑测时不要同时运行程序实例**：托盘程序会占用剪贴板、注册全局热键并持有贴图窗口，容易让相关用例偶发失败。
+- **配置用例用临时目录**：`tempfile.TemporaryDirectory()` + `ConfigManager(path)`，不读写用户真实配置；默认值断言直接对比 `DEFAULTS`。注意显式传路径只覆盖该用例，走 `core.path_utils.data_dir()` 的代码路径仍然落到**真实**的 `%APPDATA%\ScreenSnap`（见下条）。
+- **跑测前把 `APPDATA` 指向临时目录**：`data_dir()` 每次调用都读 `APPDATA` 环境变量，而贴图管理、剪贴板历史、Toast 缓存等用例仍会写 `%APPDATA%\ScreenSnap`。该目录一旦有第二个写入者（多个测试进程同时跑、残留句柄、杀软扫描）就会报 `PermissionError: ...clipboard_history.tmp` / `...sticker_cache`，看起来像"代码坏了"，其实与代码无关；因此建议 `$env:APPDATA = <临时目录>` 后再跑，运行期间也不要同时开着程序实例（托盘程序会另外占用剪贴板、全局热键与贴图窗口）。
 - **大批次拆半跑**：遮罩/采集自检这一大组（`-k mask -k capture -k notification -k self_check`，约 80 项）在本机会**偶发**进程级崩溃（退出码 `0xC0000374` 堆损坏 / `0xC0000409` / `0xC0000354`）。这不是用例或代码的问题：用 `git worktree` 干净副本对照，**只加 4 条纯空转用例**同样复现，且同一组合时崩时不崩。把大组按用例名字母序拆成 8–16 条一组都能稳定通过，建议这类大组一律拆小运行。另有两条 Windows 平台敏感的既有失败（放大镜首次悬停可见性、原地编辑键盘微调焦点），HEAD 干净副本同样失败，与代码改动无关。
 
 维护约定：
@@ -1594,7 +1594,7 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 8. 修复offscreen无可用兜底仍创建应用级输入桥，干扰原地Escape、菜单位置、连续手柄微调和放大镜的四条回归；工作区外同解释器HEAD副本116条OK，修正桥创建条件后当前截图116条也有OK摘要，但仍收尾访问违规 `3221225477`。最终完整配置123条仅既有 `test_mask_inline_edit_keeps_magnifier_settings_and_updates_position` 失败（预期70,50、实际50,50），skip=1及同一原生收尾异常；中途一次目录导入的临时文件替换 `PermissionError: [WinError 5]` 在单跑和整模块有界复核未再现，未宣称已修复。扩展阶段misc45/app12/DPI54（skip=2）/UIA58（skip=1）有OK摘要但原生收尾异常，提示条9、快速贴图2正常；不以skip或删除用例隐藏问题。
 9. 补齐报告复制/导出的兼容状态白名单、程序文件扩展名保护及附件数量超限提示，三条新增端到端回归已纳入31条；附日志每次确认且测试启动目录隔离。全量配置审计279键默认校验通过、41项策略均有保留/控件/消费/生命周期接线，README补齐九个既有漏项并更正十字线旧键迁移说明；记忆状态例外为hotkeys动作字典、last_capture_rect、save_as_dir，矩形/椭圆填充与线色保持独立。27个改动Python文件编译通过，90个生产模块独立导入全部退出0，RELEASE保留历史方案并追加具体实现，不改Git跟踪状态、不暂存。测试用临时用户目录和假backend，不操作当前实例；真实Windows锁屏唤醒消息、主副屏/混合DPI/负原点输入拥有权与穿透未验收，未重跑全部贴图/编辑器模块，也未实现系统钩子重建。未自动重启、提交或修改AGENTS；运行实例需下次启动加载。
 
-### 2026-10-16 当日调整汇总（12 条）
+### 2026-10-16 当日调整汇总（13 条）
 
 #### 日志获取统一入口与彩色定位输出
 
@@ -1698,3 +1698,16 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
    - `tests/test_ui.py::test_annotation_preview_all_kinds_render_without_error`：`AnnotationPreview` 的全部 12 个分支（output / text / arrow / rect / ellipse / pen / eraser / marker / mosaic / crop / sequence / picker）各 `grab()` 渲染一次 —— 工具栏「更多设置」用的就是这套分支；
    - `tests/test_config.py::test_all_settings_page_previews_render`：遍历设置窗口**所有页**的 `previews` 各渲染一次，覆盖截图/编辑器/贴图/剪贴板/提示条各预览类。
 4. 验证：上述两条新用例、`tests.test_ui` 18 条、`tests.test_config -k preview` 9 条、`tests.editor.test_tools` 18 条全部通过。
+
+#### 修复「清除选区」后的交互记忆残留（按键崩溃）与悬停高亮残留
+
+1. 现象（用户实测）：按 R 清除选区后，再按方向键/WASD 进程直接终止；同类残留还表现在 UIA 识别到的区域上——左键进入原地编辑、再调整选区尺寸时，尺寸变了但高亮框仍停在**旧**矩形上，尺寸徽标同样不更新。
+2. 根因（同一类：状态切换后旧值没清）：
+   - `SelectionRects` 的微调记忆 `nudge_corner`（含"第几个区域"的下标）与 `nudge_index`、以及 `start` / `resizing` 等交互状态，在 `clear_selection()` 里**没有复位**（只 `rects.clear()`）。而 `move_last()` 会拿记忆里的下标直接写 `rects[index]`，`keyPressEvent` 的方向键分支又用 `nudge_corner` 判定"此前抓住过手柄"⇒ 清空后按键仍会走到写越界那一步：`IndexError`。Python 覆写的 Qt 事件处理器里抛异常 = 进程 fail-fast，所以表现为崩溃而非用例变红。
+   - 悬停高亮 `hover_rect` 与控件名 `hover_element_label` 是**每视图独立**的状态（多屏各一块遮罩各自识别），而"单击选中 / Tab 选层 / 清空选区 / 同步选区尺寸 / 拖动收尾"这些动作只发生在其中一块屏上；原先这些位置只清当前视图的 `hover_rect`，控件名更是只在个别路径清 ⇒ 其它屏与残留值会继续按旧矩形绘制。
+3. 修复：
+   - `screenshot/selection_rect.py`：新增 `reset()`（清空选区 + 复位全部交互记忆），`move_last()` 增加下标越界保护（记忆失效时丢弃该记忆并退回"整体平移"，绝不用它写 `rects`）。
+   - `screenshot/mask_window.py`：新增 `_clear_hover_highlights()`，一次清掉会话内**所有视图**的 `hover_rect` / `hover_element_label` / `hover_source_rect` / `hover_stamp` / `hover_query_point`；`clear_selection()` 改用 `selection.reset()` 并额外复位 `_nudge_hold` 与全部视图的悬停状态；`select_hover()`、`apply_element()`、`update_inline_region()` 与 `mouseMoveEvent` 的"绘制/拖动中不显示悬停高亮"分支统一改用它（清法与会话级切换的 `cycle_element()` 对齐）。
+4. 未改动（说明）：`hide()` 与 `closeEvent()` 的清理路径不变——真正关闭时每个视图都会走 `closeEvent`（已清自身悬停），临时隐藏（Tab 重查元素）紧跟 `show()` 且由 `poll_hover` 的"非活跃屏清残留"兜底。
+5. 验证：`tests/test_capture.py` 新增三条——`test_reset_clears_selection_and_nudge_memory`、`test_move_last_falls_back_when_memory_index_is_stale`、`test_clear_selection_drops_nudge_memory_and_hover_highlight`（第三条走真实按键路径：先缩放留下微调记忆 → R 清选区 → 再按方向键必须无异常且不复活选区，同时断言悬停高亮已清）。`tests.test_capture -k reset -k nudge -k clear_selection -k hover` 17 条通过；整模块 122 条中 2 条失败为**既有批次污染**（用 HEAD 的干净 `git worktree` 对照同样失败、单跑均通过），已记入 AGENTS 的已知失败清单。
+6. 文档更正（同一次排查的产物）：README「跑测」与 AGENTS 原先把用例里的 `PermissionError: ...clipboard_history.tmp` 归因于"跑测时还开着程序实例占用数据目录"——**该归因不成立**：实测在**没有任何 ScreenSnap 进程**（只有 IDE 的 LSP 服务复用项目解释器）时同样复现，且该路径空闲时可正常写入、前后都不存在残留文件。实测结论是：用例会写进**真实**的 `%APPDATA%\ScreenSnap`（`data_dir()` 每次调用都读 `APPDATA`），报错来自测试进程内**延迟触发的** `StickerManager` 剪贴板历史落盘回调，Qt 只把它打成"未捕获槽异常"、**不影响用例结果**；把 `APPDATA` 指到临时目录后该报错为 0 次、真实目录保持逐字节不变（已验证）。两处文档已按此改写，并给出 `$env:APPDATA = <临时目录>` 的跑测建议。

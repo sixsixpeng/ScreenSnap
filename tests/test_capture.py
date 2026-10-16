@@ -328,6 +328,43 @@ class CaptureTests(CoreTests):
         self.assertEqual(selection.rects[-1].topLeft(), QPoint(149, 91))
         self.assertIsNone(selection.nudge_corner)
 
+    def test_reset_clears_selection_and_nudge_memory(self):
+        """reset() 必须连微调记忆一起复位，否则清空后按键会写越界。
+
+        回归：清选区时只 `rects.clear()` 是不够的 —— `nudge_corner`/`nudge_index` 仍记着
+        旧下标，`move_last()` 会拿它去写 `rects[index]` ⇒ IndexError。
+        """
+        from PySide6.QtCore import QPoint
+        selection = SelectionRects()
+        selection.fixed(QPoint(10, 10), 40, 30)
+        selection.begin(selection.rects[0].bottomRight())
+        selection.update(QPoint(70, 60))
+        selection.finish()                     # 缩放结束会留下 nudge_corner（含下标 0）
+        self.assertIsNotNone(selection.nudge_corner)
+
+        selection.reset()
+
+        self.assertEqual(selection.rects, [])
+        for attr in ("start", "active", "dragging", "drag_origin", "resizing",
+                     "resize_anchor", "resize_point", "resize_axis", "resize_original",
+                     "nudge_corner", "nudge_index"):
+            self.assertIsNone(getattr(selection, attr), attr)
+        selection.move_last(1, 1)              # 清空后的按键微调必须是静默空操作
+        self.assertEqual(selection.rects, [])
+
+    def test_move_last_falls_back_when_memory_index_is_stale(self):
+        """记忆下标指向已被替换的选区时，退回"整体平移"，不得写越界。"""
+        from PySide6.QtCore import QPoint
+        selection = SelectionRects()
+        selection.rects = [QRect(200, 200, 40, 30)]
+        selection.nudge_index = 1              # 指向不存在的下标 1
+        selection.nudge_corner = (1, QPoint(50, 40), QPoint(50, 40), "both", QRect(10, 10, 41, 31))
+
+        selection.move_last(1, 0)
+
+        self.assertIsNone(selection.nudge_corner)
+        self.assertEqual(selection.rects, [QRect(201, 200, 40, 30)])
+
     def test_mask_drag_resizes_each_corner(self):
         from PySide6.QtCore import QPoint, QPointF, QEvent
         from PySide6.QtGui import QMouseEvent
@@ -3105,6 +3142,46 @@ class CaptureTests(CoreTests):
             self.assertFalse(mask.session.right_capture_mode)
             self.assertEqual(recaptured, [])                     # 不重新抓屏
             self.assertEqual(closed, [])                         # 不关闭遮罩/不动鼠标
+        finally:
+            mask.close()
+
+    def test_clear_selection_drops_nudge_memory_and_hover_highlight(self):
+        """R 清选区后按方向键不得崩溃，且旧元素的悬停高亮要一起消失。
+
+        回归（用户实测崩溃）：缩放选区结束会留下 `nudge_corner=(下标,…)`；R 清选区时只清了
+        `rects`，紧接着按方向键就走进 `move_last()` 的 `rects[index] = …` ⇒ IndexError
+        （Python override 里抛异常 = 进程 fail-fast 崩溃）。同一次清理还必须清掉悬停高亮，
+        否则旧元素的框与尺寸徽标会一直停在屏幕上（与已修的 UIA 高亮残留同源）。
+        """
+        from config.config_manager import DEFAULTS
+        from PySide6.QtTest import QTest
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import patch as patcher
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 150}
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False}
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (200, 150), "blue"), bounds, [bounds], settings)
+        try:
+            mask.show()
+            self.app.processEvents()
+            mask.selection.fixed(QPoint(20, 20), 60, 40)
+            corner = mask.selection.rects[0].bottomRight()
+            QTest.mousePress(mask, Qt.LeftButton, pos=corner)
+            QTest.mouseRelease(mask, Qt.LeftButton, pos=corner)
+            QTest.keyClick(mask, Qt.Key_Right)
+            self.assertIsNotNone(mask.selection.nudge_corner)     # 前置条件：先留下微调记忆
+            mask.hover_rect = QRect(5, 5, 30, 20)
+            mask.hover_element_label = "按钮"
+
+            mask.clear_selection()
+
+            self.assertIsNone(mask.selection.nudge_corner)
+            self.assertIsNone(mask.selection.nudge_index)
+            self.assertIsNone(mask.hover_rect)
+            self.assertEqual(mask.hover_element_label, "")
+            QTest.keyClick(mask, Qt.Key_Right)                   # 清空后按键：必须无异常、不复活选区
+            self.assertEqual(mask.selection.rects, [])
         finally:
             mask.close()
 
