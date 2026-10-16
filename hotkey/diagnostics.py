@@ -12,22 +12,83 @@ from PySide6.QtCore import QTimer
 from logger import get_logger
 
 
+def backend_pressed_codes(backend):
+    """库侧记录的“当前按下”键标识（扫描码；库把 sc 为 0 的键记为 -vk）。
+
+    非 Windows、锁被钩子占用或库结构不可读时返回 None —— 表示**无法判定**，
+    调用方必须按“不下结论”处理，绝不能当成“没有按键”。
+    """
+    if os.name != "nt":
+        return None
+    lock = getattr(backend, "_pressed_events_lock", None)
+    if lock is None or not lock.acquire(blocking=False):
+        return None
+    try:
+        return tuple(getattr(backend, "_pressed_events", ()))
+    finally:
+        lock.release()
+
+
+def _virtual_key(code, user32):
+    """键标识 → 虚拟键码；is_extended 归一到通用 VK（左右 Ctrl 都落到 VK_CONTROL），无法映射返回 0。"""
+    if code < 0:
+        # 库对 scan_code 为 0 的键直接存 -vk（keyboard/_winkeyboard.process_key），可直接当 VK 用。
+        return -int(code)
+    return user32.MapVirtualKeyW(int(code) & 0xFF, 3)
+
+
+def physically_up_codes(codes):
+    """返回 codes 中“系统按键状态显示未按下”的键标识；无法判定时返回 None。
+
+    用 `GetAsyncKeyState` 而不是合成键或 `GetLastInputInfo`：合成事件不触发库自己的热键回调
+    （无法证伪，见 hotkey_manager 文件头），而 GetLastInputInfo 只能说“最近有输入”，
+    给不出“哪些键还按着”。无法映射（0）或调用失败的项不下结论。
+    """
+    if os.name != "nt":
+        return None
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        stale = []
+        for code in codes:
+            virtual = _virtual_key(code, user32)
+            if not virtual:
+                continue
+            if not user32.GetAsyncKeyState(virtual) & 0x8000:
+                stale.append(code)
+        return tuple(stale)
+    except Exception:  # noqa: BLE001 判定不可用时不建议任何清理
+        return None
+
+
+def stale_pressed_codes(backend, extra_codes=()):
+    """“被记为按下、但系统按键状态显示没按”的键标识；无法判定返回 None。
+
+    2026-10-16（实测故障）：库的热键派发按“当前按下的全部键”的精确集合查表
+    （keyboard/__init__.py: hotkey = tuple(sorted(_pressed_events))），只要有一个 KEY_UP
+    没被钩子收到（前台切到提权窗口、安全桌面等），残留项就让**所有**热键一起失灵，
+    而监听线程、观察器、绑定数量看上去全部正常 ⇒ 只能用系统按键状态证伪。
+    `extra_codes` 并入调用方自己维护的按键（库表之外），使两侧都能被判为卡住。
+    """
+    codes = backend_pressed_codes(backend)
+    pool = list(dict.fromkeys([*(codes or ()), *(code for code in extra_codes if code is not None)]))
+    if not pool:
+        return None if codes is None else ()
+    return physically_up_codes(pool)
+
+
 def physical_pressed_summary(backend):
     if os.name != "nt":
         return {"available": False, "reason": "unsupported-platform"}
-    lock = getattr(backend, "_pressed_events_lock", None)
-    if lock is None or not lock.acquire(blocking=False):
+    scan_codes = backend_pressed_codes(backend)
+    if scan_codes is None:
         return {"available": False, "reason": "backend-busy-or-unavailable"}
-    try:
-        scan_codes = tuple(getattr(backend, "_pressed_events", ()))
-    finally:
-        lock.release()
     try:
         import ctypes
         user32 = ctypes.windll.user32
         checked = down = unknown = 0
         for code in scan_codes:
-            virtual = user32.MapVirtualKeyW(int(code), 3)
+            virtual = _virtual_key(code, user32)
             if not virtual:
                 unknown += 1
                 continue

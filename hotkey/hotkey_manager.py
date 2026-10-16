@@ -29,7 +29,7 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from core.hotkey_policy import effective_policy, normalize_key_name
 from hotkey.recovery import RecoveryState
 from logger import get_logger
-from hotkey.diagnostics import DiagnosticsMixin
+from hotkey.diagnostics import DiagnosticsMixin, physically_up_codes, stale_pressed_codes
 
 # 体检周期（设置项 hotkey_health_interval，2–600 秒）与重装限速。
 # 规则 14：健康时既不重装也不打日志，只在**判定失效**并重装时记录。
@@ -72,6 +72,21 @@ MISS_WINDOW_SECONDS = 10.0
 # 回调刚触发过这么久以内，通用钩子随后再看到同一主键也不算“等待回调”——
 # 钩子链顺序可能让回调先跑、通用钩子后跑（否则会被误判成被抢占）。
 FIRED_GRACE_SECONDS = 0.25
+
+# 「卡住的按键记录」判据（2026-10-16 实测故障后新增）：
+# 库的热键派发按“当前按下的全部键”的精确集合查表
+# （keyboard/__init__.py: hotkey = tuple(sorted(_pressed_events)) → blocking/nonblocking_hotkeys[hotkey]），
+# 而库只在收到该键的 KEY_UP 时才删条目、内部没有任何其它清理。于是只要有一个 KEY_UP 没被
+# 钩子收到（前台切到提权窗口 / 安全桌面等），残留项就让**所有**热键一起失灵，同时：
+#   · listening/native_thread/processing_thread 全为 True、handles 数量不变 ⇒ 线程判据不成立；
+#   · 通用钩子仍在收事件 ⇒ 输入滞后判据不成立；
+#   · 残留项在 `_pressed_names` 里 ⇒ `_note_input` 要求“恰好只按主键+绑定修饰键”，
+#     整个「组合键未触发」检测被静默跳过 ⇒ 也没有被吞证据。
+# 真机证据：checks 从 20 涨到 26、reinstalls 保持 0、全程零告警；
+# 连续两次「重新注册」都报 installed-bindings-only/failed=0 却仍无效
+# （install 只重建绑定，不碰库的按键表）。⇒ 只能用系统按键状态证伪，且必须补上清理。
+# 连续两次成立才处置：单次快照与系统状态之间天然有竞态（键刚释放）。
+PHANTOM_CONFIRM_CHECKS = 2
 
 _MODIFIER_ALIASES = {
     "ctrl": "ctrl", "control": "ctrl",
@@ -205,6 +220,10 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         self._misses = {}
         self._last_fired = {}
         self._pressed_names = set()
+        # 按名记录扫描码：库的按键表被残留项污染时，本程序这份记录同样会污染
+        # （同一串事件维护），需要能按“系统证明未按下”精确对账，而不是整体清空。
+        self._pressed_scans = {}
+        self._phantom_hits = 0
         self.intercept_reinstalls = 0
         self._callback_trace.connect(self._log_callback)
         self.registration_finished.connect(self._registration_arrived)
@@ -254,8 +273,14 @@ class HotkeyManager(DiagnosticsMixin, QObject):
                 repeated = down and name in self._pressed_names
                 if down:
                     self._pressed_names.add(name)
+                    scan = getattr(event, "scan_code", None)
+                    if scan is None:
+                        self._pressed_scans.pop(name, None)
+                    else:
+                        self._pressed_scans[name] = scan
                 else:
                     self._pressed_names.discard(name)
+                    self._pressed_scans.pop(name, None)
                 if not down or repeated or self.paused.is_set() or self._stopping or not self._session_available:
                     return
                 if not self.policy["hotkey_criterion_misses"]:
@@ -334,6 +359,7 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         if not self._keyboard_observer:
             with self._evidence_lock:
                 self._pressed_names.clear()
+                self._pressed_scans.clear()
             try:
                 self._input_hooks.append((keyboard, keyboard.hook(self._note_input)))
                 self._keyboard_observer = True
@@ -403,6 +429,96 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         """只由独立汇总计时器输出，健康检查不会另产一条重复汇总。"""
         return
 
+    def _stale_pressed(self):
+        """→ (库侧卡住的键标识, 本程序记录里卡住的键名)；无法判定时 (None, ())。
+
+        两侧都要查：库的按键表决定热键**派发**还能不能匹配，本程序的按键记录决定
+        「组合键未触发」判据还能不能工作 —— 实测故障里两侧留下的是同一个键。
+        """
+        with self._evidence_lock:
+            local = dict(self._pressed_scans)
+        stale = stale_pressed_codes(keyboard, [code for code in local.values() if code is not None])
+        if stale is None:
+            return None, ()
+        names = tuple(name for name, code in local.items() if code in stale)
+        return stale, names
+
+    @staticmethod
+    def _describe_stuck_pressed(names):
+        """卡住的按键可读名，只用于**故障边界**日志。
+
+        诊断快照与导出报告仍只记数量（不记键名/扫描码）；这里是定位故障必须的那一条：
+        没有它就只能猜"卡住的是 F1 还是 Esc"，而两者的修法完全不同。
+        与既有 `注册热键失败 %s=%s` 同属失败边界日志。
+        """
+        return "按键名=" + ",".join(names) if names else "按键名未知"
+
+    def _confirmed_stale_pressed(self):
+        """卡住的按键数量；连续 PHANTOM_CONFIRM_CHECKS 次成立才返回，否则 None。
+
+        单次快照与系统按键状态之间天然有竞态（键刚释放），故要求连续成立 ——
+        与「组合键未触发」判据同样要求两次的口径一致。
+        """
+        if not self.policy["hotkey_criterion_phantom"]:
+            self._phantom_hits = 0
+            return None
+        stale, names = self._stale_pressed()
+        if not stale:
+            self._phantom_hits = 0
+            return None
+        self._phantom_hits += 1
+        if self._phantom_hits == 1:
+            get_logger().debug("热键按键状态待确认: 记录里有 %d 个按键系统显示未按下（%s）",
+                               len(stale), self._describe_stuck_pressed(names))
+        return len(stale) if self._phantom_hits >= PHANTOM_CONFIRM_CHECKS else None
+
+    def _clear_stale_pressed(self, boundary):
+        """删除“系统证明未按下”的残留按键记录并重同步本程序状态；返回删除数量。
+
+        库表暂时不可写时返回 None —— 调用方必须按“还没修复、下一轮再来”处理，
+        否则会重复本次事故里那种「报告成功但按了没反应」的假恢复。
+        只删锁内复核仍判定为未按下的键（真正按住的键必须保留，否则会把
+        「组合键未触发」判据变成误报源），并同步清掉监听器的修饰键状态。
+        """
+        stale, names = self._stale_pressed()
+        if not stale and not names:
+            return 0
+        lock = getattr(keyboard, "_pressed_events_lock", None)
+        if lock is not None and not lock.acquire(blocking=False):
+            get_logger().warning(
+                "热键按键状态卡住: 未能清理（库按键表正被钩子写入），原因=%s；稍后由体检重试", boundary)
+            return None
+        try:
+            verified = set(physically_up_codes(stale) or ()) if stale else set()
+            if stale and not verified:
+                return None          # 复核不可用：不动库表
+            table = getattr(keyboard, "_pressed_events", None)
+            listener = getattr(keyboard, "_listener", None)
+            active = getattr(listener, "active_modifiers", None)
+            states = getattr(listener, "modifier_states", None)
+            removed = 0
+            for code in stale:
+                if code not in verified:
+                    continue
+                if isinstance(table, dict) and table.pop(code, None) is not None:
+                    removed += 1
+                if isinstance(active, set):
+                    active.discard(code)
+                if isinstance(states, dict):
+                    states.pop(code, None)
+        finally:
+            if lock is not None:
+                lock.release()
+        with self._evidence_lock:
+            for name in names:
+                self._pressed_names.discard(name)
+                self._pressed_scans.pop(name, None)
+        self._phantom_hits = 0
+        get_logger().warning(
+            "热键按键状态卡住: 已清理库按键记录 %d 个、本程序记录 %d 个（系统按键状态显示未按下，%s），"
+            "原因=%s；卡住期间所有热键都不会触发", removed, len(names), self._describe_stuck_pressed(names), boundary)
+        return removed
+
     @Slot()
     def _schedule_evidence(self):
         if not self._stopping and self.policy["hotkey_health_enabled"]:
@@ -431,14 +547,31 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         if fresh:
             self.log_diagnostics("fault:" + reason, logging.WARNING)
         if self.recovery.notice_due(now, self.policy):
-            self.notice.emit("热键输入链出现异常证据；绑定重建不保证原生钩子恢复")
+            self.notice.emit(self._fault_notice(reason))
+
+    @staticmethod
+    def _fault_notice(reason):
+        """故障提示：能给出可操作方向时就不要只说"异常"。
+
+        2026-10-16 真机实测：`input-stale`（系统有输入、而键盘观察器二十多秒收不到任何键盘事件）
+        出现在前台为**提权窗口**（任务管理器）时 —— 非提权进程拿不回被挡住的键盘输入，
+        重注册与重建绑定都无效，用户能做的只有把焦点切走。因此这一类给具体动作；
+        其余判据不猜原因，保持通用措辞（"不保证原生钩子恢复"仍是诚实的表述）。
+        """
+        if reason.startswith("input-stale"):
+            return ("键盘输入未到达本程序：前台可能是以管理员身份运行的程序；"
+                    "切换到其它窗口后重试即可，重建绑定对这种情况无效")
+        return "热键输入链出现异常证据；绑定重建不保证原生钩子恢复"
 
     def health_evidence(self):
         """只读判定，可用于关闭自动体检后的手动检查；不重建绑定。"""
         action = self._intercepted_hotkey() if self.policy["hotkey_criterion_misses"] else None
+        stale = self._stale_pressed()[0] if self.policy["hotkey_criterion_phantom"] else None
         return dict(threads_unavailable=self.policy["hotkey_criterion_threads"] and not self.listener_alive(),
                     unfired_action=action,
-                    input_stale=self.policy["hotkey_criterion_input"] and self._hook_missed_input())
+                    input_stale=self.policy["hotkey_criterion_input"] and self._hook_missed_input(),
+                    # 只给数量：诊断不记录键名/扫描码（见 diagnostic_snapshot 的口径）。
+                    phantom_pressed=None if stale is None else len(stale))
 
     @staticmethod
     def _thread_alive(thread):
@@ -541,6 +674,8 @@ class HotkeyManager(DiagnosticsMixin, QObject):
             self._pending_attempts.clear()
             self._misses.clear()
             self._pressed_names.clear()
+            self._pressed_scans.clear()
+        self._phantom_hits = 0
         if available:
             self._grace_until = time.monotonic() + self.policy["hotkey_wake_grace"]
         self.log_diagnostics("session-resumed" if available else "session-unavailable")
@@ -583,6 +718,10 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         if not self.recovery.permit(time.monotonic(), self.policy, manual=True):
             return False
         self._actions_enabled = self._desired_request["enabled"]
+        # 手动恢复必须先清掉卡住的按键记录：库的按键表不归绑定重建管，只重建绑定会得到
+        # 「报告成功但按了没反应」的假恢复（2026-10-16 实测）。此项不受判据开关影响 ——
+        # 手动兜底的意义就是能救回自动判据关掉时的状态。
+        self._clear_stale_pressed("manual")
         return self._queue_registration(self._desired_request, "manual", recovery=True)
 
     def set_paused(self, paused):
@@ -595,6 +734,7 @@ class HotkeyManager(DiagnosticsMixin, QObject):
             with self._evidence_lock:
                 self._pending_attempts.clear()
                 self._misses.clear()
+            self._phantom_hits = 0
         else:
             self.paused.clear()
 
@@ -702,12 +842,16 @@ class HotkeyManager(DiagnosticsMixin, QObject):
                 self.log_diagnostics("registration-stalled", logging.WARNING)
             return
         intercepted = self._intercepted_hotkey() if self.policy["hotkey_criterion_misses"] else None
+        # 卡住的按键记录（残留项）与「被吞」是互斥的：残留项会让后者静默失效，所以两者都算证据。
+        phantom = self._confirmed_stale_pressed()
         if force:
             reason = "force"
         elif not alive and self.policy["hotkey_criterion_threads"]:
             reason = "listener-unavailable"
         elif intercepted is not None:
             reason = f"unfired:{intercepted}"
+        elif phantom:
+            reason = f"phantom-pressed:{phantom}"
         elif self.policy["hotkey_criterion_input"] and self._hook_missed_input():
             reason = "input-stale"
         elif self._registration_state in ("failed", "partial") and self.recovery.reason:
@@ -719,6 +863,14 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         if not force:
             self._record_fault(reason, actions, now)
         if not force and not self.policy["recovery_effective"]:
+            return
+        # 清理卡住的按键记录是**状态修复**，不是一次绑定重建：它没有注销/重注册那 ~4ms 的空窗，
+        # 所以不能被恢复门禁（退避/冷却/上限/忙时延后）拦住 —— 2026-10-16 真机第二轮实测：
+        # 清理原先排在 permit() 之后，退避等待中直接被跳过 ⇒ 热键一直不恢复、日志里只有
+        # 「退避等待中，剩余 6.0s」而没有清理行。现在清完再让门禁决定要不要顺带重建绑定。
+        if phantom and self._clear_stale_pressed(reason) is None:
+            # 库按键表暂时不可写：只重建绑定救不回来，下一轮体检重试（不装作已恢复）。
+            self.log_diagnostics("stale-pressed-unwritable:retry-later", logging.WARNING)
             return
         if not force and self.policy["hotkey_defer_busy"] and self.busy_check():
             self.set_busy_state(True)

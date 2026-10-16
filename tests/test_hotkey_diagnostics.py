@@ -214,6 +214,148 @@ class HotkeyDiagnosticsTests(unittest.TestCase):
         self.assertIn("已请求", app.notify.call_args.args[0])
         self.assertNotIn("已重新注册", app.notify.call_args.args[0])
 
+    def test_input_stale_fault_notice_is_actionable_while_others_stay_generic(self):
+        """input-stale 的提示必须给可操作方向（切走焦点），其余判据不猜原因、保持通用措辞。
+
+        2026-10-16 真机实测：该判据出现在前台为提权窗口（任务管理器）时 —— 非提权进程拿不回被
+        挡住的键盘输入，重建绑定无效，用户在日志之外看不到任何提示（旧文案只说"异常证据"）。
+        """
+        generic = "热键输入链出现异常证据；绑定重建不保证原生钩子恢复"
+        self.assertEqual(hm.HotkeyManager._fault_notice("unfired:capture"), generic)
+        self.assertEqual(hm.HotkeyManager._fault_notice("phantom-pressed:1"), generic)
+
+        notices = []
+        self.manager.notice.connect(notices.append)
+        self.register()
+        with patch.object(self.manager, "_hook_missed_input", return_value=True):
+            self.manager.check_health()
+        self.assertTrue(notices, "input-stale 必须提示，而不是只写日志")
+        self.assertIn("管理员", notices[0])
+        self.assertIn("切换", notices[0])
+
+    # ---- 卡住的按键记录（2026-10-16 真机故障）-------------------------------------
+
+    def test_physical_summary_requires_lock_and_reports_empty_table(self):
+        """读不到库按键表（没有锁）必须报“无法判定”，空表才是真的 0 —— 不能混为一谈。"""
+        from hotkey.diagnostics import physical_pressed_summary
+
+        self.assertEqual(physical_pressed_summary(self.backend),
+                         {"available": False, "reason": "backend-busy-or-unavailable"})
+        if os.name != "nt":                        # 空表分支不查系统按键状态，跨平台可比
+            self.skipTest("按键状态核对只在 Windows 可用")
+        self.backend._pressed_events_lock = threading.Lock()
+        self.backend._pressed_events.clear()
+        summary = physical_pressed_summary(self.backend)
+        self.assertTrue(summary["available"])
+        self.assertEqual((summary["backend_count"], summary["checked"], summary["stale_candidates"]),
+                         (0, 0, 0))
+
+    def test_stale_pressed_clears_only_entries_the_system_says_are_up(self):
+        """只清「系统证明未按下」的项：真正按住的键必须保留，否则未触发判据会变成误报源。"""
+        self.backend._pressed_events_lock = threading.Lock()
+        self.backend._pressed_events.update({77: "held", 88: "held"})
+        self.manager._pressed_names.update({"f1", "f2"})
+        self.manager._pressed_scans.update({"f1": 77, "f2": 88})
+        with patch.object(hm, "stale_pressed_codes", return_value=(77,)), \
+                patch.object(hm, "physically_up_codes", return_value=(77,)):
+            removed = self.manager._clear_stale_pressed("test")
+        self.assertEqual(removed, 1)
+        self.assertNotIn(77, self.backend._pressed_events)
+        self.assertIn(88, self.backend._pressed_events, "系统说仍按下的键不得被清掉")
+        self.assertEqual(self.manager._pressed_names, {"f2"})
+        self.assertEqual(self.manager._pressed_scans, {"f2": 88})
+
+    def test_stale_pressed_detection_needs_two_checks_then_rebuilds_bindings(self):
+        """连续两次成立才处置；处置后库表与本程序记录都干净，并真的重建了绑定。
+
+        「重新注册只重建绑定」是本次事故里假成功的直接原因，所以这里同时断言
+        「第一次不重建」与「第二次清完再重建」。
+        """
+        self.backend._pressed_events_lock = threading.Lock()
+        self.backend._pressed_events[77] = "held"
+        self.manager._pressed_names.update({"f1"})
+        self.manager._pressed_scans["f1"] = 77
+        self.register()
+        requested = self.manager._registration_requested
+        with patch.object(hm, "stale_pressed_codes", return_value=(77,)), \
+                patch.object(hm, "physically_up_codes", return_value=(77,)):
+            self.manager.check_health()
+            self.assertEqual(self.manager._registration_requested, requested,
+                             "第一次候选不得立即重建绑定（可能与刚释放的键竞态）")
+            self.assertEqual(self.manager.recovery.reason, "")
+            self.manager.check_health()
+        self.assertEqual(self.manager.recovery.reason, "phantom-pressed:1")
+        self.assertNotIn(77, self.backend._pressed_events)
+        self.assertEqual(self.manager._pressed_names, set())
+        self.assertEqual(self.manager._pressed_scans, {})
+        self.wait_for(lambda: self.manager._registration_requested > requested)
+
+    def test_stale_pressed_is_cleared_even_when_recovery_gate_waits(self):
+        """清理不能被恢复门禁拦住（2026-10-16 第二轮真机实测的回归）。
+
+        现场：日志里只有「退避等待中，剩余 6.0s」而没有清理行 —— 清理原先排在 permit() 之后，
+        退避/冷却/上限/忙时延后任意一条拒绝就跳过 ⇒ 热键一直不恢复。清理是状态修复，
+        没有注销重注册的空窗，必须先做；绑定重建仍由门禁决定。
+        """
+        self.backend._pressed_events_lock = threading.Lock()
+        self.backend._pressed_events[77] = "held"
+        self.register()
+        requested = self.manager._registration_requested
+        self.manager.recovery.next_at = time.monotonic() + 600      # 门禁：退避中，不允许重建
+        with patch.object(hm, "stale_pressed_codes", return_value=(77,)), \
+                patch.object(hm, "physically_up_codes", return_value=(77,)):
+            self.manager.check_health()
+            self.manager.check_health()
+        self.assertEqual(self.manager.recovery.state, "waiting-backoff")
+        self.assertNotIn(77, self.backend._pressed_events, "退避期间也必须清掉卡住的记录")
+        self.assertEqual(self.manager._registration_requested, requested,
+                         "门禁拒绝时不得顺带重建绑定")
+
+    def test_stale_pressed_keeps_records_when_library_table_is_writable_only_later(self):
+        """库表被钩子占用时不装作已恢复：不重建绑定、留痕，下一轮重试。"""
+        self.backend._pressed_events_lock = threading.Lock()
+        self.backend._pressed_events[77] = "held"
+        self.register()
+        requested = self.manager._registration_requested
+        lock_holder = threading.Event()
+
+        def hold():
+            with self.backend._pressed_events_lock:
+                lock_holder.wait(1)
+
+        thread = threading.Thread(target=hold, name="isolated-hook-writer")
+        thread.start()
+        try:
+            self.wait_for(lambda: self.backend._pressed_events_lock.locked())
+            with patch.object(hm, "stale_pressed_codes", return_value=(77,)), \
+                    patch.object(hm, "physically_up_codes", return_value=(77,)):
+                self.manager.check_health()
+                self.manager.check_health()
+                self.manager.check_health()
+            self.assertEqual(self.manager._registration_requested, requested,
+                             "库表不可写时只重建绑定救不回来，必须等下一轮")
+            self.assertIn(77, self.backend._pressed_events)
+        finally:
+            lock_holder.set()
+            thread.join(timeout=2)
+
+    def test_disabled_criterion_skips_automatic_cleanup_but_manual_recovery_clears(self):
+        """关掉判据后不再自动清理；手动「重新注册」仍要能救回来（手动兜底的意义）。"""
+        self.backend._pressed_events_lock = threading.Lock()
+        self.backend._pressed_events[77] = "held"
+        self.settings["hotkey_criterion_phantom"] = False
+        self.register()
+        requested = self.manager._registration_requested
+        with patch.object(hm, "stale_pressed_codes", return_value=(77,)), \
+                patch.object(hm, "physically_up_codes", return_value=(77,)):
+            self.manager.check_health()
+            self.manager.check_health()
+            self.assertEqual(self.manager._registration_requested, requested)
+            self.assertIn(77, self.backend._pressed_events)
+            self.manager.manual_recover(self.settings)
+        self.assertNotIn(77, self.backend._pressed_events)
+        self.wait_for(lambda: self.manager._registration_requested > requested)
+
 
 if __name__ == "__main__":
     unittest.main()

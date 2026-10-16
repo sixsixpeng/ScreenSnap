@@ -77,7 +77,7 @@ class DiagnosticPanel(QWidget):
             icon = icons.get(name)
             if icon is not None:
                 button.setIcon(self.style().standardIcon(icon))
-            button.setToolTip("显式诊断命令；不合成按键、不清空底层状态。引导验证期间不执行截图/贴图动作。")
+            button.setToolTip("显式诊断命令；不合成按键。「重新注册」会重建绑定并清理记录里「系统已未按下」的残留按键，不重启原生钩子。引导验证期间不执行截图/贴图动作。")
             button.setEnabled(name in self.tools)
             button.clicked.connect(lambda checked=False, command=name: self.run(command))
             row.addWidget(button)
