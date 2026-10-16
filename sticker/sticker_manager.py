@@ -15,6 +15,7 @@ from PIL import Image as PillowImage
 from core.path_utils import configured_dir, data_dir, cache_dir
 from core.window_snap import window_logical_rect
 from editor.image_effects import copy_saved_to_clipboard
+from logger import get_logger
 from logger.log_rate import log_every
 from sticker.clipboard_source import ClipboardSource, read_clipboard
 from sticker.sticker_item import StickerItem
@@ -100,11 +101,11 @@ class StickerManager(QObject):
             self._trim_clipboard_history()
             self.clipboard_history_index = -1
             self._clipboard_persist_timer.start()
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "记录剪贴板历史: 类型=%s 当前共 %d 条", source.kind,
                 len(self.clipboard_history))
         except Exception as error:
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "读取剪贴板历史失败: %s", error)
 
     def _load_clipboard_history(self):
@@ -116,7 +117,7 @@ class StickerManager(QObject):
             if not isinstance(records, list):
                 raise ValueError("剪贴板历史必须是列表")
         except (OSError, UnicodeError, ValueError) as error:
-            logging.getLogger("screensnap").warning("剪贴板历史无法读取: %s", error)
+            get_logger().warning("剪贴板历史无法读取: %s", error)
             return
         image_dir = self._cache_dir("clipboard_history")
         known_kinds = {"image", "text", "html", "color", "files"}
@@ -145,7 +146,7 @@ class StickerManager(QObject):
         self._trim_clipboard_history()
         if len(self.clipboard_history) != previous_count:
             self._clipboard_persist_timer.start()
-        logging.getLogger("screensnap").info(
+        get_logger().info(
             "恢复剪贴板历史: %d 条", len(self.clipboard_history))
 
     def _cache_dir(self, name):
@@ -206,7 +207,7 @@ class StickerManager(QObject):
                 try:
                     cached_image.unlink()
                 except OSError as error:
-                    logging.getLogger("screensnap").warning(
+                    get_logger().warning(
                         "无法清理剪贴板历史缓存 %s: %s", cached_image, error)
 
     def _trim_clipboard_history(self):
@@ -227,7 +228,7 @@ class StickerManager(QObject):
         # 保留发布键：排队中的自通知不能重新填入刚清空的历史。
         # 用户下一次主动贴出、且历史为空时，可以重新接纳当前实际内容。
         self.persist_clipboard_history()
-        logging.getLogger("screensnap").info("清空剪贴板历史: %d 条", count)
+        get_logger().info("清空剪贴板历史: %d 条", count)
         return count
 
     def clear_rebuildable_cache(self):
@@ -252,13 +253,13 @@ class StickerManager(QObject):
                     image.unlink()
                     toast_images += 1
                 except OSError as error:
-                    logging.getLogger("screensnap").warning(
+                    get_logger().warning(
                         "无法清理 Toast 图片缓存 %s: %s", image, error)
         result = {"clipboard_entries": history_entries,
                   "clipboard_images": clipboard_images,
                   "orphan_sticker_images": sticker_images,
                   "toast_images": toast_images}
-        logging.getLogger("screensnap").info("清理可重建图片缓存: %s", result)
+        get_logger().info("清理可重建图片缓存: %s", result)
         return result
 
     def add(self, image, source=None, origin=None, position=None, show=True):
@@ -312,7 +313,7 @@ class StickerManager(QObject):
         item.move(position)
         if image_anchor is not None:
             image_origin = item.pos() + QPoint(item.padding(), item.padding())
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "贴图锚点应用: 请求Qt屏幕点=(%d,%d) 窗口原点=(%d,%d) 图像原点=(%d,%d) "
                 "尺寸=(%dx%d) padding=%d",
                 image_anchor.x(), image_anchor.y(), item.x(), item.y(),
@@ -337,7 +338,7 @@ class StickerManager(QObject):
             item.show()
         self.changed.emit()
         self.schedule_persist()
-        logging.getLogger("screensnap").info("创建贴图: %s", source or "临时图片")
+        get_logger().info("创建贴图: %s", source or "临时图片")
         return item
 
     @staticmethod
@@ -401,7 +402,7 @@ class StickerManager(QObject):
             try:
                 self._save_placement_states()
             except (OSError, TypeError, ValueError) as error:
-                logging.getLogger("screensnap").warning("保存贴图布局失败: %s", error)
+                get_logger().warning("保存贴图布局失败: %s", error)
 
     def _apply_placement(self, item, state):
         item.move(state["x"], state["y"])
@@ -432,7 +433,7 @@ class StickerManager(QObject):
         self.selected_items.intersection_update(self.items)
         self.active_sticker = item
         self._update_selection_visuals()
-        logging.getLogger("screensnap").debug(
+        get_logger().debug(
             "贴图多选更新: ctrl=%s 选中=%d 当前=%s", additive,
             len(self.selected_items), item.source or "临时图片")
         self.changed.emit()
@@ -442,7 +443,7 @@ class StickerManager(QObject):
         if self.selected_items:
             self.active_sticker = next(iter(self.selected_items))
         self._update_selection_visuals()
-        logging.getLogger("screensnap").debug("管理面板更新贴图多选: %d 张", len(self.selected_items))
+        get_logger().debug("管理面板更新贴图多选: %d 张", len(self.selected_items))
 
     def _activate_sticker(self, item):
         self.active_sticker = item
@@ -555,7 +556,7 @@ class StickerManager(QObject):
                 item.state_changed.emit()
 
         self.schedule_persist()
-        logging.getLogger("screensnap").info(
+        get_logger().info(
             "统一设置贴图组属性: 组=%s 成员=%d 属性=%s", name, len(members),
             ",".join(sorted(properties)))
         return len(members)
@@ -565,7 +566,7 @@ class StickerManager(QObject):
             if item.group_name == name:
                 item.setVisible(visible)
         self.schedule_persist()
-        logging.getLogger("screensnap").info("切换贴图组显示: 组=%s 显示=%s", name, visible)
+        get_logger().info("切换贴图组显示: 组=%s 显示=%s", name, visible)
 
     def toggle_selected_visibility(self):
         selected = [item for item in self.selected_items if item in self.items]
@@ -584,7 +585,7 @@ class StickerManager(QObject):
         self._persist_timer.stop()
         self.persist()
         if members:
-            logging.getLogger("screensnap").info(
+            get_logger().info(
                 "关闭贴图组并保存会话: %s (%d)", name, len(members))
         return len(members)
 
@@ -636,7 +637,7 @@ class StickerManager(QObject):
         source = self.clipboard_history[self.clipboard_history_index]
         item = self.add(source.image.copy(), origin=source.origin())
         self.publish_output(source.image, origin=source)
-        logging.getLogger("screensnap").info(
+        get_logger().info(
             "贴出剪贴板历史: %d/%d 类型=%s", self.clipboard_history_index + 1,
             len(self.clipboard_history), source.kind)
         return item
@@ -647,7 +648,7 @@ class StickerManager(QObject):
         if key == self._published_clipboard_key:
             if not allow_published:
                 return
-            logging.getLogger("screensnap").debug("空历史主动接纳当前剪贴板图片，保留自通知防护")
+            get_logger().debug("空历史主动接纳当前剪贴板图片，保留自通知防护")
         else:
             self._published_clipboard_key = None
         if not self.clipboard_history_keys or self.clipboard_history_keys[0] != key:
@@ -677,7 +678,7 @@ class StickerManager(QObject):
             image = QImage(path)
             if image.isNull():
                 failed.append(path)
-                logging.getLogger("screensnap").warning("无法读取贴图图片: %s", path)
+                get_logger().warning("无法读取贴图图片: %s", path)
                 continue
             if replace is not None and opened == 0:
                 replace.replace_image(image, path)
@@ -688,7 +689,7 @@ class StickerManager(QObject):
         if failed:
             QMessageBox.warning(replace, "部分图片无法打开", "以下图片无法读取：\n" + "\n".join(failed))
         if opened:
-            logging.getLogger("screensnap").info("从文件打开贴图: %d 张", opened)
+            get_logger().info("从文件打开贴图: %d 张", opened)
         return opened > 0
 
     def remove(self, item):
@@ -696,7 +697,7 @@ class StickerManager(QObject):
         if getattr(self, "quitting", False):
             # 退出中：窗口是被 Qt 关掉的，会话必须保留（用户 2026-10-11 反馈：
             # 退出时贴图在屏幕上，重启却不恢复）。这里只留痕、不移除、不进回收站。
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "退出中忽略贴图关闭: %s", item.source or "临时图片")
             return
         self._remember_placement(item)
@@ -716,7 +717,7 @@ class StickerManager(QObject):
             self.items.remove(item)
             # 留痕（2026-10-11）：排查“退出时保存 0 张、重启不恢复贴图”。
             # 若退出路径意外先关窗口，这条日志会出现在「正在退出，保存 …」之前。
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "贴图移出会话: 剩余 %d 张（源=%s）", len(self.items), item.source or "临时图片")
             self._update_selection_visuals()
             self.changed.emit()
@@ -728,11 +729,11 @@ class StickerManager(QObject):
                 item.hide()
                 self.recycle_bin.append(item)
                 self._enforce_recycle_limit()
-                logging.getLogger("screensnap").debug("贴图进入回收站: %s", item.source or "临时图片")
+                get_logger().debug("贴图进入回收站: %s", item.source or "临时图片")
             else:
                 # 不进回收站（关闭回收站开关或已不在回收站）则恢复关闭即销毁。
                 item.setAttribute(Qt.WA_DeleteOnClose, True)
-                logging.getLogger("screensnap").debug("移除贴图: %s", item.source or "临时图片")
+                get_logger().debug("移除贴图: %s", item.source or "临时图片")
 
     def _enforce_recycle_limit(self):
         """回收站超过上限时丢弃最旧的条目（已关闭隐藏，直接销毁）。"""
@@ -763,7 +764,7 @@ class StickerManager(QObject):
         self._update_selection_visuals()
         self.changed.emit()
         self.schedule_persist()
-        logging.getLogger("screensnap").info("从回收站恢复贴图: %s", item.source or "临时图片")
+        get_logger().info("从回收站恢复贴图: %s", item.source or "临时图片")
 
     def recycle_delete(self, item):
         """把回收站中的单张贴图彻底删除（不再恢复）。"""
@@ -772,7 +773,7 @@ class StickerManager(QObject):
         self.recycle_bin.remove(item)
         item.deleteLater()
         self.changed.emit()
-        logging.getLogger("screensnap").info("从回收站彻底删除贴图: %s", item.source or "临时图片")
+        get_logger().info("从回收站彻底删除贴图: %s", item.source or "临时图片")
 
     def empty_recycle(self):
         """清空回收站，真正销毁其中所有贴图。"""
@@ -780,7 +781,7 @@ class StickerManager(QObject):
             item.deleteLater()
         self.recycle_bin.clear()
         self.changed.emit()
-        logging.getLogger("screensnap").info("清空贴图回收站")
+        get_logger().info("清空贴图回收站")
 
     def files(self):
         """按修改时间直接读取自动保存目录，不维护内部图片数据库。"""
@@ -788,7 +789,7 @@ class StickerManager(QObject):
 
         folder = configured_dir(self.settings)
         if not folder.is_dir():
-            logging.getLogger("screensnap").debug("自动保存目录不存在: %s", folder)
+            get_logger().debug("自动保存目录不存在: %s", folder)
             return []
         available = []
         private_cache = folder / "cache"
@@ -799,7 +800,7 @@ class StickerManager(QObject):
                 try:
                     available.append((path.stat().st_mtime, path))
                 except OSError as error:
-                    logging.getLogger("screensnap").debug("跳过无法读取的图片 %s: %s", path, error)
+                    get_logger().debug("跳过无法读取的图片 %s: %s", path, error)
                     continue
         available.sort(reverse=True)
         return [path for _, path in available[:self.settings["history_limit"]]]
@@ -817,7 +818,7 @@ class StickerManager(QObject):
                 continue
             image = QImage(str(source))
             if image.isNull():
-                logging.getLogger("screensnap").warning("历史图片无法读取，已跳过: %s", source)
+                get_logger().warning("历史图片无法读取，已跳过: %s", source)
                 continue
             item = self.add(image, source, show=False)
             placement = (self.placement_states.get(self._placement_key(source))
@@ -839,25 +840,25 @@ class StickerManager(QObject):
             self.active_sticker = most_recent_open_item
             self.publish_output(QImage(most_recent_open_item.source), most_recent_open_item.source)
             return True
-        logging.getLogger("screensnap").debug("自动保存目录中没有可贴出的新图片")
+        get_logger().debug("自动保存目录中没有可贴出的新图片")
         return False
 
     def cycle(self, delta):
         """上一张/下一张复用历史贴图；普通粘贴仍创建独立实例。"""
         files = self.files()
         if not files:
-            logging.getLogger("screensnap").debug("没有可轮换的历史图片")
+            get_logger().debug("没有可轮换的历史图片")
             return
         for _ in files:
             self.history_index = (self.history_index + delta) % len(files)
             source = files[self.history_index]
             image = QImage(str(source))
             if image.isNull():
-                logging.getLogger("screensnap").warning("历史图片无法读取，已跳过: %s", source)
+                get_logger().warning("历史图片无法读取，已跳过: %s", source)
                 continue
             if self.history_sticker in self.items:
                 self.history_sticker.replace_image(image, source)
-                logging.getLogger("screensnap").info("切换历史贴图: %s", source)
+                get_logger().info("切换历史贴图: %s", source)
             else:
                 self.history_sticker = self.add(image, source)
             self.publish_output(image, source)
@@ -880,7 +881,7 @@ class StickerManager(QObject):
         """关闭所有窗口并清除历史贴图引用，避免继续复用旧实例。"""
         # 留痕（2026-10-11）：这条路径会清空 items，而它此前完全静默 ——
         # 排查“退出时保存 0 张、重启不恢复贴图”时，必须能看出是不是它干的。
-        logging.getLogger("screensnap").info(
+        get_logger().info(
             "关闭全部贴图: %d 张（调用来源见同刻调用栈）", len(self.items))
         for item in self.items[:]:
             try:
@@ -889,7 +890,7 @@ class StickerManager(QObject):
                 # 退出路径上 remove() 会早退，此时窗口的 C++ 对象可能已被 Qt 析构，
                 # 对它调用 close() 会抛 RuntimeError（2026-10-11 审计 A-4 探针复现）。
                 # 关闭全部是用户可见动作，绝不能因为一张已消失的贴图整体失败。
-                logging.getLogger("screensnap").warning("关闭贴图时对象已销毁（已跳过）: %s", error)
+                get_logger().warning("关闭贴图时对象已销毁（已跳过）: %s", error)
         self.items.clear()
         self.selected_items.clear()
         self.history_sticker = None
@@ -919,15 +920,15 @@ class StickerManager(QObject):
                     # item.state() 会抛 RuntimeError。逐张兜住，绝不让单张失败导致整次会话
                     # 写不出去或写成空数组（2026-10-11 爆炸半径审计 C-4）。
                     failed += 1
-                    logging.getLogger("screensnap").warning(
+                    get_logger().warning(
                         "读取贴图状态失败（已跳过）: %s", error)
             if failed and not states:
-                logging.getLogger("screensnap").warning(
+                get_logger().warning(
                     "%d 张贴图状态都读取失败，保留上一次会话文件不覆盖", failed)
                 return False
             # 留痕（2026-10-11）：退出时若这里 items=0，就说明贴图在退出前已被移除，
             # 问题在移除路径而不在持久化本身。
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "保存贴图会话: items=%d states=%d 跳过=%d",
                 len(self.items), len(states), failed)
             # 退出期间窗口可能在首次读取后已析构；日志和布局只消费成功的纯数据快照。
@@ -935,16 +936,16 @@ class StickerManager(QObject):
                 try:
                     self._remember_placement(item, save=False, state=state)
                 except (OSError, RuntimeError, TypeError, ValueError, KeyError) as error:
-                    logging.getLogger("screensnap").warning("记录贴图布局失败，继续保存会话: %s", error)
+                    get_logger().warning("记录贴图布局失败，继续保存会话: %s", error)
             try:
                 self._save_placement_states()
             except (OSError, RuntimeError, TypeError, ValueError) as error:
-                logging.getLogger("screensnap").warning("保存贴图布局失败: %s", error)
+                get_logger().warning("保存贴图布局失败: %s", error)
             temporary = path.with_suffix(".tmp")
             temporary.write_text(json.dumps(states, indent=2), encoding="utf-8")
             temporary.replace(path)
         except (OSError, TypeError, ValueError) as error:
-            log_every(logging.getLogger("screensnap"), logging.ERROR,
+            log_every(get_logger(), logging.ERROR,
                       "sticker_session_persist", str(error), 60,
                       "保存贴图会话失败: %s", error)
             return False
@@ -971,16 +972,16 @@ class StickerManager(QObject):
                     file.unlink()
                     removed += 1
                 except OSError as error:
-                    logging.getLogger("screensnap").warning("无法清理贴图缓存 %s: %s", file, error)
+                    get_logger().warning("无法清理贴图缓存 %s: %s", file, error)
         if removed:
-            logging.getLogger("screensnap").debug("清理无引用贴图缓存: 删除=%d 保留引用=%d", removed, len(referenced))
+            get_logger().debug("清理无引用贴图缓存: 删除=%d 保留引用=%d", removed, len(referenced))
         return removed
 
     def restore(self):
         """跳过已丢失的源文件，避免下次启动恢复出空白贴图。"""
         path = data_dir() / "stickers.json"
         if not path.exists():
-            logging.getLogger("screensnap").debug("没有贴图会话文件，跳过恢复")
+            get_logger().debug("没有贴图会话文件，跳过恢复")
             self.cleanup_cache(())
             return
         try:
@@ -990,9 +991,9 @@ class StickerManager(QObject):
         except (OSError, UnicodeError, ValueError) as error:
             backup = path.with_name(f"{path.name}.broken-{time_ns()}")
             path.replace(backup)
-            logging.getLogger("screensnap").warning("贴图会话无效，已备份到 %s: %s", backup, error)
+            get_logger().warning("贴图会话无效，已备份到 %s: %s", backup, error)
             return
-        logger = logging.getLogger("screensnap")
+        logger = get_logger()
         restored_sources = []
         restored_items = {}
         pending_sticker_snaps = []

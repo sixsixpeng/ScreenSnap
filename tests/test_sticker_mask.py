@@ -183,7 +183,7 @@ class StickerMaskTests(CoreTests):
 
     def test_mask_diagnostics_do_not_repeat_for_unchanged_state(self):
         item = self.make_item()
-        with patch("sticker.sticker_item.logging.getLogger") as logger:
+        with patch("sticker.sticker_item.get_logger") as logger:
             for _ in range(30):
                 item.update_input_mask()
             self.assertFalse(logger.return_value.debug.called)

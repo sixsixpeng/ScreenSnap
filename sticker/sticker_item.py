@@ -14,6 +14,7 @@ from core.window_snap import (visible_targets, window_logical_rect, window_prese
                               window_under_point)
 from core.constants import checker_tile_size
 from editor.image_effects import copy_image_to_clipboard
+from logger import get_logger
 from logger.log_context import log_scope
 from logger.log_rate import log_every
 from sticker.sticker_menu import show_menu
@@ -161,7 +162,7 @@ class StickerItem(QWidget):
         self.pixmap.setDevicePixelRatio(ratio)
         # 只在比例真的变化时记录（典型是拖到不同缩放的屏）——这正是「贴图窗口或图片
         # 变大/变小」的现场；每帧调用不会产生日志（第 14 条）。
-        logging.getLogger('screensnap').debug(
+        get_logger().debug(
             '贴图像素比变化: %s → %.2f，物理 %dx%d，逻辑 %dx%d',
             previous, ratio, self.pixmap.width(), self.pixmap.height(),
             max(1, round(self.pixmap.width() / ratio)),
@@ -209,7 +210,7 @@ class StickerItem(QWidget):
         if pad_before is not None and pad_before != pad_after:
             delta = pad_before - pad_after
             self.move(self.x() + delta, self.y() + delta)
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "贴图样式变化补偿: padding %d→%d 位置(%d,%d)→(%d,%d)",
                 pad_before, pad_after, self.x() - delta, self.y() - delta, self.x(), self.y())
         self._pad_cache = pad_after
@@ -287,6 +288,8 @@ class StickerItem(QWidget):
         if self.snap_hint and self.snap_hint_enabled:
             # 吸附虚线画在图像内侧：画在外沿时透明模式会被输入遮罩裁掉，圆角贴图同样跟随圆角。
             # 颜色/线型/线宽/内缩全部取自本对象（创建时从全局默认继承一次，见 __init__）。
+            # 虚线框带圆角 ⇒ 必须单独开抗锯齿（上面描边分支结尾把抗锯齿关掉了，见 2026-10-16 统一补齐）。
+            painter.setRenderHint(QPainter.Antialiasing, True)
             style = {"solid": Qt.SolidLine, "dash": Qt.DashLine,
                      "dot": Qt.DotLine, "dash_dot": Qt.DashDotLine}.get(
                          self.snap_hint_style, Qt.DashLine)
@@ -344,7 +347,7 @@ class StickerItem(QWidget):
 
     def set_background_mode(self, mode):
         if mode not in ("transparent", "pseudo", "dark_checker", "light_checker"):
-            logging.getLogger("screensnap").warning("忽略无效贴图背景模式: %r", mode)
+            get_logger().warning("忽略无效贴图背景模式: %r", mode)
             return
         self.background_mode = mode
         self.update_input_mask()
@@ -352,14 +355,19 @@ class StickerItem(QWidget):
         self.state_changed.emit()
 
     def update_input_mask(self):
-        """按窗口逻辑坐标构造遮罩；setMask 同时影响命中与可见区域。"""
+        """按窗口逻辑坐标构造遮罩；setMask 同时影响命中与可见区域。
+
+        圆角是靠这个区域裁出来的（逐像素二值），**刻意不做抗锯齿**：同一个区域还要承担
+        "圆角外侧不吃鼠标"的命中语义，改成抗锯齿绘制就得另建命中判定 + `WM_NCHITTEST`
+        穿透，属于交互语义变更，已评估并放弃（见 ACCEPTANCE.md「已知限制」与 AGENTS D48）。
+        """
         rect = self.image_rect()
         key = (self.pixmap.cacheKey(), self.pixmap.devicePixelRatio(),
                self.size().width(), self.size().height(), rect, self.background_mode,
                self.shadow_enabled, self.shadow_blur(), self.shadow_offset())
         if getattr(self, "_input_mask_log_key", None) != key:
             self._input_mask_log_key = key
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "贴图透明遮罩更新: 模式=%s 图像=%dx%d DPR=%.2f 逻辑区域=%s 阴影=%s",
                 self.background_mode, self.pixmap.width(), self.pixmap.height(),
                 self.pixmap.devicePixelRatio(), rect, self.shadow_enabled)
@@ -404,7 +412,7 @@ class StickerItem(QWidget):
             self.snap_hint = None
         self.update()
         self.state_changed.emit()
-        logging.getLogger("screensnap").info(
+        get_logger().info(
             "贴图吸附提示显示: %s（源=%s）",
             "开" if self.snap_hint_enabled else "关", self.source or "临时图片")
 
@@ -421,7 +429,7 @@ class StickerItem(QWidget):
         elif event.button() == Qt.LeftButton and not self.locked:
             cursor = event.globalPosition().toPoint()
             self.drag_origin = cursor - self.pos()
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "开始拖动贴图: 位置(%d,%d) 尺寸(%dx%d) 源=%s 吸附=%s 目标=%s 阈值=%s",
                 self.x(), self.y(), self.width(), self.height(), self.source or "临时图片",
                 self.snap_enabled(), self.settings.get("sticker_snap_targets", "both"),
@@ -489,7 +497,7 @@ class StickerItem(QWidget):
             return
         self.snap_windows = visible_targets()
         under = window_under_point(cursor)
-        logging.getLogger("screensnap").debug(
+        get_logger().debug(
             "拖动开始: 鼠标(%d,%d) 可吸附窗口 %d 个 鼠标下窗口=%r",
             cursor.x(), cursor.y(), len(self.snap_windows),
             (under.title or under.class_name) if under else None)
@@ -535,7 +543,7 @@ class StickerItem(QWidget):
         # 拖动时每帧都会查询，候选集合不变就只记一次日志。
         if keys != self.snap_candidate_keys:
             self.snap_candidate_keys = keys
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "贴图吸附候选 %d 个: %s", len(targets), " | ".join(
                     f"{item['key']}({item['kind']}) 逻辑矩形({item['left']},{item['top']},"
                     f"{item['right'] - item['left'] + 1}x{item['bottom'] - item['top'] + 1})"
@@ -574,7 +582,7 @@ class StickerItem(QWidget):
         # 两个方向各自的最小偏移，用于判断“左右吸不到”是候选问题还是阈值问题。
         best_x = min(horizontal, key=lambda item: abs(item[0])) if horizontal else None
         best_y = min(vertical, key=lambda item: abs(item[0])) if vertical else None
-        log_every(logging.getLogger("screensnap"), logging.DEBUG, "snap-probe", state, 0.5,
+        log_every(get_logger(), logging.DEBUG, "snap-probe", state, 0.5,
                   "吸附计算: 贴图(%d,%d,%dx%d) 阈值=%d 候选=%d 个 | 水平最近=%s 垂直最近=%s"
                   " → 位移(%d,%d) 命中=%s 目标矩形=%s",
                   rect[0], rect[1], rect[2] - rect[0], rect[3] - rect[1], threshold, len(targets),
@@ -615,7 +623,7 @@ class StickerItem(QWidget):
             return
         target_label = {"window": "窗口", "sticker": "贴图",
                         "screen": "屏幕工作区"}.get(relation["target"], "目标")
-        logging.getLogger("screensnap").info(
+        get_logger().info(
             "贴图已吸附到%s %s：%s 边，位置(%d,%d)",
             target_label,
             relation["title"] or relation["key"], edge, position.x(), position.y())
@@ -648,7 +656,7 @@ class StickerItem(QWidget):
         """离开吸附目标，或在菜单里手动解除吸附与跟随。"""
         if self.snap_target is None:
             return
-        logging.getLogger("screensnap").info("贴图解除吸附: %s %s",
+        get_logger().info("贴图解除吸附: %s %s",
                                             self.snap_target.get("target"),
                                             self.snap_target.get("title") or self.snap_target.get("key"))
         self.snap_target = None
@@ -692,7 +700,7 @@ class StickerItem(QWidget):
         if self.follow_timer.isActive():
             return
         self.follow_timer.start()
-        logging.getLogger("screensnap").info("开启窗口跟随: hwnd=%s 标题=%r 间隔=%dms",
+        get_logger().info("开启窗口跟随: hwnd=%s 标题=%r 间隔=%dms",
                                             (self.snap_target or {}).get("hwnd"),
                                             (self.snap_target or {}).get("title"), interval)
 
@@ -701,7 +709,7 @@ class StickerItem(QWidget):
         if self.follow_timer is None or not self.follow_timer.isActive():
             return
         self.follow_timer.stop()
-        logging.getLogger("screensnap").info("停止窗口跟随: hwnd=%s 标题=%r",
+        get_logger().info("停止窗口跟随: hwnd=%s 标题=%r",
                                             (self.snap_target or {}).get("hwnd"),
                                             (self.snap_target or {}).get("title"))
 
@@ -719,7 +727,7 @@ class StickerItem(QWidget):
             relation["follow"] = True
             self.start_follow()
         else:
-            logging.getLogger("screensnap").debug("贴图没有可跟随的吸附目标，跳过跟随切换")
+            get_logger().debug("贴图没有可跟随的吸附目标，跳过跟随切换")
 
     def poll_follow(self):
         """按目标窗口或贴图的最新位置移动；目标关闭时自动解除吸附。"""
@@ -745,7 +753,7 @@ class StickerItem(QWidget):
         if rect is None:
             if not window_present(handle):
                 # 只有窗口真的被销毁才解除吸附。
-                logging.getLogger("screensnap").warning(
+                get_logger().warning(
                     "跟随的目标窗口已关闭，自动解除吸附: hwnd=%s 标题=%r",
                     handle, relation.get("title"))
                 self.snap_target = None
@@ -753,7 +761,7 @@ class StickerItem(QWidget):
                 self.stop_follow()
                 return
             # 最小化或隐藏时保留吸附关系，等窗口恢复后继续跟随。
-            log_every(logging.getLogger("screensnap"), logging.DEBUG, "follow-idle",
+            log_every(get_logger(), logging.DEBUG, "follow-idle",
                       handle, 2.0,
                       "目标窗口已最小化或隐藏，暂停跟随: hwnd=%s 标题=%r",
                       handle, relation.get("title"))
@@ -761,7 +769,7 @@ class StickerItem(QWidget):
         expected = QPoint(rect.left() + relation.get("rel_x", 0), rect.top() + relation.get("rel_y", 0))
         if expected != self.pos():
             # 跟随是定时器轮询，同一位置最多每秒记一次。
-            log_every(logging.getLogger("screensnap"), logging.DEBUG, "follow",
+            log_every(get_logger(), logging.DEBUG, "follow",
                       (handle, expected.x(), expected.y()), 1.0,
                       "跟随窗口移动: (%d,%d) → (%d,%d) 标题=%r",
                       self.pos().x(), self.pos().y(), expected.x(), expected.y(),
@@ -774,7 +782,7 @@ class StickerItem(QWidget):
                             ("target", "key", "edge", "title", "hwnd", "rel_x", "rel_y") if key in snap}
         self.snap_hint = snap.get("edge")
         self.move(rect.left() + snap.get("rel_x", 0), rect.top() + snap.get("rel_y", 0))
-        logging.getLogger("screensnap").info("恢复贴图吸附: 窗口 %r（%s 边）",
+        get_logger().info("恢复贴图吸附: 窗口 %r（%s 边）",
                                             snap.get("title") or snap.get("hwnd"), snap.get("edge"))
 
     def apply_restored_sticker_snap(self, snap, target):
@@ -870,7 +878,7 @@ class StickerItem(QWidget):
         self.update_input_mask()
         self.update()
         self.state_changed.emit()
-        logging.getLogger("screensnap").debug(
+        get_logger().debug(
             "替换贴图完成: 物理=%dx%d DPR=%.2f 缩放=%.2f",
             self.pixmap.width(), self.pixmap.height(), self._pixmap_ratio, self.scale_factor)
 

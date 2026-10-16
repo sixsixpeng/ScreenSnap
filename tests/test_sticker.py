@@ -1143,7 +1143,8 @@ class StickerTests(CoreTests):
         self.assertTrue(all(action.text() and not action.icon().isNull()
                 for menu in toolbar.findChildren(QMenu) for action in menu.actions()
                 if not isinstance(action, QWidgetAction)))
-        options = next(button for button in buttons if button.text() == "更多设置")
+        # 设置按钮文本随当前工具变化（默认工具为记号笔时是"记号笔设置"），不能按固定文本查找。
+        options = toolbar.options_button
         self.assertIsNotNone(options.menu())
         save = next(button for button in buttons if button.text() == "保存")
         save.click()

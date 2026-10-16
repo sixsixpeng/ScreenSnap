@@ -1,6 +1,5 @@
 """把剪贴板中的图片、文件、颜色和文字统一渲染成可贴出的图像。"""
 
-import logging
 import os
 import re
 from html import unescape
@@ -10,6 +9,8 @@ from PySide6.QtCore import QFileInfo, Qt, QRectF
 from PySide6.QtGui import (QColor, QFont, QFontMetrics, QGuiApplication, QImage,
                            QPainter, QTextDocument)
 from PySide6.QtWidgets import QFileIconProvider
+
+from logger import get_logger
 
 # 文件贴图最多展示的条目数量，超出部分只统计数量。
 MAX_FILES = 8
@@ -177,7 +178,7 @@ def render_html_card(markup, text, settings):
     painter.translate(padding, padding)
     document.drawContents(painter, QRectF(0, 0, card.width() - padding * 2, max_height))
     painter.end()
-    logging.getLogger("screensnap").debug(
+    get_logger().debug(
         "渲染剪贴板富文本贴图: html_bytes=%d text_chars=%d output=%dx%d",
         len(markup.encode("utf-8", errors="replace")), len(text), card.width(), card.height())
     return card
@@ -198,13 +199,15 @@ def render_color_card(color, settings):
     image.fill(QColor(color))
     mode = str(settings.get("color_sticker_labels", "follow") or "follow").lower()
     if mode == "follow":
-        mode = str(settings.get("picker_copy_format", "hex") or "hex").lower()
+        mode = str(settings.get("picker_copy_format", "all") or "all").lower()
     labels = []
     if mode != "off" and settings.get("color_sticker_value", True):
         base = "hex" if mode == "name" else mode
         labels = label_lines(color, base, with_name=mode in ("all", "name"))
     painter = QPainter(image)
     painter.setRenderHint(QPainter.TextAntialiasing)
+    # 色值底板是圆角矩形：一并开启几何抗锯齿（2026-10-16 统一补齐）。
+    painter.setRenderHint(QPainter.Antialiasing, True)
     if labels:
         font = card_font(settings, "text_sticker_font", 14)
         metrics = QFontMetrics(font)
@@ -302,7 +305,7 @@ def plain_text(mime):
 
 def read_clipboard(settings, clipboard=None):
     """按图片、文件、颜色、文字的顺序识别剪贴板内容。"""
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     board = clipboard or QGuiApplication.clipboard()
     mime = board.mimeData()
     if mime is None:
