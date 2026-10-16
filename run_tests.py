@@ -53,6 +53,25 @@ RAN_RE = re.compile(r"^Ran (\d+) tests?", re.MULTILINE)
 FAIL_RE = re.compile(r"^(FAIL|ERROR): (\S+)", re.MULTILINE)
 SKIP_RE = re.compile(r"skipped=(\d+)")
 
+# 单模块预算与超时回收（AGENTS 规则 36）：无摘要/超时都不算通过，必须显示 TIMEOUT。
+MODULE_TIMEOUT = 180
+TREE_KILL_TIMEOUT = 10
+
+
+def kill_tree(process):
+    """超时后回收整棵进程树（Windows 用 taskkill /T /F），再做有限等待。"""
+    if os.name == "nt":
+        try:
+            subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                           timeout=TREE_KILL_TIMEOUT)
+        except (OSError, subprocess.SubprocessError):
+            pass
+    try:
+        process.kill()
+    except OSError:
+        pass
+
 
 def run_module(module: str, retries: int):
     """跑一个模块，返回 (ran, verdict, failed, duration, note)。"""
@@ -61,13 +80,25 @@ def run_module(module: str, retries: int):
     while True:
         attempt += 1
         started = time.monotonic()
-        proc = subprocess.run(
+        proc = subprocess.Popen(
             [sys.executable, "-u", "-m", "unittest", module],
-            cwd=ROOT, env=env, capture_output=True, text=True,
-            encoding="utf-8", errors="replace",
+            cwd=ROOT, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, encoding="utf-8", errors="replace",
         )
+        timed_out = False
+        try:
+            output = proc.communicate(timeout=MODULE_TIMEOUT)[0] or ""
+        except subprocess.TimeoutExpired:
+            timed_out = True
+            kill_tree(proc)
+            try:
+                output = proc.communicate(timeout=TREE_KILL_TIMEOUT)[0] or ""
+            except subprocess.TimeoutExpired:
+                output = ""
         duration = time.monotonic() - started
-        output = (proc.stdout or "") + (proc.stderr or "")
+        if timed_out:
+            return (0, "TIMEOUT", [], duration,
+                    f"超过单模块预算 {MODULE_TIMEOUT}s ⇒ 已终止并回收进程树（不计通过）")
         match = RAN_RE.search(output)
         if match or attempt > retries:
             break
@@ -133,7 +164,15 @@ def main() -> int:
     print("")
     print(f"合计 {total_ran} 条，模块 {len(modules)} 个，失败模块 {failures} 个")
     if failures:
-        print("判定：FAILED（真实失败，需修）")
+        timeout_count = sum(1 for row in rows if row[2] == "TIMEOUT")
+        no_summary = sum(1 for row in rows if row[2] == "NO-SUMMARY")
+        detail = []
+        if timeout_count:
+            detail.append(f"TIMEOUT {timeout_count} 个")
+        if no_summary:
+            detail.append(f"无摘要 {no_summary} 个")
+        suffix = ("（" + "、".join(detail) + "，不计通过）") if detail else "（真实失败，需修）"
+        print("判定：FAILED" + suffix)
         return 1
     print("判定：全部通过（含 C4 收尾崩溃的模块按摘要判 OK）")
     return 0
