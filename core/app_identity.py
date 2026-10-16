@@ -8,13 +8,13 @@ Windows 的规则：Windows 11 原生 Toast 只有在「系统里存在一个带
 注册失败时通知照旧弹出，只是系统里没有独立入口（见 ui/native_toast.py 的回退）。
 """
 
-import logging
 import os
 import sys
 from pathlib import Path
 
 from core.constants import APP_USER_MODEL_ID
 from core.startup import is_frozen
+from logger import get_logger
 
 SHORTCUT_NAME = "ScreenSnap.lnk"
 SHORTCUT_DESCRIPTION = "ScreenSnap 截图与贴图工具"
@@ -31,7 +31,7 @@ _NOTIFICATION_SETTINGS_KEY = ("Software\\Microsoft\\Windows\\CurrentVersion"
 
 def retire_legacy_identities():
     """删掉旧身份的 Windows 通知设置子键（只动本模块列出的历史身份，失败不抛异常）。"""
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     if not is_supported():
         return []
     retired = []
@@ -141,7 +141,7 @@ def ensure_registered(path=None):
 
     path 参数供测试注入临时路径使用（避免在开发机上真的写开始菜单）。
     """
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     if not is_supported():
         return "unsupported"
     target = Path(path) if path is not None else shortcut_path()

@@ -1,12 +1,13 @@
 """mss 捕获虚拟桌面，保留屏幕物理坐标。"""
 
 from io import BytesIO
-import logging
 import os
 
 import mss
 from PIL import Image
 from PySide6.QtGui import QImage
+
+from logger import get_logger
 
 # `mss.mss(...)` 已被上游标记废弃（会往 stderr 打 DeprecationWarning，用户实测可见），
 # 新版本提供 `mss.MSS` 类；用 getattr 兜住旧版本。模块级别名同时便于测试替换。
@@ -96,7 +97,7 @@ def capture(cursor=False, alternatives=False, gap_fill="transparent"):
                 image.alpha_composite(screen.convert("RGBA"), offset)
             else:
                 image.paste(screen, offset)
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     logger.debug("捕获虚拟桌面: %sx%s，显示器 %d 个", image.width, image.height, len(monitors))
     with_pointer = image.copy()
     try:

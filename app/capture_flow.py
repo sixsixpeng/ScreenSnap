@@ -1,7 +1,6 @@
 """截图流程：抓屏、遮罩、选区结果分发、编辑器打开与保存。"""
 
 import ctypes
-import logging
 import os
 import subprocess
 import sys
@@ -20,6 +19,7 @@ from core.startup import set_start_on_boot
 from editor import EditorWindow
 from hotkey import HotkeyManager
 from logger import configure_logging
+from logger import get_logger
 from screenshot import MaskWindow
 from screenshot.mask_window import window_label
 from sticker import StickerManager
@@ -50,7 +50,19 @@ class CaptureFlowMixin:
         waiting = (150 if from_tray else 0) + delay
         if delay:
             self.logger.info("截图延迟 %d 毫秒后显示遮罩: %s", delay, mode)
-        QTimer.singleShot(waiting, lambda: self.show_mask(mode, initial_rect, preferred_monitor))
+        self._capture_pending = getattr(self, "_capture_pending", 0) + 1
+        if getattr(self, "hotkeys", None) is not None:
+            self.hotkeys.set_busy_state(True)
+
+        def deliver():
+            try:
+                self.show_mask(mode, initial_rect, preferred_monitor)
+            finally:
+                self._capture_pending = max(0, self._capture_pending - 1)
+                if getattr(self, "hotkeys", None) is not None:
+                    self.hotkeys.set_busy_state(self.hotkey_busy())
+
+        QTimer.singleShot(waiting, deliver)
 
 
     def complete_preset_capture(self, mode, image, bounds, monitors, alternate,
@@ -143,6 +155,8 @@ class CaptureFlowMixin:
         self.mask = MaskWindow(image, bounds, monitors, self.config.data, mode, alternate,
                        initial_rect=initial_rect, preferred_monitor=preferred_monitor,
                        extra_intruders=popup_intruders)
+        self.mask.session.compatibility_override = bool(getattr(self, "_next_capture_comparison", False))
+        self._next_capture_comparison = False
         self.mask.setAttribute(Qt.WA_DeleteOnClose)
         if hasattr(self, "settings_window"):
             self.mask.annotation_setting_changed.connect(self.settings_window.set_annotation_setting)
@@ -207,12 +221,12 @@ class CaptureFlowMixin:
             from screenshot.mask_window import take_pending_editor_state
 
             pending, history = take_pending_editor_state()
-            logging.getLogger("screensnap").info(
+            get_logger().info(
                 "新建编辑器：光标图=%s 尺寸=%s 说明=%s",
                 "有" if alternate is not None else "无",
                 getattr(alternate, "size", None),
                 "来自原地编辑转交" if pending else "本次截图")
-            logging.getLogger("screensnap").info(
+            get_logger().info(
                 "edit_images 收到交接快照：%d 条（index=%d）", len(pending), index)
             editor = EditorWindow(image, self.config.data, alternate,
                                   from_capture=from_capture)
@@ -228,18 +242,18 @@ class CaptureFlowMixin:
                                                   editor.canvas.cursor_enabled, editor.canvas.snapshot())]
                         editor.canvas.cursor_index = 0
                 except Exception as error:  # noqa: BLE001 恢复失败不影响打开编辑器
-                    logging.getLogger("screensnap").warning(
+                    get_logger().warning(
                         "恢复转交过来的标注失败: %s", error)
                     try:
                         editor.canvas.restore(pending)
                         editor.canvas.history = [(editor.canvas.image, editor.canvas.alternate,
                                                   editor.canvas.cursor_enabled, editor.canvas.snapshot())]
                         editor.canvas.cursor_index = 0
-                        logging.getLogger("screensnap").warning("已退回当前标注快照，迁移历史不可用")
+                        get_logger().warning("已退回当前标注快照，迁移历史不可用")
                     except Exception:
-                        logging.getLogger("screensnap").exception("恢复转交快照失败")
+                        get_logger().exception("恢复转交快照失败")
                 else:
-                    logging.getLogger("screensnap").info(
+                    get_logger().info(
                         "已从原地编辑器恢复 %d 个标注对象", len(pending))
             editor.sticker_position = positions[index] if positions and index < len(positions) else None
             # 编辑器必须出现在"被截取区域所在的那块屏"：Qt 默认把新窗口放在主屏居中，
@@ -254,7 +268,7 @@ class CaptureFlowMixin:
                     editor.move(
                         min(max(frame.left(), area.left()), area.right() - frame.width() + 1),
                         min(max(frame.top(), area.top()), area.bottom() - frame.height() + 1))
-                    logging.getLogger("screensnap").info(
+                    get_logger().info(
                         "编辑器定位到选区所在屏: 锚点=(%d,%d) 屏幕=%s 窗口=%s",
                         anchor.x(), anchor.y(), area.getRect(), editor.geometry().getRect())
             editor.copy_done.connect(self.notify_capture_copied)

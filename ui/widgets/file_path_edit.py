@@ -1,11 +1,12 @@
 """目录路径输入与浏览。"""
 
 from pathlib import Path
-import logging
 
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QWidget, QHBoxLayout, QLineEdit, QPushButton, QFileDialog, QStyle
+
+from logger import get_logger
 
 
 class FilePathEdit(QWidget):
@@ -54,7 +55,7 @@ class FilePathEdit(QWidget):
         self.changed(value)
         self.input.setText(self.display_value())
         if not value and self.default_path is not None:
-            logging.getLogger("screensnap").debug("目录输入已恢复默认目录显示")
+            get_logger().debug("目录输入已恢复默认目录显示")
 
     def open_directory(self, path=None):
         """打开当前保存目录；目录不存在时先创建，保留 Explorer 定位能力。"""

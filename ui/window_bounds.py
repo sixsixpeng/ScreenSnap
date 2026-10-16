@@ -1,9 +1,9 @@
-import logging
-
 import shiboken6
 from PySide6.QtCore import QEvent, QObject, QRect, QTimer, Qt
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import QDialog, QMenu, QWidget
+
+from logger import get_logger
 
 
 def clamp_geometry(frame, bounds):
@@ -79,9 +79,9 @@ class WindowBoundsFilter(QObject):
         target = clamp_geometry(frame, bounds)
         if target.topLeft() != frame.topLeft():
             window.move(target.topLeft())
-            logging.getLogger("screensnap").debug(
+            get_logger().debug(
                 "窗口移入屏幕可用区域: %s", type(window).__name__)
         if isinstance(window, (QDialog, QMenu)) and (
                 frame.width() > bounds.width() or frame.height() > bounds.height()):
-            logging.getLogger("screensnap").warning(
+            get_logger().warning(
                 "弹窗大于屏幕可用区域，已尽量调整位置: %s", type(window).__name__)

@@ -2,11 +2,12 @@
 
 from dataclasses import dataclass
 from math import inf
-import logging
 import os
 
 from PySide6.QtCore import QPoint, QRect, QRectF
 from PySide6.QtGui import QGuiApplication
+
+from logger import get_logger
 
 
 @dataclass(frozen=True)
@@ -196,13 +197,13 @@ class DisplayMapper:
             ambiguous = sum(1 for item in within if abs(item[1] - smallest) < 1e-6)
             plain = min(within, key=lambda item: item[1] * 100000.0 + item[2])
             if plain[0] != best_index:
-                logging.getLogger('screensnap').debug(
+                get_logger().debug(
                     '缩放消歧改变了屏幕配对: 物理(%d,%d,%dx%d) 选中 #%d(dpr=%.2f)，'
                     '仅按尺寸+位置会选 #%d(dpr=%.2f)；缩放提示=%s',
                     physical.left(), physical.top(), physical.width(), physical.height(),
                     best_index, scored[best_index][4], plain[0], plain[4], scale)
             elif scale is None and ambiguous > 1:
-                logging.getLogger('screensnap').debug(
+                get_logger().debug(
                     '无缩放提示且存在 %d 个同尺寸候选: 物理(%d,%d,%dx%d) 按尺寸+位置选 #%d(dpr=%.2f)',
                     ambiguous, physical.left(), physical.top(), physical.width(),
                     physical.height(), best_index, scored[best_index][4])
@@ -290,7 +291,7 @@ class DisplayMapper:
         physical = self.physical_local_to_global(point)
         mapping = self._mapping_for_physical(physical)
         native = self.physical_global_to_native_global(physical)
-        logging.getLogger("screensnap").debug(
+        get_logger().debug(
             "截图贴图锚点映射: 物理局部=(%d,%d) 物理全局=(%d,%d) 显示器物理=(%d,%d,%dx%d) "
             "Qt原生屏幕=(%d,%d,%dx%d) 锚点=(%d,%d)",
             point.x(), point.y(), physical.x(), physical.y(),
@@ -351,5 +352,5 @@ def win32_monitor_scale(rect):
         if monitor and result == 0 and dpi_x.value:
             return dpi_x.value / 96.0
     except Exception as error:  # 缺少 shcore、ctypes 调用约定差异等一律降级
-        logging.getLogger("screensnap").debug("查询显示器缩放失败，跳过缩放消歧: %s", error)
+        get_logger().debug("查询显示器缩放失败，跳过缩放消歧: %s", error)
     return None

@@ -1,7 +1,8 @@
 """可见窗口边缘坐标；其他平台返回空列表。"""
 
-import logging
 import os
+
+from logger import get_logger
 
 
 # 上一次枚举到的可见窗口集合：用于把"每窗口一行"改成"只在变化时记一条"（规则 14）。
@@ -39,9 +40,9 @@ def visible_windows():
         user32.EnumWindows(callback, 0)
     except (OSError, ValueError) as error:
         # 系统枚举偶发失败，降级为不吸附，不影响截图本身。
-        logging.getLogger("screensnap").warning("枚举窗口失败，本次不提供窗口吸附: %s", error)
+        get_logger().warning("枚举窗口失败，本次不提供窗口吸附: %s", error)
         return []
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     # 2026-10-11（规则 14）：原来"每个窗口一行"，跟随轮询时把日志刷满（实测最近 2000 行里 121 条）。
     # 改成**窗口集合变化时记一条汇总**；枚举结果不变就完全静默。
     if rectangles != _LAST_VISIBLE[0]:

@@ -2,6 +2,7 @@
 
 import logging
 import os
+import threading
 from contextlib import contextmanager
 from contextvars import ContextVar
 
@@ -82,6 +83,10 @@ class ContextFilter(logging.Filter):
     """把鼠标位置、前台窗口与临时标记附加到每条日志上。"""
 
     def filter(self, record):
+        if getattr(record, "screensnap_metadata_only", False):
+            # 热键诊断可能来自注册线程：只用 Python 元数据，不访问 Qt/Win32 窗口。
+            record.context = f"pid={os.getpid()} thread={threading.current_thread().name}"
+            return True
         if _busy.get():
             # 收集现场信息时产生的日志沿用外层现场，不再重复收集，避免递归。
             record.context = _current.get()

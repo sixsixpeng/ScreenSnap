@@ -1,12 +1,13 @@
 """Application-wide palette selection while preserving native Qt widget styles."""
 
-import logging
 from pathlib import Path
 
 from PySide6.QtCore import QCoreApplication, QEvent, QObject, QPointF, Qt
 from PySide6.QtGui import QColor, QMouseEvent, QPalette
 from PySide6.QtWidgets import (QAbstractSpinBox, QLineEdit, QStyle,
                                QStyleOptionSpinBox)
+
+from logger import get_logger
 
 THEME_PALETTES = {
     "dark": {
@@ -379,7 +380,7 @@ def _apply_menu_stylesheet(application):
     if application.styleSheet() == stylesheet:
         return
     application.setStyleSheet(stylesheet)
-    logging.getLogger("screensnap").debug(
+    get_logger().debug(
         "菜单样式刷新: %s", mode)
 
 

@@ -1,11 +1,12 @@
 """截图保存格式与质量的统一处理。"""
 
-import logging
 import os
 import tempfile
 from pathlib import Path
 
 from PySide6.QtGui import QColor, QImage, QPainter
+
+from logger import get_logger
 
 # 保存格式 -> (Qt 保存器名称, 文件扩展名)。键同时用于配置值与设置页选项。
 SAVE_FORMATS = {
@@ -103,5 +104,5 @@ def save_image(image, path, settings):
             try:
                 temporary_path.unlink(missing_ok=True)
             except OSError as error:
-                logging.getLogger("screensnap").warning(
+                get_logger().warning(
                     "无法清理图片保存临时文件 %s: %s", temporary_path, error)

@@ -10,11 +10,12 @@ Qt 的 activateWindow() 在 Windows 上最终调用 SetForegroundWindow。若本
 """
 
 import ctypes
-import logging
 import os
 
 import shiboken6
 from PySide6.QtGui import QGuiApplication
+
+from logger import get_logger
 
 # Windows 专用的前台抢夺兜底；离屏/自动化测试会把它置为 False，避免干扰用户当前窗口。
 FOREGROUND_FALLBACK = os.name == "nt"
@@ -71,7 +72,7 @@ def activate_window(widget):
 
 def activate_with_foreground_thread(handle):
     """绑到前台线程的输入队列后再激活，绕开普通 SetForegroundWindow 的限制。"""
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     try:
         user32 = ctypes.windll.user32
         kernel32 = ctypes.windll.kernel32

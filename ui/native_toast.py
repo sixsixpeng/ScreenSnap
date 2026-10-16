@@ -1,6 +1,5 @@
 """Windows native toast helpers with stable local image resources."""
 
-import logging
 import os
 from pathlib import Path
 from threading import Thread
@@ -12,9 +11,10 @@ from PIL import Image as PillowImage
 from core.constants import APP_USER_MODEL_ID
 from core.path_utils import cache_dir, data_dir
 from core.screen_capture import to_qimage
+from logger import get_logger
 
 
-logger = logging.getLogger("screensnap")
+logger = get_logger()
 
 
 def native_toast_duration(timeout_seconds):

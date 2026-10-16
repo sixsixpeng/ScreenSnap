@@ -3,12 +3,13 @@
 from ui.widgets.file_path_edit import FilePathEdit
 from ui.widgets.tooltip import SettingsPage
 from logger.log_setup import log_directory
+from ui.settings_health import add_preferences, sync_preference_rows, DiagnosticPanel
 
 
 class LogPage(SettingsPage):
     """控制标准库日志的开关、等级、轮转周期和保存位置。"""
 
-    def __init__(self, config, changed):
+    def __init__(self, config, changed, diagnostic_tools=None):
         super().__init__(config, changed)
         self.group("日志记录")
         self.check("logging_enabled", "启用日志", "关闭后停止写入运行日志；\n"
@@ -21,7 +22,9 @@ class LogPage(SettingsPage):
                     "DEBUG：额外记录每次坐标换算、窗口命中的句柄/标题/矩形、候选计算与跟随位移；\n"
                     "TRACE 记录最细致的信息；只想看异常时选 WARNING 或 ERROR")
         self.radios("log_when", "分割周期", [("每天", "midnight"), ("每小时", "H")],
-                    "最多保留 14 份日志；按小时分割适合短期密集排查")
+                    "轮转按下方备份份数保留；按小时分割适合短期密集排查，不是全目录保留天数。")
+        self.number("log_backup_count", "轮转备份份数", 1, 100,
+                    "每个轮转组保留的备份份数；默认14，不清理旧月份目录或crash.log。")
         self.check("log_monthly_folder", "按月份创建日志文件夹",
                "开启后按 YYYY-MM 创建子目录；跨月后新日志会自动写入新的月份目录。\n"
                "关闭后日志直接写入所选目录。")
@@ -32,3 +35,15 @@ class LogPage(SettingsPage):
         directory.setToolTip("仅使用已存在的目录；留空或目录不存在时保存到启动文件所在目录的 logs 文件夹")
         self.controls["log_dir"] = directory
         self.form.addRow("日志保存目录", directory)
+        add_preferences(self, "diagnostics", excluded=("log_backup_count",))
+        self.panel = DiagnosticPanel(diagnostic_tools)
+        self.form.addRow(self.panel)
+        sync_preference_rows(self)
+
+    def update_value(self, key, value):
+        super().update_value(key, value)
+        sync_preference_rows(self)
+
+    def sync_controls(self):
+        super().sync_controls()
+        sync_preference_rows(self)

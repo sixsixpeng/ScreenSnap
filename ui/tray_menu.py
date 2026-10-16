@@ -59,9 +59,9 @@ def make_tray_menu(app, capture, settings, quit_app, edit_clipboard=None, open_i
                    "选择图片文件并直接创建一个贴图窗口。", open_sticker)
     menu.addSeparator()
     if restore_hotkeys is not None:
-        # 2026-10-14：热键被其它程序抢占/系统摘钩后，这里是不依赖任何热键的兜底入口。
+        # 不依赖热键的请求入口；重建绑定不能保证原生输入链恢复。
         add_action(action_icon("rotate_left"), "重新注册全局热键",
-                   "快捷键被其它程序抢占、或系统把钩子摘掉后失灵时，立即清空并重新注册所有全局热键。",
+                   "请求按当前设置重新注册本程序的全局绑定，遵守手动恢复策略；不重启原生钩子或库线程，仍无效请保留诊断后重启软件。",
                    restore_hotkeys)
     add_action(action_icon("settings"), "设置", "打开设置窗口，调整截图、保存、快捷键和外观。", settings)
     menu.addSeparator()

@@ -1,10 +1,11 @@
 """用户数据目录。"""
 
-import logging
 import os
 import shutil
 from datetime import date
 from pathlib import Path
+
+from logger import get_logger
 
 
 def data_dir():
@@ -34,7 +35,7 @@ def clear_data_directory():
     if root.exists():
         shutil.rmtree(root, onerror=_skip_in_use)
     if skipped:
-        logging.getLogger("screensnap").warning(
+        get_logger().warning(
             "清理用户数据目录时跳过 %d 个被占用/无权限的条目（可手动删除）：%s",
             len(skipped), ", ".join(skipped[:5]))
     return root
@@ -103,7 +104,7 @@ def migrate_cache_dirs(settings):
 
     返回迁移的文件数。搬不动（被占用等）就跳过并记 WARNING，绝不影响启动。
     """
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     moved = 0
     for name in ("sticker_cache", "clipboard_history", "toast_cache"):
         old = data_dir() / name

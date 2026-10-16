@@ -12,9 +12,10 @@
 任何失败（非 Windows、文件不存在、播放异常）都回落到 beep，绝不抛异常影响通知本身。
 """
 
-import logging
 import os
 from pathlib import Path
+
+from logger import get_logger
 
 # 内置提示音：键 → 随包 wav。加进 SOUND_KINDS 后 config.validate() 自动接受它们。
 BUILTIN_FILES = {"builtin1": "chime1.wav", "builtin2": "chime2.wav",
@@ -81,7 +82,7 @@ def resolve_kind(kind, path=""):
 
 def play_sound(kind="default", path=""):
     """播放一次提示音；返回实际播放的类型（便于用例断言与排查）。"""
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     resolved, target = resolve_kind(kind, path)
     if os.name == "nt":
         try:

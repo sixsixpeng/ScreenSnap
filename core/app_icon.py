@@ -1,10 +1,11 @@
 """程序图标：优先使用随包分发的多尺寸 ICO，缺失或损坏时回退到 PNG。"""
 
-import logging
 import sys
 from pathlib import Path
 
 from PySide6.QtGui import QIcon
+
+from logger import get_logger
 
 # 两份图标是同一张图；ICO 含 16–256 多尺寸，在托盘和任务栏更清晰。
 ICON_FILES = ("icon.ico", "icon.png")
@@ -26,6 +27,6 @@ def app_icon():
         icon = QIcon(str(path))
         if not icon.isNull():
             return icon
-        logging.getLogger("screensnap").warning("图标文件无法读取，尝试下一个候选: %s", path)
-    logging.getLogger("screensnap").warning("未找到图标文件 %s，将使用内置绘制的图标", ICON_FILES)
+        get_logger().warning("图标文件无法读取，尝试下一个候选: %s", path)
+    get_logger().warning("未找到图标文件 %s，将使用内置绘制的图标", ICON_FILES)
     return QIcon()

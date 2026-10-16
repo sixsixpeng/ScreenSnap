@@ -15,6 +15,7 @@ from PySide6.QtCore import QRect
 from PySide6.QtWidgets import QApplication
 
 from core.screen_mapping import logical_point_to_physical, native_rect, physical_rect_to_logical
+from logger import get_logger
 from logger.log_rate import log_every
 
 # 沿 Z 序取下一个窗口，用于跳过显式标记的截图遮罩和贴图。
@@ -52,7 +53,7 @@ def window_under_point(point):
     """返回鼠标（逻辑坐标）下最上层的外部窗口；没有可用窗口时返回 None。"""
     if os.name != "nt":
         return None
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     physical = logical_point_to_physical(point)
     # 贴图与遮罩属于本进程且置顶，直接取它们下面第一个覆盖鼠标的外部窗口。
     handle = top_window_at(physical.x(), physical.y())
@@ -90,7 +91,7 @@ def top_window_at(x, y, skip_stickers=True):
     """
     if os.name != "nt":
         return None
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     user32 = ctypes.windll.user32
     desktop = user32.GetDesktopWindow()
     shell = user32.GetShellWindow()
@@ -222,7 +223,7 @@ def visible_targets():
     """枚举可吸附的可见窗口（排除桌面与本程序覆盖层），供拖动开始时缓存一次。"""
     if os.name != "nt":
         return []
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     user32 = ctypes.windll.user32
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     desktop = user32.GetDesktopWindow()
@@ -283,7 +284,7 @@ def window_logical_rect(handle):
         return None
     bounds = wintypes.RECT()
     if not user32.GetWindowRect(handle, ctypes.byref(bounds)):
-        logging.getLogger("screensnap").debug("读取窗口矩形失败: hwnd=%d", int(handle))
+        get_logger().debug("读取窗口矩形失败: hwnd=%d", int(handle))
         return None
     if bounds.right - bounds.left < MIN_SIZE or bounds.bottom - bounds.top < MIN_SIZE:
         return None
@@ -291,7 +292,7 @@ def window_logical_rect(handle):
     result = physical_rect_to_logical(physical)
     # 跟随轮询与拖动都会高频调用。2026-10-11（规则 14）：原来"同一矩形最多每秒一次"，实测最近
     # 2000 行里仍有 273 条（最大的刷屏源）⇒ 放宽到 5 秒一次；矩形不变则完全静默。
-    log_every(logging.getLogger("screensnap"), logging.DEBUG, "rect",
+    log_every(get_logger(), logging.DEBUG, "rect",
               (int(handle), result.left(), result.top(), result.width(), result.height()), 5.0,
               "窗口矩形: hwnd=%d 物理(%d,%d,%dx%d) → 逻辑(%d,%d,%dx%d)",
               int(handle), physical.left(), physical.top(), physical.width(), physical.height(),

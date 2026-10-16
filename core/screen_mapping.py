@@ -4,13 +4,14 @@ Windows 的 GetWindowRect 返回物理像素，而 QWidget 使用逻辑坐标；
 多显示器下两者并不相等，贴图吸附前必须换算，否则吸附位置会按比例偏移。
 """
 
-import logging
 import os
 import time
 from dataclasses import dataclass
 
 from PySide6.QtCore import QPoint, QRect
 from PySide6.QtGui import QGuiApplication
+
+from logger import get_logger
 
 # 显示器信息变化不频繁，拖动过程中按时间复用，避免每帧重新枚举。
 CACHE_SECONDS = 1.0
@@ -53,7 +54,7 @@ def screen_mappings():
     changed = mappings != _cache["mappings"]
     _cache["mappings"] = mappings
     if changed:
-        logging.getLogger("screensnap").debug(
+        get_logger().debug(
             "屏幕映射 %d 块: %s", len(mappings),
             " | ".join(describe(mapping) for mapping in mappings) or "无 Qt 屏幕")
     return _cache["mappings"]
@@ -86,7 +87,7 @@ def pair_screens(logical, physical):
     给出的是 \\\\.\\DISPLAYn，两者对不上；此时若改用尺寸匹配，遇到两块分辨率相同
     的显示器就会配反，导致水平坐标整体偏移一整块屏。按排列顺序配对可以避免。
     """
-    logger = logging.getLogger("screensnap")
+    logger = get_logger()
     mappings = []
     pending = list(logical)
     ordered = sorted(physical, key=lambda item: (item[1].left(), item[1].top()))
@@ -164,14 +165,14 @@ def enum_physical_monitors():
         callback = callback_type(collect)
         user32.EnumDisplayMonitors(None, None, callback, 0)
     except (OSError, ValueError) as error:
-        logging.getLogger("screensnap").warning("枚举显示器失败，吸附退化为按缩放比例换算: %s", error)
+        get_logger().warning("枚举显示器失败，吸附退化为按缩放比例换算: %s", error)
         return []
     # 只在**显示器集合变化**时记（转变点），轮询每拍调用本函数不许刷日志（规则 14）。
     signature = [(name, rect.x(), rect.y(), rect.width(), rect.height())
                  for name, rect in monitors]
     if signature != _last_enum_signature[0]:
         _last_enum_signature[0] = signature
-        logging.getLogger("screensnap").debug(
+        get_logger().debug(
             "枚举到 %d 块物理显示器（有变化）: %s", len(monitors),
             [name for name, _ in monitors])
     return monitors
@@ -245,6 +246,6 @@ def logical_point_to_physical(point):
         round(mapping.physical.left() + (point.x() - mapping.logical.left()) / scale_x),
         round(mapping.physical.top() + (point.y() - mapping.logical.top()) / scale_y),
     )
-    logging.getLogger("screensnap").log(TRACE, "逻辑点(%d,%d) → 物理点(%d,%d) 屏幕=%s",
+    get_logger().log(TRACE, "逻辑点(%d,%d) → 物理点(%d,%d) 屏幕=%s",
                                           point.x(), point.y(), result.x(), result.y(), mapping.name)
     return result
