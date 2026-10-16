@@ -6,15 +6,19 @@
 删除对象（整棵目录树遍历）：
   目录：__pycache__、.pytest_cache、.mypy_cache、.ruff_cache、.pytype、.pyre、
         .pyright、.hypothesis、.benchmarks、.nox、.tox、htmlcov、
-        .ipynb_checkpoints、.eggs、pip-wheel-metadata、*.egg-info
-  文件：*.pyc、*.pyo、.coverage / .coverage.<主机>.<pid>、coverage.xml、
-        coverage.json、.dmypy.json
+        .ipynb_checkpoints、.eggs、pip-wheel-metadata、*.egg-info、
+        build、dist、logs（PyInstaller 构建产物与运行日志，都可重新生成）
+  文件：*.pyc、*.pyo、*.spec、*.egg-link、*.orig、*.rej、*.bak、*.swp、*.swo、*~、
+        *.lnk、*.iml、.coverage / .coverage.<主机>.<pid>、coverage.xml、coverage.json、
+        .dmypy.json、pip-log.txt、Thumbs.db、desktop.ini、.DS_Store
 跳过目录（不进入、不删除，避免误删虚拟环境/IDE 配置里的内容）：
   .git .hg .svn .venv venv env .env __pypackages__ .idea .vscode .trae
-  .codebuddy node_modules
+  .codebuddy node_modules .screenshots
 
-说明：build/、dist/、*.spec 属于 PyInstaller 的**构建产物**（不是运行时临时文件），
-      本脚本默认不清理，需要时请用项目里的 build.bat 或手动删除。
+说明：build/、dist/、logs/、*.spec 是可重新生成的构建产物与运行日志，会与临时文件一并删除；
+      dist/ 里**尚未发布**的成品也会被清掉（需要时用 build.bat 重新打包）。
+      *.tmp 不清理：它是"正在写入"的中间文件（本程序写配置/历史也用 .tmp + 原子替换），
+      清掉可能让正在运行的实例替换失败。
 
 用法：
     python clean_python_temp.py                 # 预览后询问确认再删除
@@ -44,11 +48,11 @@ IGNORED_DIRS = {
     ".vscode",        # Visual Studio Code 工程配置
     ".trae",          # Trae IDE 工程配置
     ".codebuddy",     # CodeBuddy 插件工程配置
-    "__pypackages__", # PDM / PEP 582 本地依赖目录（等价于虚拟环境）
+    "__pypackages__",  # PDM / PEP 582 本地依赖目录（等价于虚拟环境）
     "node_modules",   # Node.js 依赖目录
 }
 
-# 匹配到即整目录删除的目录名（均为可自动重建的缓存 / 报告目录），尾注为生成来源
+# 匹配到即整目录删除的目录名（均为可自动重建的缓存 / 报告 / 构建目录），尾注为生成来源
 TEMP_DIR_NAMES = {
     "__pycache__",         # CPython 字节码缓存
     ".pytest_cache",       # pytest 用例缓存
@@ -65,16 +69,33 @@ TEMP_DIR_NAMES = {
     ".ipynb_checkpoints",  # Jupyter Notebook 自动检查点
     ".eggs",               # setuptools 旧式 egg 构建目录
     "pip-wheel-metadata",  # 旧版 pip 构建元数据
+    "build",               # PyInstaller 构建中间目录
+    "dist",                # PyInstaller 发布目录（成品可由 build.bat 重新打包）
+    "logs",                # 运行日志目录（app.log / supervisor.log / crash.log）
+    ".screenshots",        # 截图目录（可重新生成；若以后放正式截图请从这里移出）
 }
 # 以这些后缀结尾的目录名也整个删除（如 ScreenSnap.egg-info）
 TEMP_DIR_SUFFIXES = (".egg-info",)
 
 # 匹配到即删除的文件后缀 / 文件名 / 文件名前缀，尾注为生成来源
-TEMP_FILE_SUFFIXES = (".pyc", ".pyo")  # CPython 编译产物（散落在 __pycache__ 之外时）
+TEMP_FILE_SUFFIXES = (
+    ".pyc", ".pyo",            # CPython 编译产物（散落在 __pycache__ 之外时）
+    ".spec",                   # PyInstaller 规范文件（build.bat 走命令行参数，不读它）
+    ".egg-link",               # pip install -e 开发安装残留
+    ".orig", ".rej",           # 补丁 / 合并冲突残留
+    ".bak",                    # 编辑器或工具留下的备份
+    ".swp", ".swo", "~",       # Vim 交换文件与各编辑器备份（foo.py~）
+    ".lnk",                    # 本项目 start up.bat 生成的快捷方式（.gitignore 已忽略）
+    ".iml",                    # IntelliJ IDEA 模块文件
+)
 TEMP_FILE_NAMES = {
     "coverage.xml",   # coverage.py 的 XML 报告
     "coverage.json",  # coverage.py 的 JSON 报告
     ".dmypy.json",    # mypy 守护进程（dmypy）状态缓存
+    "pip-log.txt",    # 旧版 pip 在当前目录留下的日志
+    "thumbs.db",      # Windows 缩略图缓存
+    "desktop.ini",    # Windows 文件夹自定义（系统会自动重建）
+    ".ds_store",      # macOS Finder 元数据
 }
 TEMP_FILE_PREFIXES = (".coverage",)  # .coverage 与 .coverage.<主机>.<pid>
 
