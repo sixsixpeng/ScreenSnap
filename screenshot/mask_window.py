@@ -2772,11 +2772,15 @@ class MaskWindow(QWidget):
             if _sel is not None and not _sel.isEmpty():
                 element_rect, size = _sel, (_sel.width(), _sel.height())
         if element_rect is None or element_rect.isEmpty() or not size:
-            get_logger().debug(
-                '尺寸徽标隐藏：无元素矩形=%s 尺寸=%s 选区数=%s 拖拽中=%s 悬停=%s',
-                element_rect, size, len(getattr(getattr(self, 'selection', None), 'rects', None) or []),
+            # 本函数每次鼠标移动都会被调用：状态不变时按 2 秒节流，状态一变立即记录
+            # （规则 14：高频路径不得逐次刷日志；实测把日志调到 DEBUG 后基本就是这一条在刷屏）。
+            state = (
+                element_rect, size,
+                len(getattr(getattr(self, 'selection', None), 'rects', None) or []),
                 getattr(getattr(self, 'selection', None), 'active', None) is not None,
                 (self.hover_rect.getRect() if getattr(self, 'hover_rect', None) is not None else None))
+            log_every(get_logger(), logging.DEBUG, "size-badge-none", state, 2.0,
+                      '尺寸徽标隐藏：无元素矩形=%s 尺寸=%s 选区数=%s 拖拽中=%s 悬停=%s', *state)
             if widget is not None:
                 widget.hide()
             return

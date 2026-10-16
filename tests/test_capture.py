@@ -3263,6 +3263,36 @@ class CaptureTests(CoreTests):
         finally:
             mask.close()
 
+    def test_size_badge_hidden_log_is_throttled_across_pointer_moves(self):
+        """尺寸徽标「隐藏」分支每次鼠标移动都会被调用：状态不变时必须节流（规则 14）。
+
+        实测：把日志调到 DEBUG 后，两分钟 256 KB 的日志基本由这一条刷出来（逐次移动一条），
+        而它只是在说"此刻没有可标注的元素"。改成按状态节流后：状态一变立即记录，
+        状态不变时每 2 秒最多一条。
+        """
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+        from unittest.mock import patch as patcher
+
+        bounds = {"left": 0, "top": 0, "width": 200, "height": 150}
+        settings = {**DEFAULTS, "save_dir": tempfile.gettempdir(), "magnifier": False}
+        with patcher("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (200, 150), "blue"), bounds, [bounds], settings)
+        try:
+            # 节流表是 `logger.log_rate` 的**进程级**全局表：同进程里其它用例可能已经记过同一状态，
+            # 因此这里用只属于本用例的悬停矩形当状态键，保证「首次立即记录」这一前提成立。
+            mask.hover_rect = QRect(13, 17, 19, 23)
+            with self.assertLogs("screensnap", level="DEBUG") as captured:
+                for _ in range(30):
+                    mask._sync_size_badge(None, None)
+                hidden = sum("尺寸徽标隐藏" in line for line in captured.output)
+                mask.hover_rect = QRect(29, 31, 37, 41)    # 状态变化 ⇒ 必须立即再记一条
+                mask._sync_size_badge(None, None)
+                self.assertEqual(sum("尺寸徽标隐藏" in line for line in captured.output), hidden + 1)
+            self.assertEqual(hidden, 1, "状态不变时连续 30 次调用只应留下一条")
+        finally:
+            mask.close()
+
     def test_clear_selection_shortcut_is_enabled_while_inline_editing(self):
         """R（清除选择）在原地编辑里必须可用，并先退出原地编辑再清空选区。
 
