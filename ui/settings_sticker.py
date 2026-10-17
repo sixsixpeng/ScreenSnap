@@ -312,6 +312,23 @@ class StickerPage(SettingsPage):
         self.number("sticker_follow_interval", "跟随刷新间隔", 30, 1000,
                     "跟随开启后每隔多少毫秒读取一次目标窗口位置，单位毫秒；\n"
                     "数值越小跟得越紧但占用略多 CPU，100 到 200 毫秒通常已经跟手")
+        self.group("拖放与动图")
+        self.check("sticker_drag_enabled", "启用文件拖放",
+                   "开启后：\n"
+                   "· 从资源管理器把图片拖到贴图/编辑器/管理面板，可替换、新建或打开；\n"
+                   "· 按住 Shift 用左键拖动贴图，可拖出到微信、Word、浏览器等应用。\n"
+                   "程序以管理员身份运行时，Windows 会阻止从资源管理器向本程序拖入文件。")
+        self.check("sticker_drag_replace", "拖到贴图时替换内容",
+                   "默认开启：拖到已有贴图上时替换该贴图，保留位置与缩放；\n"
+                   "关闭后拖入总是新建贴图。按住 Shift 拖入始终按新建处理。")
+        self.check("sticker_gif_enabled", "播放 GIF 动图",
+                   "开启后 GIF 文件按动画播放；关闭后只显示首帧。\n"
+                   "动图透明区域按整块窗口响应鼠标（不逐帧计算透明遮罩），每张贴图可在右键菜单暂停/逐帧。")
+        self.check("sticker_gif_autoplay", "GIF 自动播放",
+                   "新建 GIF 贴图后是否立即播放；关闭时先停在首帧，可从右键菜单开始播放。")
+        self.number("sticker_gif_speed", "GIF 默认速度 (%)", 25, 400,
+                    "新建 GIF 贴图的默认播放速度，100% 为原速；\n"
+                    "单张贴图可在右键菜单的「动画」子菜单里临时调整，不写回此默认值。")
         self.group("贴图管理窗口")
         self.number("sticker_panel_thumb", "缩略图宽度", 48, 200,
                     "管理窗口中每行缩略图的宽度，高度按 4:3 推导；重新打开窗口后生效")

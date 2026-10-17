@@ -39,6 +39,35 @@ def build_menu(sticker):
     reset_rotation = rotate.addAction(sticker.style().standardIcon(QStyle.SP_DialogResetButton),
                                       "恢复原方向", sticker.reset_rotation)
     reset_rotation.setToolTip(rich_tooltip("恢复原方向", "清除旋转角度，恢复贴图原始方向。"))
+    if getattr(sticker, "animated", False):
+        animation = menu.addMenu(sticker.style().standardIcon(QStyle.SP_MediaPlay), "动画")
+        animation.setToolTip(rich_tooltip("动画", "播放/暂停 GIF、调整速度或逐帧查看；只影响当前贴图。"))
+        animation.menuAction().setToolTip(animation.toolTip())
+        play = animation.addAction(
+            sticker.style().standardIcon(QStyle.SP_MediaPlay if sticker.animation_paused
+                                         else QStyle.SP_MediaPause),
+            "播放" if sticker.animation_paused else "暂停",
+            sticker.toggle_animation)
+        play.setToolTip(rich_tooltip("播放/暂停", "暂停后画面停在当前帧；再次点击继续播放。"))
+        backward = animation.addAction(sticker.style().standardIcon(QStyle.SP_MediaSeekBackward),
+                                       "上一帧", lambda: sticker.step_animation_frame(-1))
+        backward.setToolTip(rich_tooltip("上一帧", "暂停在当前贴图并向前显示一帧。"))
+        forward = animation.addAction(sticker.style().standardIcon(QStyle.SP_MediaSeekForward),
+                                      "下一帧", lambda: sticker.step_animation_frame(1))
+        forward.setToolTip(rich_tooltip("下一帧", "暂停在当前贴图并向后显示一帧。"))
+        speeds = animation.addMenu("速度")
+        speeds.setToolTip(rich_tooltip("速度", "只调整当前 GIF 贴图的播放速度，不改变设置里的默认值。"))
+        speeds.menuAction().setToolTip(speeds.toolTip())
+        speed_group = QActionGroup(speeds)
+        speed_group.setExclusive(True)
+        for label, percent in (("0.5×", 50), ("1×", 100), ("2×", 200)):
+            action = speeds.addAction(label)
+            action.setCheckable(True)
+            action.setChecked(sticker.animation_speed == percent)
+            action.setToolTip(rich_tooltip(label, "把当前 GIF 贴图的播放速度设为 " + label + "。"))
+            action.triggered.connect(
+                lambda checked=False, value=percent: sticker.set_animation_speed(value))
+            speed_group.addAction(action)
     background = menu.addMenu(action_icon("background"), "透明背景模式")
     background.setToolTip(rich_tooltip("透明背景模式", "更改当前贴图透明区域的预览底色。"))
     background.menuAction().setToolTip(background.toolTip())

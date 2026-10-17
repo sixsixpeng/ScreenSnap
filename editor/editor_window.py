@@ -5,14 +5,15 @@ import re
 from datetime import datetime
 from pathlib import Path
 
-from PySide6.QtCore import Qt, Signal, QSignalBlocker
+from PySide6.QtCore import QEvent, Qt, Signal, QSignalBlocker
 from PySide6.QtGui import QGuiApplication
 from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QFileDialog, QSplitter,
                                QDialog, QDialogButtonBox, QDial, QDoubleSpinBox, QHBoxLayout, QLabel,
                                QLineEdit, QStyle, QSlider, QSpinBox, QGraphicsView)
 
-from core.image_io import (SAVE_FORMATS, filter_extension, matches_saved_format,
-                           normalize_save_as_path, save_as_filter, save_image, saved_extension)
+from core.image_io import (IMAGE_FILE_SUFFIXES, SAVE_FORMATS, filter_extension,
+                           matches_saved_format, normalize_save_as_path,
+                           save_as_filter, save_image, saved_extension)
 from core.path_utils import resolved_dir, save_as_directory
 from config.config_manager import TOOL_WIDTH_KEYS
 from editor.annotation_canvas import AnnotationCanvas
@@ -172,9 +173,11 @@ class EditorWindow(QMainWindow):
     pen_color_changed = Signal(str)
     tool_color_changed = Signal(str, str)
     setting_changed = Signal(str, object)
+    files_dropped = Signal(list)
 
     def __init__(self, image, settings, alternate=None, from_capture=False):
         super().__init__()
+        self.setAcceptDrops(True)
         self.settings = settings
         self.from_capture = from_capture
         self.round_corners = bool(settings.get("editor_image_round_corners", True))
@@ -188,6 +191,8 @@ class EditorWindow(QMainWindow):
         self.toolbar = ToolbarWidget(settings["pen_color"], settings,
                          show_capture_actions=False)
         self.canvas = AnnotationCanvas(image, settings, alternate)
+        # QGraphicsView 默认接受拖放，会截走画布区域的事件；在视口上装过滤器统一转发给窗口。
+        self.canvas.viewport().installEventFilter(self)
         # D8 ④（2026-10-11）：画布会吞掉 Space（拖动画布用于它）⇒ 画布侧那份快捷键转成同一条贴图命令。
         self.canvas.sticker_shortcut.connect(lambda: self.toolbar.command.emit("paste"))
         # 2026-10-11：单键 A = 另存为（画布内处理，避免无修饰可打印键被 ShortcutOverride 吞掉）。
@@ -295,6 +300,58 @@ class EditorWindow(QMainWindow):
         # Esc 会被画布接收并直接关掉整个编辑窗口。改为仅取消当前选中，不关闭窗口。
         self.canvas.cancelled.connect(lambda: self.canvas.scene_data.clearSelection())
         self.canvas.color_picked.connect(self.apply_picked_color)
+
+    def eventFilter(self, watched, event):
+        if watched is self.canvas.viewport() and event.type() in (
+                QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop):
+            if self._drag_enabled() and self._dropped_image_paths(event.mimeData()):
+                if event.type() == QEvent.Type.Drop:
+                    self.dropEvent(event)
+                else:
+                    event.acceptProposedAction()
+                return True
+        return super().eventFilter(watched, event)
+
+    def _drag_enabled(self):
+        return bool(self.settings.get("sticker_drag_enabled", True))
+
+    def dragEnterEvent(self, event):
+        paths = self._dropped_image_paths(event.mimeData())
+        if not self._drag_enabled():
+            get_logger().debug("编辑器拖入忽略: 拖放总开关已关闭")
+            return
+        if paths:
+            get_logger().debug("编辑器拖入可接收: 文件=%d", len(paths))
+            event.acceptProposedAction()
+        else:
+            get_logger().debug("编辑器拖入忽略: 没有可用的本地图片 URL")
+
+    def dragMoveEvent(self, event):
+        if self._drag_enabled() and self._dropped_image_paths(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = self._dropped_image_paths(event.mimeData())
+        if not paths or not self._drag_enabled():
+            get_logger().debug("编辑器拖入丢弃: 文件=%d 启用=%s",
+                               len(paths), self._drag_enabled())
+            return
+        # 不在已有画布上静默替换：交给主程序按“打开图片”流程新建编辑器，
+        # 避免覆盖用户尚未保存的标注。
+        get_logger().info("编辑器接收到拖入: 文件=%d", len(paths))
+        self.files_dropped.emit(paths)
+        event.acceptProposedAction()
+
+    @staticmethod
+    def _dropped_image_paths(mime):
+        paths = []
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.is_file() and path.suffix.casefold() in IMAGE_FILE_SUFFIXES:
+                paths.append(str(path))
+        return paths
 
     def set_tool(self, tool):
         """将工具栏的标注工具切换同步到画布。"""

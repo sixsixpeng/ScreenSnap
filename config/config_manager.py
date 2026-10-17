@@ -139,6 +139,8 @@ PRESERVED_ON_VERSION_RESET = (
     "magnifier_zoom", "magnifier_offset", "ruler_step", "ruler_major_multiple",
     "cursor", "ruler_enabled", "uia_debug_tree", "sticker_recycle_enabled",
     "intruder_warning_enabled", "capture_delay", "capture_hotkey_suppress",
+    "sticker_drag_enabled", "sticker_drag_replace",
+    "sticker_gif_enabled", "sticker_gif_autoplay", "sticker_gif_speed",
     "logging_enabled", "log_monthly_folder",
     # 明暗主题：属于个人偏好而非版本语义（值不合法时 validate/repair 会兜底）
     "theme",
@@ -260,6 +262,8 @@ DEFAULTS = {
     "file_sticker_path": True, "file_sticker_max": 8, "file_sticker_width": 360,
     "sticker_panel_thumb": 96,
     "sticker_snap_enabled": True, "sticker_snap_threshold": 8,
+    "sticker_drag_enabled": True, "sticker_drag_replace": True,
+    "sticker_gif_enabled": True, "sticker_gif_autoplay": True, "sticker_gif_speed": 100,
     # 吸附提示样式：每张贴图在创建时继承这些默认值，之后由对象自己持有
     # （全局改动只影响之后新建的贴图，不追溯已存在的贴图）。
     "sticker_snap_hint_enabled": True, "sticker_snap_hint_color": "#00ad91",
@@ -652,6 +656,8 @@ def validate(data):
             raise ValueError("贴图管理缩略图宽度必须在 48 到 200 像素之间")
         elif key == "sticker_snap_threshold" and not 1 <= value <= 40:
             raise ValueError("贴图吸附距离必须在 1 到 40 像素之间")
+        elif key == "sticker_gif_speed" and not 25 <= value <= 400:
+            raise ValueError("GIF 默认播放速度必须在 25 到 400 之间")
         elif key == "sticker_snap_targets" and value not in ("screen", "window", "both"):
             raise ValueError("未知贴图吸附目标")
         elif key == "hotkey_health_interval" and not 2 <= value <= 600:

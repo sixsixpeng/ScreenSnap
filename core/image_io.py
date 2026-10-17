@@ -20,6 +20,11 @@ SAVE_FORMATS = {
 LOSSY_FORMATS = ("jpg", "webp")
 OPAQUE_FORMATS = ("jpg", "bmp")
 
+# 贴图/编辑器允许打开与拖放的图片类型；文件选择框与拖放校验共用，避免两处漂移。
+IMAGE_FILE_SUFFIXES = frozenset({".png", ".jpg", ".jpeg", ".bmp", ".gif",
+                                 ".webp", ".tif", ".tiff"})
+IMAGE_FILE_FILTER = "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff)"
+
 
 def saved_extension(settings):
     """返回配置对应的扩展名；未知格式回退到 png。"""

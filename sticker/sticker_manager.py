@@ -13,6 +13,7 @@ from PySide6.QtWidgets import QFileDialog, QMessageBox
 from PIL import Image as PillowImage
 
 from core.path_utils import configured_dir, data_dir, cache_dir
+from core.image_io import IMAGE_FILE_FILTER
 from core.window_snap import window_logical_rect
 from editor.image_effects import copy_saved_to_clipboard
 from logger import get_logger
@@ -677,33 +678,48 @@ class StickerManager(QObject):
             self.clipboard_history_index = -1
             self._clipboard_persist_timer.start()
 
-    def open_file(self, replace=None):
-        """多选打开图片；替换模式用第一张替换当前窗口，其余创建新贴图。"""
-        paths, _ = QFileDialog.getOpenFileNames(
-            replace, "从文件打开贴图", "",
-            "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff)",
-        )
-        if not paths:
-            return False
-        opened = 0
+    def add_paths(self, paths, replace=None, position=None):
+        """按路径批量创建贴图；replace 非空时第一张替换该贴图。
+
+        返回 (新增/替换的贴图列表, 失败路径列表)。拖放、贴图管理面板和文件选择框共用这一条路径，
+        避免三处各写一套加载/输出/失败提示。
+        """
+        added = []
         failed = []
-        for path in paths:
+        offset = 0
+        for raw in paths:
+            path = str(raw)
             image = QImage(path)
             if image.isNull():
                 failed.append(path)
                 get_logger().warning("无法读取贴图图片: %s", path)
                 continue
-            if replace is not None and opened == 0:
+            if replace is not None and not added:
                 replace.replace_image(image, path)
+                target = replace
             else:
-                self.add(image, path)
+                anchor = None
+                if position is not None:
+                    anchor = QPoint(position) + QPoint(offset, offset)
+                    offset += 24
+                target = self.add(image, path, position=anchor)
             self.publish_output(image, path)
-            opened += 1
+            added.append(target)
+        return added, failed
+
+    def open_file(self, replace=None):
+        """多选打开图片；替换模式用第一张替换当前窗口，其余创建新贴图。"""
+        paths, _ = QFileDialog.getOpenFileNames(
+            replace, "从文件打开贴图", "", IMAGE_FILE_FILTER,
+        )
+        if not paths:
+            return False
+        added, failed = self.add_paths(paths, replace=replace)
         if failed:
             QMessageBox.warning(replace, "部分图片无法打开", "以下图片无法读取：\n" + "\n".join(failed))
-        if opened:
-            get_logger().info("从文件打开贴图: %d 张", opened)
-        return opened > 0
+        if added:
+            get_logger().info("从文件打开贴图: %d 张", len(added))
+        return bool(added)
 
     def remove(self, item):
         """贴图销毁后从会话列表移除，避免持久化已关闭窗口。"""
@@ -1038,6 +1054,8 @@ class StickerManager(QObject):
             if not (isinstance(origin, dict) and origin.get("kind") in ORIGIN_KINDS):
                 origin = None
             item = self.add(image, source, origin, show=False)
+            if getattr(item, "animated", False):
+                item.restore_animation_state(state.get("animation"))
             # 恢复端现场（与 add() 里的 image_anchor 日志成对）：存储值 vs 应用几何 + 屏幕 dpr/padding，
             # 用来判定偏移属于取整（不可避）还是 padding/frame 失配（可修）；state 键名也一并打印，避免猜错。
             try:

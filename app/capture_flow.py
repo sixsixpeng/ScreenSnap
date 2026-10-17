@@ -230,6 +230,7 @@ class CaptureFlowMixin:
                 "edit_images 收到交接快照：%d 条（index=%d）", len(pending), index)
             editor = EditorWindow(image, self.config.data, alternate,
                                   from_capture=from_capture)
+            editor.files_dropped.connect(self.open_editor_paths)
             # 从原地编辑器按 E 转交过来的标注：以对象形式恢复，保证在窗口编辑里仍可选中/编辑
             # （2026-10-11 用户反馈：以前只交合成图，标注变成像素后无法再编辑）。
             if (pending or history is not None) and index == 0:
@@ -465,6 +466,16 @@ class CaptureFlowMixin:
         )
         if not paths:
             return
+        images, failed = self.load_editor_images(paths)
+        if failed:
+            self.notify(f"无法打开 {len(failed)} 张图片")
+        if not images:
+            return
+        self.logger.info("多选打开图片: %d 张", len(images))
+        self.edit_images(images, from_capture=False)
+
+    def load_editor_images(self, paths):
+        """按路径读取编辑器图片；拖放与文件选择框共用。"""
         images = []
         failed = []
         for path in paths:
@@ -474,10 +485,16 @@ class CaptureFlowMixin:
             except (OSError, ValueError) as error:
                 self.logger.warning("打开图片失败 %s: %s", path, error)
                 failed.append(path)
+        return images, failed
+
+    def open_editor_paths(self, paths):
+        """编辑器窗口拖入图片：按现有“打开图片”流程新建编辑器。"""
+        images, failed = self.load_editor_images(paths)
+        self.logger.info("编辑器拖入处理: 收到=%d 成功=%d 失败=%d",
+                         len(paths), len(images), len(failed))
         if failed:
             self.notify(f"无法打开 {len(failed)} 张图片")
         if not images:
             return
-        self.logger.info("多选打开图片: %d 张", len(images))
         self.edit_images(images, from_capture=False)
 

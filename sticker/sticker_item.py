@@ -5,10 +5,14 @@ import os
 from pathlib import Path
 from uuid import uuid4
 
-from PySide6.QtCore import Qt, QPoint, QRect, QRectF, QSize, Signal, QTimer, QEvent
+from PySide6.QtCore import (Qt, QPoint, QRect, QRectF, QSize, Signal, QTimer,
+                            QEvent, QUrl, QMimeData)
 from PySide6.QtGui import (QGuiApplication, QPixmap, QPainter, QColor, QPen,
-                           QImage, QTransform, QBitmap, QRegion, QPainterPath)
-from PySide6.QtWidgets import QWidget
+                           QImage, QTransform, QBitmap, QRegion, QPainterPath,
+                           QDrag, QMovie, QCursor)
+from PySide6.QtWidgets import QWidget, QApplication
+
+from core.image_io import IMAGE_FILE_SUFFIXES
 
 from core.window_snap import (visible_targets, window_logical_rect, window_present,
                               window_under_point)
@@ -45,6 +49,15 @@ class StickerItem(QWidget):
         self.original_pixmap = QPixmap.fromImage(image)
         self.pixmap = QPixmap(self.original_pixmap)
         self.rotation_degrees = 0
+        # 动图状态：GIF 由 QMovie 驱动，pixmap 每帧替换；静态贴图保持原有路径。
+        self.movie = None
+        self.animated = False
+        self.animation_paused = False
+        self.animation_speed = int(self.settings.get("sticker_gif_speed", 100))
+        self._animated_corner_radius = None
+        self._drag_out_start = None
+        self._drag_out_active = False
+        self.setAcceptDrops(bool(self.settings.get("sticker_drag_enabled", True)))
         self.locked = False
         self.click_through = False
         self.always_on_top = True
@@ -87,6 +100,7 @@ class StickerItem(QWidget):
         # 贴图像素是源图的物理像素；窗口尺寸必须按屏幕 dpr 折算成 Qt 逻辑尺寸，
         # 否则在 125%/150% 屏上窗口与图片会被整体放大 dpr 倍。
         self._pixmap_ratio = None
+        self._setup_animation()
         self._apply_pixmap_ratio()
         self.resize(self.window_size())
         self.update_input_mask()
@@ -94,6 +108,9 @@ class StickerItem(QWidget):
 
     def image_corner_radius(self):
         """按图像左上角估算圆角半径（源图像像素）；直角或透明留白返回 0。"""
+        if getattr(self, "animated", False) and self._animated_corner_radius is not None:
+            # 动图逐帧测圆角没有意义，也会拖慢播放：用首帧测一次后固定。
+            return self._animated_corner_radius
         key = (self.pixmap.cacheKey(), self.scale_factor)
         if getattr(self, "_corner_radius_key", None) == key:
             return self._corner_radius
@@ -116,7 +133,153 @@ class StickerItem(QWidget):
                 radius = float(measured)
         self._corner_radius_key = key
         self._corner_radius = radius
+        if getattr(self, "animated", False):
+            self._animated_corner_radius = radius
         return radius
+
+    # ------------------------------------------------------------------
+    # 动图（GIF / 动态 WebP）：QMovie 逐帧驱动，其它绘制/交互复用静态路径
+    # ------------------------------------------------------------------
+
+    def _setup_animation(self):
+        """源文件是动图且未禁用时启用 QMovie；否则保持静态首帧。"""
+        self.movie = None
+        self.animated = False
+        self.animation_paused = False
+        self._animated_corner_radius = None
+        source = self.source
+        if not source or not self.settings.get("sticker_gif_enabled", True):
+            if source and Path(source).suffix.casefold() in (".gif", ".webp"):
+                get_logger().debug("GIF 动图未启用，按静态首帧显示: %s", source)
+            return
+        if Path(source).suffix.casefold() not in (".gif", ".webp"):
+            return
+        movie = QMovie(source, parent=self)
+        if not movie.isValid() or movie.frameCount() <= 1:
+            movie.deleteLater()
+            get_logger().debug("GIF 无有效动画帧，按静态首帧显示: 帧数=%s 源=%s",
+                               movie.frameCount(), source)
+            return
+        if max(movie.frameRect().width(), movie.frameRect().height()) > 4096:
+            # 与静态贴图的尺寸上限保持一致：超大 GIF 只显示首帧，避免逐帧解码/缩放卡顿。
+            movie.deleteLater()
+            get_logger().warning("GIF 尺寸超过 4096，按静态首帧显示: %s", source)
+            return
+        movie.setCacheMode(QMovie.CacheNone)
+        movie.setSpeed(max(25, min(400, self.animation_speed)))
+        movie.frameChanged.connect(self._on_animation_frame)
+        self.movie = movie
+        self.animated = True
+        movie.start()
+        if not self.settings.get("sticker_gif_autoplay", True):
+            self.animation_paused = True
+            movie.setPaused(True)
+        get_logger().debug(
+            "贴图动图初始化: 帧数=%d 速度=%d%% 自动播放=%s 源=%s",
+            movie.frameCount(), self.animation_speed,
+            not self.animation_paused, source)
+
+    def _stop_animation(self):
+        if self.movie is not None:
+            try:
+                self.movie.stop()
+                self.movie.deleteLater()
+            except RuntimeError:
+                pass
+            get_logger().debug("停止 GIF 动图: 源=%s", self.source or "临时图片")
+        self.movie = None
+        self.animated = False
+        self.animation_paused = False
+
+    def _on_animation_frame(self, frame_number):
+        # QMovie.frameChanged 在 Qt6 传的是帧号（int），不是 QPixmap；必须自己取当前帧。
+        if not self.animated or self.movie is None:
+            return
+        pixmap = self.movie.currentPixmap()
+        if pixmap.isNull():
+            get_logger().debug("GIF 当前帧为空: 帧号=%s 源=%s",
+                               frame_number, self.source or "临时图片")
+            return
+        self.original_pixmap = pixmap
+        self._render_animation_frame()
+
+    def _render_animation_frame(self):
+        """把当前动图帧按现有旋转规则写入 pixmap；不重建遮罩、不重算 padding。"""
+        pixmap = self.original_pixmap
+        if self.rotation_degrees:
+            pixmap = pixmap.transformed(
+                QTransform().rotate(self.rotation_degrees), Qt.SmoothTransformation)
+        self.pixmap = pixmap
+        ratio = self.device_pixel_ratio()
+        self.original_pixmap.setDevicePixelRatio(ratio)
+        self.pixmap.setDevicePixelRatio(ratio)
+        if self.size() != self.window_size():
+            # 帧尺寸变化（极少见）才走完整样式刷新，普通 GIF 每帧尺寸一致。
+            self.apply_style()
+        else:
+            self.update()
+
+    def animation_state(self):
+        """会话持久化的动图状态；非动图返回 None。"""
+        if not self.animated or self.movie is None:
+            return None
+        return {"speed": self.animation_speed,
+                "frame": self.movie.currentFrameNumber(),
+                "paused": self.animation_paused}
+
+    def restore_animation_state(self, payload):
+        """恢复会话里的速度/帧号/暂停状态；非法值按默认处理。"""
+        if not self.animated or self.movie is None or not isinstance(payload, dict):
+            return
+        speed = payload.get("speed")
+        if type(speed) is int and 25 <= speed <= 400:
+            self.animation_speed = speed
+            self.movie.setSpeed(speed)
+        frame = payload.get("frame")
+        count = self.movie.frameCount()
+        if type(frame) is int and count > 0 and 0 <= frame < count:
+            self.movie.jumpToFrame(frame)
+        paused = bool(payload.get("paused", False))
+        self.animation_paused = paused
+        self.movie.setPaused(paused)
+        get_logger().debug("恢复 GIF 动图状态: 速度=%d%% 帧=%d/%d 暂停=%s 源=%s",
+                           self.animation_speed, self.movie.currentFrameNumber(),
+                           self.movie.frameCount(), paused, self.source or "临时图片")
+
+    def set_animation_speed(self, speed):
+        if not self.animated or self.movie is None:
+            return
+        previous = self.animation_speed
+        self.animation_speed = max(25, min(400, int(speed)))
+        self.movie.setSpeed(self.animation_speed)
+        get_logger().info("调整 GIF 播放速度: %d%% → %d%% 源=%s",
+                          previous, self.animation_speed, self.source or "临时图片")
+        self.state_changed.emit()
+
+    def toggle_animation(self):
+        if not self.animated or self.movie is None:
+            return
+        self.animation_paused = not self.animation_paused
+        self.movie.setPaused(self.animation_paused)
+        if not self.animation_paused and self.movie.state() != QMovie.Running:
+            self.movie.start()
+        get_logger().info("GIF 动图%s: 源=%s", "暂停" if self.animation_paused else "继续",
+                          self.source or "临时图片")
+        self.state_changed.emit()
+
+    def step_animation_frame(self, delta):
+        if not self.animated or self.movie is None:
+            return
+        count = self.movie.frameCount()
+        if count <= 0:
+            return
+        self.animation_paused = True
+        self.movie.setPaused(True)
+        self.movie.jumpToFrame((self.movie.currentFrameNumber() + delta) % count)
+        get_logger().debug("GIF 逐帧: %+d → 第 %d/%d 帧 源=%s",
+                           delta, self.movie.currentFrameNumber(), count,
+                           self.source or "临时图片")
+        self.state_changed.emit()
 
     def border_corner_radius(self, rect):
         """描边圆角半径（窗口像素）：跟随贴图圆角，直角贴图为 0。"""
@@ -361,6 +524,11 @@ class StickerItem(QWidget):
         "圆角外侧不吃鼠标"的命中语义，改成抗锯齿绘制就得另建命中判定 + `WM_NCHITTEST`
         穿透，属于交互语义变更，已评估并放弃（见 ACCEPTANCE.md「已知限制」与 AGENTS D48）。
         """
+        if getattr(self, "animated", False):
+            # 动图每帧 alpha 都可能变化；逐帧 createAlphaMask 会明显拖慢播放。
+            # 折中：动图使用整块窗口（等价 pseudo），透明区域也可拖动/命中。
+            self.clearMask()
+            return
         rect = self.image_rect()
         key = (self.pixmap.cacheKey(), self.pixmap.devicePixelRatio(),
                self.size().width(), self.size().height(), rect, self.background_mode,
@@ -419,6 +587,15 @@ class StickerItem(QWidget):
     def mousePressEvent(self, event):
         # 记录全局鼠标到窗口左上角的偏移，跨显示器拖动仍保持原抓取位置。
         self.activated.emit()
+        self._drag_out_start = None
+        if (event.button() == Qt.LeftButton and not self.locked
+                and self.settings.get("sticker_drag_enabled", True)
+                and event.modifiers() & Qt.ShiftModifier):
+            # Shift+左键 = 拖出到其他应用；不进入移动/吸附流程。
+            self._drag_out_start = event.globalPosition().toPoint()
+            self.selection_requested.emit(self, False)
+            self.setFocus()
+            return
         if event.button() == Qt.LeftButton:
             # 本次按下是否真的拖动过：决定松开后吸附提示是保留还是清掉（见 mouseReleaseEvent）。
             self.snap_hint_dragged = False
@@ -446,6 +623,11 @@ class StickerItem(QWidget):
 
     def mouseMoveEvent(self, event):
         """以全局坐标拖动窗口，跨显示器时不重置抓取偏移；按住 Alt 临时不吸附。"""
+        if self._drag_out_start is not None:
+            cursor = event.globalPosition().toPoint()
+            if (cursor - self._drag_out_start).manhattanLength() >= QApplication.startDragDistance():
+                self._start_drag_out()
+            return
         if self.drag_origin is None:
             return
         cursor = event.globalPosition().toPoint()
@@ -463,6 +645,7 @@ class StickerItem(QWidget):
 
     def mouseReleaseEvent(self, event):
         """释放拖动状态，避免下一次鼠标移动继续平移。"""
+        self._drag_out_start = None
         self.drag_origin = None
         self.refresh_snap_relation()
         # 吸附提示虚线的收尾（只动提示，不动 snap_target —— 吸附关系与跟随照旧）：
@@ -485,6 +668,109 @@ class StickerItem(QWidget):
                 else:
                     self.clear_snap_hint()
         self.state_changed.emit()
+
+    # ------------------------------------------------------------------
+    # 文件拖放：拖入替换/新建，Shift+左键拖出到其他应用
+    # ------------------------------------------------------------------
+
+    def _drag_enabled(self):
+        return bool(self.settings.get("sticker_drag_enabled", True))
+
+    def _start_drag_out(self):
+        """Shift+左键拖出：同时提供文件 URL 与图片数据，由目标应用选择。"""
+        if self._drag_out_active:
+            return
+        self._drag_out_active = True
+        self._drag_out_start = None
+        source = self.source or "临时图片"
+        try:
+            mime = QMimeData()
+            image = self.pixmap.toImage()
+            if not image.isNull():
+                mime.setImageData(image)
+            has_url = bool(self.source and Path(self.source).is_file())
+            if has_url:
+                mime.setUrls([QUrl.fromLocalFile(str(Path(self.source).resolve()))])
+            drag = QDrag(self)
+            drag.setMimeData(mime)
+            preview = self.pixmap
+            if preview.width() > 360:
+                preview = preview.scaledToWidth(360, Qt.SmoothTransformation)
+            drag.setPixmap(preview)
+            hotspot = self.mapFromGlobal(QCursor.pos())
+            hotspot.setX(max(0, min(hotspot.x(), max(0, preview.width() - 1))))
+            hotspot.setY(max(0, min(hotspot.y(), max(0, preview.height() - 1))))
+            drag.setHotSpot(hotspot)
+            get_logger().debug("开始拖出贴图: 源=%s 文件URL=%s 图片=%s",
+                               source, has_url, not image.isNull())
+            action = drag.exec(Qt.CopyAction)
+            get_logger().info("拖出贴图结束: 动作=%s 源=%s", int(action), source)
+        except Exception:  # noqa: BLE001 拖出失败要留现场，Qt 事件异常默认会被吞
+            get_logger().exception("拖出贴图失败: 源=%s", source)
+        finally:
+            self._drag_out_active = False
+            self._drag_out_start = None
+
+    @staticmethod
+    def _dropped_image_paths(mime):
+        paths = []
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.is_file() and path.suffix.casefold() in IMAGE_FILE_SUFFIXES:
+                paths.append(str(path))
+        return paths
+
+    def dragEnterEvent(self, event):
+        paths = self._dropped_image_paths(event.mimeData())
+        if not self._drag_enabled():
+            get_logger().debug("贴图拖入忽略: 拖放总开关已关闭 源=%s", self.source or "临时图片")
+            return
+        if paths:
+            get_logger().debug("贴图拖入可接收: 文件=%d 源=%s",
+                               len(paths), self.source or "临时图片")
+            event.acceptProposedAction()
+        else:
+            get_logger().debug("贴图拖入忽略: 没有可用的本地图片 URL 源=%s",
+                               self.source or "临时图片")
+
+    def dragMoveEvent(self, event):
+        if self._drag_enabled() and self._dropped_image_paths(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = self._dropped_image_paths(event.mimeData())
+        manager = getattr(self, "manager", None)
+        source = self.source or "临时图片"
+        if not self._drag_enabled():
+            get_logger().debug("贴图拖入丢弃: 拖放总开关已关闭 源=%s", source)
+            return
+        if not paths:
+            get_logger().debug("贴图拖入丢弃: 没有可用的本地图片 URL 源=%s", source)
+            return
+        if manager is None:
+            get_logger().warning("贴图拖入失败: 当前贴图没有关联管理器 源=%s 文件=%d",
+                                 source, len(paths))
+            return
+        new_only = bool(event.modifiers() & Qt.ShiftModifier) or \
+            not self.settings.get("sticker_drag_replace", True)
+        # QDropEvent 提供的是窗口内局部坐标；Qt6 的 QDropEvent 没有 globalPosition()。
+        anchor = self.mapToGlobal(event.position().toPoint())
+        mode = "新建" if new_only else "替换"
+        try:
+            if new_only:
+                added, failed = manager.add_paths(paths, position=anchor)
+            else:
+                added, failed = manager.add_paths(paths, replace=self, position=anchor)
+        except Exception:  # noqa: BLE001 事件异常默认被 Qt 吞掉，必须留现场
+            get_logger().exception("贴图拖入处理失败: 模式=%s 文件=%d 源=%s 落点=(%d,%d)",
+                                   mode, len(paths), source, anchor.x(), anchor.y())
+            return
+        get_logger().info("贴图拖入完成: 模式=%s 文件=%d 成功=%d 失败=%d 落点=(%d,%d) 源=%s",
+                          mode, len(paths), len(added), len(failed),
+                          anchor.x(), anchor.y(), source)
+        event.acceptProposedAction()
 
     def snap_enabled(self):
         """吸附总开关；配置缺失时按默认开启处理。"""
@@ -851,25 +1137,35 @@ class StickerItem(QWidget):
     def rotate(self, degrees):
         """按指定角度旋转贴图显示，不修改源图片文件。"""
         self.rotation_degrees = (self.rotation_degrees + degrees) % 360
-        self.pixmap = self.original_pixmap.transformed(
-            QTransform().rotate(self.rotation_degrees), Qt.SmoothTransformation)
-        self.apply_style()
+        if self.animated:
+            self._render_animation_frame()
+        else:
+            self.pixmap = self.original_pixmap.transformed(
+                QTransform().rotate(self.rotation_degrees), Qt.SmoothTransformation)
+            self.apply_style()
         self.state_changed.emit()
 
     def reset_rotation(self):
         self.rotation_degrees = 0
-        self.pixmap = QPixmap(self.original_pixmap)
-        self.apply_style()
+        if self.animated:
+            self._render_animation_frame()
+        else:
+            self.pixmap = QPixmap(self.original_pixmap)
+            self.apply_style()
         self.state_changed.emit()
 
     def replace_image(self, image, source):
         """历史图片轮换时保留贴图窗口的当前位置和缩放倍率。"""
+        self._stop_animation()
+        self._animated_corner_radius = None
         self.source = str(source)
         self.image = None
         self.origin = None
         self.original_pixmap = QPixmap.fromImage(image)
         self.rotation_degrees = 0
         self.pixmap = QPixmap(self.original_pixmap)
+        # 新文件可能是 GIF：重新判断是否需要动图播放。
+        self._setup_animation()
         # 新 Pixmap 没有旧对象的 DPR；同屏也必须重新写入，不能命中比例缓存早退。
         self._pixmap_ratio = None
         self._apply_pixmap_ratio()
@@ -883,11 +1179,16 @@ class StickerItem(QWidget):
             self.pixmap.width(), self.pixmap.height(), self._pixmap_ratio, self.scale_factor)
 
     def closeEvent(self, event):
+        self._stop_animation()
         self.closed.emit()
         super().closeEvent(event)
 
     def copy_image(self):
-        """复制原始图像而非带窗口缩放效果的预览。"""
+        """复制原始图像而非带窗口缩放效果的预览；动图复制当前帧。"""
+        if self.animated and self.movie is not None:
+            image = self.movie.currentImage()
+            if not image.isNull():
+                return copy_image_to_clipboard(image)
         image = QImage(self.source) if self.source else self.image
         if image is None or image.isNull():
             image = self.original_pixmap.toImage()
@@ -916,7 +1217,7 @@ class StickerItem(QWidget):
         if snap is not None and snap.get("target") == "window":
             # 句柄必须转成普通整数才能写入 JSON。
             snap["hwnd"] = int(snap.get("hwnd", 0))
-        return {"id": self.session_id, "source": self.source, "x": self.x(), "y": self.y(),
+        state = {"id": self.session_id, "source": self.source, "x": self.x(), "y": self.y(),
             "width": self.width(), "height": self.height(),
             "scale": self.scale_factor, "opacity": self.windowOpacity(),
             "rotation": self.rotation_degrees,
@@ -925,6 +1226,10 @@ class StickerItem(QWidget):
                 "shadow": self.shadow_enabled, "background_mode": self.background_mode,
                 "snap_hint_enabled": bool(self.snap_hint_enabled),
                 "group": self.group_name, "origin": self.origin, "snap": snap}
+        animation = self.animation_state()
+        if animation:
+            state["animation"] = animation
+        return state
 
     def thumbnail(self, width=96, height=72):
         """贴图管理窗口使用的等比缩略图。"""

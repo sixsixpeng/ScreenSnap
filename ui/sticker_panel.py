@@ -1,5 +1,7 @@
 """贴图管理窗口。"""
 
+from pathlib import Path
+
 from PySide6.QtCore import Qt, QSize, QPoint, QEvent, QItemSelection, QItemSelectionModel
 from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget,
                                QListWidgetItem, QLabel, QPushButton, QStyle,
@@ -7,7 +9,8 @@ from PySide6.QtWidgets import (QWidget, QVBoxLayout, QHBoxLayout, QListWidget,
                                QFileDialog, QDialog, QFormLayout, QCheckBox,
                                QDoubleSpinBox, QButtonGroup,
                                QRadioButton, QSpinBox, QGroupBox)
-from PySide6.QtGui import QImage
+from core.image_io import IMAGE_FILE_FILTER, IMAGE_FILE_SUFFIXES
+from logger import get_logger
 from ui.action_icons import action_icon
 
 
@@ -186,6 +189,7 @@ class StickerPanel(QWidget):
     def __init__(self, manager):
         super().__init__()
         self.manager = manager
+        self.setAcceptDrops(True)
         self.setWindowTitle("ScreenSnap · 贴图管理")
         self.resize(760, 500)
         layout = QVBoxLayout(self)
@@ -237,6 +241,7 @@ class StickerPanel(QWidget):
         self.list_widget.setSelectionMode(QAbstractItemView.ExtendedSelection)
         self.list_widget.itemSelectionChanged.connect(self.sync_manager_selection)
         self.list_widget.itemDoubleClicked.connect(lambda item: self.locate(item.data(Qt.UserRole)))
+        self.list_widget.viewport().installEventFilter(self)
         layout.addWidget(self.list_widget, 1)
         self.stickers = []
         self._selection_anchor = None
@@ -345,29 +350,81 @@ class StickerPanel(QWidget):
         self.manager.assign_group(selected, self.group_combo.currentData())
         self.refresh()
 
-    def add_files_to_group(self):
-        paths, _ = QFileDialog.getOpenFileNames(
-            self, "从文件添加贴图", "",
-            "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff)",
-        )
+    def add_files_to_group(self, paths=None):
+        if paths is None:
+            paths, _ = QFileDialog.getOpenFileNames(
+                self, "从文件添加贴图", "", IMAGE_FILE_FILTER,
+            )
         if not paths:
             return 0
         group_name = self.group_combo.currentData() or ""
-        added = []
-        failed = []
-        for path in paths:
-            image = QImage(path)
-            if image.isNull():
-                failed.append(path)
-                continue
-            added.append(self.manager.add(image, path))
-            self.manager.publish_output(image, path)
+        try:
+            added, failed = self.manager.add_paths(paths)
+        except OSError as error:
+            get_logger().error("管理面板添加贴图失败: %s", error, exc_info=True)
+            QMessageBox.warning(self, "无法添加贴图", f"读取或保存贴图失败：\n{error}")
+            return 0
         if group_name and added:
             self.manager.assign_group(added, group_name)
         if failed:
             QMessageBox.warning(self, "部分图片无法打开", "以下图片无法读取：\n" + "\n".join(failed))
+        get_logger().info("管理面板添加贴图: 请求=%d 成功=%d 失败=%d 组=%s",
+                          len(paths), len(added), len(failed), group_name or "未分组")
         self.refresh()
         return len(added)
+
+    def eventFilter(self, watched, event):
+        if watched is self.list_widget.viewport() and event.type() in (
+                QEvent.Type.DragEnter, QEvent.Type.DragMove, QEvent.Type.Drop):
+            if self._drag_enabled() and self._dropped_image_paths(event.mimeData()):
+                if event.type() == QEvent.Type.Drop:
+                    self.dropEvent(event)
+                elif event.type() == QEvent.Type.DragEnter:
+                    self.dragEnterEvent(event)
+                else:
+                    self.dragMoveEvent(event)
+                return True
+        return super().eventFilter(watched, event)
+
+    def _drag_enabled(self):
+        return bool(self.manager.settings.get("sticker_drag_enabled", True))
+
+    def dragEnterEvent(self, event):
+        """接受从资源管理器拖入的图片文件，加入当前选中的贴图组。"""
+        paths = self._dropped_image_paths(event.mimeData())
+        if not self._drag_enabled():
+            get_logger().debug("管理面板拖入忽略: 拖放总开关已关闭")
+            return
+        if paths:
+            get_logger().debug("管理面板拖入可接收: 文件=%d", len(paths))
+            event.acceptProposedAction()
+        else:
+            get_logger().debug("管理面板拖入忽略: 没有可用的本地图片 URL")
+
+    def dragMoveEvent(self, event):
+        if self._drag_enabled() and self._dropped_image_paths(event.mimeData()):
+            event.acceptProposedAction()
+
+    def dropEvent(self, event):
+        paths = self._dropped_image_paths(event.mimeData())
+        if not paths or not self._drag_enabled():
+            get_logger().debug("管理面板拖入丢弃: 文件=%d 启用=%s",
+                               len(paths), self._drag_enabled())
+            return
+        get_logger().info("管理面板接收到拖入: 文件=%d", len(paths))
+        self.add_files_to_group(paths)
+        event.acceptProposedAction()
+
+    @staticmethod
+    def _dropped_image_paths(mime):
+        paths = []
+        for url in mime.urls():
+            if not url.isLocalFile():
+                continue
+            path = Path(url.toLocalFile())
+            if path.is_file() and path.suffix.casefold() in IMAGE_FILE_SUFFIXES:
+                paths.append(str(path))
+        return paths
 
     def create_group(self):
         name, accepted = QInputDialog.getText(self, "新建贴图组", "组名称")

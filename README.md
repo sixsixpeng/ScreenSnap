@@ -259,7 +259,7 @@ python -m venv .venv
 
 贴图是独立的置顶窗口，内容可以来自截图、图片文件、文字、颜色或剪贴板历史。
 
-**创建贴图的 5 种方式**：
+**创建贴图的 6 种方式**：
 
 | 来源 | 入口 | 说明 |
 | --- | --- | --- |
@@ -268,6 +268,7 @@ python -m venv .venv
 | 图片文件 | 托盘「从文件打开新贴图」或 `Shift+F3` | 新建独立窗口；也可在右键菜单里「替换此贴图」 |
 | 历史截图 | `F3`（尚未贴出过的）/ `Ctrl+Alt+Left`、`Ctrl+Alt+Right`（窗口内换图） | 来源是统一保存目录，`history_limit` 只限制可浏览条数 |
 | 剪贴板 | `Ctrl+F3` 轮播剪贴板历史 | 文字→文字卡片、颜色→色卡、文件→文件卡片，外观在「设置 > 剪贴板贴图」 |
+| 文件拖入 | 从资源管理器把图片拖到贴图/管理面板 | 拖到贴图默认替换内容；Shift 拖入新建；拖到面板加入当前组（见「文件拖放与动图」） |
 
 各入口都会先按统一保存目录落盘（截图为最终成品），再贴出。
 
@@ -312,6 +313,13 @@ python -m venv .venv
 贴图透明区域显示为四种背景之一，在"设置 > 贴图 > 透明图像背景"选择：`transparent` 完全透明（鼠标需落在内容像素上才能拖动）、`pseudo` 伪透明（整张含透明像素均可拖动，便于抓取空白处）、`dark_checker` / `light_checker` 暗色/亮色棋盘（直观预览透明区域）。单张贴图也可在右键菜单"背景模式"子菜单中单独切换，不影响全局默认。
 
 透明贴图的窗口遮罩同时影响显示和鼠标命中，必须与图像的逻辑目标矩形一致；其逻辑栅格使用 DPR=1，不能将源图的屏幕 DPR 再应用一次。100/125/150/175% 下真实圆角和图像自带的透明内容保留，不在图片内部额外挖出缩小后的角落；此规则由 Space、两个编辑器及文件/剪贴板/历史等入口共用，不修改保存文件或源图。换图、背景/样式变化、旋转、缩放重置和跨屏 DPR 通知都会同步遮罩，即使窗口尺寸不变或窗口暂时隐藏也不能依赖 resize 事件。
+
+#### 文件拖放与动图
+
+- **拖入**：把图片文件从资源管理器拖到贴图上，默认替换该贴图内容并保留位置/缩放；按住 `Shift` 拖入则新建贴图。拖到贴图管理面板会加入当前选中的分组；拖到编辑器会按“打开图片”流程新建编辑器，不会覆盖当前未保存的标注。多个文件按 24px 级联排布，非图片文件忽略。
+- **拖出**：按住 `Shift` 用左键拖动贴图，会同时提供文件 URL 与图片数据，可直接拖到微信、Word、浏览器等应用。普通左键拖动仍然是移动/吸附；锁定状态下禁用拖出。
+- **权限限制**：程序以管理员身份运行时，Windows UIPI 会阻止从资源管理器向本程序拖入文件；拖出（高完整性 → 普通应用）不受影响。
+- **GIF 动图**：GIF/动态 WebP 默认播放，右键菜单「动画」可暂停/继续、上一帧/下一帧、0.5×/1×/2× 速度；设置页可配置默认速度与是否自动播放。动图透明区域按整块窗口响应鼠标（不逐帧重算透明遮罩），避免播放时反复 `createAlphaMask` 卡顿。点「编辑」时取当前帧作为静态图，保存/复制/贴图输出都是静态帧；尺寸超过 4096 的 GIF 只显示首帧。会话会保存速度、当前帧和暂停状态，重启后恢复。
 
 #### 吸附与跟随
 
@@ -540,6 +548,7 @@ APP_VERSION = "1.0.18"   # ← 发布新版本时只改这一行
 | 输出组织习惯 | `filename`、`save_format`、`archive_by_month`、`archive_by_day`、`image_archive_period` |
 | 打扰程度 | `bubble`、`notification_timeout`、`copy_notification`、`save_notification`、`sticker_notification` |
 | 功能开关 | `window_detection`、`window_hover_detect`、`magnifier`、`magnifier_size`、`magnifier_zoom`、`magnifier_offset`、`magnifier_grid`、`magnifier_crosshair_enabled`、`ruler_enabled`、`ruler_step`、`ruler_major_multiple`、`cursor`、`uia_debug_tree`、`sticker_recycle_enabled`、`intruder_warning_enabled`、`capture_delay`、`capture_hotkey_suppress`、`logging_enabled`、`log_monthly_folder` |
+| 贴图拖放与动图 | `sticker_drag_enabled`、`sticker_drag_replace`、`sticker_gif_enabled`、`sticker_gif_autoplay`、`sticker_gif_speed` |
 | 明暗主题 | `theme` |
 | 另存为记忆 | `save_as_dir`（内部记忆值，不出现在设置页） |
 
@@ -699,6 +708,11 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `sticker_snap_enabled` | `true` | 拖动时自动吸附；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
 | `sticker_snap_targets` | `both` | 吸附目标；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
 | `sticker_snap_threshold` | `8` | 吸附触发距离；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
+| `sticker_drag_enabled` | `true` | 是否启用文件拖放：拖入替换/新建贴图，Shift+左键把贴图拖出到其他应用。 |
+| `sticker_drag_replace` | `true` | 拖到已有贴图时是否替换该贴图；关闭后总是新建。按住 Shift 拖入始终按新建处理。 |
+| `sticker_gif_enabled` | `true` | 是否播放 GIF 动图；关闭后只显示首帧。 |
+| `sticker_gif_autoplay` | `true` | 新建 GIF 贴图是否立即播放；关闭时先停在首帧。 |
+| `sticker_gif_speed` | `100` | 新建 GIF 贴图的默认播放速度，范围 25–400（%）；单张贴图可在右键菜单临时调整。 |
 | `text_sticker_background` | `#1f6f5c` | 2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
 | `text_sticker_color` | `#ffffff` | 2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
 | `text_sticker_font` | `` | 字体；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
@@ -1854,3 +1868,27 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 2. 矩形/椭圆颜色：工具栏「当前工具颜色」行与设置页统一为「矩形边框颜色」「椭圆边框颜色」，选中工具后不再显示英文键名；两个编辑器共用 `ToolbarWidget`，一处生效。README 参数表补 `rect_color` / `ellipse_color` 两行并统一称「边框颜色」。
 3. 「另存为」侧栏：Qt 自绘 `QFileDialog` 的左侧快捷位置初始仅 190px 且位于可折叠 splitter，部分缩放/窗口尺寸下只剩图标或文字被截。`build_save_dialog()` 现在把侧栏最小宽度固定为 240px、禁止折叠、侧栏不参与拉伸；单选（原地编辑器）、多选（逐块 `EditorWindow`）、窗口编辑（独立编辑器）共用该构造器。验证：新增 `test_save_as_dialog_sidebar_stays_readable_for_all_entry_paths`（最小宽度、不可折叠、显示后实际宽度 ≥240），两条既有另存为用例通过。
 4. 「另存为」文件类型：原先只列当前配置的一种格式（另加「所有文件」），想临时存成别的格式只能手打后缀。现在列出 PNG / JPEG / WebP / BMP 四种，当前配置格式排第一；选择后 `defaultSuffix` 跟随，**预填名字的已知后缀同步切换**，文件名不带后缀时自动补对应扩展名，`normalize_save_as_path()` 按后缀切换本次编码格式（`.jpeg` 视同 `.jpg`）。设置页 `save_format` 说明同步明确「另存为可临时选其它格式、只对本次生效」。验证：新增 `test_save_as_offers_all_formats_and_follows_selected_suffix`（四种格式齐全、当前格式排第一、预填 `格式.jpg` 切到 BMP 后变 `格式.bmp`、`.jpeg` 按 JPEG 编码）。
+
+### 2026-10-17 当日调整汇总
+
+#### 运行权限与开机启动方式（1.0.18）
+
+1. 新增 `core/elevation.py`：`is_elevated()`、`restart_as_admin()`、`restart_as_standard()`、`run_elevated()`。提权用 `ShellExecuteExW(runas)`；降权不能用 runas（子进程会继承提权令牌），改为读取当前令牌的 linked token 后用 `CreateProcessWithTokenW` 启动。拒绝 UAC 时返回 `cancelled`，应用保持运行。
+2. 权限切换后的第一层进程清掉继承的 `SCREENSNAP_SUPERVISED`/`SCREENSNAP_RESTARTED` 并重新进入看护；看护在切换启动时先等旧实例释放单实例锁（最多 20 秒），子进程参数去掉 `--elevated/--standard`，避免递归。
+3. 设置页「启动与通知」把原「开机自动启动」与「开机以管理员身份启动」合并为一个三选一「开机启动方式」：关闭 / 标准权限 / 管理员权限（免 UAC）。新增 `start_on_boot_admin`（默认 false，纳入 `PRESERVED_ON_VERSION_RESET`）；管理员模式使用计划任务 `ScreenSnapAdminStartup`（`/SC ONLOGON /RL HIGHEST`），启用时删除 Run 项，切回标准权限时删除任务并恢复 Run 项。
+4. 新增 `core/autostart_admin.py`：任务查询/创建/删除、`--admin-autostart install|remove` UAC 助手、`schtasks` 输出按 `mbcs` 解码、`/Query` 未找到任务不写 WARNING。每次启用都用 `/F` 覆盖任务，程序目录移动后重新开关即可修正；已提权启动时会顺手刷新任务。
+5. 托盘右键菜单新增「以管理员身份重启 / 以标准权限重启」，提示文案按当前开机启动方式区分“只影响本次会话”和“下次登录仍为管理员”。「清空全部数据」现在会一并删除管理员计划任务。
+6. 打包适配：Run 键、计划任务、提权/降权、看护子进程统一走 `core/startup.py::launch_command()`；打包后使用 exe 绝对路径，源码模式看护用 `python.exe`、自启/提权用 `pythonw.exe`。`supervisor.log` 改为写程序根目录（不再落 `_internal`/临时解包目录）。
+7. 已知限制：UAC 安全桌面无法截取；使用其他管理员账户完成 UAC 会切换到该账户的配置目录；管理员实例会被 UIPI 阻止接收资源管理器的拖入；`Program Files` 下标准权限启动时默认日志目录可能不可写。
+8. 验证：`tests.test_elevation` 24 条、`tests.test_supervisor` 6 条通过；配置/设置页相关 10 条通过。真实 UAC、计划任务登录触发、管理员→标准降权仍需真机 exe 验收。
+
+#### 贴图文件拖放与 GIF 动图
+
+1. 新增配置：`sticker_drag_enabled`（默认 true，总开关）、`sticker_drag_replace`（默认 true，拖到贴图时替换）、`sticker_gif_enabled`（默认 true）、`sticker_gif_autoplay`（默认 true）、`sticker_gif_speed`（25–400，默认 100）。均补齐 `DEFAULTS`、`validate()`、`PRESERVED_ON_VERSION_RESET`、设置页「贴图 > 拖放与动图」与 README 配置表。
+2. 拖入：拖到贴图默认替换内容并保留位置/缩放（旋转重置），Shift 拖入新建；拖到管理面板加入当前选中组；拖到编辑器按“打开图片”流程新开编辑器，不覆盖未保存标注；多文件 24px 级联。`QGraphicsView` 默认接受拖放，编辑器画布视口与管理面板列表视口都装了事件过滤器转发，避免子控件截走事件。只接受 png/jpg/jpeg/bmp/gif/webp/tif/tiff。
+3. 拖出：`Shift+左键` 拖动贴图，MIME 同时提供文件 URL 与图片数据，可拖到微信/Word/浏览器；普通左键仍为移动/吸附，锁定和点击穿透状态禁用拖出。**Qt6 的 `QDropEvent` 没有 `globalPosition()`**，落点改用 `event.position()` + `mapToGlobal()`；上一版曾因调用错误 API 被 Qt 吞掉异常，表现为拖入无反应，已修复并用真实 `QDropEvent` 用例钉住。
+4. GIF：`QMovie` 播放 GIF/动态 WebP；右键「动画」支持播放/暂停、上一帧/下一帧、0.5×/1×/2×；会话保存速度、当前帧、暂停状态，重启后恢复。编辑/保存/复制/贴图输出取当前帧静态图；超过 4096 的 GIF 只显示首帧。
+5. 遮罩折中：动图逐帧 alpha 不重建透明遮罩，统一按整块窗口响应鼠标，避免反复 `createAlphaMask` 卡顿；静态贴图的精确透明命中逻辑不变。
+6. 日志：拖入/拖出/面板/编辑器在 DEBUG 记录事件级细节（可接收、忽略原因、落点、文件数），INFO 记录完成汇总，WARNING 记录无管理器/超大 GIF/单文件读取失败，ERROR 带 `exc_info` 记录处理异常；GIF 初始化、逐帧、暂停/继续、速度与状态恢复均有对应级别日志。
+7. 验证：新增 `tests.test_sticker_drag_gif.py` 9 条（路径加载/级联/替换、真实 QDropEvent 替换与 Shift 新建、拖出 MIME、编辑器/面板视口转发与总开关、GIF 播放/暂停/逐帧、动画状态会话恢复、关闭开关回退静态）；`tests.test_sticker_lifecycle` 14 条、`tests.test_sticker_mask` 8 条、设置页/面板相关用例通过。`tests.test_sticker` 全量仍受沙箱禁止写 `%APPDATA%` 与既有序相关波动影响，未发现与本次改动相关的新失败。
+8. 未验收：真实桌面从资源管理器拖入/拖出、管理员权限下的 UIPI 限制、超大 GIF 解码性能，需在普通 PowerShell + 非提权实例上手工复测。

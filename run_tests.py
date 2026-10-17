@@ -34,6 +34,7 @@ MODULES = [
     "tests.test_capture",
     "tests.test_capture_pointer",
     "tests.test_sticker",
+    "tests.test_sticker_drag_gif",
     "tests.test_sticker_mask",
     "tests.test_sticker_lifecycle",
     "tests.test_uia",
