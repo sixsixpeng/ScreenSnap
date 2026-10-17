@@ -32,11 +32,29 @@ SAVE_FORMAT_LABELS = {"png": "PNG 图片", "jpg": "JPEG 图片", "jpeg": "JPEG �
 
 
 def save_as_filter(settings):
-    """「另存为」对话框的文件类型过滤器（按当前保存格式）。"""
-    key = str(settings.get("save_format", "png")).lower()
-    extension = SAVE_FORMATS.get(key, SAVE_FORMATS["png"])[1]
-    label = SAVE_FORMAT_LABELS.get(key, f"{key.upper()} 图片")
-    return f"{label} (*.{extension});;所有文件 (*.*)"
+    """「另存为」的文件类型过滤器：列出全部可保存格式，当前配置格式排第一（默认选中）。
+
+    只给一种格式时，想临时存成别的格式必须手动改后缀；现在可直接在下拉里选，
+    实际编码格式由所选后缀决定（见 normalize_save_as_path）。
+    """
+    current = str(settings.get("save_format", "png")).lower()
+    keys = [key for key in SAVE_FORMATS if key != current]
+    if current in SAVE_FORMATS:
+        keys.insert(0, current)
+    parts = [f"{SAVE_FORMAT_LABELS.get(key, key.upper() + ' 图片')} (*.{SAVE_FORMATS[key][1]})"
+             for key in keys]
+    return ";;".join(parts + ["所有文件 (*.*)"])
+
+
+def filter_extension(name_filter):
+    """从「PNG 图片 (*.png)」取出扩展名；「所有文件 (*.*)」或无法识别时返回空串。"""
+    text = str(name_filter)
+    marker = "*."
+    start = text.rfind(marker)
+    if start < 0:
+        return ""
+    extension = text[start + len(marker):].split(")")[0].strip().lower()
+    return "" if extension == "*" else extension
 
 
 def normalize_save_as_path(path, settings):
@@ -51,7 +69,8 @@ def normalize_save_as_path(path, settings):
     if not suffix:
         extension = SAVE_FORMATS.get(current, SAVE_FORMATS["png"])[1]
         return path.with_suffix("." + extension), settings
-    matched = next((key for key, value in SAVE_FORMATS.items() if value[1] == suffix), None)
+    canonical = "jpg" if suffix == "jpeg" else suffix
+    matched = next((key for key, value in SAVE_FORMATS.items() if value[1] == canonical), None)
     if matched is None or matched == current:
         return path, settings
     return path, {**settings, "save_format": matched}

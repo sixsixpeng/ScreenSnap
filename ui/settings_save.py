@@ -62,7 +62,8 @@ class SaveOutputPage(SettingsPage):
         self.group("文件与目录")
         self.radios("save_format", "保存格式", [("PNG（无损）", "png"), ("JPEG", "jpg"),
                                             ("WebP", "webp"), ("BMP", "bmp")],
-                    "自动与手动保存使用的图片格式；不改变剪贴板中图像的格式。")
+                    "自动与手动「保存」使用的图片格式；「另存为」可临时选择其它格式，"
+                    "仅对本次另存生效，不改变此设置，也不改变剪贴板中图像的格式。")
         self.number("save_quality", "图片质量", 1, 100,
                     "仅 JPEG 与 WebP 生效；数值越大越清晰，文件也越大。")
         self.color("save_background", "保存底色",

@@ -3452,6 +3452,66 @@ class CanvasTests(CoreTests):
             mask2.session.inline_editor.execute("copy_only")
             self.assertEqual(len(copied), 1)
 
+    def test_save_as_dialog_sidebar_stays_readable_for_all_entry_paths(self):
+        """单选、多选、窗口编辑共用同一个「另存为」对话框，左侧快捷位置不能被压成图标条。
+
+        Qt 自绘 QFileDialog 的侧栏默认 190px 且位于可折叠 splitter 中；在部分缩放/窗口
+        尺寸下只剩图标（2026-10-17 反馈「只能看到一点点」）。这里钉住最小宽度与不可折叠。
+        """
+        from config.config_manager import DEFAULTS
+        from editor.editor_window import SAVE_DIALOG_SIDEBAR_WIDTH, build_save_dialog
+        from PySide6.QtWidgets import QSplitter, QWidget
+
+        dialog = build_save_dialog(None, Path(tempfile.gettempdir()) / "侧栏.png", DEFAULTS)
+        try:
+            sidebar = dialog.findChild(QWidget, "sidebar")
+            splitter = dialog.findChild(QSplitter)
+            self.assertIsNotNone(sidebar)
+            self.assertIsNotNone(splitter)
+            self.assertGreaterEqual(sidebar.minimumWidth(), SAVE_DIALOG_SIDEBAR_WIDTH)
+            self.assertFalse(splitter.childrenCollapsible())
+            dialog.show()
+            self.app.processEvents()
+            self.assertGreaterEqual(splitter.sizes()[0], SAVE_DIALOG_SIDEBAR_WIDTH)
+        finally:
+            dialog.close()
+
+    def test_save_as_offers_all_formats_and_follows_selected_suffix(self):
+        """文件类型下拉列出全部可保存格式；改名不带后缀时按所选格式补后缀。"""
+        from config.config_manager import DEFAULTS
+        from core.image_io import SAVE_FORMATS, filter_extension, normalize_save_as_path, save_as_filter
+        from editor.editor_window import build_save_dialog
+        from PySide6.QtWidgets import QLineEdit
+
+        filters = save_as_filter(dict(DEFAULTS, save_format="jpg"))
+        self.assertTrue(filters.startswith("JPEG 图片 (*.jpg)"))
+        for _, extension in SAVE_FORMATS.values():
+            self.assertIn(f"*.{extension}", filters)
+        self.assertIn("所有文件 (*.*)", filters)
+        self.assertEqual(filter_extension("WebP 图片 (*.webp)"), "webp")
+        self.assertEqual(filter_extension("所有文件 (*.*)"), "")
+
+        # 手打 .jpeg 时也按 JPEG 编码，避免「后缀 jpeg、内容 png」。
+        _, effective = normalize_save_as_path(Path("a.jpeg"), dict(DEFAULTS, save_format="png"))
+        self.assertEqual(effective["save_format"], "jpg")
+
+        dialog = build_save_dialog(None, Path(tempfile.gettempdir()) / "格式.jpg",
+                                   dict(DEFAULTS, save_format="jpg"))
+        try:
+            dialog.show()
+            self.app.processEvents()
+            self.assertEqual(dialog.defaultSuffix(), "jpg")
+            # 程序化 selectNameFilter 不发 filterSelected（真实选择才发），这里模拟该信号。
+            dialog.filterSelected.emit("BMP 图片 (*.bmp)")
+            self.assertEqual(dialog.defaultSuffix(), "bmp")
+            edit = dialog.findChild(QLineEdit, "fileNameEdit")
+            self.assertTrue(edit.text().endswith("格式.bmp"))   # 预填名字同步换后缀
+            edit.setText("临时名字")
+            self.app.processEvents()
+            self.assertTrue(dialog.selectedFiles()[0].endswith("临时名字.bmp"))
+        finally:
+            dialog.close()
+
     def test_copy_only_notifies_once_with_image_for_both_paths(self):
         """仅复制：快速（遮罩 Y）与窗口编辑（原地工具栏）都应恰好发一次带图通知。
 

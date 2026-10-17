@@ -670,8 +670,9 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `editor_toolbar_shadow_enabled` | `true` | 工具栏阴影光晕；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
 | `editor_toolbar_shadow_strength` | `60` | 阴影强度；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
 | `editor_transparent_background` | `theme` | 透明区域显示；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
+| `ellipse_color` | `#ff0000` | 椭圆边框颜色，六位十六进制颜色；与 `ellipse_fill_color` 填充色各自独立，改变边框色不修改填充色。 |
 | `ellipse_fill_enabled` | `false` | 椭圆填充区域；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
-| `ellipse_fill_color` | `#ff0000` | 椭圆填充颜色，六位十六进制颜色；与 `ellipse_color` 线条颜色各自独立，改变线条颜色不修改填充色。 |
+| `ellipse_fill_color` | `#ff0000` | 椭圆填充颜色，六位十六进制颜色；与 `ellipse_color` 边框颜色各自独立，改变边框色不修改填充色。 |
 | `ellipse_fill_opacity` | `35` | 椭圆填充不透明度 (%)；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
 | `ellipse_width` | `2` | 椭圆线宽；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
 | `file_sticker_width` | `360` | 卡片宽度；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
@@ -679,8 +680,9 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `marker_width` | `4` | 记号笔线宽；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
 | `mosaic_size` | `10` | 马赛克/模糊颗粒参数，整数 2–100；与笔刷宽度 `mosaic_width` 独立。 |
 | `pen_width` | `2` | 画笔线宽；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
+| `rect_color` | `#ff0000` | 矩形边框颜色，六位十六进制颜色；与 `rect_fill_color` 填充色各自独立，改变边框色不修改填充色。 |
 | `rect_fill_enabled` | `false` | 矩形填充区域；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
-| `rect_fill_color` | `#ff0000` | 矩形填充颜色，六位十六进制颜色；与 `rect_color` 线条颜色各自独立，改变线条颜色不修改填充色。 |
+| `rect_fill_color` | `#ff0000` | 矩形填充颜色，六位十六进制颜色；与 `rect_color` 边框颜色各自独立，改变边框色不修改填充色。 |
 | `rect_fill_opacity` | `35` | 矩形填充不透明度 (%)；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
 | `rect_width` | `2` | 矩形线宽；2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
 | `save_background` | `#ffffff` | 2026-10-12 按规则 6/35 补录（此前 README 全文未提及 ✓）。 |
@@ -812,7 +814,7 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `save_dir` | `""`（自动默认） | 统一保存根目录，接受目录路径字符串。未自定义时输入框直接显示 `<用户主目录>/Pictures/ScreenSnap`，磁盘配置仍保持 `""`，不会仅因打开设置而变成显式路径。删除自定义输入并结束编辑会恢复默认显示；浏览明确选择目录则保存所选路径。自动/手动保存、两个编辑器和截图历史共用此根目录，日期归档由独立选项追加子目录；不改变空值下既有缓存归属。 |
 | `archive_by_month` | `true` | 所有保存按月写入 `YYYY-MM` 子目录；默认开启。 |
 | `archive_by_day` | `false` | 所有保存按日写入 `YYYY-MM-DD` 子目录；与按月归档互斥。 |
-| `save_format` | `png` | 所有保存格式：PNG、JPEG、WebP 或 BMP。 |
+| `save_format` | `png` | 自动/手动「保存」使用的格式：PNG、JPEG、WebP 或 BMP；「另存为」会在文件类型中列出全部四种，仅对本次另存生效。 |
 | `save_quality` | `90` | JPEG/WebP 压缩质量，范围 1–100。 |
 | `filename` | `ScreenSnap_%Y%m%d_%H%M%S` | 所有保存共用的文件名模板（strftime 格式），默认带 `ScreenSnap_` 前缀。 |
 | `copy_saved_image` | `true` | 布尔值：保存、另存为、截图直存、主动创建/切换贴图后是否复制图片；显式“仅复制/复制图像”不受此开关限制。 |
@@ -1839,3 +1841,10 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
     判定：线程正常 · 无未触发动作 · 无卡住按键
     ```
    `tests.test_hotkey_policy` 新增两条用例（正常/异常/未知三态；兼容面板状态码映射）。
+
+#### 设置项说明全量校正与「另存为」对话框
+
+1. 设置项 tooltip：289 个配置键、271 个控件逐项核对；参数控件统一补「取值：范围，默认值」，范围取自控件本身、默认值取自 `DEFAULTS`（单一来源）；修正四个文字格式开关把「默认关」写成「默认加粗」、遮罩默认色误写「清透蓝」（实际石墨黑）、椭圆边框色仍写「也作为填充颜色」等旧文案；超过 60 字的说明按语义换行。18 个无控件键确认属于记忆状态（`hotkeys`、`save_as_dir`、`last_capture_rect` 与 15 个编辑器记忆色）。验证：离屏遍历 271 个控件 0 缺失；`test_config` 的 tooltip 契约升级为强制断言。
+2. 矩形/椭圆颜色：工具栏「当前工具颜色」行与设置页统一为「矩形边框颜色」「椭圆边框颜色」，选中工具后不再显示英文键名；两个编辑器共用 `ToolbarWidget`，一处生效。README 参数表补 `rect_color` / `ellipse_color` 两行并统一称「边框颜色」。
+3. 「另存为」侧栏：Qt 自绘 `QFileDialog` 的左侧快捷位置初始仅 190px 且位于可折叠 splitter，部分缩放/窗口尺寸下只剩图标或文字被截。`build_save_dialog()` 现在把侧栏最小宽度固定为 240px、禁止折叠、侧栏不参与拉伸；单选（原地编辑器）、多选（逐块 `EditorWindow`）、窗口编辑（独立编辑器）共用该构造器。验证：新增 `test_save_as_dialog_sidebar_stays_readable_for_all_entry_paths`（最小宽度、不可折叠、显示后实际宽度 ≥240），两条既有另存为用例通过。
+4. 「另存为」文件类型：原先只列当前配置的一种格式（另加「所有文件」），想临时存成别的格式只能手打后缀。现在列出 PNG / JPEG / WebP / BMP 四种，当前配置格式排第一；选择后 `defaultSuffix` 跟随，**预填名字的已知后缀同步切换**，文件名不带后缀时自动补对应扩展名，`normalize_save_as_path()` 按后缀切换本次编码格式（`.jpeg` 视同 `.jpg`）。设置页 `save_format` 说明同步明确「另存为可临时选其它格式、只对本次生效」。验证：新增 `test_save_as_offers_all_formats_and_follows_selected_suffix`（四种格式齐全、当前格式排第一、预填 `格式.jpg` 切到 BMP 后变 `格式.bmp`、`.jpeg` 按 JPEG 编码）。

@@ -7,12 +7,12 @@ from pathlib import Path
 
 from PySide6.QtCore import Qt, Signal, QSignalBlocker
 from PySide6.QtGui import QGuiApplication
-from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QFileDialog,
+from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QFileDialog, QSplitter,
                                QDialog, QDialogButtonBox, QDial, QDoubleSpinBox, QHBoxLayout, QLabel,
-                               QStyle, QSlider, QSpinBox, QGraphicsView)
+                               QLineEdit, QStyle, QSlider, QSpinBox, QGraphicsView)
 
-from core.image_io import (matches_saved_format, normalize_save_as_path, save_as_filter,
-                           save_image, saved_extension)
+from core.image_io import (SAVE_FORMATS, filter_extension, matches_saved_format,
+                           normalize_save_as_path, save_as_filter, save_image, saved_extension)
 from core.path_utils import resolved_dir, save_as_directory
 from config.config_manager import TOOL_WIDTH_KEYS
 from editor.annotation_canvas import AnnotationCanvas
@@ -26,6 +26,10 @@ from logger import get_logger
 # 2026-10-11：这个模块级助手**必须放在 class 之前** —— 上一版误插进类体内（列 0）⇒ 类提前结束、
 # 之后所有方法都变成它的嵌套函数 ⇒ AttributeError（test_tools/test_zoom/test_app 共 9 条 ERROR）。
 _CHINESE_DIALOGS_READY = [False]
+
+# 「另存为」左侧快捷位置的初始宽度。Qt 自绘对话框默认只有 190px，位于可折叠 splitter 中；
+# 在部分缩放/窗口尺寸下会被压得只剩图标（2026-10-17 反馈「只能看到一点点」）。
+SAVE_DIALOG_SIDEBAR_WIDTH = 240
 
 
 def _ensure_chinese_dialogs():
@@ -79,8 +83,37 @@ def build_save_dialog(parent, suggested, settings, anchor=None, is_stub=False):
     dialog.setLabelText(QFileDialog.DialogLabel.Accept, "保存(S)")
     dialog.setLabelText(QFileDialog.DialogLabel.Reject, "取消")
     dialog.setSidebarUrls(save_as_sidebar_urls())
+    # 文件类型下拉列出所有可保存格式；补后缀时跟随当前选择（否则会出现后缀与内容不一致）。
+    configured_extension = saved_extension(settings)
+    known_extensions = {value[1] for value in SAVE_FORMATS.values()} | {"jpeg"}
+
+    def sync_filter_suffix(chosen):
+        extension = filter_extension(chosen)
+        dialog.setDefaultSuffix(extension or configured_extension)
+        if not extension:
+            return  # 「所有文件」保持用户输入的名字，不强行改后缀。
+        # 预填文件名带的是配置格式的后缀；切换类型时应同步改掉，否则选的 JPEG 仍存成 shot.png。
+        edit = dialog.findChild(QLineEdit, "fileNameEdit")
+        if edit is not None:
+            path = Path(edit.text().strip())
+            if path.suffix.casefold().lstrip(".") in known_extensions:
+                edit.setText(str(path.with_suffix("." + extension)))
+
+    dialog.setDefaultSuffix(configured_extension)
+    dialog.filterSelected.connect(sync_filter_suffix)
     dialog.resize(980, 640)
     dialog.setMinimumSize(760, 520)
+    # 2026-10-17：固定左侧快捷位置的可读宽度，并禁止分栏被拖到 0（只剩图标）。
+    # 单选、多选、窗口编辑都走这里，所以一处配置对三个入口同时生效。
+    sidebar = dialog.findChild(QWidget, "sidebar")
+    if sidebar is not None:
+        sidebar.setMinimumWidth(SAVE_DIALOG_SIDEBAR_WIDTH)
+    splitter = dialog.findChild(QSplitter)
+    if splitter is not None:
+        splitter.setChildrenCollapsible(False)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([SAVE_DIALOG_SIDEBAR_WIDTH, 1])
     if anchor is not None and hasattr(anchor, "center"):
         size = dialog.size()
         dialog.move(anchor.center().x() - size.width() // 2,
@@ -97,7 +130,7 @@ def save_as_sidebar_urls():
     """「另存为」自绘对话框的侧栏：计算机 + 桌面 + 用户文件夹 + 常用目录 + **所有磁盘**。
 
     2026-10-11 用户要求：原生对话框侧栏只有"我的电脑 / 用户文件夹"太窄，希望有桌面与所有磁盘。
-    只在 **自绘**（多选另存为）路径使用；单选路径仍是 Windows 原生对话框（外观不变 ✓）。
+    单选、多选与窗口编辑统一使用该自绘对话框（2026-10-11 起不再走 Windows 原生对话框）。
     """
     from PySide6.QtCore import QStandardPaths, QUrl
     from PySide6.QtCore import QDir
