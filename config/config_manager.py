@@ -116,7 +116,7 @@ PRESERVED_ON_VERSION_RESET = (
     # 环境与路径：用户选的存放位置，跟着版本重置会让图片散落或找不到
     "save_dir", "save_as_dir", "log_dir", "file_sticker_path",
     # 开机与系统注册：开机自启在系统里已注册，配置重置但注册还在会造成状态不一致
-    "start_on_boot",
+    "start_on_boot", "start_on_boot_admin",
     # 按键习惯：键盘流用户最在意的部分，且与数据格式无关
     "hotkeys", "hotkeys_enabled",
     "capture_quick_sticker_shortcut", "capture_save_shortcut", "capture_custom_size_shortcut",
@@ -172,6 +172,7 @@ DEFAULTS = {
     **HOTKEY_POLICY_DEFAULTS,
     "hotkeys_enabled": True,
     "start_on_boot": False,
+    "start_on_boot_admin": False,
     "hotkeys": {
         "capture": "f1", "repeat": "shift+f1", "fullscreen": "alt+f1",
         "monitor": "ctrl+f1", "paste": "f3",

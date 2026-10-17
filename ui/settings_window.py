@@ -18,7 +18,7 @@ from ui.settings_editor import EditorPage
 from ui.settings_log import LogPage
 from ui.settings_sticker import StickerPage
 from ui.settings_clipboard import ClipboardPage
-from core.startup import set_start_on_boot
+from core.startup import remove_run_entry, set_start_on_boot
 from ui.action_icons import action_icon
 from ui.widgets.confirmation import yes_no_dialog
 
@@ -30,17 +30,21 @@ class SettingsWindow(QWidget):
     recording = Signal(bool)
 
     def __init__(self, config, clear_clipboard_history=None, clear_cache=None,
-                 reset_all_user_data=None, restore_hotkeys=None, diagnostic_tools=None):
+                 reset_all_user_data=None, restore_hotkeys=None, diagnostic_tools=None,
+                 elevate_callback=None):
         super().__init__()
         self.config = config
         self.clear_clipboard_history_callback = clear_clipboard_history
         self.reset_all_user_data_callback = reset_all_user_data
         # 热键恢复入口由 main 注入（设置窗口不直接持有 HotkeyManager）。
         self.restore_hotkeys_callback = restore_hotkeys
+        # 运行权限切换需要主程序保存会话并退出，设置窗口只负责发起。
+        self.elevate_callback = elevate_callback
         self.diagnostic_tools = diagnostic_tools or {}
         # 缓存清理由 main 注入：设置窗口不直接依赖贴图管理器，避免 ui 反向依赖 sticker。
         self.clear_cache_callback = clear_cache
         self._saved_start_on_boot = config.data["start_on_boot"]
+        self._saved_start_on_boot_admin = config.data.get("start_on_boot_admin", False)
         self._persist_timer = QTimer(self)
         self._persist_timer.setSingleShot(True)
         self._persist_timer.setInterval(250)
@@ -77,7 +81,7 @@ class SettingsWindow(QWidget):
                 "贴图私有缓存、剪贴板历史及图片、"
                 "Toast 缩略图，以及保存在此目录中的日志。\n"
                 "若自定义截图保存目录位于此目录内，其中的截图也会被删除；目录外文件不受影响。\n"
-                "同时关闭 Windows 开机自动启动项。不创建备份，也不会自动重启；下次手动启动时会生成默认 settings.json。"
+                "同时关闭 Windows 开机自动启动项（注册表 Run 项与管理员计划任务）。不创建备份，也不会自动重启；下次手动启动时会生成默认 settings.json。"
                 "请只在确实需要完整清空时使用。"
             ),
         }
@@ -137,6 +141,8 @@ class SettingsWindow(QWidget):
                 widget = page(self.config, self.persist, self.recording.emit)
             elif page is LogPage:
                 widget = page(self.config, self.persist, self.diagnostic_tools)
+            elif page is GeneralPage:
+                widget = page(self.config, self.persist, self.elevate_callback)
             else:
                 widget = page(self.config, self.persist)
             self.pages.addWidget(widget)
@@ -170,32 +176,84 @@ class SettingsWindow(QWidget):
 
     def persist(self):
         """合并短时间内的设置变化，避免滑块连续操作反复写入整份 JSON。"""
-        if self.config.data["start_on_boot"] != self._saved_start_on_boot:
+        if (self.config.data["start_on_boot"] != self._saved_start_on_boot
+                or bool(self.config.data.get("start_on_boot_admin")) != self._saved_start_on_boot_admin):
             self._persist_timer.stop()
             self._write_pending()
             return
         self._persist_timer.start()
 
+    def _sync_autostart(self, data=None):
+        """把系统里的开机自启注册同步成当前配置选择的实现方式。
+
+        管理员模式由计划任务负责，必须删除 Run 键，否则登录时会启动两份；
+        标准模式沿用原来的 Run 键。计划任务本身的创建/删除由设置页在切换时完成
+        （需要 UAC），这里只处理不需要提权的部分。
+        """
+        data = self.config.data if data is None else data
+        if data.get("start_on_boot_admin"):
+            remove_run_entry()
+        else:
+            set_start_on_boot(bool(data.get("start_on_boot")))
+
+    def _apply_admin_autostart(self, previous_admin):
+        """导入/恢复默认后，把计划任务同步到新的「开机以管理员身份启动」值。
+
+        切换需要管理员权限（可能弹一次 UAC）；失败时回滚配置键，避免界面显示
+        「已启用」但系统里没有任务。
+        """
+        desired = bool(self.config.data.get("start_on_boot_admin"))
+        if desired == bool(previous_admin):
+            return True
+        from core.autostart_admin import set_enabled
+
+        ok, message = set_enabled(desired)
+        if ok:
+            if desired and not self.config.data.get("start_on_boot"):
+                # 计划任务本身就是开机自启：显式联动并落盘（README 与设置页提示均已说明）。
+                self.config.data["start_on_boot"] = True
+                try:
+                    self.config.save()
+                except OSError:
+                    pass
+            return True
+        self.config.data["start_on_boot_admin"] = bool(previous_admin)
+        try:
+            self.config.save()
+        except OSError:
+            pass
+        get_logger().warning("同步开机管理员计划任务失败: %s", message)
+        QMessageBox.warning(self, "开机启动设置未完全生效",
+                            f"{message}\n已保留原来的开机启动方式。")
+        return False
+
     def _write_pending(self):
         """持久化当前最后一版配置，并在成功后刷新运行中的应用设置。"""
         previous = self._saved_start_on_boot
-        changed = self.config.data["start_on_boot"] != previous
+        previous_admin = self._saved_start_on_boot_admin
+        changed = (self.config.data["start_on_boot"] != previous
+                   or bool(self.config.data.get("start_on_boot_admin")) != previous_admin)
         try:
             if changed:
-                set_start_on_boot(self.config.data["start_on_boot"])
+                self._sync_autostart()
             self.config.save()
             self._saved_start_on_boot = self.config.data["start_on_boot"]
+            self._saved_start_on_boot_admin = bool(self.config.data.get("start_on_boot_admin"))
             self.changed.emit()
         except (ValueError, OSError) as error:
             if changed:
                 try:
-                    set_start_on_boot(previous)
+                    self._sync_autostart({"start_on_boot": previous,
+                                          "start_on_boot_admin": previous_admin})
                 except OSError:
                     pass
                 self.config.data["start_on_boot"] = previous
+                self.config.data["start_on_boot_admin"] = previous_admin
                 control = self.pages.widget(0).controls["start_on_boot"]
                 with QSignalBlocker(control):
-                    control.setChecked(previous)
+                    # 两个配置键共用一个三态单选组，回滚时要按“管理员优先”还原成模式值。
+                    control.set_value("admin" if previous_admin
+                                      else ("standard" if previous else "off"))
             QMessageBox.warning(self, "设置未保存", str(error))
 
     def flush_persist(self):
@@ -265,14 +323,17 @@ class SettingsWindow(QWidget):
             previous = copy.deepcopy(self.config.data)
             try:
                 self.config.import_from(path)
-                set_start_on_boot(self.config.data["start_on_boot"])
+                self._sync_autostart()
             except (ValueError, OSError) as error:
                 self.config.data.clear()
                 self.config.data.update(previous)
                 self.config.save()
                 QMessageBox.warning(self, "导入失败", str(error))
                 return
+            # 导入可能改变「开机以管理员身份启动」：计划任务本身要在系统里同步。
+            self._apply_admin_autostart(previous.get("start_on_boot_admin", False))
             self._saved_start_on_boot = self.config.data["start_on_boot"]
+            self._saved_start_on_boot_admin = bool(self.config.data.get("start_on_boot_admin"))
             self.rebuild_pages()
 
     def rebuild_pages(self):
@@ -304,14 +365,14 @@ class SettingsWindow(QWidget):
             self.config.data.clear()
             self.config.data.update(copy.deepcopy(DEFAULTS))
             defaults_applied = True
-            set_start_on_boot(self.config.data["start_on_boot"])
+            self._sync_autostart()
             self.config.save()
         except (OSError, ValueError) as error:
             self.config.data.clear()
             self.config.data.update(previous)
             if defaults_applied:
                 try:
-                    set_start_on_boot(previous["start_on_boot"])
+                    self._sync_autostart(previous)
                 except (OSError, ValueError) as startup_error:
                     get_logger().warning("恢复默认失败后还原启动设置失败: %s", startup_error)
             if pending_persist:
@@ -319,7 +380,10 @@ class SettingsWindow(QWidget):
             get_logger().error("恢复默认设置失败: %s", error)
             QMessageBox.warning(self, "恢复默认设置失败", str(error))
             return
+        # 默认值把管理员自启关掉了：同步删除系统里的计划任务（必要时弹一次 UAC）。
+        self._apply_admin_autostart(previous.get("start_on_boot_admin", False))
         self._saved_start_on_boot = self.config.data["start_on_boot"]
+        self._saved_start_on_boot_admin = bool(self.config.data.get("start_on_boot_admin"))
         self.rebuild_pages()
         get_logger().info("已恢复默认设置，原配置备份到 %s", backup)
         QMessageBox.information(self, "已恢复默认设置", f"原配置已备份到：\n{backup}")
@@ -359,7 +423,7 @@ class SettingsWindow(QWidget):
             f"即将退出 ScreenSnap 并永久删除以下目录的全部内容：\n{directory}\n\n"
             "包括设置与备份、贴图/回收站会话、剪贴板历史、缓存及目录内日志；"
             "若自定义截图保存目录位于此目录内，截图也会被删除。\n"
-            "目录外的截图不会删除；Windows 开机自动启动项也会关闭。\n"
+            "目录外的截图不会删除；Windows 开机自动启动项也会关闭（含管理员计划任务）。\n"
             "程序不会自动重启；下次手动启动时会生成默认设置。\n"
             "此操作不可撤销且不创建备份。是否继续？"
         )
@@ -404,6 +468,8 @@ class SettingsWindow(QWidget):
                 widget = page(self.config, self.persist, self.recording.emit)
             elif page is LogPage:
                 widget = page(self.config, self.persist, self.diagnostic_tools)
+            elif page is GeneralPage:
+                widget = page(self.config, self.persist, self.elevate_callback)
             else:
                 widget = page(self.config, self.persist)
             self.pages.addWidget(widget)

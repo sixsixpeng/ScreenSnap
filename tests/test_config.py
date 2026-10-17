@@ -897,7 +897,7 @@ class ConfigTests(CoreTests):
             for index in range(settings.pages.count()):
                 for key in settings.pages.widget(index).controls:
                     self.assertIn(key, manager.data)
-            self.assertFalse(settings.pages.widget(0).controls["start_on_boot"].isChecked())
+            self.assertEqual(settings.pages.widget(0).controls["start_on_boot"].value(), "off")
             depth_control = settings.page("截图").controls["element_depth"]
             self.assertEqual(depth_control.maximum(), 32)
             self.assertEqual(depth_control.value(), 8)
@@ -1782,16 +1782,17 @@ class ConfigTests(CoreTests):
             with patch("ui.settings_window.set_start_on_boot") as startup, \
                  patch("ui.settings_window.QMessageBox.warning") as warning:
                 settings = SettingsWindow(manager)
-                control = settings.pages.widget(0).controls["start_on_boot"]
-                control.setChecked(True)
+                page = settings.pages.widget(0)
+                control = page.controls["start_on_boot"]
+                control._buttons["standard"].click()
                 startup.assert_called_with(True)
                 self.assertTrue(ConfigManager(manager.path).data["start_on_boot"])
-                control.setChecked(False)
+                control._buttons["off"].click()
                 startup.assert_called_with(False)
                 self.assertFalse(ConfigManager(manager.path).data["start_on_boot"])
                 startup.side_effect = OSError("registry unavailable")
-                control.setChecked(True)
-                self.assertFalse(control.isChecked())
+                control._buttons["standard"].click()
+                self.assertEqual(control.value(), "off")
                 self.assertFalse(manager.data["start_on_boot"])
                 self.assertFalse(ConfigManager(manager.path).data["start_on_boot"])
                 warning.assert_called_once()
@@ -1808,7 +1809,7 @@ class ConfigTests(CoreTests):
                 settings = SettingsWindow(manager)
                 settings.import_settings()
                 startup.assert_called_once_with(True)
-                self.assertTrue(settings.pages.widget(0).controls["start_on_boot"].isChecked())
+                self.assertEqual(settings.pages.widget(0).controls["start_on_boot"].value(), "standard")
                 self.assertTrue(ConfigManager(manager.path).data["start_on_boot"])
                 settings.close()
 
@@ -1825,7 +1826,7 @@ class ConfigTests(CoreTests):
                 settings.import_settings()
                 self.assertFalse(manager.data["start_on_boot"])
                 self.assertFalse(ConfigManager(manager.path).data["start_on_boot"])
-                self.assertFalse(settings.pages.widget(0).controls["start_on_boot"].isChecked())
+                self.assertEqual(settings.pages.widget(0).controls["start_on_boot"].value(), "off")
                 warning.assert_called_once()
                 settings.close()
 

@@ -1316,6 +1316,8 @@ class MiscTests(CoreTests):
         app.logger = Mock()
         app.qt = Mock()
         app.settings_window = Mock()
+        app.config = Mock()
+        app.config.data = {"start_on_boot_admin": False}
         with patch("main.set_start_on_boot") as set_start_on_boot:
             self.assertTrue(Application.request_full_user_data_reset(app))
         set_start_on_boot.assert_called_once_with(False)

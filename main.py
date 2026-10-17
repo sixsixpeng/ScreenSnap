@@ -42,6 +42,13 @@ def enable_windows_app_id():
 
 enable_windows_dpi_awareness()
 
+if os.name == "nt" and "--admin-autostart" in sys.argv:
+    # 计划任务助手：只执行一次 schtasks 就退出。必须放在导入 PySide6 之前，
+    # 否则为了注册/删除任务要白白拉起整个 GUI 依赖。
+    from core.autostart_admin import helper_main
+
+    sys.exit(helper_main(sys.argv))
+
 from PySide6.QtCore import Qt, QPoint, QRect, QTimer, QSignalBlocker, QObject, Signal, Slot, QLockFile
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen, QGuiApplication, QFont, QCursor
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QGraphicsView, QFileDialog, QMessageBox
@@ -50,6 +57,8 @@ from config import ConfigManager
 from config.config_manager import TOOL_WIDTH_KEYS
 from core import app_icon, data_dir, capture, qimage_to_pillow
 from core.constants import APP_USER_MODEL_ID
+from core.elevation import (ELEVATED_MARKER, RESULT_ALREADY, RESULT_CANCELLED, RESULT_LAUNCHED,
+                            STANDARD_MARKER, is_elevated, restart_as_admin, restart_as_standard)
 from core.version import APP_VERSION
 from core.dpi import DisplayMapper
 from core.path_utils import clear_data_directory
@@ -65,6 +74,7 @@ from ui import SettingsWindow, make_tray_menu, CaptureNotification, StickerPanel
 from ui.recycle_window import RecycleWindow
 from ui.theme import apply_theme
 from ui.window_bounds import WindowBoundsFilter
+from ui.widgets.confirmation import yes_no_dialog
 from PIL import Image
 
 from app.bootstrap import (QApp, acquire_single_instance_lock, install_exception_hooks,
@@ -97,6 +107,7 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
         # 先装日志、再做版本闸门：闸门要写「跳过被占用文件」「已清空数据目录」这类 WARNING/INFO，
         # 若日志尚未配置，它们只会走 logging 的兜底 handler（仅 stderr、无格式、且不进日志文件）。
         configure_logging(self.config.data)
+        self.logger.info("运行权限：%s", "管理员" if is_elevated() else "标准")
         # 版本闸门：配置里记录的版本与内置版本不一致时，先清空用户数据再启动。
         self.version_reset_from = ""
         if self.apply_version_gate():
@@ -105,9 +116,18 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
         # 显示器分辨率/缩放/增减变化时刷新坐标缓存与贴图（中间屏被改动的情形）。
         self.watch_screens()
         apply_theme(self.qt, self.config.data["theme"])
-        if self.config.data["start_on_boot"]:
+        if self.config.data["start_on_boot"] or self.config.data.get("start_on_boot_admin"):
             try:
-                set_start_on_boot(True)
+                from core.autostart_admin import sync_autostart
+
+                if self.config.data.get("start_on_boot_admin") and not self.config.data["start_on_boot"]:
+                    # 计划任务本身就是开机自启：配置与界面保持一致（README 已说明该联动）。
+                    self.config.data["start_on_boot"] = True
+                    self.config.save()
+                if (self.config.data.get("start_on_boot_admin")
+                        and not sync_autostart(self.config.data)):
+                    self.logger.warning("开机管理员计划任务缺失：登录时可能不会自动启动，"
+                                        "请在「设置 → 启动与通知」中重新开启")
             except OSError as error:
                 self.logger.warning("无法同步开机启动设置: %s", error)
         self.hotkeys = HotkeyManager()
@@ -134,7 +154,8 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
             self.config, self.stickers.clear_clipboard_history,
             self.stickers.clear_rebuildable_cache,
             reset_all_user_data=self.request_full_user_data_reset,
-            restore_hotkeys=self.restore_hotkeys, diagnostic_tools=self.hotkey_tools())
+            restore_hotkeys=self.restore_hotkeys, diagnostic_tools=self.hotkey_tools(),
+            elevate_callback=self.request_privilege_restart)
         self.settings_window.changed.connect(self.refresh)
         self.settings_window.recording.connect(self.pause_hotkeys)
         self.hotkey_recording = False
@@ -154,6 +175,9 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
             sticker_panel=self.open_sticker_panel,
             recycle_bin=self.open_recycle_bin,
             restore_hotkeys=self.restore_hotkeys,
+            switch_privilege=self.request_privilege_restart,
+            elevated=is_elevated(),
+            admin_autostart=bool(self.config.data.get("start_on_boot_admin")),
         )
         self.tray.setContextMenu(self.menu)
         self.tray.activated.connect(self.tray_clicked)
@@ -295,6 +319,10 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
             self.logger.warning("崩溃后自动重启（上次退出码=%s）", restarted)
             self.notify(f"ScreenSnap 上次异常退出（code={restarted}），已自动重启")
             return
+        if is_elevated():
+            # 提权重启时旧进程会立刻退出（命令行随之结束），用这条提示确认新实例已在后台运行。
+            self.notify("已启动（管理员权限）：前台是管理员窗口时热键仍可用")
+            return
         self.notify("已启动：快捷键截图，右键托盘打开设置")
 
 
@@ -311,6 +339,52 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
         self.settings_window.raise_()
         self.settings_window.activateWindow()
 
+    def request_privilege_restart(self):
+        """在管理员/标准权限之间重启自身；提权仅本次会话有效。
+
+        时序：确认 → 写完待落盘配置 → 拉起新进程 → 正常 quit（退出码 0，看护不重启旧副本）。
+        新进程带 `--elevated` / `--standard` 标记，会用更长的单实例锁等待时间，
+        避免和正在保存贴图会话的旧进程抢锁失败。
+        """
+        elevated = is_elevated()
+        admin_autostart = bool(self.config.data.get("start_on_boot_admin"))
+        if elevated:
+            title = "以标准权限重启"
+            boot_note = ("· 开机启动方式仍是「管理员权限」：下次登录会由计划任务以管理员权限启动；\n"
+                         if admin_autostart else
+                         "· 本次切换只影响当前会话，不改变开机启动方式；\n")
+            message = ("将退出当前进程，并以标准权限重新启动 ScreenSnap。\n\n"
+                       "· 当前贴图会话会先保存，重启后恢复；\n"
+                       + boot_note +
+                       "· 前台是管理员窗口时，全局热键可能重新被拦截。\n\n继续？")
+        else:
+            title = "以管理员身份重启"
+            boot_note = ("· 当前开机启动方式已是「管理员权限」，本次手动提权只影响当前会话；\n"
+                         if admin_autostart else
+                         "· 提权只对本次会话有效，不会改变开机启动方式；\n")
+            message = ("将请求管理员权限并重新启动 ScreenSnap。\n\n"
+                       "· 会弹出一次 UAC 确认；\n"
+                       "· 当前贴图会话会先保存，重启后恢复；\n"
+                       + boot_note + "\n继续？")
+        parent = self.settings_window if self.settings_window.isVisible() else None
+        if yes_no_dialog(parent, title, message).exec() != QMessageBox.Yes:
+            return
+        try:
+            self.settings_window.flush_persist()
+        except Exception as error:  # noqa: BLE001 重启前尽量写盘，失败也继续尝试
+            self.logger.warning("重启前保存设置失败: %s", error)
+        status = restart_as_standard() if elevated else restart_as_admin()
+        if status == RESULT_LAUNCHED:
+            self.logger.warning("正在切换运行权限：%s", "管理员 → 标准" if elevated else "标准 → 管理员")
+            self.quit_app()
+        elif status == RESULT_CANCELLED:
+            self.notify("已取消管理员权限请求")
+        elif status == RESULT_ALREADY:
+            self.notify("当前已经是目标运行权限")
+        else:
+            QMessageBox.warning(self.settings_window, "无法切换运行权限",
+                                "拉起新进程失败，请退出后手动重新启动（详见日志）。")
+
 
     def request_full_user_data_reset(self):
         """停止当前实例，待持久化任务结束后由入口删除用户数据。"""
@@ -318,6 +392,13 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
             return True
         try:
             set_start_on_boot(False)
+            if self.config.data.get("start_on_boot_admin"):
+                # 管理员自启由计划任务负责；清空数据时一并删除，避免残留任务继续拉起空配置。
+                from core.autostart_admin import set_enabled
+
+                ok, message = set_enabled(False)
+                if not ok:
+                    raise OSError(f"删除开机管理员计划任务失败：{message}")
         except OSError as error:
             self.logger.error("彻底重置时无法关闭开机启动: %s", error, exc_info=True)
             QMessageBox.warning(self.settings_window, "无法清空全部数据",
@@ -347,6 +428,9 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
             sticker_panel=self.open_sticker_panel,
             recycle_bin=self.open_recycle_bin,
             restore_hotkeys=self.restore_hotkeys,
+            switch_privilege=self.request_privilege_restart,
+            elevated=is_elevated(),
+            admin_autostart=bool(self.config.data.get("start_on_boot_admin")),
         )
         self.tray.setContextMenu(self.menu)
         binding_settings = self.hotkey_binding_settings()
@@ -628,11 +712,20 @@ if __name__ == "__main__":
     # 正常启动也带崩溃自动重启：首次启动把控制权交给看护循环（supervisor.main），
     # 由它把本程序作为子进程运行并在异常退出后重启。已由看护启动（SUPERVISED=1）
     # 或设置 SCREENSNAP_NO_WATCHDOG=1 时直接运行，避免递归。
+    #
+    # 提权/降权拉起的第一层会继承旧进程的 SUPERVISED 标记：必须清掉，才能重新进入看护，
+    # 保证切换权限后崩溃自动重启仍然保持同一权限级别。看护给子进程传参时会去掉
+    # --elevated/--standard，所以第二层不会再次清标记、也就不会递归。
+    permission_launch = ELEVATED_MARKER in sys.argv or STANDARD_MARKER in sys.argv
+    if permission_launch:
+        os.environ.pop("SCREENSNAP_SUPERVISED", None)
+        os.environ.pop("SCREENSNAP_RESTARTED", None)
     if (os.environ.get("SCREENSNAP_SUPERVISED") != "1"
             and os.environ.get("SCREENSNAP_NO_WATCHDOG") != "1"):
         import supervisor
         sys.exit(supervisor.main(sys.argv[1:]))
-    instance_lock = acquire_single_instance_lock()
+    # 无看护模式下由本进程自己等旧实例退出；有看护时由 supervisor 先等锁。
+    instance_lock = acquire_single_instance_lock(wait_ms=20000 if permission_launch else 0)
     if instance_lock is None:
         notify_existing_instance()
         sys.exit(0)

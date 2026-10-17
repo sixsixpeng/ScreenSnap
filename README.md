@@ -493,7 +493,7 @@ Windows 图片提示优先使用带缩略图的原生图片 Toast；无法导入
 
 全局热键在"设置 > 快捷键"修改；截图遮罩内的快速贴图/快速保存键在"设置 > 截图 > 截图快捷操作"修改。设置页底部"恢复本页默认"只重置本页；窗口底部的"恢复全部默认"是最终手段，会先把当前设置备份成同目录的 `settings.bak` 再整体重置，"清理贴图会话"则删除贴图会话文件与私有缓存，方便从空白状态验证。
 
-设置窗口底部新增"清空全部数据"：经二次确认后退出当前实例并删除 `%APPDATA%\ScreenSnap`（实际路径以 tooltip 为准）及其中所有文件；不会重建配置或自动启动新实例，下次手动启动时程序会生成默认 `settings.json`。范围包括所有配置/备份、贴图会话与回收站、剪贴板历史及图片、缓存和保存在该目录的日志；若自定义截图保存目录设在此目录内，正式截图也会被删除。目录外的文件不受影响，不创建备份；同时关闭 Windows 开机自动启动项。该操作不可撤销，与"恢复全部默认"和"清理贴图会话"不同。
+设置窗口底部新增"清空全部数据"：经二次确认后退出当前实例并删除 `%APPDATA%\ScreenSnap`（实际路径以 tooltip 为准）及其中所有文件；不会重建配置或自动启动新实例，下次手动启动时程序会生成默认 `settings.json`。范围包括所有配置/备份、贴图会话与回收站、剪贴板历史及图片、缓存和保存在该目录的日志；若自定义截图保存目录设在此目录内，正式截图也会被删除。目录外的文件不受影响，不创建备份；同时关闭 Windows 开机自动启动项（注册表 Run 项与管理员计划任务）。该操作不可撤销，与"恢复全部默认"和"清理贴图会话"不同。
 
 - 4K/125% 大屏与小屏上下排列时，需在真实桌面分别测试新建截图贴图和重启恢复；若小屏仍偏移，查看 `logs/YYYY-MM/app.log` 中的"截图贴图锚点映射"与"贴图锚点应用"两条 DEBUG 记录，核对物理锚点、Qt 原生屏幕矩形和实际图像原点。
 
@@ -509,7 +509,7 @@ Windows 图片提示优先使用带缩略图的原生图片 Toast；无法导入
 
 ```python
 # core/version.py
-APP_VERSION = "1.0.17"   # ← 发布新版本时只改这一行
+APP_VERSION = "1.0.18"   # ← 发布新版本时只改这一行
 ```
 
 改动流程：
@@ -535,7 +535,7 @@ APP_VERSION = "1.0.17"   # ← 发布新版本时只改这一行
 | 分组 | 保留的键 |
 | --- | --- |
 | 环境与路径 | `save_dir`、`log_dir`、`file_sticker_path` |
-| 开机与系统注册 | `start_on_boot`（注册表里的自启项还在，重置会造成状态不一致） |
+| 开机与系统注册 | `start_on_boot`、`start_on_boot_admin`（注册表自启项 / 计划任务还在，重置会造成状态不一致） |
 | 按键习惯 | `hotkeys`、`hotkeys_enabled`、`capture_quick_sticker_shortcut`、`capture_save_shortcut`、`capture_custom_size_shortcut`、`capture_recapture_shortcut`、`capture_window_edit_shortcut`、`capture_multi_select_shortcut`、`capture_copy_shortcut`、`capture_toolbar_hide_shortcut`、`capture_picker_shortcut`、`capture_picker_format_shortcut`、`editor_save_as_shortcut`、`editor_undo_shortcut`、`editor_redo_shortcut`、`editor_zoom_reset_shortcut` |
 | 输出组织习惯 | `filename`、`save_format`、`archive_by_month`、`archive_by_day`、`image_archive_period` |
 | 打扰程度 | `bubble`、`notification_timeout`、`copy_notification`、`save_notification`、`sticker_notification` |
@@ -585,9 +585,15 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 
 通知由总开关和对应分类开关共同控制。进入编辑器不执行保存，因此没有入口自动保存通知；用户显式保存和贴图落盘仍按保存/贴图通知设置显示。Windows 11 Toast 只支持系统 `short`/`long` 时长（设置为 1–7 秒映射为 `short`，0 或 8–60 秒映射为 `long`，系统仍可能按自身策略关闭）；应用内图片预览和托盘文字提示按设置的秒数执行。
 
+启动与通知页还包含两项与权限相关的入口：
+
+* **开机启动方式**（三选一，互斥）：`关闭` / `标准权限` / `管理员权限（免 UAC）`。选「标准权限」写注册表 Run 项；选「管理员权限」改为 Windows 计划任务（`ScreenSnapAdminStartup`，`/SC ONLOGON /RL HIGHEST`），登录时由任务计划程序直接以管理员令牌启动，不再弹 UAC；首次切换、修改或删除任务需要一次管理员权限。任一时刻只会存在一种开机启动方式：启用任务会删除 Run 项，切回标准权限会删除任务并恢复 Run 项，关闭则两者都删除。
+* **运行权限**：设置页与托盘右键菜单都提供入口，可在本次会话内提权或降权重启。切到管理员会弹一次 UAC，并先保存贴图会话；切回标准会退出当前进程，用登录用户的标准令牌重新启动。切换只影响本次会话，不改变开机启动方式；如果开机启动方式本身是「管理员权限」，降权重启后下次登录仍会以管理员权限启动。提权后，前台为管理员窗口时全局热键不再被拦截；UAC 安全桌面仍无法截取。
+
 | 参数 | 默认值 | 控制内容 |
 | --- | --- | --- |
-| `start_on_boot` | `false` | 登录 Windows 后是否自动启动。 |
+| `start_on_boot` | `false` | 登录 Windows 后是否自动启动（标准权限，或与 `start_on_boot_admin` 组合表示管理员自启）。 |
+| `start_on_boot_admin` | `false` | 是否改用计划任务在登录时以管理员权限启动（免 UAC）；开启时同时把 `start_on_boot` 置为 `true`，并删除 Run 项。 |
 | `bubble` | `true` | 应用内图片预览、托盘提示和 Windows Toast 的总开关；完成音效独立控制。 |
 | `copy_notification` | `true` | 截图复制、复制颜色等复制操作完成后是否显示通知；旧配置的 `capture_notification` 会迁移到此项。 |
 | `save_notification` | `true` | 图片保存成功后是否显示通知。 |

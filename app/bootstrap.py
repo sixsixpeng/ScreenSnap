@@ -82,12 +82,16 @@ def install_exception_hooks():
 
 
 
-def acquire_single_instance_lock(path=None):
-    """获取进程级应用锁；返回 None 表示已有实例持锁。"""
+def acquire_single_instance_lock(path=None, wait_ms=0):
+    """获取进程级应用锁；返回 None 表示已有实例持锁。
+
+    wait_ms > 0 时最多等待这么久：提权/降权重启时新进程会先于旧进程退出启动，
+    必须给旧进程留出保存贴图会话并释放锁的时间。
+    """
     lock_path = Path(path) if path is not None else data_dir() / "screensnap.lock"
     lock_path.parent.mkdir(parents=True, exist_ok=True)
     lock = QLockFile(str(lock_path))
-    return lock if lock.tryLock(0) else None
+    return lock if lock.tryLock(int(wait_ms)) else None
 
 
 

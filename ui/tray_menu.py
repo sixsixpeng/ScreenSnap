@@ -5,9 +5,36 @@ from core.constants import shortcut_suffix, shortcut_label
 from ui.action_icons import action_icon
 
 
+def _privilege_action(menu, add_action, callback, elevated, admin_autostart):
+    """运行权限切换：文案与提示都要说清和开机启动方式的关系。
+
+    提权/降权只影响当前会话；如果开机启动方式本身是「管理员权限」，降权后下次登录
+    仍会由计划任务以管理员权限拉起 —— 这一点必须写进提示，避免用户以为已经永久降权。
+    """
+    from PySide6.QtWidgets import QStyle
+
+    if elevated:
+        text = "以标准权限重启"
+        tip = "退出当前进程，并用普通用户令牌重新启动 ScreenSnap。"
+        tip += ("\n开机启动方式仍是「管理员权限」：下次登录会由计划任务以管理员权限启动。"
+                if admin_autostart else
+                "\n只影响本次会话，不改变开机启动方式。")
+        icon = menu.style().standardIcon(QStyle.SP_DialogResetButton)
+    else:
+        text = "以管理员身份重启"
+        tip = ("请求管理员权限并重启 ScreenSnap；会弹出一次 UAC。\n"
+               "前台是管理员窗口时全局热键不再被拦截。")
+        tip += ("\n当前开机启动方式已是「管理员权限」，本次手动提权只影响当前会话。"
+                if admin_autostart else
+                "\n只影响本次会话，不改变开机启动方式。")
+        icon = menu.style().standardIcon(QStyle.SP_VistaShield)
+    add_action(icon, text, tip, callback)
+
+
 def make_tray_menu(app, capture, settings, quit_app, edit_clipboard=None, open_image=None,
                    hotkeys=None, open_sticker=None, paste_clipboard=None, sticker_panel=None,
-                   recycle_bin=None, restore_hotkeys=None):
+                   recycle_bin=None, restore_hotkeys=None, switch_privilege=None,
+                   elevated=False, admin_autostart=False):
     """只组装菜单动作，截图与退出逻辑仍由主程序持有。"""
     menu = QMenu()
 
@@ -64,6 +91,8 @@ def make_tray_menu(app, capture, settings, quit_app, edit_clipboard=None, open_i
                    "请求按当前设置重新注册本程序的全局绑定，同时清理记录里「系统已未按下」的残留按键，遵守手动恢复策略；"
                    "不重启原生钩子或库线程，仍无效请保留诊断后重启软件。",
                    restore_hotkeys)
+    if switch_privilege is not None:
+        _privilege_action(menu, add_action, switch_privilege, elevated, admin_autostart)
     add_action(action_icon("settings"), "设置", "打开设置窗口，调整截图、保存、快捷键和外观。", settings)
     menu.addSeparator()
     add_action(action_icon("exit"), "退出",

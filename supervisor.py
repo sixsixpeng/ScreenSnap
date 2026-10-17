@@ -2,16 +2,53 @@
 '''ScreenSnap 崩溃看护：异常退出时自动重启，正常退出时一起退出。'''
 import datetime
 import os
-import pathlib
 import subprocess
 import sys
 import time
 
-ROOT = pathlib.Path(__file__).resolve().parent
+
+def _default_root():
+    '''日志放在程序根目录：源码模式是仓库根，打包后是 exe 所在目录。
+
+    不能用 Path(__file__).parent：onedir 下它指向 _internal，onefile 下指向临时解包目录，
+    日志会写进用户找不到、重启后还会消失的位置。
+    '''
+    from core.startup import project_root
+
+    return project_root()
+
+
+ROOT = _default_root()
 LIMIT = 3
 WINDOW = 300.0
 BACKOFF = 1.0
 LOG_NAME = 'supervisor.log'
+# 提权/降权拉起的新进程会带这两个参数；子进程不需要它们（看护已经等过锁）。
+PERMISSION_MARKERS = ('--elevated', '--standard')
+
+
+def wait_for_previous_instance(timeout_ms=20000):
+    '''等待旧实例退出并释放单实例锁。
+
+    提权/降权重启时新进程会先于旧进程退出启动；旧进程要先保存贴图会话，
+    这里最多等 timeout_ms，避免新实例抢锁失败后直接提示「已经在运行」。
+    '''
+    try:
+        from PySide6.QtCore import QLockFile
+        from core.path_utils import data_dir
+
+        lock = QLockFile(str(data_dir() / 'screensnap.lock'))
+        if lock.tryLock(int(timeout_ms)):
+            lock.unlock()
+            return True
+    except (ImportError, OSError) as error:
+        log('等待单实例锁失败: ' + str(error))
+    return False
+
+
+def child_argv(argv):
+    '''传给子进程的参数：去掉只对启动方式有意义的权限标记。'''
+    return [arg for arg in argv if arg not in PERMISSION_MARKERS]
 
 
 def should_restart(returncode):
@@ -47,19 +84,21 @@ def default_command(argv):
 
     打包（PyInstaller/Nuitka）后 `sys.executable` 就是 exe 本身，**不能**再拼 main.py ——
     那会变成 `ScreenSnap.exe main.py …`，多出一个无意义的位置参数（onefile 下 ROOT 还是
-    临时解包目录，该路径并不存在）。判定复用 `core.startup.is_frozen()`（它同时兼容
-    PyInstaller 的 sys.frozen 与 Nuitka 的 __compiled__），与开机自启那条路径保持一致。
+    临时解包目录，该路径并不存在）。具体拼法统一放在 core.startup.launch_command。
     '''
-    from core.startup import is_frozen
+    from core.startup import launch_command
 
-    if is_frozen():
-        return [sys.executable, *argv]
-    return [sys.executable, str(ROOT / 'main.py'), *argv]
+    return launch_command(argv)
 
 
 def main(argv=None, command=None, limit=LIMIT, window=WINDOW, backoff=BACKOFF):
     '''看护循环：拉起子进程；异常退出则重启，达上限则停止。参数可注入以便测试。'''
     argv = list(sys.argv[1:] if argv is None else argv)
+    handoff = any(marker in argv for marker in PERMISSION_MARKERS)
+    if handoff:
+        waited = wait_for_previous_instance()
+        log('权限切换启动：等待旧实例释放单实例锁' + ('成功' if waited else '超时'))
+        argv = child_argv(argv)
     command = default_command(argv) if command is None else list(command)
     history = []
     restarted_from = None

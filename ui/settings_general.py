@@ -31,8 +31,10 @@ SOUND_OPTIONS = [("默认提示音（系统）", "default"),
 class GeneralPage(SettingsPage):
     """管理启动行为和通知偏好。"""
 
-    def __init__(self, config, changed):
+    def __init__(self, config, changed, elevate_callback=None):
         super().__init__(config, changed)
+        # 运行权限切换由主程序执行（要保存会话并退出当前进程），设置页只负责发起。
+        self.elevate_callback = elevate_callback
         self.group("版本与数据")
         self.text("app_version", "程序版本号",
                   "内置版本号会记录在这里（可在设置里修改）。启动时如果记录的版本与内置版本不一致，\n"
@@ -40,7 +42,8 @@ class GeneralPage(SettingsPage):
                   "因此改动此值等同于主动触发一次数据重置；留空表示首次运行，会直接写入内置版本。\n"
                   "当前内置版本见 core/version.py 的 APP_VERSION。")
         self.group("启动与通知")
-        self.check("start_on_boot", "开机自动启动", "登录 Windows 后自动运行 ScreenSnap")
+        self._startup_mode_row()
+        self._privilege_row()
         self.check("bubble", "通知总开关", "关闭后不显示应用内预览、托盘提示和 Windows Toast；完成音效仍由独立开关控制")
         self.radios("notification_backend", "通知方式",
                 [("Windows 11 原生通知", "win11toast"), ("旧版应用通知", "legacy")],
@@ -86,6 +89,167 @@ class GeneralPage(SettingsPage):
                     "留空表示跟随上面的全局提示音；\n"
                     "选择具体音色则只覆盖「" + label + "」这一类通知。\n"
                     "右侧「试听」听的就是这一行实际会响的音。", category=category)
+
+    def _startup_mode_row(self):
+        """开机自启的三种状态合并为一个单选组：关闭 / 标准权限 / 管理员权限。
+
+        管理员模式本质上是"开机自启的一种实现"（计划任务 + 最高权限），把它和普通自启
+        拆成两个开关会互相牵制，所以这里只暴露一个三选一：
+        · 关闭：删除 Run 键，并删除计划任务（若存在）；
+        · 标准权限：写 HKCU Run 键；
+        · 管理员权限：创建 HIGHEST 计划任务并删除 Run 键（首次需要一次 UAC）。
+        """
+        from ui.widgets.tooltip import RadioRow
+
+        tip = ("登录 Windows 后是否自动启动，以及用哪种权限启动：\n"
+               "· 关闭：不自动启动；\n"
+               "· 标准权限：写注册表 Run 项，启动后是普通权限；\n"
+               "· 管理员权限：改用 Windows 计划任务（使用最高权限运行），登录时免 UAC；\n"
+               "  首次切换、修改或删除任务时会请求一次管理员权限。\n"
+               "三种状态互斥，同一时间只会存在一种开机启动方式。\n"
+               "取值：关闭 / 标准权限 / 管理员权限，默认关闭")
+        widget = RadioRow(
+            [("关闭", "off"), ("标准权限", "standard"), ("管理员权限（免 UAC）", "admin")],
+            self._startup_mode(), tip, self._select_startup_mode)
+        widget.setToolTip(tip)
+        for button in widget._buttons.values():
+            button.setToolTip(tip)
+        widget._setting_label = "开机启动方式"
+        # 两个配置键共用同一个控件：设置页约定每个键都要有入口，刷新时由 sync_controls 特殊处理。
+        self.controls["start_on_boot"] = widget
+        self.controls["start_on_boot_admin"] = widget
+        self._startup_mode_control = widget
+        self.form.addRow("开机启动方式", widget)
+
+    def _startup_mode(self):
+        """把两个布尔键还原成三态，避免界面出现"管理员关着但普通自启也关着"的歧义。"""
+        if self.config.data.get("start_on_boot_admin"):
+            return "admin"
+        if self.config.data.get("start_on_boot"):
+            return "standard"
+        return "off"
+
+    def _select_startup_mode(self, mode):
+        """切换开机启动方式；需要 UAC 的操作失败/取消时只回滚按钮，不改配置。"""
+        from PySide6.QtWidgets import QMessageBox
+
+        from core.autostart_admin import set_enabled
+
+        previous = self._startup_mode()
+        if mode == previous:
+            return
+        if previous == "admin" and mode != "admin":
+            ok, message = set_enabled(False)
+            if not ok:
+                self._revert_startup_mode(previous, message)
+                return
+        if mode == "admin":
+            ok, message = set_enabled(True)
+            if not ok:
+                self._revert_startup_mode(previous, message)
+                return
+        self.config.data["start_on_boot_admin"] = mode == "admin"
+        self.config.data["start_on_boot"] = mode != "off"
+        self.changed()
+
+    def _revert_startup_mode(self, previous, message):
+        from PySide6.QtCore import QSignalBlocker
+        from PySide6.QtWidgets import QMessageBox
+
+        with QSignalBlocker(self._startup_mode_control):
+            self._startup_mode_control.set_value(previous)
+        if message == "cancelled":
+            QMessageBox.information(self, "已取消", "已取消管理员权限请求，开机启动方式未改变。")
+        else:
+            QMessageBox.warning(self, "设置未生效", f"{message}\n可稍后重试。")
+
+    def _sync_startup_mode_control(self):
+        from PySide6.QtCore import QSignalBlocker
+
+        if hasattr(self, "_startup_mode_control"):
+            with QSignalBlocker(self._startup_mode_control):
+                self._startup_mode_control.set_value(self._startup_mode())
+
+    def _privilege_row(self):
+        """一次性动作：在管理员权限与标准权限之间重启当前程序。"""
+        from PySide6.QtWidgets import QHBoxLayout, QLabel, QPushButton, QSizePolicy, QWidget
+
+        self._privilege_button = QPushButton()
+        self._privilege_button.setSizePolicy(QSizePolicy.Fixed, QSizePolicy.Fixed)
+        self._privilege_button.setToolTip(
+            "重启 ScreenSnap 并切换运行权限（只影响本次会话）。\n"
+            "切到管理员：前台是管理员窗口时全局热键不再被拦截；会弹一次 UAC，\n"
+            "当前贴图会话会先保存、重启后恢复。\n"
+            "切回标准：退出当前进程，并用普通用户令牌重新启动。")
+        self._privilege_status = QLabel()
+        self._privilege_status.setToolTip(self._privilege_button.toolTip())
+        row = QWidget()
+        row.setToolTip(self._privilege_button.toolTip())
+        layout = QHBoxLayout(row)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        layout.addWidget(self._privilege_button)
+        layout.addWidget(self._privilege_status, 1)
+        self.form.addRow("运行权限", row)
+        self._privilege_button.clicked.connect(self._switch_privilege)
+        self._refresh_privilege_row()
+
+    def _refresh_privilege_row(self):
+        from PySide6.QtWidgets import QStyle
+
+        from core.elevation import is_elevated
+
+        if not hasattr(self, "_privilege_button"):
+            return
+        elevated = is_elevated()
+        self._privilege_button.setText("以标准权限重启" if elevated else "以管理员身份重启")
+        # 两种文案取较宽者，保证按钮在任何 DPI/字体下都不会把文字裁掉。
+        metrics = self._privilege_button.fontMetrics()
+        needed = max(metrics.horizontalAdvance(text)
+                     for text in ("以管理员身份重启", "以标准权限重启"))
+        self._privilege_button.setMinimumWidth(needed + 56)
+        self._privilege_button.setIcon(
+            self.style().standardIcon(QStyle.SP_MessageBoxWarning if not elevated
+                                      else QStyle.SP_DialogResetButton))
+        self._privilege_button.setEnabled(self.elevate_callback is not None)
+        self._privilege_status.setText(
+            "当前以管理员权限运行" if elevated else "当前以标准权限运行")
+
+    def _switch_privilege(self):
+        if self.elevate_callback is not None:
+            self.elevate_callback()
+
+    def sync_controls(self):
+        """页面切换/恢复默认后，把三态启动方式与运行权限按钮刷新到实际状态。"""
+        # 两个配置键共用同一个 RadioRow；基类会按布尔值调用 set_value，先临时摘下再统一回写。
+        special = {key: self.controls.pop(key)
+                   for key in ("start_on_boot", "start_on_boot_admin")
+                   if key in self.controls}
+        try:
+            super().sync_controls()
+        finally:
+            self.controls.update(special)
+        self._sync_startup_mode_control()
+        self._refresh_privilege_row()
+
+    def reset_page(self):
+        """恢复本页默认：管理员模式需要先删掉系统里的计划任务（可能弹一次 UAC）。
+
+        删除失败/取消时保留当前启动方式并提示，避免界面显示"关闭"、
+        系统里却仍然存在登录提权任务。
+        """
+        from PySide6.QtWidgets import QMessageBox
+
+        if self._startup_mode() == "admin":
+            from core.autostart_admin import set_enabled
+
+            ok, message = set_enabled(False)
+            if not ok:
+                QMessageBox.warning(self, "无法关闭开机管理员启动",
+                                    f"{message}\n本次未恢复本页默认设置。")
+                return
+        super().reset_page()
+        self._sync_startup_mode_control()
 
     def _sound_choice(self, key, label, options, help_text, category=None):
         """提示音下拉 + **同一行**的「试听」按钮（2026-10-11 用户要求：每行一个试听，明确在听谁）。

@@ -41,6 +41,7 @@ MODULES = [
     "tests.test_ui",
     "tests.test_app",
     "tests.test_misc",
+    "tests.test_elevation",
     "tests.test_supervisor",
     "tests.editor.test_canvas",
     "tests.editor.test_tools",
