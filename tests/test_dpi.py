@@ -1982,5 +1982,240 @@ class DpiTests(CoreTests):
             apply_theme(self.app, "system")
 
 
+    def test_mask_multiscreen_cache_invariants_across_layouts(self):
+        """多屏约定回归：缓存后的吸附边缘/坐标缩放/标尺必须与“每帧重算”的旧算法逐屏一致。
+
+        覆盖 2/3/4 屏 × 横排/竖排/2×2/阶梯/物理间隙/负原点 六种排列，DPR 取
+        1.0/1.25/1.5/1.75 并轮换组合。每个视图都断言：
+        ① `snap_x_edges`/`snap_y_edges` 与旧公式（显示器边缘 + 窗口边缘，物理局部坐标）完全相同；
+        ② `to_logical_rect` 与按本屏 native/物理比例直接计算的结果一致（含跨屏大矩形）；
+        ③ 标尺 pixmap 按本屏尺寸/DPR 缓存，重复取用命中同一对象，改刻度后失效重建。
+        """
+        from PySide6.QtGui import QImage, QPainter
+        from config.config_manager import DEFAULTS
+        from core.dpi import DisplayMapper
+        from screenshot.mask_window import MaskSession, MaskWindow
+
+        sizes = ((512, 384), (640, 480), (800, 600), (960, 540))
+        scale_sets = ((1.0, 1.5), (1.25, 1.0, 1.75), (1.0, 1.25, 1.5, 1.75))
+        arrangements = ("row", "column", "grid", "staircase", "gap", "negative")
+
+        def build_layout(count, scales, arrangement):
+            gap = 20 if arrangement in ("gap", "grid") else 0
+            columns = 2 if arrangement == "grid" else 1
+            row_height = max(size[1] for size in sizes[:count])
+            row_native_height = max(round(size[1] / scale)
+                                    for size, scale in zip(sizes[:count], scales))
+            monitors, infos = [], []
+            x = y = nx = ny = 0
+            for index in range(count):
+                width, height = sizes[index]
+                scale = scales[index]
+                native_width, native_height = round(width / scale), round(height / scale)
+                monitors.append({"left": x, "top": y, "width": width, "height": height})
+                infos.append({"geometry": QRect(nx, ny, native_width, native_height),
+                              "dpr": scale})
+                if arrangement in ("row", "gap", "negative"):
+                    x += width + gap
+                    nx += native_width + gap
+                elif arrangement == "column":
+                    y += height + gap
+                    ny += native_height + gap
+                elif arrangement == "staircase":
+                    x += width + gap
+                    y += height + gap
+                    nx += native_width + gap
+                    ny += native_height + gap
+                else:  # grid：2 列，按行换行
+                    if index % columns == columns - 1:
+                        x = 0
+                        y += row_height + gap
+                        nx = 0
+                        ny += row_native_height + gap
+                    else:
+                        x += width + gap
+                        nx += native_width + gap
+            if arrangement == "negative":
+                offset_x, offset_y = -1234, -777
+                for monitor in monitors:
+                    monitor["left"] += offset_x
+                    monitor["top"] += offset_y
+                for info in infos:
+                    info["geometry"].translate(offset_x, offset_y)
+            left = min(monitor["left"] for monitor in monitors)
+            top = min(monitor["top"] for monitor in monitors)
+            right = max(monitor["left"] + monitor["width"] for monitor in monitors)
+            bottom = max(monitor["top"] + monitor["height"] for monitor in monitors)
+            bounds = {"left": left, "top": top, "width": right - left, "height": bottom - top}
+            return monitors, infos, bounds
+
+        # 窗口吸附边缘：一条完全在桌面内，一条跨到负坐标（覆盖负原点的会话）。
+        windows = ((0, 0, 320, 240), (-1500, -900, 60, 40))
+        checked = 0
+        for count in (2, 3, 4):
+            for arrangement in arrangements:
+                scales = scale_sets[count - 2]
+                shift = arrangements.index(arrangement) % len(scales)
+                scales = scales[shift:] + scales[:shift]
+                monitors, infos, bounds = build_layout(count, scales, arrangement)
+                mapper = DisplayMapper(bounds, monitors, infos, monitor_scales=list(scales))
+                session = MaskSession(mapper)
+                settings = dict(DEFAULTS, window_detection=False, inline_edit=False,
+                                magnifier=False, mask_opacity=0, crosshair=False)
+                with patch("screenshot.mask_window.visible_windows",
+                           return_value=list(windows)):
+                    # 生产约定：只创建主遮罩，其余显示器由主遮罩在构造时一并创建。
+                    MaskWindow(Image.new("RGB", (bounds["width"], bounds["height"])),
+                               bounds, monitors, settings, session=session)
+                views = list(session.views)
+                try:
+                    self.assertEqual(len(views), count)
+                    expected_x, expected_y = [], []
+                    for monitor in monitors:
+                        expected_x.extend((monitor["left"] - bounds["left"],
+                                           monitor["left"] + monitor["width"] - 1 - bounds["left"]))
+                        expected_y.extend((monitor["top"] - bounds["top"],
+                                           monitor["top"] + monitor["height"] - 1 - bounds["top"]))
+                    for left, top, right, bottom in windows:
+                        expected_x.extend((left - bounds["left"], right - 1 - bounds["left"]))
+                        expected_y.extend((top - bounds["top"], bottom - 1 - bounds["top"]))
+                    for view in views:
+                        name = (count, arrangement, scales, view.monitor_rect.getRect())
+                        # ① 吸附边缘：缓存结果必须与旧算法逐项相同（顺序也相同）。
+                        self.assertEqual(view.snap_x_edges, expected_x, name)
+                        self.assertEqual(view.snap_y_edges, expected_y, name)
+                        # ② 每块屏的物理→逻辑比例各自独立（混合 DPI 下不能共用全局比例）。
+                        native = mapper.physical_local_rect_to_native_global_rect(
+                            view.monitor_rect)
+                        scale_x = native.width() / view.monitor_rect.width()
+                        scale_y = native.height() / view.monitor_rect.height()
+                        rects = (view.monitor_rect,
+                                 mapper.full_physical_local_rect(),
+                                 QRect(view.monitor_rect.x() + 7,
+                                       view.monitor_rect.y() + 11, 13, 17))
+                        for rect in rects:
+                            actual = view.to_logical_rect(rect)
+                            expected = QRectF((rect.x() - view.monitor_rect.x()) * scale_x,
+                                              (rect.y() - view.monitor_rect.y()) * scale_y,
+                                              rect.width() * scale_x,
+                                              rect.height() * scale_y)
+                            for key in ("x", "y", "width", "height"):
+                                self.assertAlmostEqual(getattr(actual, key)(),
+                                                       getattr(expected, key)(),
+                                                       places=6, msg=name)
+                        # ③ 标尺按本屏尺寸/DPR 缓存；重复取用命中同一对象。
+                        ratio = view.devicePixelRatioF() or 1.0
+                        first = view._ruler_pixmap()
+                        self.assertIs(first, view._ruler_pixmap(), name)
+                        self.assertEqual(first.width(),
+                                         max(1, int(view.width() * ratio)), name)
+                        self.assertEqual(first.height(),
+                                         max(1, int(view.height() * ratio)), name)
+                        checker = QImage(view.size(), QImage.Format_ARGB32_Premultiplied)
+                        checker.fill(Qt.transparent)
+                        painter = QPainter(checker)
+                        view._draw_ruler(painter)
+                        painter.end()
+                        self.assertGreater(checker.pixelColor(0, 0).alpha(), 0, name)
+                        self.assertEqual(checker.pixelColor(checker.width() // 2,
+                                                           checker.height() // 2).alpha(),
+                                         0, name)
+                        old_key = view._ruler_cache_key
+                        view.settings["ruler_step"] = 20
+                        try:
+                            self.assertIsNot(first, view._ruler_pixmap(), name)
+                            self.assertNotEqual(old_key, view._ruler_cache_key, name)
+                        finally:
+                            view.settings["ruler_step"] = DEFAULTS["ruler_step"]
+                        checked += 1
+                finally:
+                    for view in views:
+                        view.close()
+        self.assertGreaterEqual(checked, 36, "多屏组合覆盖不足")
+
+    def test_mask_update_all_computes_magnifier_frame_once_on_cursor_screen(self):
+        """多屏刷新约定：每帧只为光标所在屏算一次放大镜框，其它屏传 None。
+
+        负原点 + 水平/垂直接缝 + 混合 DPI 的四屏布局，逐屏移动光标，断言：
+        ① `magnifier_frame()` 每次刷新恰好调用一次，且属于光标所在视图；
+        ② 两块浮层的 `sync(frame)` 收到的是**同一个** frame，非光标屏为 None（保持原隐藏语义）；
+        ③ 位置落在接缝（下一块屏的左上角）时只归下一块屏，不会两块屏重复计算。
+        """
+        from config.config_manager import DEFAULTS
+        from core.dpi import DisplayMapper
+        from screenshot.mask_window import (InfoBar, MagnifierOverlay, MaskSession,
+                                            MaskWindow)
+
+        monitors = [
+            {"left": -960, "top": -540, "width": 960, "height": 540},
+            {"left": 0, "top": -540, "width": 1280, "height": 720},
+            {"left": 0, "top": 180, "width": 960, "height": 540},
+            {"left": 960, "top": 180, "width": 640, "height": 360},
+        ]
+        infos = [
+            {"geometry": QRect(-960, -540, 960, 540), "dpr": 1.0},
+            {"geometry": QRect(0, -540, 1024, 576), "dpr": 1.25},
+            {"geometry": QRect(0, 180, 640, 360), "dpr": 1.5},
+            {"geometry": QRect(960, 180, 640, 360), "dpr": 1.0},
+        ]
+        bounds = {"left": -960, "top": -540, "width": 2560, "height": 1260}
+        mapper = DisplayMapper(bounds, monitors, infos,
+                               monitor_scales=[1.0, 1.25, 1.5, 1.0])
+        session = MaskSession(mapper)
+        settings = dict(DEFAULTS, window_detection=False, inline_edit=False,
+                        mask_opacity=0, crosshair=False)
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            # 生产约定：只创建主遮罩，其余显示器由主遮罩在构造时一并创建。
+            MaskWindow(Image.new("RGB", (2560, 1260), "white"), bounds, monitors,
+                       settings, session=session)
+        views = list(session.views)
+        self.assertEqual(len(views), len(monitors))
+        real_frame = MaskWindow.magnifier_frame
+        frame_calls = []
+
+        def spy_frame(view):
+            frame = real_frame(view)
+            frame_calls.append((view, frame))
+            return frame
+
+        try:
+            with patch.object(MaskWindow, "magnifier_frame", spy_frame), \
+                    patch.object(MagnifierOverlay, "sync") as magnifier_sync, \
+                    patch.object(InfoBar, "sync") as info_sync:
+                for index, view in enumerate(views):
+                    view.position = view.monitor_rect.center()
+                    frame_calls.clear()
+                    magnifier_sync.reset_mock()
+                    info_sync.reset_mock()
+                    view.update_all()
+                    self.assertEqual(session.position, view.monitor_rect.center(), index)
+                    self.assertEqual(len(frame_calls), 1, index)
+                    self.assertIs(frame_calls[0][0], view, index)
+                    cursor_frame = frame_calls[0][1]
+                    self.assertEqual(magnifier_sync.call_count, len(views), index)
+                    self.assertEqual(info_sync.call_count, len(views), index)
+                    for other_index, other in enumerate(views):
+                        expected = cursor_frame if other is view else None
+                        self.assertIs(
+                            magnifier_sync.call_args_list[other_index].args[0],
+                            expected, (index, other_index))
+                        self.assertIs(
+                            info_sync.call_args_list[other_index].args[0],
+                            expected, (index, other_index))
+                # 接缝：下一块屏的左上角属于下一块屏（QRect 右/下边界为开区间）。
+                views[1].position = views[1].monitor_rect.topLeft()
+                frame_calls.clear()
+                magnifier_sync.reset_mock()
+                info_sync.reset_mock()
+                views[1].update_all()
+                self.assertEqual(len(frame_calls), 1)
+                self.assertIs(frame_calls[0][0], views[1])
+                self.assertIsNone(magnifier_sync.call_args_list[0].args[0])
+                self.assertIsNotNone(magnifier_sync.call_args_list[1].args[0])
+        finally:
+            for view in views:
+                view.close()
+
+
 if __name__ == "__main__":  # 支持 python tests/test_dpi.py
     unittest.main()

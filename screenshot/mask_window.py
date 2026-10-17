@@ -233,7 +233,7 @@ class MagnifierOverlay(QWidget):
         self.setAttribute(Qt.WA_OpaquePaintEvent)
         self.hide()
 
-    def sync(self):
+    def sync(self, frame=None):
         view = self.view
         editor = view.session.inline_editor
         # 任意模态对话框或下拉弹出层（如取色框、字体选择下拉）打开时都隐藏放大镜，
@@ -246,7 +246,10 @@ class MagnifierOverlay(QWidget):
         if not visible:
             self.hide()
             return
-        frame = view.magnifier_frame()
+        # 调用方（`update_all`）可能在同一次刷新里已经算过，直接复用 ⇒ 不再与 InfoBar
+        # 各自重算一遍（内含提示条排版与文字宽度测量）。
+        if frame is None:
+            frame = view.magnifier_frame()
         # 记下这个框：paintEvent 必须用**同一个**框来平移与绘制。重新算一遍是危险的 ——
         # `magnifier_frame()` 把提示条预留计入组翻转判定，触底/触右时可能与只算放大镜的
         # 结果翻到不同侧，内容就被画到窗口外、放大镜一片空白（2026-10-16 修复）。
@@ -300,8 +303,12 @@ class InfoBar(QWidget):
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.hide()
 
-    def sync(self):
-        """按当前光标位置重算位置与内容；没有内容或不该显示时整条隐藏。"""
+    def sync(self, frame=None):
+        """按当前光标位置重算位置与内容；没有内容或不该显示时整条隐藏。
+
+        `frame` 可由调用方传入（同一次刷新里 `update_all` 已为光标所在屏算过一次），
+        避免放大镜与提示条各自调用 `magnifier_frame()` 重复排版。
+        """
         view = self.view
         if not view.isVisible():
             self.hide()
@@ -342,9 +349,11 @@ class InfoBar(QWidget):
         metrics = self.fontMetrics()
         warning = view.self_check_warning()
         settings = view.settings or {}
+        if frame is None:
+            frame = view.magnifier_frame()
         # 传入光标（逻辑坐标）：提示条据此与放大镜一起翻转、并与放大镜的边缘直接对齐。
         bar, rows, align_right = info_bar_layout(
-            metrics, view.rect(), view.magnifier_frame(), view.capture_hint_items(),
+            metrics, view.rect(), frame, view.capture_hint_items(),
             warning=warning, per_line=view.hint_per_line(),
             cursor=view.to_logical_point(view.position),
             gap=int(settings.get("capture_hint_gap", 0) or 0))
@@ -1326,6 +1335,27 @@ class MaskWindow(QWidget):
             get_logger().debug(
                 "截图窗口吸附边界：%d 个窗口，物理像素包含式端点", len(self.session.window_edges))
         self.window_edges = self.session.window_edges
+        # 吸附边缘只取决于显示器布局与窗口枚举结果，一轮截图内不变 ⇒ 构造时算一次，
+        # 避免每次鼠标移动都重建两份列表（多屏 + 多窗口时尤其明显）。
+        # 坐标是**相对 bounds 原点的物理局部坐标**（整轮截图共享），不是本屏局部坐标：
+        # 选区/指针也在这个空间里，因此跨屏拖动时边缘吸附仍然正确。
+        self.snap_x_edges = [coordinate for screen in self.monitors for coordinate in
+                             (screen["left"] - self.bounds["left"],
+                              screen["left"] + screen["width"] - 1 - self.bounds["left"])]
+        self.snap_y_edges = [coordinate for screen in self.monitors for coordinate in
+                             (screen["top"] - self.bounds["top"],
+                              screen["top"] + screen["height"] - 1 - self.bounds["top"])]
+        self.snap_x_edges.extend(edge - self.bounds["left"]
+                                 for left, top, right, bottom in self.window_edges
+                                 for edge in (left, right - 1))
+        self.snap_y_edges.extend(edge - self.bounds["top"]
+                                 for left, top, right, bottom in self.window_edges
+                                 for edge in (top, bottom - 1))
+        # 每块屏构造时只算一次；后续鼠标移动直接复用，日志用于确认没有在移动路径上重建。
+        get_logger().debug(
+            "吸附边缘缓存建立: 显示器=%d 窗口=%d x边缘=%d y边缘=%d",
+            len(self.monitors), len(self.window_edges),
+            len(self.snap_x_edges), len(self.snap_y_edges))
         self.settings = settings
         self.quick_sticker_enabled = bool(settings.get("capture_quick_sticker_enabled", False))
         self.quick_sticker_consumed = False
@@ -1811,12 +1841,47 @@ class MaskWindow(QWidget):
             # S 不参与微调：任何状态下都是快捷保存（避免"按住时按键被吞/误保存"的判定问题）
             self.capture_save_shortcut.setEnabled(True)
         self.session.position = QPoint(self.position)
-        for view in self.session.views:
+        started = time.perf_counter()
+        frame_cost = 0.0
+        frame_views = 0
+        cursor_view = -1
+        for index, view in enumerate(self.session.views):
             view.position = QPoint(self.session.position)
+            # 放大镜与提示条原本各自调用一次 magnifier_frame()（内含提示条排版与文字测量）。
+            # 只有光标所在屏需要显示它们，因此这里只在该屏算一次并复用给两个浮层。
+            # 判定口径与 `info_bar.hint_visible_on_monitor` 一致（QRect 右/下边界为开区间）：
+            # 光标落在两块屏接缝像素上时只会命中其中一块，不存在两屏各算一次的情况。
+            on_cursor = view.monitor_rect.contains(view.position)
+            if on_cursor:
+                cursor_view = index
+                frame_started = time.perf_counter()
+                frame = view.magnifier_frame()
+                frame_cost += time.perf_counter() - frame_started
+                frame_views += 1
+            else:
+                frame = None
             view.update()
-            view.magnifier_overlay.sync()
+            view.magnifier_overlay.sync(frame)
             # 提示条是子控件：位置与内容都跟着光标变，每帧同步一次并抬到画布之上。
-            view.info_bar.sync()
+            view.info_bar.sync(frame)
+        # 限频 DEBUG 统计：用于确认“每帧只算了一次放大镜框”、以及同步本身的耗时量级。
+        now = time.perf_counter()
+        stats = getattr(self, "_update_all_stats", None)
+        if stats is None:
+            stats = [0.0, 0.0, 0]
+            self._update_all_stats = stats
+        stats[0] += frame_cost
+        stats[1] += now - started
+        stats[2] += 1
+        if now - getattr(self, "_update_all_log_at", 0.0) >= 5.0:
+            count = max(1, stats[2])
+            get_logger().debug(
+                "遮罩刷新(5s窗口): 次数=%d 屏数=%d 光标屏=%d 计算放大镜框=%d "
+                "平均放大镜框=%.3fms 平均同步=%.3fms",
+                stats[2], len(self.session.views), cursor_view, frame_views,
+                stats[0] / count * 1000, stats[1] / count * 1000)
+            self._update_all_log_at = now
+            self._update_all_stats = [0.0, 0.0, 0]
 
     def _dismiss_inline_editor(self):
         """关掉原地编辑器并归还快捷键（沿用 toggle_multi_select_mode 的收尾顺序）。"""
@@ -2746,11 +2811,31 @@ class MaskWindow(QWidget):
         return (self.mapper.native_global_to_physical_global(QCursor.pos())
                 - self.mapper.physical_bounds.topLeft())
 
+    def _logical_scales(self):
+        """物理局部 → 当前窗口逻辑局部的缩放比例（每块屏各自一份）。
+
+        多屏混合 DPI 下各屏比例不同，因此缓存键必须带 `monitor_rect` 与窗口尺寸；
+        同一轮截图内这两者不变，缓存后 `paintEvent` 里的多次 `to_logical_rect` 不再重复走映射查找。
+        """
+        monitor = self.monitor_rect
+        key = (monitor.x(), monitor.y(), monitor.width(), monitor.height(),
+               self.width(), self.height())
+        cached = getattr(self, "_logical_scale_cache", None)
+        if cached is not None and cached[0] == key:
+            return cached[1], cached[2]
+        native = self.mapper.physical_local_rect_to_native_global_rect(monitor)
+        scale_x = native.width() / monitor.width() if monitor.width() else 1.0
+        scale_y = native.height() / monitor.height() if monitor.height() else 1.0
+        self._logical_scale_cache = (key, scale_x, scale_y)
+        # 每块屏一轮截图只建一次缓存；记录下来可确认后续绘制没有再走映射查找。
+        get_logger().debug(
+            "坐标缩放缓存建立: 显示器=%s 窗口=%dx%d 缩放=(%.4f, %.4f)",
+            monitor.getRect(), self.width(), self.height(), scale_x, scale_y)
+        return scale_x, scale_y
+
     def to_logical_rect(self, rect):
         """截图物理局部矩形 -> 当前窗口逻辑局部矩形。"""
-        native = self.mapper.physical_local_rect_to_native_global_rect(self.monitor_rect)
-        scale_x = native.width() / self.monitor_rect.width()
-        scale_y = native.height() / self.monitor_rect.height()
+        scale_x, scale_y = self._logical_scales()
         return QRectF((rect.x() - self.monitor_rect.x()) * scale_x,
                       (rect.y() - self.monitor_rect.y()) * scale_y,
                       rect.width() * scale_x, rect.height() * scale_y)
@@ -2790,14 +2875,26 @@ class MaskWindow(QWidget):
             widget.setAlignment(Qt.AlignCenter)
             widget.setAttribute(Qt.WA_TransparentForMouseEvents)   # 不抢鼠标 ⇒ 不干扰划选/微调 ✓
             self._size_badge = widget
-        font_size = int(self.settings.get("window_hover_font_size", 12))
-        widget.setStyleSheet(
-            "QLabel#sizeBadge { color: %s; background: %s; border: %dpx solid %s; border-radius: 4px; }"
-            % (self.settings.get("window_hover_text_color", "#F4FFFC"),
-               self.settings.get("window_hover_badge_color", "#102A31"),
-               max(1, int(self.settings.get("window_hover_border_width", 2))),
-               self.settings.get("window_hover_border_color", "#168cff")))
-        widget.setFont(QFont(self.font().family(), max(1, font_size)))
+        font_size = max(1, int(self.settings.get("window_hover_font_size", 12)))
+        # 本函数每帧都会被 paintEvent 调用；setStyleSheet 会触发 Qt 样式重解析 + polish，
+        # 每帧重复执行是明确的浪费。样式只与这几个配置值有关 ⇒ 用签名比较，未变化就跳过。
+        style_key = (
+            self.settings.get("window_hover_text_color", "#F4FFFC"),
+            self.settings.get("window_hover_badge_color", "#102A31"),
+            max(1, int(self.settings.get("window_hover_border_width", 2))),
+            self.settings.get("window_hover_border_color", "#168cff"),
+            font_size, self.font().family(),
+        )
+        if getattr(self, "_badge_style_key", None) != style_key:
+            widget.setStyleSheet(
+                "QLabel#sizeBadge { color: %s; background: %s; border: %dpx solid %s; border-radius: 4px; }"
+                % (style_key[0], style_key[1], style_key[2], style_key[3]))
+            widget.setFont(QFont(self.font().family(), font_size))
+            self._badge_style_key = style_key
+            # 只有样式签名变化才会走到这里（首次创建或设置被改），不会每帧刷屏。
+            get_logger().debug(
+                "尺寸徽标样式已应用: 字号=%d 文字=%s 背景=%s 边框=%dpx/%s",
+                font_size, style_key[0], style_key[1], style_key[2], style_key[3])
         content = str(self.settings.get("window_hover_badge_content", "size_class")
                       or "size_class")
         origin = None
@@ -2869,12 +2966,18 @@ class MaskWindow(QWidget):
         #   画布/工具栏压了上来（此前几处 raise 都跑在它们显示之前，无效）⇒ 判定没变化时也**延迟**
         #   把徽标提上来一次（raise_ 幂等廉价；绝不在绘制期动子控件 —— D35）。
         if want_visible and not needs_update:
-            def _ensure_badge_on_top():
-                import shiboken6
-                _b = getattr(self, '_size_badge', None)
-                if _b is not None and shiboken6.isValid(self) and shiboken6.isValid(_b) and _b.isVisible():
-                    _b.raise_()
-            QTimer.singleShot(0, _ensure_badge_on_top)
+            # 每帧都排一个 singleShot 只为 raise_ 也是浪费：同一次事件循环里排一次足够，
+            # 后续帧复用同一个待执行回调（回调执行时会重新取最新的徽标对象）。
+            if not getattr(self, "_badge_raise_scheduled", False):
+                self._badge_raise_scheduled = True
+
+                def _ensure_badge_on_top():
+                    self._badge_raise_scheduled = False
+                    import shiboken6
+                    _b = getattr(self, '_size_badge', None)
+                    if _b is not None and shiboken6.isValid(self) and shiboken6.isValid(_b) and _b.isVisible():
+                        _b.raise_()
+                QTimer.singleShot(0, _ensure_badge_on_top)
         if not needs_update:
             return
 
@@ -3009,9 +3112,14 @@ class MaskWindow(QWidget):
         cached = getattr(self, "_preview_cache_pixmap", None)
         if cached is not None and getattr(self, "_preview_cache_key", None) == key:
             return cached
+        built_at = time.perf_counter()
         pixmap = QPixmap.fromImage(self.preview)
         self._preview_cache_pixmap = pixmap
         self._preview_cache_key = key
+        # 冻结画面 → QPixmap 的转换只做一次；记录耗时用于解释“第一帧偏慢”。
+        get_logger().debug("冻结画面 pixmap 缓存建立: 尺寸=%dx%d 耗时=%.2fms",
+                           pixmap.width(), pixmap.height(),
+                           (time.perf_counter() - built_at) * 1000)
         return pixmap
 
     def mask_background_pixmap(self):
@@ -3028,6 +3136,7 @@ class MaskWindow(QWidget):
         cached = getattr(self, "_mask_background_cache", None)
         if cached is not None and getattr(self, "_mask_background_key", None) == key:
             return cached
+        built_at = time.perf_counter()
         ratio = self.devicePixelRatioF() or 1.0
         pixmap = QPixmap(int(self.width() * ratio), int(self.height() * ratio))
         pixmap.setDevicePixelRatio(ratio)
@@ -3043,29 +3152,48 @@ class MaskWindow(QWidget):
         # 重建只在画面/尺寸/遮罩参数变化时发生，不是每帧，因此限频记 DEBUG 也不会刷屏。
         log_every(get_logger(), logging.DEBUG,
                   "mask-background-cache", key, 5.0,
-                  "重建遮罩底图缓存: 尺寸=%dx%d 遮罩=%s/%s%%",
+                  "重建遮罩底图缓存: 尺寸=%dx%d 遮罩=%s/%s%% 耗时=%.2fms",
                   self.width(), self.height(), self.settings.get("mask_color", "#000000"),
-                  int(self.settings.get("mask_opacity", 70)))
+                  int(self.settings.get("mask_opacity", 70)),
+                  (time.perf_counter() - built_at) * 1000)
         return pixmap
 
-    def _record_paint_cost(self, cost, now):
-        """限频 DEBUG 记录遮罩重绘耗时（5 秒窗口的平均/峰值/次数）。
+    def _record_paint_cost(self, cost, now, breakdown=None):
+        """限频 DEBUG 记录遮罩重绘耗时（5 秒窗口的平均/峰值/次数与分阶段均值）。
 
-        用于在实机上确认「每次鼠标移动整窗重绘」的真实成本，作为是否做局部重绘的依据；
+        `breakdown` 依次是 `(底图, 选区, 十字线, 标尺, 徽标)` 的秒数；与总耗时之差记为
+        “其它”（徽标判定、日志节流判断等）。这些分段只用于实测定位瓶颈，默认级别为 DEBUG，
         5 秒才输出一行，不属于高频刷屏。
         """
         stats = self.paint_cost_stats
         stats[0] += cost
         stats[1] += 1
         stats[2] = max(stats[2], cost)
+        parts = getattr(self, "_paint_cost_parts", None)
+        if parts is None:
+            parts = [0.0, 0.0, 0.0, 0.0, 0.0]
+            self._paint_cost_parts = parts
+        if breakdown:
+            for index, value in enumerate(breakdown[:5]):
+                parts[index] += value
         if self.paint_cost_log_at and now - self.paint_cost_log_at < 5.0:
             return
+        count = max(1, stats[1])
+        average = stats[0] / count * 1000
+        parts_ms = [value / count * 1000 for value in parts]
+        other = max(0.0, average - sum(parts_ms))
         self.paint_cost_log_at = now
         get_logger().debug(
-            "遮罩重绘耗时(5s窗口): 平均=%.1fms 峰值=%.1fms 次数=%d 窗口=%dx%d 悬停=%s",
-            stats[0] / stats[1] * 1000, stats[2] * 1000, stats[1],
-            self.width(), self.height(), self.hover_rect is not None)
+            "遮罩重绘耗时(5s窗口): 平均=%.2fms 峰值=%.2fms 次数=%d | "
+            "底图=%.2fms 选区=%.2fms 十字线=%.2fms 标尺=%.2fms 徽标=%.2fms 其它=%.2fms | "
+            "窗口=%dx%d 悬停=%s 标尺=%s 放大镜=%s",
+            average, stats[2] * 1000, stats[1],
+            parts_ms[0], parts_ms[1], parts_ms[2], parts_ms[3], parts_ms[4], other,
+            self.width(), self.height(), self.hover_rect is not None,
+            bool(self.settings.get("ruler_enabled", False)),
+            bool(self.settings.get("magnifier", False)))
         self.paint_cost_stats = [0.0, 0, 0.0]
+        self._paint_cost_parts = [0.0, 0.0, 0.0, 0.0, 0.0]
 
     def _crosshair_luminance(self):
         """采样十字线覆盖区域（限本屏）若干像素的平均亮度；无图像/越界返回 None。
@@ -3201,14 +3329,17 @@ class MaskWindow(QWidget):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.Antialiasing, True)
         painter.drawPixmap(0, 0, self.mask_background_pixmap())
+        # 冻结画面的 QPixmap 每帧只取一次：悬停揭示与各选区预览共用同一份缓存。
+        preview = self.preview_pixmap()
         hover_clipped = None
         if (self.hover_rect is not None and self.selection.active is None and
                 self.settings.get("window_hover_fill_mode", "reveal") == "reveal"):
             hover_clipped = self.hover_rect.intersected(self.monitor_rect)
-            preview = self.preview_pixmap()
             if not hover_clipped.isEmpty() and preview is not None:
                 painter.drawPixmap(self.to_logical_rect(hover_clipped), preview,
                                    QRectF(hover_clipped))
+        # 分阶段计时：只多 5 次 perf_counter（纳秒级），用于在 DEBUG 日志里定位瓶颈。
+        mask_cost = time.perf_counter() - started
         selection_paths = []
         for rect in self.selection.rects + ([self.selection.active] if self.selection.active else []):
             clipped = rect.intersected(self.monitor_rect)
@@ -3228,7 +3359,6 @@ class MaskWindow(QWidget):
             selection_paths.append(selection_path)
             painter.save()
             painter.setClipPath(selection_path)
-            preview = self.preview_pixmap()
             if preview is not None:
                 painter.drawPixmap(logical_rect, preview, QRectF(clipped))
             painter.restore()
@@ -3251,8 +3381,10 @@ class MaskWindow(QWidget):
                     painter.fillRect(anchor, anchor_color)
                 else:
                     painter.drawRect(anchor)
+        selection_cost = time.perf_counter() - started - mask_cost
         if self.settings["crosshair"]:
             self._paint_crosshair(painter)
+        crosshair_cost = time.perf_counter() - started - mask_cost - selection_cost
         current_selection = self.selection.active or (
             self.selection.rects[-1] if self.selection.rects else None
         )
@@ -3331,19 +3463,24 @@ class MaskWindow(QWidget):
                     else _hover_fill_color(self.settings))
                 painter.drawRect(self.to_logical_rect(clipped))
                 painter.setBrush(Qt.NoBrush)
+        ruler_started = time.perf_counter()
         self._draw_ruler(painter)
+        ruler_cost = time.perf_counter() - ruler_started
+        badge_started = time.perf_counter()
         self.info_bar_rect = draw_size_badge()      # 最后画 ⇒ 不被选区/悬停/刻度尺盖住 ✓
+        badge_cost = time.perf_counter() - badge_started
         ended = time.perf_counter()
-        self._record_paint_cost(ended - started, ended)
+        self._record_paint_cost(ended - started, ended,
+                                (mask_cost, selection_cost, crosshair_cost,
+                                 ruler_cost, badge_cost))
 
-    def _draw_ruler(self, painter):
-        """在遮罩边缘绘制像素标尺（顶部/右侧仅短线，底部/左侧带数值），帮助定位。"""
-        if not self.settings.get("ruler_enabled", False):
-            return
-        from PySide6.QtGui import QFont
-        rect = self.rect()
-        color = QColor(self.settings.get("ruler_color", "#00ad91"))
-        # 刻度间距与主刻度倍数可在设置里调整（ruler_step / ruler_major_multiple）。
+    def _ruler_pixmap(self):
+        """把标尺刻度画进一张透明覆盖层并缓存。
+
+        原来每次 paintEvent 都要在整窗范围内按 `ruler_step` 逐格 drawLine/drawText
+        （2560×1440、step=10 时约 800 次 drawLine + 80 次 drawText），而刻度只与窗口
+        尺寸、DPR 和三个配置项有关 ⇒ 缓存后每帧只需一次 drawPixmap。
+        """
         try:
             step = int(self.settings.get("ruler_step", 10) or 10)
         except (TypeError, ValueError):
@@ -3356,11 +3493,25 @@ class MaskWindow(QWidget):
             multiple = 5
         if multiple not in (2, 5, 10):
             multiple = 5
-        painter.save()
+        color = QColor(self.settings.get("ruler_color", "#00ad91"))
+        ratio = self.devicePixelRatioF() or 1.0
+        key = (self.width(), self.height(), round(ratio, 3), color.rgba(), step, multiple)
+        cached = getattr(self, "_ruler_cache", None)
+        if cached is not None and getattr(self, "_ruler_cache_key", None) == key:
+            return cached
+        built_at = time.perf_counter()
+        pixmap = QPixmap(max(1, int(self.width() * ratio)),
+                         max(1, int(self.height() * ratio)))
+        pixmap.setDevicePixelRatio(ratio)
+        pixmap.fill(Qt.transparent)
+        painter = QPainter(pixmap)
+        # 与原先直接画在遮罩上时保持同样的抗锯齿设置（文字刻度观感一致）。
+        painter.setRenderHint(QPainter.Antialiasing, True)
         painter.setPen(QPen(color, 1))
         font = QFont()
         font.setPixelSize(9)
         painter.setFont(font)
+        rect = self.rect()
         major = step * multiple
         # 小刻度与大刻度的线长随间距缩放，间距很小时仍能区分主次（避免等长看不清）。
         small = 5 if step >= 20 else 3
@@ -3377,7 +3528,21 @@ class MaskWindow(QWidget):
             painter.drawLine(rect.width() - length, y, rect.width(), y)
             if y % major == 0 and y > 0:
                 painter.drawText(length + 2, y - 2, str(y))
-        painter.restore()
+        painter.end()
+        self._ruler_cache = pixmap
+        self._ruler_cache_key = key
+        # 只在“尺寸/DPR/刻度配置”变化时重建，不是每帧；记录一次重建成本便于对比优化前后。
+        get_logger().debug(
+            "标尺缓存重建: 尺寸=%dx%d DPR=%.2f 步长=%d 主刻度=%d 耗时=%.2fms",
+            self.width(), self.height(), ratio, step, major,
+            (time.perf_counter() - built_at) * 1000)
+        return pixmap
+
+    def _draw_ruler(self, painter):
+        """在遮罩边缘绘制像素标尺（顶部/右侧仅短线，底部/左侧带数值），帮助定位。"""
+        if not self.settings.get("ruler_enabled", False):
+            return
+        painter.drawPixmap(0, 0, self._ruler_pixmap())
 
     def wheelEvent(self, event):
         super().wheelEvent(event)
@@ -3528,16 +3693,10 @@ class MaskWindow(QWidget):
             # 2026-10-12（规则 22 ✓ 多屏）：屏幕右/下边缘取**含端点**值（left+width-1），而非排他的 left+width。
             #   QRect 两端含端点 ⇒ 吸附到排他边界会让选区比屏幕多 1px（实测 2561×1441 ✗）；
             #   取含端点边界后，拉满屏正好等于屏幕尺寸（2560×1440 ✓）。
-            x_edges = [coordinate for screen in self.monitors for coordinate in
-                       (screen["left"] - self.bounds["left"],
-                        screen["left"] + screen["width"] - 1 - self.bounds["left"])]
-            y_edges = [coordinate for screen in self.monitors for coordinate in
-                       (screen["top"] - self.bounds["top"],
-                        screen["top"] + screen["height"] - 1 - self.bounds["top"])]
-            x_edges.extend(edge - self.bounds["left"] for left, top, right, bottom in self.window_edges
-                           for edge in (left, right - 1))
-            y_edges.extend(edge - self.bounds["top"] for left, top, right, bottom in self.window_edges
-                           for edge in (top, bottom - 1))
+            # 吸附边缘在构造时已按显示器布局与窗口枚举结果算好（一轮截图内不变），
+            # 这里直接复用，不再每次鼠标移动重建列表。
+            x_edges = self.snap_x_edges
+            y_edges = self.snap_y_edges
             if getattr(self, "_nudge_hold", False):
                 # 键盘微调已接管本次拖动 ⇒ 只按真实指针位置更新，不再做边缘吸附 ✗
                 # （吸附会把刚微调出来的 1px 偏移拉回原来的屏幕/窗口边缘 ✓ 见 _nudge_active_region）。
