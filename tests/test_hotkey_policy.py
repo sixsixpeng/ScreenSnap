@@ -13,7 +13,6 @@ from types import SimpleNamespace
 import unittest
 from unittest.mock import Mock, patch
 from contextlib import contextmanager
-import zipfile
 
 _ROOT = str(Path(__file__).resolve().parents[1])
 if _ROOT in sys.path:
@@ -27,7 +26,6 @@ from hotkey import hotkey_manager as hm
 from hotkey.recovery import RecoveryState
 from ui.settings_window import SettingsWindow
 from logger import get_logger
-from logger.diagnostic_report import export_report
 
 APP = QApplication.instance() or QApplication([])
 
@@ -180,7 +178,7 @@ class PolicyTests(unittest.TestCase):
                 log = window.page("日志与诊断")
                 log.update_value("logging_enabled", False)
                 self.assertTrue(log.controls["hotkey_summary_interval"].isHidden())
-                self.assertFalse(log.controls["hotkey_snapshot_limit"].isHidden())
+                self.assertFalse(log.controls["hotkey_snapshot_on_fault"].isHidden())
                 # 2026-10-16：键盘兼容性（兜底开关）已从截图页移到快捷键页；可见性依赖截图页的
                 # 快速贴图开关，属跨页联动 —— 切换页面会刷新，这里显式刷新快捷键页再断言。
                 capture = window.page("截图")
@@ -267,9 +265,18 @@ class PolicyTests(unittest.TestCase):
         with manager_context(hotkey_diagnostic_only=True) as (m, fake, _):
             m._pending_attempts["capture"] = [time.monotonic() - 1, time.monotonic() - 0.5]
             before = fake.add_hotkey.call_count
-            for _ in range(30):
-                m.check_health()
-            self.assertEqual(len(m._snapshot_history), 1)
+            # 2026-10-16：故障快照改为写日志（导出/复制报告已删），每次故障只写一条。
+            with self.assertLogs("screensnap", level="WARNING") as captured:
+                for _ in range(30):
+                    m.check_health()
+            snapshots = [line for line in captured.output if "热键故障快照:" in line]
+            self.assertEqual(len(snapshots), 1, "同一次故障只能写一条快照日志")
+            payload = snapshots[0].split("热键故障快照:", 1)[1].strip()
+            self.assertIn("reason", json.loads(payload), "快照必须是可直接解析的单行 JSON")
+            record = next(item for item in captured.records if "热键故障快照:" in item.getMessage())
+            self.assertTrue(getattr(record, "screensnap_metadata_only", False),
+                            "故障快照必须走元数据口径：否则日志过滤器会去取前台窗口/鼠标，"
+                            "前台是无响应或提权窗口时可能阻塞（故障现场恰恰是这种）")
             self.assertEqual(fake.add_hotkey.call_count, before)
             state = m.recovery
             state.callback("capture")
@@ -315,7 +322,7 @@ class PolicyTests(unittest.TestCase):
                 transition()
                 APP.processEvents()
             self.assertEqual(forwarded, [])
-            m.begin_verification()
+            m.reproduce_diagnostics()
             thread = threading.Thread(target=m.emit_action, args=("capture",))
             thread.start(); thread.join(1)
             m.finish_verification()
@@ -329,7 +336,8 @@ class PolicyTests(unittest.TestCase):
             m.check_health()
             self.assertEqual(m.recovery.state, "deferred")
             before = m._registration_requested
-            result = m.inspect_health()
+            m._last_health_evidence = m.health_evidence()
+            result = m.capture_snapshot("manual-check")
             self.assertEqual(result["evidence"]["unfired_action"], "capture")
             self.assertEqual(m._registration_requested, before)
             m.busy_check = lambda: False
@@ -363,30 +371,26 @@ class PolicyTests(unittest.TestCase):
             self.assertEqual(notices, [])
             self.assertEqual(failures, [])
 
-    def test_reports_are_private_bounded_and_reads_do_not_evict_faults(self):
-        with manager_context(hotkey_snapshot_limit=2) as (m, fake, _):
+    def test_snapshot_is_json_safe_and_carries_no_private_input(self):
+        """快照会直接 json.dumps 进日志：必须是可序列化的基础类型，且不含输入内容。"""
+        with manager_context() as (m, fake, _):
             fake._pressed_events[999] = "PRIVATE-INPUT"
-            m.capture_snapshot("fault")
-            for _ in range(30):
-                m.capture_snapshot("panel", retain=False)
-                report = m.diagnostic_report()
-            self.assertEqual(len(m._snapshot_history), 1)
-            self.assertNotIn("PRIVATE-INPUT", report)
-            m.capture_snapshot("manual"); m.capture_snapshot("manual")
-            self.assertEqual(len(m._snapshot_history), 2)
+            snapshot = m.capture_snapshot("panel")
+            payload = json.dumps(snapshot, ensure_ascii=False)
+            self.assertNotIn("PRIVATE-INPUT", payload)
+            self.assertIn('"reason"', payload)
 
-    def test_temporary_detail_does_not_modify_level_or_restart_on_settings_refresh(self):
-        with manager_context() as (m, _, settings):
+    def test_reproduce_diagnostics_enables_detail_without_changing_log_level(self):
+        with manager_context() as (m, _, _):
             logger = get_logger()
             level = logger.level
-            m.start_detail()
-            until = m._detail_until
-            settings["hotkey_detail_minutes"] = 2
-            m.configure_policy(settings)
-            self.assertEqual(m._detail_until, until)
-            self.assertEqual(logger.level, level)
-            m.stop_detail()
-            self.assertEqual(m._detail_until, 0)
+            message = m.reproduce_diagnostics()
+            self.assertIn("10 秒", message)
+            self.assertGreater(m._detail_until, time.monotonic())
+            self.assertEqual(logger.level, level, "复现诊断不得改普通日志等级")
+            result = m.finish_verification()
+            self.assertEqual(m._detail_until, 0.0, "结束时必须自动关闭详细诊断")
+            self.assertIn("keyboard_events", result)
 
     def test_session_unlock_and_resume_are_not_last_event_wins(self):
         from core.session_monitor import SessionMonitor
@@ -401,105 +405,51 @@ class PolicyTests(unittest.TestCase):
         self.assertEqual(events, [False, True])
         monitor.close()
 
-    def test_export_is_atomic_protects_live_directories_and_includes_newest_logs(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            logs = root / "logs"; logs.mkdir()
-            private = root / "private"; private.mkdir()
-            report = json.dumps({"safe": True})
-            for destination in (logs / "report.json", private / "settings.json"):
-                with self.assertRaises(ValueError):
-                    export_report(destination, report, logs, root, private / "settings.json")
-            (logs / "app.log").write_text("CURRENT", encoding="utf-8")
-            for index in range(30):
-                (logs / f"app.log.{index:02d}").write_text("OLD", encoding="utf-8")
-            result = export_report(root / "report.zip", report, logs, root, private / "settings.json", True)
-            self.assertGreater(result["truncated_logs"], 0)
-            with zipfile.ZipFile(root / "report.zip") as archive:
-                current = [name for name in archive.namelist() if name.endswith("/app.log")]
-                self.assertEqual(archive.read(current[0]), b"CURRENT")
-            target = root / "report.json"; target.write_text("before", encoding="utf-8")
-            with patch.object(Path, "replace", side_effect=OSError("isolated write failure")):
-                with self.assertRaises(OSError):
-                    export_report(target, report, logs, root, private / "settings.json")
-            self.assertEqual(target.read_text(encoding="utf-8"), "before")
-            self.assertFalse(list(root.glob("screensnap-report-*.tmp")))
+    def test_diagnostic_summary_is_three_readable_lines(self):
+        """2026-10-17：状态框不再刷 54 键原始 JSON，改为三行可读摘要（原始 JSON 只进故障日志）。"""
+        from ui.settings_health import DiagnosticPanel
 
-    def test_report_suffix_guard_cannot_overwrite_program_or_mislabel_archive(self):
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            for name, include in (("main.py", False), ("ScreenSnap.exe", True),
-                                  ("report.json", True), ("report.zip", False)):
-                with self.subTest(name=name):
-                    target = root / name
-                    target.write_text("KEEP", encoding="utf-8")
-                    with self.assertRaises(ValueError):
-                        export_report(target, "{}", root / "logs", root,
-                                      root / "private" / "settings.json", include)
-                    self.assertEqual(target.read_text(encoding="utf-8"), "KEEP")
-            self.assertFalse(list(root.glob("screensnap-report-*.tmp")))
+        healthy = dict(handles=18, listening=True, local_pressed_count=0, paused=False,
+                       keyboard_age=1.2, mouse_age=0.3, callbacks=12, qt_callbacks=12,
+                       recovery_reason="",
+                       evidence=dict(threads_unavailable=False, unfired_action=None,
+                                     phantom_pressed=0, input_stale=False))
+        lines = DiagnosticPanel._hotkey_summary(healthy).splitlines()
+        self.assertEqual(len(lines), 3)
+        self.assertIn("已注册 18 项", lines[0])
+        self.assertIn("最近故障：无", lines[0])
+        self.assertIn("键盘 1.2 秒前", lines[1])
+        self.assertIn("无卡住按键", lines[2])
+        self.assertNotIn("{", "\n".join(lines), "状态框不得再显示原始 JSON")
 
-    def test_copy_and_export_share_allowlisted_capture_compatibility_report(self):
-        from app import hotkey_flow as flow
-        app = flow.HotkeyControlMixin()
-        app.hotkeys = Mock()
-        app.hotkeys.diagnostic_report.return_value = json.dumps({"format": "test", "current": {}})
-        app.capture_compatibility_status = Mock(return_value=dict(
-            toolbar="environment-disabled", quick_sticker="session-comparison-disabled",
-            escape="installation-failed", capture_active=True, temporary_handles=1,
-            escape_installed=False, private="PRIVATE-PATH", binding="PRIVATE-KEY"))
-        clipboard = Mock()
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            app.config = SimpleNamespace(data=dict(DEFAULTS), path=root / "private" / "settings.json")
-            app.settings_window = None
-            target = root / "report.json"
-            with patch("editor.image_effects.clipboard_available", return_value=True), \
-                    patch.object(flow.QApplication, "clipboard", return_value=clipboard), \
-                    patch.object(flow.QMessageBox, "question") as question, \
-                    patch.object(flow.QFileDialog, "getSaveFileName", return_value=(str(target), "")), \
-                    patch.object(flow, "log_directory", return_value=root / "logs"):
-                app.copy_hotkey_report()
-                app.export_hotkey_report()
-            question.assert_not_called()
-            copied = clipboard.setText.call_args.args[0]
-            self.assertEqual(json.loads(copied), json.loads(target.read_text(encoding="utf-8")))
-            states = json.loads(copied)["capture_compatibility"]
-            self.assertEqual(states["toolbar"], "environment-disabled")
-            self.assertEqual(states["temporary_handles"], 1)
-            self.assertFalse(states["escape_installed"])
-            self.assertNotIn("PRIVATE", copied)
+        broken = dict(handles=18, listening=False, local_pressed_count=1, paused=True,
+                      keyboard_age=None, mouse_age=None, callbacks=0, qt_callbacks=0,
+                      recovery_reason="unfired:capture",
+                      evidence=dict(threads_unavailable=True, unfired_action="capture",
+                                    phantom_pressed=2, input_stale=True))
+        text = DiagnosticPanel._hotkey_summary(broken)
+        for expected in ("监听未启动", "已暂停", "线程不可用", "未触发：capture",
+                         "卡住按键 2 个", "输入链停滞", "键盘 无记录"):
+            self.assertIn(expected, text)
 
-    def test_raw_log_export_requires_each_consent_and_reports_omitted_count(self):
-        from app import hotkey_flow as flow
-        app = flow.HotkeyControlMixin()
-        app.hotkeys = Mock()
-        app.hotkeys.diagnostic_report.return_value = "{}"
-        app.settings_window = None
-        with tempfile.TemporaryDirectory() as folder:
-            root = Path(folder)
-            logs = root / "logs"; logs.mkdir()
-            (logs / "app.log").write_text("CURRENT", encoding="utf-8")
-            for index in range(25):
-                (logs / f"app.log.{index}").write_text("OLD", encoding="utf-8")
-            app.config = SimpleNamespace(data=dict(DEFAULTS, hotkey_report_include_logs=True),
-                                         path=root / "private" / "settings.json")
-            target = root / "report.zip"
-            with patch.object(flow.QMessageBox, "question", side_effect=[
-                    flow.QMessageBox.No, flow.QMessageBox.Yes, flow.QMessageBox.Yes]) as question, \
-                    patch.object(flow.QFileDialog, "getSaveFileName", return_value=(str(target), "")) as dialog, \
-                    patch.object(flow.sys, "argv", [str(root / "main.py")]), \
-                    patch.object(flow, "log_directory", return_value=logs):
-                self.assertIn("取消", app.export_hotkey_report())
-                dialog.assert_not_called()
-                self.assertFalse(target.exists())
-                for _ in range(2):
-                    self.assertIn("数量超限未附带=6", app.export_hotkey_report())
-                self.assertEqual(question.call_count, 3)
-                self.assertTrue(all(call.args[-1] == flow.QMessageBox.No for call in question.call_args_list))
-            with zipfile.ZipFile(target) as archive:
-                self.assertEqual(len([name for name in archive.namelist() if name.startswith("raw-logs/")]), 20)
-                self.assertIn("capture_compatibility", json.loads(archive.read("diagnostic.json")))
+        # 未知 ≠ 正常：没有证据时必须写未知/尚未注册，不能显示成“无异常”或“线程不可用”。
+        unknown = DiagnosticPanel._hotkey_summary({})
+        self.assertIn("未注册", unknown)
+        self.assertIn("尚未注册", unknown)
+        self.assertIn("按键核对未知", unknown)
+
+    def test_compatibility_summary_maps_status_codes(self):
+        from ui.settings_health import DiagnosticPanel
+
+        text = DiagnosticPanel._compatibility_summary(
+            dict(toolbar="enabled", quick_sticker="preference-disabled",
+                 escape="conflict-with-global-binding", capture_active=True,
+                 temporary_handles=2, escape_installed=True))
+        self.assertIn("工具栏隐藏键=启用", text)
+        self.assertIn("快速贴图键=设置关闭", text)
+        self.assertIn("与全局热键冲突", text)
+        self.assertIn("临时句柄 2 个", text)
+        self.assertEqual(len(text.splitlines()), 2)
 
     def test_logging_retention_is_consumed_by_actual_handler(self):
         from logger.log_setup import configure_logging

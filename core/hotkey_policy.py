@@ -49,22 +49,36 @@ PREFERENCES = (
     option("hotkey_criterion_misses", True, H, "高级判定", "检查组合键无回调", "要求独立按下/释放、修饰键精确匹配，长按自动重复不累计。"),
     option("hotkey_criterion_input", True, H, "高级判定", "检查输入观察滞后", "GetLastInputInfo包括键鼠，滞后不是系统摘钩证明。"),
     option("hotkey_criterion_phantom", True, H, "高级判定", "检查卡住的按键记录",
-           "把记录的「仍按下」与系统实际按键状态核对；存在只记录了按下、系统显示未按下的残留键时判为异常并清理"
-           "（残留键会让所有热键都不响应）。关闭后不再自动核对与清理，仍可用「重新注册」手动清理。"),
+           "把记录的「仍按下」与系统实际按键状态核对：只记录了按下、系统显示未按下的残留键判为异常并清理\n"
+           "（残留键会让所有热键都不响应）。关闭后不再自动核对，仍可用「重新注册」手动清理。"),
     option("hotkey_sensitivity", "standard", H, "高级判定", "灵敏度", "预设只计算有效参数，不覆盖自定义保存值。", choices=(("保守", "conservative"), ("标准", "standard"), ("快速", "fast"), ("自定义", "custom"))),
     option("hotkey_miss_count", 2, H, "高级判定", "连续未触发次数", "独立尝试数量，达到后仍需等待回调宽限结束。", 2, 5),
     option("hotkey_miss_window", 10, H, "高级判定", "证据窗口(秒)", "旧证据按时间过期；轮询不延长证据寿命。", 5, 60),
     option("hotkey_recent_input_ms", 1500, H, "高级判定", "系统近期输入(毫秒)", "系统输入比现在更近于此值时才检查观察滞后。", 500, 5000),
     option("hotkey_missed_input_ms", 2500, H, "高级判定", "观察滞后阈值(毫秒)", "必须大于近期输入窗口，避免把正常调度当异常。", 1000, 10000),
     option("hotkey_callback_grace_ms", 250, H, "高级判定", "回调顺序宽限(毫秒)", "同时兼容观察器先到及热键回调先到；钩子线程只更新元数据。", 100, 1000),
-    option("hotkey_diagnostic_level", "standard", D, "热键诊断", "额外诊断", "关闭额外日志不关闭健康判定；详细诊断仅含元数据，不记录输入内容。", choices=(("关闭", "off"), ("仅异常", "errors"), ("标准", "standard"), ("详细", "detailed"))),
-    option("hotkey_summary_enabled", True, D, "热键诊断", "周期状态汇总", "独立于体检和自动恢复的计时器；不逐键输出。"),
-    option("hotkey_summary_interval", 600, D, "热键诊断", "汇总间隔(秒)", "汇总不因体检关闭而停止；受普通日志总开关和额外诊断级别控制。", 60, 3600),
-    option("hotkey_trace_interval", 2, D, "热键诊断", "回调详情节流(秒)", "仅限制同动作详细日志，不限制热键动作。", 1, 60),
-    option("hotkey_detail_minutes", 10, D, "热键诊断", "临时详细诊断(分钟)", "点击开始后自动结束；不改普通日志等级，设置刷新不会延长计时。", 1, 30),
-    option("hotkey_snapshot_on_fault", True, D, "热键诊断", "异常时保留快照", "仅保存在内存，记录状态及计数，不存键名、窗口标题或用户路径。"),
-    option("hotkey_snapshot_limit", 20, D, "热键诊断", "快照数量上限", "超过后淘汰最旧项；退出清空，不作为用户会话数据持久化。", 1, 100),
-    option("hotkey_report_include_logs", False, D, "热键诊断", "导出时附带原始日志", "原始日志可能包含标题、路径和命令行；每次导出仍需明确确认。"),
+    option("hotkey_diagnostic_level", "standard", D, "热键诊断", "额外诊断",
+           "作用：控制热键诊断日志的详细程度，不影响健康判定与恢复动作。\n"
+           "取值：关闭 / 仅异常 / 标准（默认）/ 详细；详细额外输出回调 DEBUG 元数据。\n"
+           "影响：关闭后不写诊断日志（故障诊断行也不再记录）；仅异常只写警告及以上；均不记录按键内容。",
+           choices=(("关闭", "off"), ("仅异常", "errors"), ("标准", "standard"), ("详细", "detailed"))),
+    option("hotkey_summary_enabled", True, D, "热键诊断", "周期状态汇总",
+           "作用：按独立计时器写周期状态汇总，不逐键输出。\n"
+           "取值：开（默认）/ 关。\n"
+           "影响：与自动体检、自动恢复互不联动；受日志总开关与「额外诊断」级别控制。"),
+    option("hotkey_summary_interval", 600, D, "热键诊断", "汇总间隔(秒)",
+           "作用：周期状态汇总的写入间隔。\n"
+           "取值：60–3600 秒，默认 600 秒；仅在「周期状态汇总」开启且「额外诊断」不是关闭时生效。\n"
+           "影响：不改变体检周期，也不逐体检或逐键输出。", 60, 3600),
+    option("hotkey_trace_interval", 2, D, "热键诊断", "同动作回调日志间隔(秒)",
+           "作用：同一热键动作（如截图、贴图）的「热键回调」详细日志最多每 N 秒写一条，避免连按刷屏。\n"
+           "取值：1–60 秒，默认 2 秒；调大日志更少，调小更密。\n"
+           "影响：只限制详细级别的回调日志（详细诊断或日志等级为调试时才会写），不改变热键响应与动作执行。",
+           1, 60),
+    option("hotkey_snapshot_on_fault", True, D, "热键诊断", "异常时把快照写进日志",
+           "作用：故障首次判定时把只读状态快照写成一条单行 JSON 日志，便于事后排查。\n"
+           "取值：开（默认）/ 关；仅含状态与计数，不含键名、路径和输入内容。\n"
+           "影响：开启后可在日志搜索「热键故障快照:」；关闭只少这一行，不影响判定、提示与自动恢复。"),
     option("log_backup_count", 14, D, "日志记录", "轮转备份份数", "每个日志轮转组保留的份数，不是天数，也不清理旧月份目录。", 1, 100),
     option("capture_toolbar_hotkey_fallback", True, C, "键盘兼容性", "工具栏隐藏键全局兜底", "关闭仅停全局兜底，正常Qt操作仍可用；某些副屏可能收不到Qt按键。"),
     option("capture_quick_sticker_hotkey_fallback", True, C, "键盘兼容性", "快速贴图键全局兜底", "独立于快速贴图功能开关，永不吞Space原有画布操作。"),
@@ -147,7 +161,7 @@ def preference_visible(key, settings):
     """表单与运行时共用同一有效策略，隐藏不删除用户值。"""
     p = effective_policy(settings)
     if SPECS[key].page == D and key in ("hotkey_diagnostic_level", "hotkey_summary_enabled",
-            "hotkey_summary_interval", "hotkey_trace_interval", "hotkey_detail_minutes") and not settings.get("logging_enabled", True):
+            "hotkey_summary_interval", "hotkey_trace_interval") and not settings.get("logging_enabled", True):
         return False
     health = p["hotkey_health_enabled"]
     recovery = p["recovery_effective"]

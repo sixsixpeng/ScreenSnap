@@ -135,23 +135,21 @@ class HotkeyLifecycleTests(unittest.TestCase):
             manager.stop()
             mouse.unhook.assert_called_once()
 
-    def test_metadata_report_keeps_safe_failure_reasons_and_evidence(self):
+    def test_metadata_snapshot_keeps_safe_failure_reasons_and_evidence(self):
         with fixtures.manager_context() as (manager, _, _):
             manager._observer_error = "OSError"
             manager._diagnostic_error = "RuntimeError"
-            manager._physical_result = {"available": False, "reason": "backend-busy-or-unavailable", "private": "PRIVATE-PATH"}
             manager._registration_result = {"state": "partial", "failed": 1, "failed_actions": ["capture", "PRIVATE-PATH"]}
             manager._pending_attempts["capture"] = [time.monotonic() - 1] * 2
-            manager.inspect_health()
-            report = json.loads(manager.diagnostic_report())
-            current = report["current"]
+            # 2026-10-16：报告改为直接写日志 ⇒ 快照本身就是最终产物（不再有 history/物理核对）。
+            manager._last_health_evidence = manager.health_evidence()
+            current = manager.capture_snapshot("fault")
             self.assertEqual(current["observer_error"], "OSError")
             self.assertEqual(current["diagnostic_error"], "RuntimeError")
-            self.assertEqual(current["physical_check"]["reason"], "backend-busy-or-unavailable")
             self.assertEqual(current["install_result"]["state"], "partial")
             self.assertEqual(current["install_result"]["failed_actions"], ["capture"])
-            self.assertEqual(report["history"][-1]["evidence"]["unfired_action"], "capture")
-            self.assertNotIn("PRIVATE", manager.diagnostic_report())
+            self.assertEqual(current["evidence"]["unfired_action"], "capture")
+            self.assertNotIn("PRIVATE", json.dumps(current, ensure_ascii=False))
 
     def test_manual_restore_clears_capture_recording_even_if_rejected(self):
         from main import Application

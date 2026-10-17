@@ -1,6 +1,5 @@
 """Qt线程上的元数据诊断工具；不采集输入内容、不合成键、不重置钩子。"""
 
-from collections import deque
 import builtins
 import json
 import logging
@@ -10,6 +9,9 @@ import time
 from PySide6.QtCore import QTimer
 
 from logger import get_logger
+
+# 「复现诊断」的统计窗口：同时开详细日志与输入链计数，到期自动结束并把结果写进日志。
+VERIFICATION_SECONDS = 10.0
 
 
 def backend_pressed_codes(backend):
@@ -77,53 +79,24 @@ def stale_pressed_codes(backend, extra_codes=()):
     return physically_up_codes(pool)
 
 
-def physical_pressed_summary(backend):
-    if os.name != "nt":
-        return {"available": False, "reason": "unsupported-platform"}
-    scan_codes = backend_pressed_codes(backend)
-    if scan_codes is None:
-        return {"available": False, "reason": "backend-busy-or-unavailable"}
-    try:
-        import ctypes
-        user32 = ctypes.windll.user32
-        checked = down = unknown = 0
-        for code in scan_codes:
-            virtual = _virtual_key(code, user32)
-            if not virtual:
-                unknown += 1
-                continue
-            checked += 1
-            down += bool(user32.GetAsyncKeyState(virtual) & 0x8000)
-        return dict(available=True, backend_count=len(scan_codes), checked=checked,
-                    physically_down=down, stale_candidates=checked - down, unmappable=unknown)
-    except Exception as error:  # noqa: BLE001 只保留类型，不把异常中的路径/内容写进报告
-        return {"available": False, "reason": type(error).__name__}
-
-
 class DiagnosticsMixin:
     def _init_diagnostics(self):
-        self._snapshot_history = deque(maxlen=20)
         self._detail_until = 0.0
         self._verification_until = 0.0
         self._verification_baseline = (0, 0, 0)
         self._verification_result = None
-        self._physical_result = None
         self._registration_result = None
         self._last_health_evidence = None
         self._summary_timer = QTimer(self)
         self._summary_timer.setInterval(600_000)
         self._summary_timer.timeout.connect(lambda: self.log_diagnostics("heartbeat"))
         self._summary_timer.start()
-        self._detail_timer = QTimer(self)
-        self._detail_timer.setSingleShot(True)
-        self._detail_timer.timeout.connect(self.stop_detail)
         self._verification_timer = QTimer(self)
         self._verification_timer.setSingleShot(True)
         self._verification_timer.timeout.connect(self.finish_verification)
 
     def _apply_diagnostic_policy(self):
         p = self.policy
-        self._snapshot_history = deque(self._snapshot_history, maxlen=p["hotkey_snapshot_limit"])
         interval = p["hotkey_summary_interval"] * 1000
         if self._summary_timer.interval() != interval:
             self._summary_timer.setInterval(interval)
@@ -149,31 +122,49 @@ class DiagnosticsMixin:
         elif detailed or logger.isEnabledFor(logging.DEBUG):
             logger.debug(message, *args, extra=extra)
 
-    def start_detail(self):
-        self._detail_until = time.monotonic() + self.policy["hotkey_detail_minutes"] * 60
-        self._detail_timer.start(self.policy["hotkey_detail_minutes"] * 60_000)
-        self.log_diagnostics("temporary-detail-start")
-        return "临时详细诊断已开始；到期自动恢复当前保存策略"
+    def reproduce_diagnostics(self):
+        """复现诊断：10 秒内开详细日志并统计输入链，到期自动结束、结果写日志。
 
-    def stop_detail(self):
+        2026-10-16（个人开发口径）：导出/复制报告已删除，诊断信息一律落日志，
+        不再依赖"点按钮把报告存出去"。期间不执行截图/贴图动作。
+        """
+        self._detail_until = time.monotonic() + VERIFICATION_SECONDS
+        self._verification_baseline = (self._keyboard_events, self._callback_events, self._qt_callbacks)
+        self._verification_until = time.monotonic() + VERIFICATION_SECONDS
+        self._verification_result = None
+        self._verification_timer.start(int(VERIFICATION_SECONDS * 1000))
+        self.log_diagnostics("guided-verification-start")
+        return "10 秒内尝试当前快捷键：期间开详细诊断，结束自动写日志，不执行截图/贴图"
+
+    def finish_verification(self):
+        before = self._verification_baseline
+        self._verification_until = 0.0
         self._detail_until = 0.0
-        self._detail_timer.stop()
-        self.log_diagnostics("temporary-detail-stop")
-        return "临时详细诊断已停止"
+        self._verification_timer.stop()
+        self._verification_result = dict(keyboard_events=self._keyboard_events - before[0],
+                                         callbacks=self._callback_events - before[1],
+                                         qt_callbacks=self._qt_callbacks - before[2])
+        self.log_diagnostics("guided-verification-finished")
+        get_logger().info("复现诊断结果: %s",
+                          json.dumps(self._verification_result, ensure_ascii=False),
+                          extra={"screensnap_metadata_only": True})
+        return self._verification_result
 
-    def capture_snapshot(self, reason="manual", retain=True):
+    def capture_snapshot(self, reason="manual"):
+        # 只读判定顺带刷新一次：面板每 2 秒取一次快照，这一行让"判定"反映当前状态而不是
+        # 只反映上一次故障；成本是每个已记录按键一次 GetAsyncKeyState（通常 0 个）。
+        self._last_health_evidence = self.health_evidence()
         state = self.diagnostic_snapshot()
         state.update(self.recovery.snapshot(time.monotonic()))
         state.update(reason=reason, registration_state=self._registration_state,
                      detail_remaining=round(max(0.0, self._detail_until - time.monotonic()), 1),
                      verification_active=time.monotonic() < self._verification_until,
                      verification_result=self._verification_result,
-                     physical_check=self._physical_result,
                      install_result=self._registration_result,
                       evidence=self._last_health_evidence,
                      effective_recovery=self.policy["recovery_effective"],
                      session_available=self._session_available)
-        # 只保存基础类型，拒绝私有backend对象或任意异常文本进入共享报告。
+        # 只保留基础类型，保证结果能直接 json.dumps 写进日志（拒绝私有 backend 对象或异常文本）。
         clean = {}
         for key, value in state.items():
             if isinstance(value, (bool, int, float)) or value is None:
@@ -185,61 +176,12 @@ class DiagnosticsMixin:
             elif key in ("observer_error", "diagnostic_error"):
                 error = getattr(builtins, value, None) if isinstance(value, str) else None
                 clean[key] = value if isinstance(error, type) and issubclass(error, Exception) else "unknown-error-type"
-            elif key in ("verification_result", "physical_check", "install_result", "evidence") and isinstance(value, dict):
+            elif key in ("verification_result", "install_result", "evidence") and isinstance(value, dict):
                 clean[key] = {k: v for k, v in value.items() if type(v) in (bool, int, float) or v is None}
-                if key == "physical_check":
-                    reason = value.get("reason")
-                    error = getattr(builtins, reason, None) if isinstance(reason, str) else None
-                    if reason in ("unsupported-platform", "backend-busy-or-unavailable") or isinstance(error, type) and issubclass(error, Exception):
-                        clean[key]["reason"] = reason
-                elif key == "install_result":
+                if key == "install_result":
                     if value.get("state") in ("completed", "partial", "failed", "disabled", "cancelled"):
                         clean[key]["state"] = value["state"]
                     clean[key]["failed_actions"] = [action for action in value.get("failed_actions", []) if action in self._hotkey_keys]
                 elif key == "evidence" and value.get("unfired_action") in self._hotkey_keys:
                     clean[key]["unfired_action"] = value["unfired_action"]
-        if retain:
-            self._snapshot_history.append(clean)
         return clean
-
-    def diagnostic_report(self):
-        import keyboard
-        return json.dumps(dict(format="ScreenSnap-hotkey-metadata-v1",
-                               backend_version=str(getattr(keyboard, "version", "unknown")),
-                               current=self.capture_snapshot("report", retain=False), history=list(self._snapshot_history)),
-                          ensure_ascii=False, indent=2)
-
-    def inspect_health(self):
-        self._last_health_evidence = self.health_evidence()
-        self.log_diagnostics("manual-check")
-        return self.capture_snapshot("manual-check")
-
-    def check_physical_state(self):
-        from hotkey.hotkey_manager import keyboard
-        self._physical_result = physical_pressed_summary(keyboard)
-        self.log_diagnostics("physical-state-check")
-        return self._physical_result
-
-    def begin_verification(self):
-        self._verification_baseline = (self._keyboard_events, self._callback_events, self._qt_callbacks)
-        self._verification_until = time.monotonic() + 10.0
-        self._verification_result = None
-        self._verification_timer.start(10_000)
-        self.log_diagnostics("guided-verification-start")
-        return "10秒内尝试当前快捷键：本次只验证输入链，不执行截图/贴图动作"
-
-    def finish_verification(self):
-        before = self._verification_baseline
-        self._verification_until = 0.0
-        self._verification_timer.stop()
-        self._verification_result = dict(keyboard_events=self._keyboard_events - before[0],
-                                         callbacks=self._callback_events - before[1],
-                                         qt_callbacks=self._qt_callbacks - before[2])
-        self.log_diagnostics("guided-verification-finished")
-        return self._verification_result
-
-    def clear_diagnostic_history(self):
-        self._snapshot_history.clear()
-        self._physical_result = self._verification_result = None
-        self._last_health_evidence = None
-        return "已清除内存诊断历史；未改底层按键状态或恢复策略计数"

@@ -1,19 +1,14 @@
 """常驻应用拥有诊断工具，设置页仅接受动作注入。
 
-本 mixin 只“收集状态 / 转发动作”，不直接读 HotkeyManager 内部字段：报告与导出都
-走 `self.hotkeys` 的只读接口。日志只记录动作本身，不写路径、键名或输入内容。
+本 mixin 只“收集状态 / 转发动作”，不直接读 HotkeyManager 内部字段。
+诊断信息一律写日志（2026-10-16：导出/复制报告已删除）。日志只记录动作本身，不写路径、键名或输入内容。
 """
 
-import json
 import os
-from pathlib import Path
-import sys
 
-from PySide6.QtWidgets import QApplication, QFileDialog, QMessageBox
 from shiboken6 import isValid
 from logger import get_logger
 from logger.log_setup import log_directory
-from logger.diagnostic_report import export_report
 
 
 class HotkeyControlMixin:
@@ -30,65 +25,12 @@ class HotkeyControlMixin:
         return False
 
     def hotkey_tools(self):
-        return dict(snapshot=lambda: self.hotkeys.capture_snapshot("panel", retain=False),
-                    check=self.hotkeys.inspect_health, recover=self.restore_hotkeys,
-                    copy=self.copy_hotkey_report, export=self.export_hotkey_report,
-                    open_logs=self.open_hotkey_logs, detail_start=self.hotkeys.start_detail,
-                    detail_stop=self.hotkeys.stop_detail, physical=self.hotkeys.check_physical_state,
-                    verify=self.hotkeys.begin_verification, clear=self.hotkeys.clear_diagnostic_history,
+        return dict(snapshot=lambda: self.hotkeys.capture_snapshot("panel"),
+                    recover=self.restore_hotkeys, open_logs=self.open_hotkey_logs,
+                    verify=self.hotkeys.reproduce_diagnostics,
                     compatibility=self.capture_compatibility_status,
                     compare_off=lambda: self.set_capture_comparison(True),
                     compare_restore=lambda: self.set_capture_comparison(False))
-
-    def hotkey_report(self):
-        report = json.loads(self.hotkeys.diagnostic_report())
-        states = self.capture_compatibility_status()
-        allowed = {"environment-disabled", "session-comparison-disabled", "preference-disabled",
-                   "action-disabled", "conflict-with-global-binding", "unsupported-or-offscreen",
-                   "enabled", "installation-failed"}
-        compatibility: dict[str, str | bool | int] = {
-            key: states[key] for key in ("toolbar", "quick_sticker", "escape")
-            if type(states.get(key)) is str and states[key] in allowed}
-        for key in ("capture_active", "escape_installed"):
-            if type(states.get(key)) is bool:
-                compatibility[key] = states[key]
-        count = states.get("temporary_handles")
-        if type(count) is int and 0 <= count <= 2:
-            compatibility["temporary_handles"] = count
-        report["capture_compatibility"] = compatibility
-        return json.dumps(report, ensure_ascii=False, indent=2)
-
-    def copy_hotkey_report(self):
-        from editor.image_effects import clipboard_available
-        if not clipboard_available():
-            return "剪贴板被占用，未复制报告"
-        try:
-            QApplication.clipboard().setText(self.hotkey_report())
-        except (RuntimeError, OSError):
-            return "报告复制失败，原剪贴板未作进一步操作"
-        self.hotkeys.log_diagnostics("report-copy-requested")
-        return "已请求写入脱敏报告（Qt不提供实际粘贴成功回执）"
-
-    def export_hotkey_report(self):
-        include = bool(self.config.data["hotkey_report_include_logs"])
-        parent = self.settings_window
-        if include and QMessageBox.question(parent, "附带原始日志",
-                "原始日志可能包含窗口标题、路径、命令行及其他信息，附件不保证脱敏。是否继续？",
-                QMessageBox.Yes | QMessageBox.No, QMessageBox.No) != QMessageBox.Yes:
-            return "已取消原始日志导出"
-        filename = "ScreenSnap-hotkey-report.zip" if include else "ScreenSnap-hotkey-report.json"
-        filters = "ZIP (*.zip)" if include else "JSON (*.json)"
-        path, _ = QFileDialog.getSaveFileName(parent, "导出热键诊断报告", filename, filters)
-        if not path:
-            return "已取消导出"
-        if not Path(path).suffix:
-            path += ".zip" if include else ".json"
-        startup = Path(sys.executable if getattr(sys, "frozen", False) else sys.argv[0]).resolve().parent
-        result = export_report(path, self.hotkey_report(), log_directory(self.config.data),
-                               startup, self.config.path, include_logs=include)
-        self.hotkeys.log_diagnostics("report-exported")
-        return (f"诊断报告已导出；未读日志数量={result['unreadable_logs']}；"
-                f"数量超限未附带={result['truncated_logs']}")
 
     def open_hotkey_logs(self):
         """打开实际日志目录（用户排查热键问题的一步）。只记动作，不记路径。"""

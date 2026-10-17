@@ -236,21 +236,6 @@ class HotkeyDiagnosticsTests(unittest.TestCase):
 
     # ---- 卡住的按键记录（2026-10-16 真机故障）-------------------------------------
 
-    def test_physical_summary_requires_lock_and_reports_empty_table(self):
-        """读不到库按键表（没有锁）必须报“无法判定”，空表才是真的 0 —— 不能混为一谈。"""
-        from hotkey.diagnostics import physical_pressed_summary
-
-        self.assertEqual(physical_pressed_summary(self.backend),
-                         {"available": False, "reason": "backend-busy-or-unavailable"})
-        if os.name != "nt":                        # 空表分支不查系统按键状态，跨平台可比
-            self.skipTest("按键状态核对只在 Windows 可用")
-        self.backend._pressed_events_lock = threading.Lock()
-        self.backend._pressed_events.clear()
-        summary = physical_pressed_summary(self.backend)
-        self.assertTrue(summary["available"])
-        self.assertEqual((summary["backend_count"], summary["checked"], summary["stale_candidates"]),
-                         (0, 0, 0))
-
     def test_stale_pressed_clears_only_entries_the_system_says_are_up(self):
         """只清「系统证明未按下」的项：真正按住的键必须保留，否则未触发判据会变成误报源。"""
         self.backend._pressed_events_lock = threading.Lock()

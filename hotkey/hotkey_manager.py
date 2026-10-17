@@ -1,5 +1,6 @@
 """keyboard 回调只向 Qt 主线程投递信号。"""
 
+import json
 import logging
 import queue
 import threading
@@ -342,7 +343,8 @@ class HotkeyManager(DiagnosticsMixin, QObject):
                 legacy_mouse = importlib.import_module("keyboard.mouse")
             for item in caught:
                 get_logger().debug(
-                    "鼠标钩子导入期警告已捕获并忽略: %s: %s", item.category.__name__, item.message)
+                    "鼠标钩子导入期警告已捕获并忽略: %s: %s", item.category.__name__, item.message,
+                    extra={"screensnap_metadata_only": True})
             return legacy_mouse, "keyboard.mouse(已废弃)"
         except Exception:  # noqa: BLE001
             return None, ""
@@ -469,7 +471,8 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         self._phantom_hits += 1
         if self._phantom_hits == 1:
             get_logger().debug("热键按键状态待确认: 记录里有 %d 个按键系统显示未按下（%s）",
-                               len(stale), self._describe_stuck_pressed(names))
+                               len(stale), self._describe_stuck_pressed(names),
+                               extra={"screensnap_metadata_only": True})
         return len(stale) if self._phantom_hits >= PHANTOM_CONFIRM_CHECKS else None
 
     def _clear_stale_pressed(self, boundary):
@@ -486,7 +489,8 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         lock = getattr(keyboard, "_pressed_events_lock", None)
         if lock is not None and not lock.acquire(blocking=False):
             get_logger().warning(
-                "热键按键状态卡住: 未能清理（库按键表正被钩子写入），原因=%s；稍后由体检重试", boundary)
+                "热键按键状态卡住: 未能清理（库按键表正被钩子写入），原因=%s；稍后由体检重试", boundary,
+                extra={"screensnap_metadata_only": True})
             return None
         try:
             verified = set(physically_up_codes(stale) or ()) if stale else set()
@@ -516,7 +520,8 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         self._phantom_hits = 0
         get_logger().warning(
             "热键按键状态卡住: 已清理库按键记录 %d 个、本程序记录 %d 个（系统按键状态显示未按下，%s），"
-            "原因=%s；卡住期间所有热键都不会触发", removed, len(names), self._describe_stuck_pressed(names), boundary)
+            "原因=%s；卡住期间所有热键都不会触发", removed, len(names), self._describe_stuck_pressed(names), boundary,
+            extra={"screensnap_metadata_only": True})
         return removed
 
     @Slot()
@@ -543,7 +548,14 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         self.recovery.fault(reason, actions)
         if self.policy["hotkey_snapshot_on_fault"] and not self.recovery.snapshot_taken:
             self.recovery.snapshot_taken = True
-            self.capture_snapshot(reason)
+            snapshot = self.capture_snapshot(reason)
+            # 2026-10-16：导出/复制报告已删除 ⇒ 故障现场直接落日志，重启后仍能翻到。
+            # 单行紧凑 JSON（日志按行消费，多行会打断 grep/sed）；要美化就复制出去格式化。
+            # 必须标记 metadata-only：否则日志上下文过滤器会去取前台窗口标题/鼠标位置
+            # （GetWindowText 跨进程，前台恰好是无响应/提权窗口时会阻塞，正是故障现场）。
+            get_logger().warning("热键故障快照: %s",
+                                 json.dumps(snapshot, ensure_ascii=False, sort_keys=True),
+                                 extra={"screensnap_metadata_only": True})
         if fresh:
             self.log_diagnostics("fault:" + reason, logging.WARNING)
         if self.recovery.notice_due(now, self.policy):
@@ -1054,7 +1066,7 @@ class HotkeyManager(DiagnosticsMixin, QObject):
     def stop(self):
         """通知监听线程注销热键，并等待有限时间避免退出卡住。"""
         self._stopping = True  # 观察器由注册worker串行清理，避免与正在挂载的句柄竞态。
-        for timer in (getattr(self, name, None) for name in ("health_timer", "_summary_timer", "_detail_timer", "_verification_timer", "_evidence_timer", "_housekeeping_timer")):
+        for timer in (getattr(self, name, None) for name in ("health_timer", "_summary_timer", "_verification_timer", "_evidence_timer", "_housekeeping_timer")):
             try:
                 if timer is not None:
                     timer.stop()
