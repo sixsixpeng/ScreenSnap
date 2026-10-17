@@ -1865,8 +1865,16 @@ class MaskWindow(QWidget):
             QWidget.close(view)
 
     def closeEvent(self, event):
-        """窗口关闭后释放截图大图，避免 Application.mask 暂存时继续占用内存。"""
-        get_logger().debug("关闭截图遮罩")
+        """窗口关闭后释放截图大图，避免 Application.mask 暂存时继续占用内存。
+
+        多屏约定：每块显示器一个 MaskWindow，因此一次截图结束会看到**每屏一条**
+        “关闭截图遮罩”日志（按屏数，不是同一个窗口重复关闭）。日志带上显示器矩形、
+        是否主视图和剩余视图数，便于区分这是不同屏的收尾。
+        """
+        get_logger().debug(
+            "关闭截图遮罩: 显示器=%s 主视图=%s 剩余视图=%d",
+            self.monitor_rect.getRect(), self.primary,
+            max(0, len(self.session.views) - 1))
         # 关闭路径可能绕过 Python 的 close()（例如多屏时 Qt 直接关闭其它视图），
         # 这里再释放一次全局 Esc 兜底，避免遮罩销毁后钩子仍持有失效信号源。
         self._release_escape_fallback()
