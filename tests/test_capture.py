@@ -2559,6 +2559,39 @@ class CaptureTests(CoreTests):
         self.assertFalse(bar.isVisible())
         mask.close()
 
+    def test_clicking_outside_inline_editor_clears_annotation_selection(self):
+        """原地编辑：点在选区/画布之外也应退出标注选择（用户反馈）。"""
+        from config.config_manager import DEFAULTS
+        from PySide6.QtGui import QPen
+        from editor.annotation_items import AnnotationRectItem, editable
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 400, "height": 300}
+        settings = {**DEFAULTS, "inline_edit": True, "magnifier": False, "crosshair": False,
+                    "capture_after_selection": "edit", "mask_opacity": 0}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (400, 300), "white"), bounds, [bounds], settings)
+        try:
+            mask.selection.rects.append(QRect(100, 80, 200, 150))
+            mask.complete()
+            mask.show()
+            self.app.processEvents()
+            editor = mask.session.inline_editor
+            self.assertIsNotNone(editor, "原地编辑应已创建")
+            canvas = editor.canvas
+            item = editable(AnnotationRectItem(QRectF(10, 10, 60, 40)))
+            item.setPen(QPen(Qt.red, 3))
+            canvas.scene_data.addItem(item)
+            item.setSelected(True)
+            self.assertEqual(canvas.scene_data.selectedItems(), [item])
+            # (10,10) 在选区 (100,80,200,150) 之外 ⇒ 事件落在遮罩上。
+            QTest.mouseClick(mask, Qt.LeftButton, pos=QPoint(10, 10))
+            self.app.processEvents()
+            self.assertEqual(canvas.scene_data.selectedItems(), [],
+                             "点击原地编辑区域外应退出标注选择")
+        finally:
+            mask.close()
+
     def test_inline_editor_copy_only_copies_without_saving_and_closes_capture(self):
         from config.config_manager import DEFAULTS
         from PySide6.QtGui import QImage

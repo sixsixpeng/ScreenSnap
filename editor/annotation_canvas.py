@@ -811,6 +811,25 @@ class AnnotationCanvas(QGraphicsView):
                 return item
         return None
 
+    def _deselect_for_blank_click(self, point, handles_hit=False):
+        """左键点击空白（画布内或画布外的灰色区域）时退出标注选择。
+
+        · 命中任何标注（含大面积标注的包围盒内部）不清：那是“继续拖动/编辑该标注”；
+        · 命中缩放手柄/旋转手柄不清：那是“缩放/旋转”；
+        · 只有既没点中标注、也没点中手柄时才 clearSelection。
+        返回是否真的清掉了选择，便于调用方打日志/决定后续框选。
+        """
+        if handles_hit or not self.scene_data.selectedItems():
+            return False
+        if self.annotation_at(point) is not None:
+            return False
+        self.scene_data.clearSelection()
+        self.viewport().update()
+        get_logger().debug(
+            "点击空白退出标注选择: 场景点=(%.1f,%.1f) 画布内=%s",
+            point.x(), point.y(), self.sceneRect().contains(point))
+        return True
+
     def erase_items(self):
         """按 z 顺序返回擦除层图元。"""
         return sorted((item for item in self.scene_data.items()
@@ -2184,6 +2203,11 @@ class AnnotationCanvas(QGraphicsView):
             _handles_hit = any(
                 self.resize_handle_at(self.item_resize_handles(i), point) is not None
                 or (len(_sel) == 1 and self.rotation_handle_at(i, point)) for i in _sel)
+        # 非选择工具：左键点在空白（画布内或画布外的灰色区域）先退出标注选择。
+        # 选择工具在下面单独处理（空白按下要开始辅助框选）；手型工具用于平移，
+        # 不在这里强制取消选择。点在标注/手柄上时由 helper 自行跳过。
+        if event.button() == Qt.LeftButton and self.tool not in ("select", "hand"):
+            self._deselect_for_blank_click(point, _handles_hit)
         if (not _handles_hit and self.tool != "select" and event.button() == Qt.LeftButton
                 and self.scene_data.selectedItems()):
             hit = self.annotation_at(point)
@@ -2251,13 +2275,14 @@ class AnnotationCanvas(QGraphicsView):
                 event.accept()
                 return
             # 手柄/旋转手柄判定在前：标注超出画布时手柄可能落在 sceneRect 外，也要能抓到；
-            # 画布外的空白仍不参与框选，避免在灰色区域拖出整屏选区。
+            # 画布外的空白仍不参与框选，但必须退出标注选择（用户要求：画布外的空白也算空白）。
             if not self.sceneRect().contains(point):
+                self._deselect_for_blank_click(point)
                 event.accept()
                 return
             if self.annotation_at(point) is None:
                 # 从底图空白处（含已被擦除的区域）拖动只画辅助选区，松开后保留框线并选中其中的标注。
-                self.scene_data.clearSelection()
+                self._deselect_for_blank_click(point)
                 self.selection_start = point
                 self.selection_end = point
                 event.accept()
@@ -2305,13 +2330,8 @@ class AnnotationCanvas(QGraphicsView):
             event.accept()
             return
         if self.tool not in ("select", "hand") and event.button() == Qt.LeftButton:
-            # 在空白处起笔 ⇒ 先退出所有标注的编辑态（与选择工具点空白一致）。
-            # 只在需要拖出形状的工具上做：文字/序号/取色/橡皮/马赛克是“单击生效”，语义不同。
-            if (self.tool in ("pen", "marker", "rect", "ellipse", "arrow")
-                    and self.annotation_at(point) is None
-                    and self.scene_data.selectedItems()):
-                self.scene_data.clearSelection()
-                self.viewport().update()
+            # 空白起笔已在上面统一退出标注选择（含画布外的灰色区域）；
+            # 这里只处理落笔状态。
             # 多段绘制进行中：保留上一终点作为本段起点，不从按下点重置。
             if not (self.chain_active and self._chain_tool() and self.start is not None):
                 self.start = point

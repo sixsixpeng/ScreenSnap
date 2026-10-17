@@ -501,6 +501,43 @@ class CanvasTests(CoreTests):
         self.assertIs(selected[0], second, "留下的应是点中的那个标注")
         self.assertEqual(canvas.tool, "pen", "点击标注不应切换工具")
         editor.close()
+
+    def test_clicking_gray_area_outside_image_exits_selection(self):
+        """用户反馈：大面积标注选中后无法退出；点击画布外的灰色空白也应取消选择。"""
+        from PySide6.QtCore import QPoint, QRectF, Qt
+        from PySide6.QtGui import QPen
+        from PySide6.QtTest import QTest
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import AnnotationRectItem, editable
+
+        editor = EditorWindow(Image.new("RGB", (120, 90), "white"), dict(DEFAULTS))
+        editor.resize(520, 420)
+        editor.show()
+        canvas = editor.canvas
+        self.app.processEvents()
+        # 大面积标注铺满图片：图片内几乎没有可点的空白，用户只能点画布外的灰色区域。
+        item = editable(AnnotationRectItem(QRectF(0, 0, 120, 90)))
+        item.setPen(QPen(Qt.red, 3))
+        canvas.scene_data.addItem(item)
+        canvas.set_tool("select")
+        item.setSelected(True)
+        corner = QPoint(2, 2)
+        self.assertFalse(canvas.sceneRect().contains(canvas.mapToScene(corner)),
+                         "前置条件：视口左上角必须落在图片外的灰色区域")
+        QTest.mouseClick(canvas.viewport(), Qt.LeftButton, pos=corner)
+        self.app.processEvents()
+        self.assertEqual(canvas.scene_data.selectedItems(), [],
+                         "点击画布外空白应退出标注选择")
+
+        # 非选择工具同样生效（用户可能选完标注后切到画笔/矩形）。
+        item.setSelected(True)
+        canvas.set_tool("pen")
+        QTest.mouseClick(canvas.viewport(), Qt.LeftButton, pos=corner)
+        self.app.processEvents()
+        self.assertEqual(canvas.scene_data.selectedItems(), [],
+                         "绘图工具点击画布外空白也应退出选择")
+        editor.close()
+
     def test_handles_stay_draggable_with_a_drawing_tool(self):
         """回归（用户 2026-10-10）：准备拖控制点却变成绘图。
 

@@ -3821,7 +3821,23 @@ class MaskWindow(QWidget):
             if event.button() == Qt.LeftButton:
                 self.position = self._mouse_event_position(event)
                 hit = self.selection.handle_at(self.position)
-                if hit is not None or self.selection.border_at(self.position, hit):
+                on_region = hit is not None or self.selection.border_at(self.position, hit)
+                # 用户要求：原地编辑时点击“画布外”的空白也要退出标注选择。
+                # 画布内的空白由 AnnotationCanvas 自己处理；这里处理落在遮罩上的区域外点击。
+                # 注意用 canvas.geometry()（选区区域），不能用 editor.geometry()：
+                # InlineEditor 本体只是工具条容器，几何并不等于选区。
+                editor = self.session.inline_editor
+                canvas = getattr(editor, "canvas", None) if editor is not None else None
+                if not on_region and canvas is not None:
+                    logical = self.to_logical_point(self.position)
+                    if not canvas.geometry().contains(logical):
+                        if canvas.scene_data.selectedItems():
+                            canvas.scene_data.clearSelection()
+                            canvas.viewport().update()
+                            get_logger().debug(
+                                "点击原地编辑区域外 ⇒ 退出标注选择: 显示器=%s",
+                                self.monitor_rect.getRect())
+                if on_region:
                     if hit is not None:
                         self.resize_cursor = hit[2]
                     self.selection.begin(self.position, hit)
