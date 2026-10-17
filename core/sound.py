@@ -7,6 +7,8 @@
 · builtin1-4 —— 随包分发的 4 个短音（ui/assets/sounds/*.wav），**与 Windows 声音方案无关** ——
                  2026-10-11 用户反馈"星号与感叹号听起来一样、问号没声"（Windows 默认把前两者指向同一个 wav，
                  问号常常未分配）⇒ 内置这 4 个保证四个选项**互不相同且一定有声音**；
+· shutter_*   —— 2026-10-17 新增的相机快门音（经典/轻柔/双击/手机），同样随包分发；
+· none        —— 明确静音，不回落 beep；
 · custom      —— winsound.PlaySound(<用户选择的 wav>, SND_FILENAME | SND_ASYNC)。
 
 任何失败（非 Windows、文件不存在、播放异常）都回落到 beep，绝不抛异常影响通知本身。
@@ -18,6 +20,7 @@ from pathlib import Path
 from logger import get_logger
 
 # 内置提示音：键 → 随包 wav。加进 SOUND_KINDS 后 config.validate() 自动接受它们。
+# shutter_* 是截图完成音效专用的相机快门声（2026-10-17），由标准库合成，不依赖系统声音方案。
 BUILTIN_FILES = {"builtin1": "chime1.wav", "builtin2": "chime2.wav",
                  "builtin3": "chime3.wav", "builtin4": "chime4.wav",
                  "builtin5": "chime5.wav", "builtin6": "chime6.wav",
@@ -32,11 +35,16 @@ BUILTIN_FILES = {"builtin1": "chime1.wav", "builtin2": "chime2.wav",
                  "builtin23": "chime23.wav", "builtin24": "chime24.wav",
                  "builtin25": "chime25.wav", "builtin26": "chime26.wav",
                  "builtin27": "chime27.wav", "builtin28": "chime28.wav",
-                 "builtin29": "chime29.wav", "builtin30": "chime30.wav"}
+                 "builtin29": "chime29.wav", "builtin30": "chime30.wav",
+                 "shutter_classic": "shutter_classic.wav",
+                 "shutter_soft": "shutter_soft.wav",
+                 "shutter_double": "shutter_double.wav",
+                 "shutter_phone": "shutter_phone.wav"}
 LEGACY_KINDS = {"exclamation": "asterisk", "question": "default"}
 
-# 合法取值：default / 四种系统音 / 4 个内置音 / custom（自定义 wav）。空串由调用方解释为「跟随全局」。
-SOUND_KINDS = ("default", "asterisk", "exclamation", "question", "hand", "custom",
+# 合法取值：none（静音）/ default / 四种系统音 / 内置音 / 快门音 / custom（自定义 wav）。
+# 空串由调用方解释为「跟随全局」。
+SOUND_KINDS = ("none", "default", "asterisk", "exclamation", "question", "hand", "custom",
                *BUILTIN_FILES)
 
 
@@ -84,6 +92,9 @@ def play_sound(kind="default", path=""):
     """播放一次提示音；返回实际播放的类型（便于用例断言与排查）。"""
     logger = get_logger()
     resolved, target = resolve_kind(kind, path)
+    if resolved == "none":
+        # 静音是一个明确结果：不能让下面的 beep 兜底把「无声」变成有声音。
+        return "none"
     if os.name == "nt":
         try:
             import winsound

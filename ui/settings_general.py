@@ -27,6 +27,22 @@ SOUND_OPTIONS = [("默认提示音（系统）", "default"),
                  ("内置 29（柔和三连）", "builtin29"), ("内置 30（收尾成功音）", "builtin30"),
                  ("自定义 wav", "custom")]
 
+# 截图完成音效（2026-10-17）：无声 + 4 个相机快门 + 常用内置音 + 系统默认 + 自定义。
+# 与通知提示音分开配置，互不覆盖；总开关仍是上面的 sound。
+CAPTURE_SOUND_OPTIONS = [("无声", "none"),
+                         ("相机快门（经典）", "shutter_classic"),
+                         ("相机快门（轻柔）", "shutter_soft"),
+                         ("相机快门（双击）", "shutter_double"),
+                         ("手机快门", "shutter_phone"),
+                         ("内置 1（单声）", "builtin1"),
+                         ("内置 2（上行两声）", "builtin2"),
+                         ("内置 4（三连音）", "builtin4"),
+                         ("内置 8（四连上行）", "builtin8"),
+                         ("内置 10（双滴提示）", "builtin10"),
+                         ("内置 30（收尾成功音）", "builtin30"),
+                         ("默认提示音（系统）", "default"),
+                         ("自定义 wav（使用下面的文件）", "custom")]
+
 
 class GeneralPage(SettingsPage):
     """管理启动行为和通知偏好。"""
@@ -63,7 +79,15 @@ class GeneralPage(SettingsPage):
         self.check("open_notification_file", "点击通知定位文件",
                    "点击带已保存图片路径的通知后，在资源管理器中打开文件所在目录并选中该图片；关闭后仍显示通知，但不再打开目录。")
         self.check("sticker_notification", "贴图通知", "创建或粘贴贴图后显示托盘提示")
-        self.check("sound", "完成音效", "截图完成时播放提示音；独立于通知总开关和各类视觉通知，即使关闭通知仍可播放")
+        self.check("sound", "完成音效",
+                   "通知与截图音效总开关；关闭后所有提示音（含截图完成音效）静音，独立于视觉通知。")
+        # 截图完成音效独立于通知提示音（2026-10-17）：默认相机快门，可改为无声/其它内置音。
+        self._sound_choice("capture_sound", "截图完成音效", CAPTURE_SOUND_OPTIONS,
+                "截图完成时播放的音效，与下面的通知提示音互不覆盖。\n"
+                "· 无声：即使总开关打开也不播放截图音效。\n"
+                "· 相机快门：经典/轻柔/双击/手机四种随包音色。\n"
+                "· 自定义 wav：使用下面「自定义声音文件」；文件失效时回落系统默认提示音。",
+                category="capture")
         # 通知音效（2026-10-11）：全局默认音 + 可选自定义 wav + 每类通知可单独覆盖。
         # 每个下拉**同行**配一个「试听」，听的就是该行实际会响的音（分类有覆盖听覆盖，空则听全局）。
         self._sound_choice("notification_sound", "提示音", SOUND_OPTIONS,
@@ -296,7 +320,8 @@ class GeneralPage(SettingsPage):
 
         key = {"copy_notification": "sound_copy", "save_notification": "sound_save",
                "sticker_notification": "sound_sticker", "picker_notification": "sound_picker",
-               "operation_notification": "sound_operation"}.get(category or "", "")
+               "operation_notification": "sound_operation",
+               "capture": "capture_sound"}.get(category or "", "")
         kind = self.config.data.get(key, "") if key else ""
         if not kind:
             kind = self.config.data.get("notification_sound", "default") or "default"

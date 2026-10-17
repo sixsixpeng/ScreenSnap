@@ -131,7 +131,7 @@ PRESERVED_ON_VERSION_RESET = (
     "sticker_notification", "operation_notification", "open_notification_file", "notification_backend",
     # 声音偏好（2026-10-11 用户明确要求）：总开关、默认音、自定义文件与按类型覆盖都是"挑好了就不想被升级改回去"的习惯；
     # 取值不合法或文件失效时 validate/resolve_kind 会兜底，保留不会让新版本启动失败。
-    "sound", "notification_sound", "notification_sound_file",
+    "sound", "notification_sound", "notification_sound_file", "capture_sound",
     "sound_copy", "sound_save", "sound_sticker", "sound_picker", "sound_operation",
     # 功能开关：用户显式关掉过的能力（识别、放大镜、标尺、诊断、回收站等）必须记住
     "window_detection", "window_hover_detect", "magnifier", "magnifier_size", "magnifier_grid",
@@ -201,6 +201,8 @@ DEFAULTS = {
     # 取值见 core/sound.py 的 SOUND_KINDS：builtin1-16 / default / asterisk / hand / custom。
     # 用户要求（2026-10-11）：**默认全部用内置音**（不依赖 Windows 声音方案），且六类默认音互不相同便于分辨。
     "notification_sound": "builtin1", "notification_sound_file": "",
+    # 截图完成音效独立于通知提示音：默认相机快门（2026-10-17 用户要求），可选 none/内置/自定义。
+    "capture_sound": "shutter_classic",
     "sound_copy": "builtin10", "sound_save": "builtin8", "sound_sticker": "builtin4",
     "sound_picker": "builtin9", "sound_operation": "builtin7",
     "save_dir": "",
@@ -683,6 +685,8 @@ def validate(data):
             raise ValueError("未知的取色复制格式")
         elif key == "notification_sound" and value not in SOUND_KINDS:
             raise ValueError("未知通知音效")
+        elif key == "capture_sound" and value not in SOUND_KINDS:
+            raise ValueError("未知截图完成音效")
         elif key.startswith("sound_") and value not in ("",) + SOUND_KINDS:
             # 按类型覆盖：空串表示跟随全局。
             raise ValueError("未知的通知音效覆盖值")

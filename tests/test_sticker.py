@@ -47,8 +47,8 @@ class StickerTests(CoreTests):
         assets = Path(__file__).resolve().parents[1] / "ui" / "assets"
         self.assertEqual(builtin_dir().resolve(), (assets / "sounds").resolve(),
                          "内置音必须位于 ui/assets/sounds —— 打包脚本按整目录复制")
-        self.assertEqual(len(BUILTIN_FILES), 30,
-                         "内置提示音数量变化时要同步这条与设置页的 SOUND_OPTIONS")
+        self.assertEqual(len(BUILTIN_FILES), 34,
+                         "内置提示音数量变化时要同步这条与设置页的 SOUND_OPTIONS（30 个 chime + 4 个快门）")
         for kind, name in BUILTIN_FILES.items():
             with self.subTest(kind=kind):
                 path = builtin_path(kind)

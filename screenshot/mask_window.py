@@ -1303,6 +1303,9 @@ class MaskWindow(QWidget):
     selected = Signal(object, object)
     edit_requested = Signal(object, object)
     save_requested = Signal(object, object)
+    # 2026-10-17：本轮截图已经确认（选区提交/快速贴图），应用据此播放一次完成音效。
+    # 必须由遮罩发出：默认开启的原地编辑不会走 edit_requested/save_requested。
+    capture_completed = Signal()
     # 2026-10-11 用户定案：另存为在多选时**依次弹出对话框**（模态 ⇒ 天然按顺序、互不抢焦点）。
     save_as_requested = Signal(object, object)
     last_region = Signal(object)
@@ -2610,6 +2613,17 @@ class MaskWindow(QWidget):
                 return clipped
         return rect
 
+    def _notify_capture_completed(self):
+        """通知应用：本轮截图已确认，播放一次完成音效（2026-10-17）。
+
+        一轮截图可能被多个视图/多次按键触碰（双击、E、右键、快速贴图），
+        用 `MaskSession` 上的标记保证只响一次；取消、Esc、无选区关闭都不发。
+        """
+        if getattr(self.session, "capture_sound_played", False):
+            return
+        self.session.capture_sound_played = True
+        self.capture_completed.emit()
+
     def complete(self, force_window=False, save_direct=False):
         """完成当前选区，进入原地编辑或交给独立编辑器。"""
         if self.session.completing or self.session.closing:
@@ -2676,6 +2690,9 @@ class MaskWindow(QWidget):
         self.selection.rects[:] = regions
         self.selection.active = None
         rect = regions[-1]
+        # 选区已确认：无论接下来是原地编辑、独立编辑器、保存、复制还是另存为，
+        # 都先让应用播放一次截图完成音效（同一轮只响一次）。
+        self._notify_capture_completed()
         if self.mode == "capture":
             # 只有自由选区（手动框选 / UIA 点击 / 多选）才刷新“上次截图区域”。
             # 全屏、当前显示器是整屏预设，若也写入会把上次区域覆盖成整块主屏，
@@ -4414,6 +4431,8 @@ class MaskWindow(QWidget):
             self.session.inline_editor.execute("paste")
             return
         self.quick_sticker_consumed = True
+        # 快速贴图同样是“截图完成”：在生成多张贴图前只发一次，避免每张贴图各响一遍。
+        self._notify_capture_completed()
         # 2026-10-11 用户要求：多选模式下**每个选区都贴一张**（原来只贴最后一个）。
         # 规则 22：每个选区可能落在另一块屏 ⇒ 裁剪与坐标都交给**归属视图**（_region_owner_view），
         # 绝不用本视图的 image + 别人的 rect 混算。

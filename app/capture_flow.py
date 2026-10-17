@@ -92,6 +92,8 @@ class CaptureFlowMixin:
         area = (local.x(), local.y(), local.x() + local.width(), local.y() + local.height())
         images = [(image.crop(area), alternate.crop(area) if alternate else None)]
         position = mapper.physical_local_to_native_global(local.topLeft())
+        # 全屏/当前显示器不经过遮罩，没有 capture_completed 信号 ⇒ 在这里补一次完成音效。
+        self.play_capture_sound()
         self.logger.info("预设截图直接完成: mode=%s 区域=%s", mode, tuple(region.getRect()))
         self.handle_capture_selection(images, [position], mode=mode)
 
@@ -141,6 +143,8 @@ class CaptureFlowMixin:
             left, top = rect.x() - bounds["left"], rect.y() - bounds["top"]
             crop = (left, top, left + rect.width(), top + rect.height())
             images = [(image.crop(crop), alternate.crop(crop) if alternate else None)]
+            # “上次区域”不显示遮罩，也就没有 capture_completed ⇒ 直接补一次完成音效。
+            self.play_capture_sound()
             if self.config.data.get("capture_repeat_action", "save") == "save":
                 self.save_capture_images(images)
             else:
@@ -178,6 +182,8 @@ class CaptureFlowMixin:
                 lambda path, image: self.saved(path, image, notify=False))
             view.recapture_requested.connect(self.restart_capture)
         self._connect_sticker_signals(self.mask.session.views)
+        # 截图确认（含默认开启的原地编辑、直接保存/复制、快速贴图）统一由遮罩通知一次。
+        self.mask.capture_completed.connect(self.play_capture_sound)
         self.mask.close_all_requested.connect(self.close_all_editors)
         self.mask.destroyed.connect(lambda obj=None, current=self.mask: setattr(self, "mask", None)
                                     if self.mask is current else None)
@@ -210,6 +216,29 @@ class CaptureFlowMixin:
         self.config.data["last_capture_rect"] = rect
         self.config.save()
         self.logger.debug("记住上次截图区域: %s", rect)
+
+
+    def play_capture_sound(self):
+        """播放一次截图完成音效（2026-10-17）。
+
+        调用点：遮罩的 `capture_completed`（含原地编辑、直接保存/复制、另存为、快速贴图），
+        以及不显示遮罩的全屏/当前显示器/上次区域预设截图。同一轮截图由遮罩侧去重，只响一次；
+        `from_capture=False` 的“打开图片”不会触发。
+        无声（`capture_sound == "none"`）由 `play_sound` 提前返回，绝不能回落系统 beep；
+        `custom` 复用「自定义声音文件」，文件失效时 `resolve_kind` 会回落默认提示音。
+        """
+        if not self.config.data.get("sound", True):
+            return
+        from core.sound import play_sound, resolve_kind
+
+        kind = self.config.data.get("capture_sound", "shutter_classic") or "default"
+        if kind == "custom":
+            resolved, target = resolve_kind(
+                "custom", self.config.data.get("notification_sound_file", ""))
+            played = play_sound(resolved, target)
+        else:
+            played = play_sound(kind)
+        self.logger.debug("截图完成音效: kind=%s 实际=%s", kind, played)
 
 
     def edit_images(self, images, positions=None, from_capture=True):
@@ -308,8 +337,6 @@ class CaptureFlowMixin:
             editor.setAttribute(Qt.WA_DeleteOnClose)
             self.editors.append(editor)
             editor.show()
-        if from_capture and self.config.data["sound"]:
-            QApplication.beep()
         self.logger.info("完成截图: %s 张" if from_capture else "打开图片编辑: %s 张", len(images))
 
 

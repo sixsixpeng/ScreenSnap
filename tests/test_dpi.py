@@ -415,7 +415,8 @@ class DpiTests(CoreTests):
             {"geometry": QRect(0, 0, 3072, 1728), "dpr": 1.25},
             {"geometry": QRect(0, 2160, 1920, 1080), "dpr": 1.0},
         ]
-        app = SimpleNamespace(logger=Mock(), handle_capture_selection=Mock())
+        app = SimpleNamespace(logger=Mock(), handle_capture_selection=Mock(),
+                              play_capture_sound=Mock())
         with patch("core.dpi.DisplayMapper.collect_screen_infos", return_value=screen_infos):
             CaptureFlowMixin.complete_preset_capture(
                 app, "monitor", Image.new("RGB", (3840, 3240), "white"),

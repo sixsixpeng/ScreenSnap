@@ -229,7 +229,7 @@ class CaptureTests(CoreTests):
         app.settings_window = Mock()
         with patch("app.capture_flow.EditorWindow") as editor_factory, \
                 patch("app.notification_flow.CaptureNotification") as notice, \
-                patch("main.QApplication.beep") as beep:
+                patch("core.sound.play_sound") as beep:
             app.edit_images([(Image.new("RGB", (20, 12), "blue"), None)], from_capture=False)
         editor_factory.assert_called_once()
         notice.assert_not_called()
@@ -2121,12 +2121,60 @@ class CaptureTests(CoreTests):
         app.settings_window = Mock()
         app.editors = []
         app.capture_notice = None
-        with patch("main.QApplication.beep") as beep, \
+        with patch("core.sound.play_sound") as beep, \
                 patch("app.capture_flow.EditorWindow"), patch("main.QTimer"), \
                 patch("app.notification_flow.CaptureNotification") as preview:
             app.edit_images([(Image.new("RGB", (12, 8), "white"), None)])
-        beep.assert_called_once()
+            app.play_capture_sound()
+        beep.assert_called_once_with("shutter_classic")
         preview.assert_not_called()
+
+    def test_capture_sound_none_stays_silent(self):
+        """2026-10-17：截图音效选「无声」时必须真的静音 —— 不能走系统 beep 兜底。
+
+        这里分两段验证：① 截图完成路径确实把 none 传给播放函数；
+        ② 播放函数对 none 提前返回，既不调用 winsound 也不 beep。"""
+        from types import SimpleNamespace
+        from config.config_manager import DEFAULTS
+        from core import sound
+        from main import Application
+
+        app = Application.__new__(Application)
+        app.config = SimpleNamespace(data=dict(DEFAULTS, sound=True, capture_sound="none"))
+        app.logger = Mock()
+        app.settings_window = Mock()
+        app.editors = []
+        app.capture_notice = None
+        with patch("core.sound.play_sound") as play, \
+                patch("app.capture_flow.EditorWindow"), patch("main.QTimer"):
+            app.edit_images([(Image.new("RGB", (12, 8), "white"), None)])
+            app.play_capture_sound()
+        play.assert_called_once_with("none")
+
+        with patch("PySide6.QtWidgets.QApplication.beep") as beep:
+            self.assertEqual(sound.play_sound("none"), "none")
+        beep.assert_not_called()
+
+    def test_mask_emits_capture_completed_once_per_round(self):
+        """2026-10-17：遮罩确认选区时只发一次 capture_completed。
+
+        原地编辑（默认开启）不经过 edit_requested/save_requested，音效必须由遮罩通知；
+        同一轮里双击/E/快速贴图等多次触发不能重复播放。"""
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 160, "height": 100}
+        settings = {**DEFAULTS, "inline_edit": False, "capture_after_selection": "save",
+                    "magnifier": False, "crosshair": False}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (160, 100), "blue"), bounds, [bounds], settings)
+        hits = []
+        mask.capture_completed.connect(lambda: hits.append(1))
+        mask.selection.rects.append(QRect(20, 20, 60, 40))
+        mask.complete()
+        mask._notify_capture_completed()
+        self.assertEqual(hits, [1])
+        self.assertTrue(mask.session.capture_sound_played)
 
     def test_capture_editors_open_without_saving_and_close_all(self):
         from types import SimpleNamespace

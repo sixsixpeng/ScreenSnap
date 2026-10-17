@@ -448,6 +448,8 @@ ScreenSnap 是 Windows 优先的 PySide6 托盘程序，启动后没有主窗口
 
 **在哪里开关**：总开关与分类开关都在「设置 > 启动与通知」（复制完成、保存成功、贴图、其他操作/错误各自一项），另可配置通知方式、提示音、以及点击通知是否打开对应文件；关闭总开关后全部静默。
 
+**截图完成音效**：选区确认时播放一次（原地编辑、独立编辑器、直接保存/复制、另存为、快速贴图都算；全屏/当前显示器/上次区域预设截图同样生效），取消、Esc 与「打开图片」不播放。可在「设置 > 启动与通知 > 截图完成音效」选择：无声、四种相机快门（经典/轻柔/双击/手机）、常用内置音、系统默认提示音或自定义 wav；多选区一轮只响一次。它独立于各类通知提示音（`notification_sound`/`sound_*`），但仍受音效总开关 `sound` 控制；选「无声」时绝不会回落到系统 beep。
+
 **长什么样**：由「通知方式」决定 —— **默认走旧版应用通知**（应用内图片预览，必定带缩略图 + 托盘文字提示）；改成 Win11 原生通知后走系统通知中心，截图图片提示会缓存本地 PNG 作为 hero 图片、点击可定位已保存文件，普通文字消息也通过 Toast 发送，原生发送失败时自动回退为本地预览。非 Windows 平台始终使用应用内预览。「仅复制」「取色」「图片已保存」的图片提示统一按这一设置发送；「仅复制到剪贴板」这类复制反馈为保证内容可见，一律用应用内本地缩略图预览（原生 Toast 常不显示 hero 缩略图）。
 
 要提供可分析的 UIA 结构，在"设置 > 截图 > 窗口与控件识别"打开"记录 UIA 结构诊断"，再在目标程序上开始截图并悬停/识别目标；复制日志中以"UIA 结构诊断"开头的块。默认日志位于 `logs/YYYY-MM/app.log`（自定义日志目录则以设置为准）。输出最多 60 个节点；名称可能包含标题或文件名，分享前请检查并打码，诊断完成后建议关闭此设置。
@@ -584,7 +586,7 @@ APP_VERSION = "1.0.18"   # ← 发布新版本时只改这一行
 
 `notification_backend` 允许值为 `win11toast` 或 `legacy`，默认 `legacy`（旧版应用通知，必定带缩略图）。两种后端对**纯文字提示**（启动、热键故障、保存失败、剪贴板状态等）也一致遵守该设置：`legacy` 用应用内提示窗口（文字按宽度换行、按「通知自动关闭时长」关闭、有目标路径时可点击跳转），`win11toast` 走 Windows 通知中心；托盘气泡只在应用内窗口创建失败时兜底。
 
-**通知音效（2026-10-11）**：`sound` 是总开关。`notification_sound` 决定全局默认音，允许值 `default`（Windows 声音方案里的「默认提示音」）/ `asterisk`（星号）/ `exclamation`（感叹号）/ `question`（问号）/ `hand`（关键停止）/ `custom`（自定义 wav）；后四种对应系统声音方案里的同名事件，都能在「Windows 设置 > 声音 > 更多声音设置」里替换成任意 wav。**按类型覆盖**用 `sound_copy` / `sound_save` / `sound_sticker` / `sound_picker` / `sound_operation`（分别对应 仅复制 / 保存 / 贴图 / 取色 / 其它操作），取值同上并多一个**空串 = 跟随全局**；`notification_sound_file` 是 `custom` 使用的 wav 路径，**文件不存在或留空时自动回落默认提示音**（不影响通知本身）。实现见 `core/sound.py`（只用标准库：`QApplication.beep` 与 `winsound`），非 Windows 或播放失败一律回落到默认提示音。每个提示音下拉**同行**都有试听按钮（听的就是**该行实际会响的音**：分类行有覆盖听覆盖、留空则跟随全局）：按当前选择播放一次（**不受**「完成音效」总开关限制，方便挑音色）；自定义文件缺失时试听也按默认提示音播放，与真实通知的回落规则一致。前者将图片和文字通知交给 Windows 11 Toast，发送失败时仅对当前通知回退，不会改写已保存的后端配置；配置仍为 `win11toast` 时，后续通知和重启后都会重新尝试。后者使用旧版应用内图片预览与系统托盘文字通知。2026-10-16 起文字提示也归入应用内窗口（同款外观、无缩略图），托盘气泡只在窗口创建失败时兜底 —— 原先 `legacy` 直接把文字交给托盘气泡，Windows 会把它画成系统 toast，看起来仍像 Win11 原生通知。 **内置 1-30** 是随包分发的 30 个短音（`ui/assets/sounds/chime1-30.wav`，标准库 `wave` 生成、共约 233KB），与 Windows 声音方案无关、互不相同；**默认全部使用内置音**，六类默认各不相同便于分辨：全局 `builtin1`（单声）、仅复制 `builtin10`（双滴）、保存 `builtin8`（四连上行）、贴图 `builtin4`（三连音）、取色 `builtin9`（双音和音）、其它操作 `builtin7`（柔和低音）。2026-10-11 星号与感叹号合并为一项（Windows 里是同一个 wav）、去掉问号（默认未分配、不发声）；历史取值 `exclamation` 等同 `asterisk`、`question` 回落到默认提示音，老配置不受影响。
+**通知音效（2026-10-11）**：`sound` 是总开关。`notification_sound` 决定全局默认音，允许值 `default`（Windows 声音方案里的「默认提示音」）/ `asterisk`（星号）/ `exclamation`（感叹号）/ `question`（问号）/ `hand`（关键停止）/ `custom`（自定义 wav）；后四种对应系统声音方案里的同名事件，都能在「Windows 设置 > 声音 > 更多声音设置」里替换成任意 wav。**按类型覆盖**用 `sound_copy` / `sound_save` / `sound_sticker` / `sound_picker` / `sound_operation`（分别对应 仅复制 / 保存 / 贴图 / 取色 / 其它操作），取值同上并多一个**空串 = 跟随全局**；`notification_sound_file` 是 `custom` 使用的 wav 路径，**文件不存在或留空时自动回落默认提示音**（不影响通知本身）。实现见 `core/sound.py`（只用标准库：`QApplication.beep` 与 `winsound`），非 Windows 或播放失败一律回落到默认提示音。每个提示音下拉**同行**都有试听按钮（听的就是**该行实际会响的音**：分类行有覆盖听覆盖、留空则跟随全局）：按当前选择播放一次（**不受**「完成音效」总开关限制，方便挑音色）；自定义文件缺失时试听也按默认提示音播放，与真实通知的回落规则一致。前者将图片和文字通知交给 Windows 11 Toast，发送失败时仅对当前通知回退，不会改写已保存的后端配置；配置仍为 `win11toast` 时，后续通知和重启后都会重新尝试。后者使用旧版应用内图片预览与系统托盘文字通知。2026-10-16 起文字提示也归入应用内窗口（同款外观、无缩略图），托盘气泡只在窗口创建失败时兜底 —— 原先 `legacy` 直接把文字交给托盘气泡，Windows 会把它画成系统 toast，看起来仍像 Win11 原生通知。 **内置 1-30** 是随包分发的 30 个短音（`ui/assets/sounds/chime1-30.wav`，标准库 `wave` 生成、共约 233KB），与 Windows 声音方案无关、互不相同；**默认全部使用内置音**，六类默认各不相同便于分辨：全局 `builtin1`（单声）、仅复制 `builtin10`（双滴）、保存 `builtin8`（四连上行）、贴图 `builtin4`（三连音）、取色 `builtin9`（双音和音）、其它操作 `builtin7`（柔和低音）。2026-10-11 星号与感叹号合并为一项（Windows 里是同一个 wav）、去掉问号（默认未分配、不发声）；历史取值 `exclamation` 等同 `asterisk`、`question` 回落到默认提示音，老配置不受影响。**截图完成音效（2026-10-17）**：独立配置键 `capture_sound`（默认 `shutter_classic`），取值 `none` / `shutter_classic` / `shutter_soft` / `shutter_double` / `shutter_phone` / 内置 1-30 / `default` / `custom`；`custom` 与通知共用 `notification_sound_file`，文件失效时回落默认提示音；`none` 在 `play_sound()` 里提前返回，不会落到 beep 兜底。四个快门 wav 位于 `ui/assets/sounds/shutter_*.wav`，由标准库 `wave` 合成、随包分发。
 
 #### Windows 通知身份（让通知设置里出现独立条目）
 
@@ -610,7 +612,8 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `notification_timeout` | `2` 秒 | 本地预览与托盘提示时长；`0` 表示本地预览不自动关闭，Toast 映射为 `long`。 |
 | `open_notification_file` | `true` | 点击带保存文件目标的通知后，是否在资源管理器中选中该文件。 |
 | `sticker_notification` | `true` | 创建或粘贴贴图后是否显示通知。 |
-| `sound` | `true` | 截图完成时是否播放提示音；默认开启，且独立于通知总开关和通知分类。 |
+| `sound` | `true` | 提示音总开关：通知提示音与截图完成音效都受它控制，关闭后全部静音；独立于视觉通知。 |
+| `capture_sound` | `shutter_classic` | 截图完成音效：`none` 无声 / `shutter_classic`、`shutter_soft`、`shutter_double`、`shutter_phone` 四种相机快门 / 内置音 / `default` 系统提示音 / `custom` 自定义 wav（与通知共用 `notification_sound_file`，文件失效时回落默认提示音）。 |
 
 #### 截图
 
@@ -1930,3 +1933,12 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 3. 失败（剪贴板不可用）走「其它操作」通知并记 WARNING，避免被「复制完成通知」开关静音；动图复制当前帧，文件贴图复制源图，不带窗口边框/缩放效果。
 4. 日志：成功 `贴图右键复制图像已写入剪贴板`（INFO），失败 WARNING。
 5. 验证：新增 `test_sticker_copy_image_reports_to_copy_notification`，覆盖成功通知分类 `copy_notification`、剪贴板写入与失败 `operation_notification`。
+
+#### 截图完成音效（相机快门）
+
+1. 新增配置 `capture_sound`（默认 `shutter_classic`），纳入 `DEFAULTS`、`validate()` 与 `PRESERVED_ON_VERSION_RESET`；`core.sound.SOUND_KINDS` 增加 `none` 与 4 个 `shutter_*`。
+2. 随包新增 4 个快门 wav：`ui/assets/sounds/shutter_{classic,soft,double,phone}.wav`，标准库 `wave` 合成（44100Hz、单声道、16-bit，220/160/180/90ms），不依赖 Windows 声音方案。
+3. 设置页「启动与通知」新增「截图完成音效」下拉 13 项（无声 + 四种快门 + 常用内置音 + 系统默认 + 自定义 wav），行内「试听」复用现有逻辑（`category="capture"`）；原「完成音效」复选框说明改为通知与截图音效总开关。
+4. 播放时机：遮罩新增 `capture_completed` 信号，在选区确认后、进入原地编辑/独立编辑器/保存/复制/另存为之前发出；`MaskSession.capture_sound_played` 保证一轮只响一次，双击/E/快速贴图不会重复。全屏、当前显示器、上次区域不显示遮罩，由 `complete_preset_capture` 与 `show_mask` 的 repeat 分支补播；取消与「打开图片」不播。
+5. `none` 在 `play_sound()` 提前返回，明确静音、不回落 beep；`custom` 复用 `notification_sound_file`，文件失效回落默认提示音；日志 `截图完成音效: kind=... 实际=...`（DEBUG）。
+6. 验证：`test_capture_completion_sound_is_independent_of_notification_switches`（与通知开关独立）、`test_capture_sound_none_stays_silent`（无声不 beep）、`test_mask_emits_capture_completed_once_per_round`（一轮一次）；`test_config` 试听按钮 7 个、`test_sticker` 内置音 34 个同步更新。真机听感需人工验收。

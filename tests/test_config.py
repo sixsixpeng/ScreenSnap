@@ -50,18 +50,20 @@ class ConfigTests(CoreTests):
             manager = ConfigManager(Path(folder) / "settings.json")
             page = GeneralPage(manager, manager.save)
             buttons = [b for b in page.findChildren(QPushButton) if b.text() == "试听"]
-            self.assertEqual(len(buttons), 6, "全局 + 5 个分类，各需要一个同行试听按钮")
+            self.assertEqual(len(buttons), 7, "截图完成 + 全局 + 5 个分类，各需要一个同行试听按钮")
             for button in buttons:
                 self.assertFalse(button.icon().isNull(), "可见按钮必须同时有文字和图标")
             # 2026-10-11：按类型默认不再是空串（默认全是内置音）⇒ 想验证「跟随全局」的分行必须显式清空。
             manager.data.update(notification_sound="asterisk", sound_copy="hand",
                                 sound_save="", sound_sticker="", sound_picker="",
-                                sound_operation="", notification_sound_file="C:/nope.wav")
+                                sound_operation="", capture_sound="shutter_classic",
+                                notification_sound_file="C:/nope.wav")
             for category, expected in ((None, "asterisk"), ("copy_notification", "hand"),
                                        ("save_notification", "asterisk"),
                                        ("sticker_notification", "asterisk"),
                                        ("picker_notification", "asterisk"),
-                                       ("operation_notification", "asterisk")):
+                                       ("operation_notification", "asterisk"),
+                                       ("capture", "shutter_classic")):
                 with self.subTest(category=category):
                     with patch("core.sound.play_sound") as play:
                         page._preview_sound(category)
