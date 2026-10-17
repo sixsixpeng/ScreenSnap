@@ -79,7 +79,7 @@ def window_under_point(point):
     return target
 
 
-def top_window_at(x, y, skip_stickers=True):
+def top_window_at(x, y, skip_stickers=True, include_shell=False):
     """按 Z 序找到第一个覆盖该物理点、可见且不是本程序覆盖层的窗口。
 
     遮罩与贴图会显式标记为穿透窗口；同进程的普通窗口仍可成为识别目标。
@@ -88,6 +88,11 @@ def top_window_at(x, y, skip_stickers=True):
 
     skip_stickers 为 True 时贴图也跳过（供贴图吸附使用，避免与贴图间吸附重复）；
     UIA 识别传 False，只跳过遮罩，让贴图、菜单等本程序窗口也能被命中。
+
+    include_shell 为 True 时**不排除系统桌面（GetShellWindow）**：桌面图标挂在
+    Progman/WorkerW 下的 SysListView32 里，若把 shell 跳过，UIA 永远拿不到桌面图标，
+    只能识别整块桌面或什么都识别不到。贴图吸附仍用默认 False（整屏桌面不是有意义的
+    吸附目标）。
     """
     if os.name != "nt":
         return None
@@ -95,6 +100,8 @@ def top_window_at(x, y, skip_stickers=True):
     user32 = ctypes.windll.user32
     desktop = user32.GetDesktopWindow()
     shell = user32.GetShellWindow()
+    # GetDesktopWindow 本身不会被 EnumWindows 枚举；这里保留是为了与旧行为一致。
+    skipped_system = (desktop,) if include_shell else (desktop, shell)
     found = []
     # 句柄集合在枚举**之前**收集好：ctypes 回调里绝不能调用 Qt 的 winId()（对象已析构时会抛异常，
     # 而回调里的异常无法传播 ⇒ 直接原生崩溃，2026-10-11 实测）。
@@ -107,7 +114,7 @@ def top_window_at(x, y, skip_stickers=True):
         try:
             if found:
                 return False
-            if (handle in (desktop, shell) or is_cloaked(handle)
+            if (handle in skipped_system or is_cloaked(handle)
                     or window_class(user32, handle) in IGNORED_CLASSES
                     or not user32.IsWindowVisible(handle) or user32.IsIconic(handle)
                     or int(handle) in skip_handles):
@@ -125,7 +132,28 @@ def top_window_at(x, y, skip_stickers=True):
     except (OSError, ValueError) as error:
         logger.warning("枚举窗口失败，本次无法识别: %s", error)
         return None
-    return found[0] if found else None
+    if not found:
+        return None
+    if include_shell and int(found[0]) == int(shell):
+        # UIA 专用：桌面图标在 shell 下，记录下来便于排查"桌面图标识别不到"。
+        log_every(logger, logging.DEBUG, "window-hit-shell", int(found[0]), 2.0,
+                  "窗口识别命中系统桌面: hwnd=%d（UIA 将继续下钻桌面图标）", int(found[0]))
+    return found[0]
+
+
+def is_desktop_window(handle):
+    """句柄是否为系统桌面（GetDesktopWindow / GetShellWindow）。
+
+    UIA 拿到桌面 shell 后需要区分“桌面背景”和“桌面图标”：前者覆盖整块虚拟桌面，
+    后者只是几十像素的列表项/图像。仅用于识别，不影响贴图吸附。
+    """
+    if not handle:
+        return False
+    try:
+        user32 = ctypes.windll.user32
+        return int(handle) in (int(user32.GetDesktopWindow()), int(user32.GetShellWindow()))
+    except (OSError, ValueError):
+        return False
 
 
 def is_cloaked(handle):

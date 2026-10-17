@@ -13,6 +13,7 @@ from ctypes import wintypes
 
 from core.window_snap import top_window_at
 from core.window_snap import ignored_mask_window
+from core.window_snap import is_desktop_window
 from logger import get_logger
 
 # 自绘界面里过小的控件没有识别价值；4 像素仍能选中图标这类小控件。
@@ -339,7 +340,9 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
     try:
         # 鼠标下最上面的一定是本进程的遮罩，而 UIA 是树结构没有 Z 序概念，
         # 所以先用 Win32 找到遮罩下面的外部窗口，识别结果必须落在它里面。
-        handle = top_window_at(x, y, skip_stickers=False)
+        # include_shell=True：桌面图标挂在 Progman/WorkerW 下，若把系统桌面排除，
+        # 悬停在桌面上会直接返回空，永远识别不到图标（只能拖选整块桌面）。
+        handle = top_window_at(x, y, skip_stickers=False, include_shell=True)
         if not handle:
             logger.debug("UIA 之前未取到外部窗口: 物理点(%d,%d)", x, y)
             return ([], "") if with_label else []
@@ -364,6 +367,10 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
                 return ([], "") if with_label else []
             if win_rect is not None:
                 rect = _clamp_rect(rect, win_rect)
+            if is_desktop_window(handle) and _mostly_covers(rect, win_rect):
+                # 桌面背景（桌面列表控件本身铺满虚拟桌面）不是有意义的元素。
+                # 桌面图标在前面的 deepest_at 里已收窄到几十像素，不会命中这里。
+                return ([], "") if with_label else []
             if not with_label:
                 return [rect]
             # 尺寸标签的控件名：同次查询里类型属性已被 cache 覆盖，这里不额外增加往返；
@@ -380,6 +387,9 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
         # 复用悬停同款下钻：同一线程、同一读取预算与熔断，不新增风险类型，
         # 而且 Tab 的频率远低于悬停轮询。
         deep = deepest_at(control, x, y, logger, cache=cache)
+        # 桌面背景同理：悬停/点击都不应把整块桌面当成元素；桌面图标已收窄。
+        if is_desktop_window(handle) and _mostly_covers(_rect_of(deep, cache), win_rect):
+            return ([], "") if with_label else []
         # 2026-10-11（规则 14）：这里是**高频悬停**入口 ⇒ 显式关掉 climb 的逐元素/逐跳过日志
         # （实测最近 2000 行里「UIA 元素[N]」54 条 + 「UIA 跳过元素」42 条 ✗）。
         # 传 verbose=False 只影响日志：矩形链、层数、命中判定完全不变 ✓；
@@ -679,6 +689,25 @@ def _clamp_rect(rectangle, frame):
     if right - left < MIN_SIZE or bottom - top < MIN_SIZE:
         return rectangle
     return (left, top, right, bottom)
+
+
+def _mostly_covers(rectangle, frame, ratio=0.9):
+    """矩形是否基本覆盖参考框；用于区分“整块桌面背景”和“桌面图标”。
+
+    `win_rect`（GetWindowRect/DWM）与 UIA 的 BoundingRectangle 可能差 1–2px，
+    因此用 90% 面积而不是严格相等。frame 缺失时无法判断，返回 False（保持原行为）。
+    """
+    if rectangle is None or frame is None:
+        return False
+    frame_width = frame[2] - frame[0]
+    frame_height = frame[3] - frame[1]
+    if frame_width <= 0 or frame_height <= 0:
+        return False
+    width = min(rectangle[2], frame[2]) - max(rectangle[0], frame[0])
+    height = min(rectangle[3], frame[3]) - max(rectangle[1], frame[1])
+    if width <= 0 or height <= 0:
+        return False
+    return width * height >= frame_width * frame_height * ratio
 
 
 def covers(rectangle, x, y):

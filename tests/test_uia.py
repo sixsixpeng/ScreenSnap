@@ -1787,6 +1787,110 @@ class UiaTests(CoreTests):
         self.assertEqual((dx, dy), (-4, -4))
         self.assertEqual(hit[0], "win1")
 
+    def test_top_window_at_can_include_desktop_shell_for_uia(self):
+        """桌面图标识别：UIA 需要 shell 作为目标；贴图吸附仍应排除整屏桌面。
+
+        桌面图标挂在 Progman/WorkerW 下的 SysListView32 里，而 Progman 正是
+        GetShellWindow()。普通识别与贴图吸附跳过它是正确的（整屏桌面不是有意义的
+        吸附目标），但 UIA 必须允许它，否则永远拿不到桌面图标。
+        """
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from core import window_snap
+
+        shell, desktop = 111, 222
+
+        class FakeUser32:
+            def GetDesktopWindow(self):
+                return desktop
+
+            def GetShellWindow(self):
+                return shell
+
+            def EnumWindows(self, callback, unused):
+                callback(shell, 0)
+                callback(desktop, 0)
+
+            def IsWindowVisible(self, handle):
+                return True
+
+            def IsIconic(self, handle):
+                return False
+
+        with patch.object(window_snap.ctypes, "windll",
+                          SimpleNamespace(user32=FakeUser32())), \
+                patch.object(window_snap, "overlay_handles", return_value=set()), \
+                patch.object(window_snap, "is_cloaked", return_value=False), \
+                patch.object(window_snap, "window_class", return_value="TestClass"), \
+                patch.object(window_snap, "covers", return_value=True):
+            self.assertIsNone(window_snap.top_window_at(10, 10),
+                              "默认（贴图吸附/普通识别）仍应排除系统桌面")
+            self.assertEqual(window_snap.top_window_at(10, 10, include_shell=True), shell,
+                             "UIA 路径必须允许把桌面 shell 作为识别目标")
+            self.assertTrue(window_snap.is_desktop_window(shell))
+            self.assertFalse(window_snap.is_desktop_window(999))
+
+    def test_uia_recognizes_desktop_icon_and_ignores_empty_desktop(self):
+        """悬停桌面：命中图标时返回图标矩形；空白桌面不返回整块桌面。
+
+        回归用户反馈：直接截桌面时，桌面被 `top_window_at` 排除，导致只能拖选整块
+        桌面，桌面上的图标反而识别不到。这里用假控件树验证：shell → 桌面列表 →
+        图标 → 图标图像，最终必须收窄到图像/列表项，而不是整块桌面。
+        """
+        import logging
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from core import window_uia
+
+        shell = 65834
+        desktop_rect = (0, -459, 5120, 1440)
+
+        class Node:
+            def __init__(self, name, control_type, rect, children=()):
+                self.Name = name
+                self.ControlTypeName = control_type
+                self.BoundingRectangle = SimpleNamespace(
+                    left=rect[0], top=rect[1], right=rect[2], bottom=rect[3])
+                self.NativeWindowHandle = 0
+                self.children = list(children)
+                self.parent = None
+                for child in self.children:
+                    child.parent = self
+
+            def GetFirstChildControl(self):
+                return self.children[0] if self.children else None
+
+            def GetNextSiblingControl(self):
+                return None
+
+            def GetChildren(self):
+                return list(self.children)
+
+            def GetParentControl(self):
+                return self.parent
+
+        icon_image = Node("图标图像", "ImageControl", (28, 28, 60, 60))
+        icon = Node("此电脑", "ListItemControl", (20, 20, 80, 90), [icon_image])
+        desktop_list = Node("桌面", "ListControl", desktop_rect, [icon])
+        shell_pane = Node("Program Manager", "PaneControl", desktop_rect, [desktop_list])
+        automation = SimpleNamespace(ControlFromPoint=lambda x, y: desktop_list)
+
+        with patch.object(window_uia, "top_window_at", return_value=shell), \
+                patch.object(window_uia, "physical_rect_of", return_value=desktop_rect), \
+                patch.object(window_uia, "is_desktop_window", return_value=True), \
+                patch.object(window_uia, "module", return_value=automation), \
+                patch.object(window_uia, "_disabled_until", 0.0):
+            chain, label = window_uia.element_chain(
+                (40, 40), 8, exclude_hwnd=None, deepest_only=True, with_label=True)
+            self.assertEqual(chain, [(28, 28, 60, 60)],
+                             "桌面图标必须收窄到图标本身，而不是整块桌面")
+            self.assertEqual(label, "图片")
+
+            empty_chain, empty_label = window_uia.element_chain(
+                (500, 500), 8, exclude_hwnd=None, deepest_only=True, with_label=True)
+            self.assertEqual(empty_chain, [], "空白桌面不应把整块桌面当作悬停元素")
+            self.assertEqual(empty_label, "")
+
     def test_window_hit_ignores_invisible_system_windows(self):
         from core.window_snap import IGNORED_CLASSES, is_cloaked, top_window_at
 
