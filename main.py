@@ -146,6 +146,7 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
 
         migrate_cache_dirs(self.config.data)
         self.stickers = StickerManager(self.config.data)
+        self.stickers.image_copied.connect(self.notify_sticker_copied)
         self.reset_user_data_requested = False
         # 「自动清理时机」设为启动时的话，等事件循环起来再清理，别拖慢启动。
         QTimer.singleShot(0, lambda: self.cleanup_cache_if_scheduled("start"))

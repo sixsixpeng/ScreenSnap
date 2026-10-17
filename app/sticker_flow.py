@@ -93,6 +93,19 @@ class StickerFlowMixin:
                 self.logger.warning("贴图通知缩略图失败，退回文字通知: %s", error)
         self.notify("已创建贴图", "sticker_notification", target, "sticker_panel")
 
+    def notify_sticker_copied(self, image, success):
+        """贴图右键「复制图像」的结果通知。
+
+        成功复用截图「仅复制」的同一条通知链路：视觉开关 copy_notification、
+        提示音 sound_copy（再由 sound 总开关控制），不新增独立配置。
+        失败不属于“复制完成”，走其它操作通知，避免被复制通知开关静音。
+        """
+        if success:
+            self.logger.info("贴图右键复制图像已写入剪贴板")
+            self.notify_capture_copied(image)
+            return
+        self.logger.warning("贴图右键复制图像失败：剪贴板不可用")
+        self.notify("复制图片失败：剪贴板不可用", "operation_notification")
 
     def edit_sticker(self, image):
         """在独立编辑器中编辑贴图副本；首次保存会分配新文件名。"""

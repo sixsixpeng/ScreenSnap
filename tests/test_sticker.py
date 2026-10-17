@@ -2495,6 +2495,30 @@ class ClipboardOutputTests(CoreTests):
             self.assert_same_image(context.board.image(), QImage(str(source)))
             self.assertEqual(len(context.board.writes), 1)
 
+    def test_sticker_copy_image_reports_to_copy_notification(self):
+        """贴图右键「复制图像」必须复用复制完成通知（copy_notification）与失败提示。"""
+        from PySide6.QtGui import QImage
+
+        with self.output_context() as context:
+            source = context.folder / "source.png"
+            Image.new("RGB", (20, 15), "red").save(source)
+            item = context.manager.add(QImage(str(source)), source)
+            context.manager.image_copied.connect(context.app.notify_sticker_copied)
+
+            self.assertTrue(item.copy_image())
+            self.assertEqual(len(context.board.writes), 1)
+            context.app.show_image_notice.assert_called_once()
+            self.assertEqual(context.app.show_image_notice.call_args.kwargs["category"],
+                             "copy_notification")
+            context.app.notify.assert_not_called()
+
+            context.app.show_image_notice.reset_mock()
+            with patch("sticker.sticker_item.copy_image_to_clipboard", return_value=False):
+                self.assertFalse(item.copy_image())
+            context.app.show_image_notice.assert_not_called()
+            context.app.notify.assert_called_once()
+            self.assertEqual(context.app.notify.call_args.args[1], "operation_notification")
+
     def test_clipboard_output_busy_board_keeps_only_copy_editor_open(self):
         for inline in (False, True):
             with self.subTest(inline=inline), self.output_context() as context:

@@ -37,6 +37,8 @@ class StickerItem(QWidget):
     batch_scaled = Signal(object, float)
     batch_opacity_changed = Signal(object, float)
     edit_requested = Signal(object)
+    # 右键「复制图像」的结果：image 为实际写入剪贴板的图（动图取当前帧），success=False 表示剪贴板不可用。
+    image_copied = Signal(object, bool)
 
     def __init__(self, image, source=None, settings=None, origin=None):
         super().__init__()
@@ -1184,15 +1186,22 @@ class StickerItem(QWidget):
         super().closeEvent(event)
 
     def copy_image(self):
-        """复制原始图像而非带窗口缩放效果的预览；动图复制当前帧。"""
+        """复制原始图像而非带窗口缩放效果的预览；动图复制当前帧。
+
+        复制结果通过 `image_copied` 信号交给应用层，复用「复制完成通知」的
+        视觉开关（copy_notification）与提示音（sound_copy）；本方法不直接弹通知，
+        避免贴图窗口依赖全局通知对象。
+        """
+        image = None
         if self.animated and self.movie is not None:
             image = self.movie.currentImage()
-            if not image.isNull():
-                return copy_image_to_clipboard(image)
-        image = QImage(self.source) if self.source else self.image
+        if image is None or image.isNull():
+            image = QImage(self.source) if self.source else self.image
         if image is None or image.isNull():
             image = self.original_pixmap.toImage()
-        return copy_image_to_clipboard(image)
+        result = copy_image_to_clipboard(image)
+        self.image_copied.emit(image, bool(result))
+        return result
 
     def toggle_top(self):
         """切换置顶标志后重新显示窗口，使窗口管理器应用新状态。"""

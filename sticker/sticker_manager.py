@@ -32,6 +32,8 @@ class StickerManager(QObject):
 
     changed = Signal()
     edit_requested = Signal(object)
+    # 任意贴图右键「复制图像」的结果；由应用层转成「复制完成」通知（含提示音）。
+    image_copied = Signal(object, bool)
 
     def __init__(self, settings, clipboard=None):
         super().__init__()
@@ -333,6 +335,7 @@ class StickerManager(QObject):
                 image_anchor.x(), image_anchor.y(), item.x(), item.y(),
                 image_origin.x(), image_origin.y(), item.width(), item.height(), item.padding())
         item.edit_requested.connect(self.edit_requested)
+        item.image_copied.connect(self.image_copied)
         item.open_file_replace = lambda: self.open_file(item)
         item.open_file_new = self.open_file
         item.setAttribute(Qt.WA_DeleteOnClose)
