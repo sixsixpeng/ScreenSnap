@@ -1668,11 +1668,28 @@ class ConfigTests(CoreTests):
                     new_width = clipboard_page.controls["color_sticker_width"].value() + 20
                     clipboard_page.controls["color_sticker_width"].setValue(new_width)
                     self.assertEqual(color_preview.images[0].width(), new_width)
+            # D45：每个设置项都要有说明；参数类控件还要写明取值与默认值，长文按语义换行。
+            from config.config_manager import DEFAULTS
+            from PySide6.QtWidgets import QCheckBox, QComboBox, QDoubleSpinBox, QSpinBox
+            from ui.widgets.tooltip import RadioRow
+
+            parameter_types = (QSpinBox, QDoubleSpinBox, QCheckBox, RadioRow, QComboBox)
             for index in range(settings.pages.count()):
                 page = settings.pages.widget(index)
+                page_name = settings.navigation.item(index).text()
                 for key, control in {**page.controls, **page.color_buttons}.items():
-                    self.assertTrue(control.toolTip().strip(),
-                                    (settings.navigation.item(index).text(), key))
+                    with self.subTest(page=page_name, key=key):
+                        tip = control.toolTip().strip()
+                        self.assertTrue(tip, (page_name, key))
+                        if isinstance(control, parameter_types):
+                            explained = "取值" in tip
+                            if not explained and isinstance(control, (QSpinBox, QDoubleSpinBox)):
+                                default = DEFAULTS.get(key)
+                                explained = ("默认" in tip and default is not None
+                                             and (str(default) in tip or f"{default:g}" in tip))
+                            self.assertTrue(explained, f"{page_name}/{key} 未写明取值或默认值：{tip}")
+                        if len(tip) > 60:
+                            self.assertIn("\n", tip, f"{page_name}/{key} 的长说明未换行：{tip}")
             save_page = settings.page("保存与输出")
             archive_groups = [box for box in save_page.findChildren(QGroupBox)
                               if box.title() == "图片归档"]

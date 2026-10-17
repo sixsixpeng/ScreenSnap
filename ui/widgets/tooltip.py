@@ -9,9 +9,12 @@ from PySide6.QtWidgets import (QWidget, QFormLayout, QCheckBox, QSpinBox, QDoubl
                                QVBoxLayout, QPushButton, QStyle, QRadioButton, QButtonGroup,
                                QGridLayout, QKeySequenceEdit)
 
+from config.config_manager import DEFAULTS
 from logger import get_logger
 from ui.widgets.color_button import ColorButton
 from ui.widgets.file_path_edit import FilePathEdit
+
+_MISSING = object()
 
 
 class RadioRow(QWidget):
@@ -157,13 +160,59 @@ class SettingsPage(QWidget):
         self.form = form
         return box
 
+    def _with_value_help(self, key, help_text, widget):
+        """按控件实际范围补一行「取值」，避免每个设置项各写一遍且写错默认值。
+
+        文案已含「取值」或已写清范围与默认值时原样返回；没有对应配置键或
+        非参数类控件（颜色按钮、文件框等）也原样返回。
+        """
+        if "取值" in help_text:
+            return help_text
+        default = DEFAULTS.get(key, _MISSING)
+        if default is _MISSING:
+            return help_text
+        if isinstance(widget, QDoubleSpinBox):
+            if "默认" in help_text and f"{default:g}" in help_text:
+                return help_text
+            text = (f"取值：{widget.minimum():g}–{widget.maximum():g}{widget.suffix()}"
+                    f"，默认 {default:g}{widget.suffix()}")
+        elif isinstance(widget, QSpinBox):
+            if "默认" in help_text and str(default) in help_text:
+                return help_text
+            text = (f"取值：{widget.minimum()}–{widget.maximum()}{widget.suffix()}"
+                    f"，默认 {default}{widget.suffix()}")
+        elif isinstance(widget, QCheckBox):
+            text = f"取值：开 / 关，默认{'开' if default else '关'}"
+        elif isinstance(widget, RadioRow):
+            names = [button.text() for button in widget._buttons.values()]
+            selected = widget._buttons.get(default)
+            values = " / ".join(names) if len(names) <= 6 else f"下拉列表中的 {len(names)} 个选项"
+            text = f"取值：{values}，默认{selected.text() if selected else default}"
+        elif isinstance(widget, QComboBox):
+            count = widget.count()
+            names = " / ".join(widget.itemText(i) for i in range(count))
+            if count > 6:
+                names = f"下拉列表中的 {count} 个选项"
+            index = widget.findData(default)
+            text = f"取值：{names}，默认{widget.itemText(index) if index >= 0 else default}"
+        else:
+            return help_text
+        return f"{help_text}\n{text}"
+
+    def _add_row(self, label, widget):
+        """加一行并让左侧标签也能显示同一份说明（悬停文字时同样可读）。"""
+        self.form.addRow(label, widget)
+        field_label = self.form.labelForField(widget)
+        if field_label is not None:
+            field_label.setToolTip(widget.toolTip())
+
     def bind(self, key, widget, signal, getter, label, help_text):
         """信号到达时读取控件的最新值，而非创建时的默认值。"""
-        widget.setToolTip(help_text)
+        widget.setToolTip(self._with_value_help(key, help_text, widget))
         # 记录界面标签：配置变更日志用它把键名翻译成用户看得懂的功能说明。
         widget._setting_label = label
         self.controls[key] = widget
-        self.form.addRow(label, widget)
+        self._add_row(label, widget)
         signal.connect(lambda *args: self.update_value(key, getter()))
         return widget
 
@@ -217,14 +266,15 @@ class SettingsPage(QWidget):
         row.addStretch()
         container = QWidget()
         container.setLayout(row)
-        box.setToolTip(help_text)
-        spin.setToolTip(help_text)
+        box.setToolTip(self._with_value_help(check_key, help_text, box))
+        spin.setToolTip(self._with_value_help(number_key, help_text, spin))
+        container.setToolTip(spin.toolTip())
         # 记录界面标签：配置变更日志用它把键名翻译成用户看得懂的功能说明。
         box._setting_label = label
         spin._setting_label = label
         self.controls[check_key] = box
         self.controls[number_key] = spin
-        self.form.addRow(label, container)
+        self._add_row(label, container)
         box.toggled.connect(lambda value: self.update_value(check_key, value))
         spin.valueChanged.connect(lambda value: self.update_value(number_key, value))
         return container
@@ -258,10 +308,14 @@ class SettingsPage(QWidget):
                 on_change(value)
 
         widget = RadioRow(options, self.config.data[key], help_text, change)
+        tip = self._with_value_help(key, help_text, widget)
+        widget.setToolTip(tip)
+        for button in widget._buttons.values():
+            button.setToolTip(tip)
         # 记录界面标签：配置变更日志用它把键名翻译成用户看得懂的功能说明。
         widget._setting_label = label
         self.controls[key] = widget
-        self.form.addRow(label, widget)
+        self._add_row(label, widget)
         return widget
 
     def color(self, key, label, help_text):
@@ -273,5 +327,5 @@ class SettingsPage(QWidget):
         button._setting_label = label
         self.controls[key] = button
         self.color_buttons[key] = button
-        self.form.addRow(label, button)
+        self._add_row(label, button)
         return button

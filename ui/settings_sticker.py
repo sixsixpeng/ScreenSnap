@@ -235,16 +235,22 @@ class StickerPage(SettingsPage):
         self.check("sticker_selection_effect_enabled", "选中时显示光晕",
                "控制贴图获得焦点或进入多选状态时显示的蓝色选中光晕")
         self.number("sticker_selection_effect_strength", "光晕强度 (%)", 0, 100,
-                    "调整贴图选中光晕的浓度；0 为不显示，默认 30%")
+                    "贴图选中光晕的浓度；0 为不显示，只影响获得焦点或多选时的外观。")
         self.selection_effect_preview = StickerSelectionPreview(config)
         self.previews.append(self.selection_effect_preview)
         self.form.addRow(self.selection_effect_preview)
-        self.check("sticker_border_enabled", "默认开启描边", "新建贴图默认显示外圈描边；单个贴图可在右键菜单单独切换")
-        self.color("sticker_border_color", "描边颜色", "设置新建贴图默认描边颜色")
-        self.number("sticker_border_width", "描边宽度", 0, 20, "设置新建贴图默认描边宽度，0 表示不绘制描边")
-        self.check("sticker_shadow_enabled", "默认显示阴影", "新建贴图默认显示阴影；单个贴图可在右键菜单单独切换")
-        self.color("sticker_shadow_color", "阴影颜色", "设置新建贴图默认阴影颜色")
-        self.number("sticker_shadow_strength", "阴影强度", 0, 100, "设置新建贴图默认阴影强度，0 表示不绘制阴影")
+        self.check("sticker_border_enabled", "默认开启描边",
+                   "新建贴图是否默认显示外圈描边；单张贴图可在右键菜单单独切换。")
+        self.color("sticker_border_color", "描边颜色",
+                   "新建贴图的描边颜色；已创建的贴图可在右键菜单单独调整。")
+        self.number("sticker_border_width", "描边宽度", 0, 20,
+                    "新建贴图的描边宽度；0 表示不绘制描边，已创建的贴图可单独调整。")
+        self.check("sticker_shadow_enabled", "默认显示阴影",
+                   "新建贴图是否默认显示阴影；单张贴图可在右键菜单单独切换。")
+        self.color("sticker_shadow_color", "阴影颜色",
+                   "新建贴图的阴影颜色；已创建的贴图可在右键菜单单独调整。")
+        self.number("sticker_shadow_strength", "阴影强度", 0, 100,
+                    "新建贴图的阴影强度；0 表示不绘制阴影，已创建的贴图可单独调整。")
         self.group("拖动与吸附")
         self.check("sticker_snap_enabled", "拖动时自动吸附",
                    "拖动贴图靠近屏幕工作区、普通窗口或其他贴图边缘时自动对齐；\n"
@@ -260,22 +266,23 @@ class StickerPage(SettingsPage):
                     "两者：同时考虑上面两类目标，取距离最近的一个")
         self.group("吸附提示样式")
         self.check("sticker_snap_hint_enabled", "显示吸附提示",
-                   "吸附瞬间沿贴图外沿显示的提示框；每张贴图还可以在右键菜单里单独开关")
+                   "吸附瞬间沿贴图外沿显示提示框；单张贴图可在右键菜单单独开关。")
         self.radios("sticker_snap_hint_preset", "预设样式",
                     [("默认青绿虚线", "default"), ("蓝色实线", "blue_solid"),
                      ("橙色点线", "orange_dot"), ("白色高对比", "white_contrast"),
                      ("自定义", "custom")],
                     "预设会一次性设定颜色/线宽/线型；手动改动其中任一项即变成“自定义”")
         self.color("sticker_snap_hint_color", "提示颜色", "吸附提示框的颜色（默认与提示虚线同为青绿）")
-        self.number("sticker_snap_hint_width", "提示线宽 (px)", 1, 6, "吸附提示框的线条宽度")
+        self.number("sticker_snap_hint_width", "提示线宽 (px)", 1, 6,
+                    "吸附提示框的线条宽度；只影响提示框，不改变吸附范围。")
         self.radios("sticker_snap_hint_style", "提示线型",
                     [("实线", "solid"), ("虚线", "dash"), ("点线", "dot"), ("点划线", "dash_dot")],
-                    "吸附提示框的线型，默认虚线与旧行为一致")
+                    "吸附提示框的线型；默认虚线与旧行为一致。")
         self.radios("sticker_snap_hint_mode", "显示时机",
                     [("吸附关系存在期间常显", "always"), ("仅吸附瞬间", "drag")],
                     "默认“常显”：只要贴图还贴着目标就一直显示提示框；\n选“仅吸附瞬间”则松开后按下面的延时淡出")
         self.number("sticker_snap_hint_duration", "淡出延时 (ms)", 0, 3000,
-                    "仅在“仅吸附瞬间”下生效：0 表示松开立即消失（默认 600ms）")
+                    "仅在「仅吸附瞬间」下生效：0 表示松开立即消失；其它模式忽略此值。")
         self.number("sticker_snap_hint_inset", "提示内缩 (px)", 0, 8,
                     "提示框相对图像边缘向内缩进；透明模式必须内缩，否则会被输入遮罩裁掉")
         self.snap_hint_preview = StickerSnapHintPreview(config)
@@ -298,10 +305,10 @@ class StickerPage(SettingsPage):
                 _signal.connect(lambda *_a: mark_snap_hint_custom(self))
         self.check("sticker_follow_window", "吸附到窗口后跟随移动",
                    "贴到某个窗口后，该窗口移动或改变位置时贴图跟着一起走；\n"
-                   "窗口关闭会自动解除吸附；也可在贴图右键菜单单独开关跟随")
+                   "窗口关闭会自动解除吸附，也可在贴图右键菜单单独开关跟随。")
         self.check("sticker_follow_sticker", "吸附到贴图后跟随移动",
                "贴图吸附到另一张贴图后，目标贴图移动时本贴图保持相对位置跟随；\n"
-               "目标贴图关闭后自动解除跟随")
+               "目标贴图关闭后自动解除跟随。")
         self.number("sticker_follow_interval", "跟随刷新间隔", 30, 1000,
                     "跟随开启后每隔多少毫秒读取一次目标窗口位置，单位毫秒；\n"
                     "数值越小跟得越紧但占用略多 CPU，100 到 200 毫秒通常已经跟手")

@@ -70,11 +70,15 @@ class ClipboardPage(SettingsPage):
         fonts = QFontDatabase.families()
         self.choice("text_sticker_font", "字体", [("系统默认", "")] + [(font, font) for font in fonts],
                     "复制文字后贴出的便签使用的字体")
-        self.number("text_sticker_font_size", "字号", 6, 72, "便签文字的字号，同时影响卡片内边距")
-        self.color("text_sticker_color", "文字颜色", "便签文字颜色")
-        self.color("text_sticker_background", "背景颜色", "便签背景颜色，可使用深色底浅色字")
-        self.number("text_sticker_width", "最大宽度", 160, 1600, "超过该宽度会自动折行")
-        self.number("text_sticker_lines", "最大行数", 1, 500, "超出部分会被截断，避免超长文本生成巨大图片")
+        self.number("text_sticker_font_size", "字号", 6, 72, "便签文字的字号；会同时影响卡片内边距。")
+        self.color("text_sticker_color", "文字颜色",
+                   "便签文字颜色；只影响文字便签，不改变颜色贴图的色值文字。")
+        self.color("text_sticker_background", "背景颜色",
+                   "便签背景颜色；只影响文字便签，可使用深色底浅色字。")
+        self.number("text_sticker_width", "最大宽度", 160, 1600,
+                    "便签的最大宽度，超出后自动折行；只影响文字便签。")
+        self.number("text_sticker_lines", "最大行数", 1, 500,
+                    "便签最多显示的行数，超出部分截断；避免超长文本生成巨大图片。")
         self._card_preview("text")
         self.check("clipboard_color_detection", "识别颜色值",
                    "复制 #RGB、#RRGGBB 或裸六位十六进制时贴出色块而不是这段文字；"
@@ -84,8 +88,8 @@ class ClipboardPage(SettingsPage):
                 [("#RRGGBB（十六进制）", "hex"), ("rgb(r, g, b)", "rgb"),
                  ("rgba(r, g, b, 1)", "rgba"), ("hsl(h, s%, l%)", "hsl"),
                  ("全部（三行）", "all")],
-                "取色（C 键取色）复制到剪贴板的文本表达。选「全部」时一次复制三行（hex / rgb / hsl），"
-                "粘贴到支持多行的目标即可逐行取用。")
+                "取色（C 键取色）复制到剪贴板的文本表达。\n"
+                "选「全部」时一次复制三行（hex / rgb / hsl），粘贴到支持多行的目标即可逐行取用。")
         self.check("picker_accumulate", "累积取色",
                    "开启后连续取色不再互相覆盖，而是拼成多行文本一次粘贴拿到一组配色（同一颜色不重复）。")
         self.group("颜色贴图")
@@ -94,9 +98,10 @@ class ClipboardPage(SettingsPage):
                 [("跟随取色复制格式", "follow"), ("只显示色块", "off"),
                  ("十六进制", "hex"), ("rgb(r, g, b)", "rgb"), ("rgba(r, g, b, 1)", "rgba"),
                  ("hsl(h, s%, l%)", "hsl"), ("全部三行 + 色名", "all"), ("色值 + 色名", "name")],
-                "颜色贴图卡片上标注什么：跟随取色复制格式（默认）或单独指定；选「全部三行 + 色名」时还会在卡片底部画一条色阶条；文字黑白按背景亮度自动选择。"
-                "rgb/hsl/全部三行这类标签比较长，字号会自动缩小到放得下为止（下限 8pt，字号本身设得比 8pt 小时以该字号为下限、不会放大），缩到底还放不下就用省略号截断 ——"
-                "想保住大字号，把「色块宽度」调大即可。")
+                "颜色贴图卡片上标注什么：跟随取色复制格式或单独指定；\n"
+                "选「全部三行 + 色名」时还会在卡片底部画一条色阶条，文字黑白按背景亮度自动选择。\n"
+                "rgb/hsl/全部三行这类标签比较长，字号会自动缩小到放得下为止（下限 8pt）；"
+                "缩到底仍放不下就用省略号截断，想保住大字号可调大「色块宽度」。")
         self.number("color_sticker_width", "色块宽度", 80, 800,
                     "颜色贴图卡片的宽度，范围 80–800。\n"
                     "改大：能容纳更长的色值标签（rgb/hsl/全部三行），标签字号可以保持更大；\n"
@@ -108,8 +113,10 @@ class ClipboardPage(SettingsPage):
         self._card_preview("color")
         self.group("文件贴图")
         self.check("file_sticker_path", "显示所在目录", "在文件名下方用小字显示文件所在目录")
-        self.number("file_sticker_max", "最多展示", 1, 20, "一次复制多个文件时卡片最多列出的条目数，其余只统计数量")
-        self.number("file_sticker_width", "卡片宽度", 240, 800, "文件贴图的卡片宽度，影响文件名可用长度")
+        self.number("file_sticker_max", "最多展示", 1, 20,
+                    "一次复制多个文件时卡片最多列出的条目数，其余只统计数量。")
+        self.number("file_sticker_width", "卡片宽度", 240, 800,
+                    "文件贴图的卡片宽度，影响文件名可用长度；只影响文件贴图。")
         self._card_preview("file")
 
     def _card_preview(self, kind):

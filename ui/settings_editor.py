@@ -134,7 +134,8 @@ class EditorPage(SettingsPage):
                     [(label, key) for label, key in (("选择", "select"), ("矩形", "rect"),
                         ("椭圆", "ellipse"), ("箭头", "arrow"), ("画笔", "pen"), ("记号笔", "marker"),
                         ("橡皮擦", "eraser"), ("文字", "text"), ("序号", "number"),
-                        ("马赛克", "mosaic"), ("取色", "picker"), ("裁剪", "crop"))], "新建编辑器时默认启用的工具")
+                        ("马赛克", "mosaic"), ("取色", "picker"), ("裁剪", "crop"))],
+                    "新建编辑器默认启用的工具；只影响初始选择，之后可在工具栏随时切换。")
         self.group("箭头")
         self.preview("arrow")
         self.add_color("arrow_color", "箭头颜色")
@@ -143,24 +144,25 @@ class EditorPage(SettingsPage):
                                 ("双向箭头", "double_filled"), ("双向空心箭头", "double_open"), ("双向虚线箭头", "double_dashed"),
                                 ("线段", "line"), ("虚线", "dashed_line"),
                                 ("箭杆矩形", "rect_filled"), ("空心箭杆", "rect_open"), ("虚线箭杆", "rect_dashed")],
-                    "新建箭头的样式")
+                    "新建箭头使用的样式（单向/双向、实线/虚线、箭杆等）；只影响新建箭头。")
         self.check("arrow_chain", "箭头多段绘制",
                    "开启后，绘制一个箭头后可继续在上一个终点与下一个点之间连续绘制相连的多段箭头；"
                    "按鼠标右键结束连续绘制并保留已画图形。")
-        self.number("arrow_width", "箭头线宽", 1, 50, "只影响对应工具")
+        self.number("arrow_width", "箭头线宽", 1, 50,
+                    "箭头标注的线条粗细；只影响箭头工具，不改画笔、矩形等其它工具。")
         self.group("画笔")
         self.preview("pen")
         self.add_color("pen_color", "画笔颜色")
-        self.number("pen_width", "画笔线宽", 1, 50, "只影响画笔工具")
+        self.number("pen_width", "画笔线宽", 1, 50, "画笔标注的线条粗细；只影响画笔工具。")
         self.check("pen_chain", "画笔多段绘制",
                    "开启后，画笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
                    "按鼠标右键结束连续绘制并保留已画图形。")
         self.group("矩形")
         self.preview("rect")
         self.add_color("rect_color", "矩形颜色")
-        self.number("rect_width", "矩形线宽", 1, 50, "只影响矩形工具")
+        self.number("rect_width", "矩形线宽", 1, 50, "矩形标注的边框粗细；只影响矩形工具，不改填充。")
         self.radios("rect_style", "矩形线型", [("实线", "solid"), ("虚线", "dash")],
-                    "新建矩形使用的边框线型")
+                    "新建矩形的边框线型（实线或虚线）；只影响新建矩形，不改填充。")
         self.check_number("rect_corner_enabled", "rect_corner_radius", "矩形标注圆角 (px)", 0, 100,
                           "勾选后新建矩形标注使用圆角；右侧数值为圆角半径，0 表示直角；"
                           "实线和虚线均适用，单张图片与窗口内编辑共用此设置")
@@ -171,9 +173,9 @@ class EditorPage(SettingsPage):
         self.group("椭圆")
         self.preview("ellipse")
         self.add_color("ellipse_color", "椭圆颜色")
-        self.number("ellipse_width", "椭圆线宽", 1, 50, "只影响椭圆工具")
+        self.number("ellipse_width", "椭圆线宽", 1, 50, "椭圆标注的边框粗细；只影响椭圆工具，不改填充。")
         self.radios("ellipse_style", "椭圆线型", [("实线", "solid"), ("虚线", "dash")],
-                    "新建椭圆使用的边框线型")
+                    "新建椭圆的边框线型（实线或虚线）；只影响新建椭圆，不改填充。")
         self.check("ellipse_fill_enabled", "椭圆填充区域", "绘制椭圆时填充区域")
         self.add_color("ellipse_fill_color", "椭圆填充颜色")
         self.number("ellipse_fill_opacity", "椭圆填充不透明度 (%)", 0, 100,
@@ -193,27 +195,32 @@ class EditorPage(SettingsPage):
         self.group("记号笔")
         self.preview("marker")
         self.add_color("marker_color", "记号笔颜色")
-        self.number("marker_width", "记号笔线宽", 1, 50, "只影响对应工具")
-        self.number("marker_opacity", "记号笔不透明度", 1, 100, "越低越能看清原图；记号笔也使用标注颜色")
+        self.number("marker_width", "记号笔线宽", 1, 50, "记号笔标注的线条粗细；只影响记号笔工具。")
+        self.number("marker_opacity", "记号笔不透明度", 1, 100,
+                    "记号笔颜色的不透明度；越低越能看清底图，记号笔仍使用标注颜色。")
         self.check("marker_chain", "记号笔多段绘制",
                    "开启后，记号笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
                    "按鼠标右键结束连续绘制并保留已画图形。")
         self.group("文字")
         self.preview("text", 120)
         self.add_color("text_color", "文字颜色")
-        self.number("font_size", "文字大小", 6, 200, "默认文字字号")
+        self.number("font_size", "文字大小", 6, 200,
+                    "编辑器文字标注的默认字号；之后可在工具栏临时调整，不改写此项。")
         self.number("text_width", "文字宽度", 0, 2000, "新建文字标注的文本框宽度（像素）；超出后自动换行，0 表示按内容自动")
         self.number("text_height", "文字高度", 0, 2000, "新建文字标注的文本框高度（像素）；超出部分裁剪，0 表示按内容自动")
-        self.decimal("line_spacing", "文字行距", 0.5, 4, "多行文字的行间距倍率")
+        self.decimal("line_spacing", "文字行距", 0.5, 4,
+                     "多行文字的行间距倍率；只影响文字排版，不改变字号。")
         self.radios("text_alignment", "文字对齐", [("左对齐", "left"), ("居中", "center"),
-                                             ("右对齐", "right")], "新建文字标注的对齐方式")
+                                             ("右对齐", "right")],
+                    "新建文字标注的对齐方式；只影响多行文字的排版。")
         fonts = QFontDatabase.families()
         self.choice("font", "默认字体", [("系统默认", "")] + [(font, font) for font in fonts], "从已安装字体中选择")
-        self.check("text_bold", "粗体", "新建文字标注默认加粗")
-        self.check("text_italic", "斜体", "新建文字标注默认斜体")
-        self.check("text_underline", "下划线", "新建文字标注默认加下划线")
-        self.check("text_strikethrough", "删除线", "新建文字标注默认加删除线")
-        self.check("text_background_enabled", "文字背景", "为新建文字标注添加背景色块")
+        self.check("text_bold", "粗体", "新建文字标注是否默认加粗；可在工具栏临时切换，不改写此项。")
+        self.check("text_italic", "斜体", "新建文字标注是否默认斜体；可在工具栏临时切换，不改写此项。")
+        self.check("text_underline", "下划线", "新建文字标注是否默认加下划线；可在工具栏临时切换。")
+        self.check("text_strikethrough", "删除线", "新建文字标注是否默认加删除线；可在工具栏临时切换。")
+        self.check("text_background_enabled", "文字背景",
+                   "是否为新建文字标注添加背景色块；颜色由下方「文字背景色」决定。")
         self.add_color("text_background", "文字背景色")
         self.group("序号标注")
         self.preview("sequence", 120)
@@ -227,8 +234,10 @@ class EditorPage(SettingsPage):
                     "更具表达力的发散形状，便于按场景强调")
         self.add_color("sequence_fill_color", "序号填充色")
         self.add_color("sequence_text_color", "序号文字色")
-        self.number("sequence_font_size", "序号字号", 6, 200, "新建序号标注的数字字号")
-        self.number("sequence_start", "序号起始值", 0, 999, "第一个序号的号码，后续自动递增")
+        self.number("sequence_font_size", "序号字号", 6, 200,
+                    "序号标注中数字的字号；不影响普通文字标注。")
+        self.number("sequence_start", "序号起始值", 0, 999,
+                    "第一个序号的号码，后续按绘制顺序自动递增；只影响新建序号。")
         self.radios("sequence_preset", "预设组合",
                     [("自定义", "custom"), ("红圆", "red_circle"), ("蓝方", "blue_square"),
                      ("绿星", "green_star"), ("琥珀菱形", "amber_diamond"),
@@ -238,8 +247,10 @@ class EditorPage(SettingsPage):
         self.group("马赛克")
         self.preview("mosaic")
         self.radios("mosaic_mode", "马赛克类型", [("方块", "blocks"), ("毛玻璃", "blur"),
-                             ("细粒", "fine")], "标注区域的像素处理方式")
-        self.number("mosaic_size", "马赛克方块", 2, 100, "像素化块大小")
+                             ("细粒", "fine")],
+                    "马赛克工具的处理方式：方块像素化、毛玻璃模糊或细粒；只影响马赛克工具。")
+        self.number("mosaic_size", "马赛克方块", 2, 100,
+                    "马赛克块的像素粒度，数值越大色块越粗；只影响马赛克工具。")
         self.check("mosaic_brush", "涂抹模式（自由笔刷）",
                    "开启后按住拖动可沿笔迹涂抹马赛克/模糊；关闭则为拖框选矩形")
         self.number("mosaic_width", "涂抹笔刷宽度 (px)", 4, 100,
@@ -292,7 +303,8 @@ class EditorPage(SettingsPage):
         self.group("裁剪框")
         self.preview("crop", 84)
         self.add_color("crop_color", "裁剪框颜色")
-        self.number("crop_width", "裁剪框线宽", 1, 12, "只影响编辑器裁剪框")
+        self.number("crop_width", "裁剪框线宽", 1, 12,
+                    "编辑器裁剪框的线条宽度；仅编辑时显示，不写入导出图片。")
         self.group("取色")
         self.preview("picker", 120)
         # 序号预设组合：选择后立即套用形状与配色到对应键（自定义不覆盖）。

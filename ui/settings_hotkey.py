@@ -52,7 +52,8 @@ class HotkeyPage(SettingsPage):
             setattr(self, f"edit_{action}", widget)
         # 两个编辑器共用的「另存为」（2026-10-11 用户要求：单键即可）。
         self.text("editor_save_as_shortcut", "另存为（两个编辑器）",
-                  "独立编辑器与原地编辑器共用的另存为按键，默认单键 A（例如改成 D 或 Ctrl+Shift+S）；保存与仅复制沿用截图快捷键里的那两项。")
+                  "独立编辑器与原地编辑器共用的另存为按键；保存与仅复制沿用截图快捷键里的那两项。\n"
+                  "取值：任意单键或组合键，默认单键 A（例如改成 D 或 Ctrl+Shift+S）。")
         for key, label, tip in (
                 ("editor_undo_shortcut", "撤销（两个编辑器）",
                  "独立编辑器与原地编辑器共用的撤销按键；默认遵循 Windows 通用约定 Ctrl+Z。"),

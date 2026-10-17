@@ -595,7 +595,8 @@ class ScreenshotPage(SettingsPage):
         self._shortcut("capture_picker_shortcut", "取色按键", "C",
                        "选区确认前按此键在光标处取色一次；取色态下左键取样会把色值复制到剪贴板")
         self._shortcut("capture_picker_format_shortcut", "切换取色表达式按键", "X",
-                       "遮罩内循环切换取色复制到剪贴板的表达式（十六进制 / rgb / rgba / hsl / 全部三行）；切换后按一次取色键即按该表达式复制；顶部提示栏会显示当前表达式。")
+                       "遮罩内循环切换取色复制到剪贴板的表达式（十六进制 / rgb / rgba / hsl / 全部三行）；\n"
+                       "切换后按一次取色键即按该表达式复制，顶部提示栏会显示当前表达式。")
         self._shortcut("capture_custom_size_shortcut", "自定义尺寸按键", "F",
                        "选区存在时按此键打开“自定义尺寸”对话框，按指定宽高重建选区")
         self._shortcut("capture_recapture_shortcut", "清除选择按键", "R",
@@ -610,8 +611,8 @@ class ScreenshotPage(SettingsPage):
         self._shortcut("capture_copy_shortcut", "仅复制按键", "Y",
                        "把整屏截图（有选区时取选区）写入剪贴板并关闭遮罩，不落盘、不进入编辑器")
         self._shortcut("capture_toolbar_hide_shortcut", "隐藏工具栏按键", "`",
-                       "原地编辑中按此键临时隐藏/恢复工具栏，方便查看与操作被它遮住的内容；"
-                       "工具栏也可按住空白处拖动，这个键在顶部提示条里有说明")
+                       "原地编辑中按此键临时隐藏/恢复工具栏，方便查看与操作被它遮住的内容；\n"
+                       "工具栏也可按住空白处拖动，这个键在顶部提示条里有说明。")
         self.group("操作提示")
         self.check("capture_hints_enabled", "显示快捷键提示",
                    "在截图时于放大镜旁显示快捷键与操作提示；关闭后整条提示不显示，\n"
@@ -777,7 +778,7 @@ class ScreenshotPage(SettingsPage):
                     "倍数越大，标数字的位置越稀疏；默认 5 倍。")
         ruler_color = ColorButton(config.data["ruler_color"],
                                   lambda color: self.update_value("ruler_color", color))
-        ruler_color.setToolTip("设置标尺刻度与数值颜色")
+        ruler_color.setToolTip("标尺刻度线与数值的颜色；不改变十字线、候选框等其它辅助颜色。")
         ruler_color._setting_label = "标尺颜色"
         self.controls["ruler_color"] = ruler_color
         self.form.addRow("标尺颜色", ruler_color)
@@ -1044,8 +1045,9 @@ class ScreenshotPage(SettingsPage):
         combo.setCurrentIndex(combo.findData(current))
         button = ColorButton(current,
                      lambda color: self._set_mask_color(color, combo, button))
-        button.setToolTip("自定义选区外遮罩颜色")
-        combo.setToolTip("选择清新亮色预设，也可用旁边的按钮自定义颜色")
+        button.setToolTip("自定义选区外遮罩颜色；只影响遮罩填充，不改变选区边框与标注颜色。")
+        combo.setToolTip("从预设中选择选区外遮罩颜色，也可用右侧按钮自定义；\n"
+                         "取值：下拉列表中的预设色，默认石墨黑。")
         combo.currentIndexChanged.connect(
             lambda _index: self._select_mask_color(combo, button))
         self.controls[key] = combo

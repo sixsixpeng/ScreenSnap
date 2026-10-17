@@ -21,21 +21,23 @@ class SaveOutputPage(SettingsPage):
         self.group("输出图像外观")
         self.preview("output", 120)
         self.check("editor_image_round_corners", "输出透明圆角",
-                   "将圆角外像素设为透明；截图选区预览、编辑器预览和最终输出共用此设置")
+                   "是否把圆角外的像素设为透明；只影响输出，截图选区预览、编辑器预览与最终图片共用。")
         self.number("editor_image_corner_radius", "输出圆角半径 (px)", 0, 100,
-                    "0 表示直角；圆角会应用于截图、保存、复制和贴图输出")
+                    "输出图片的圆角半径；0 表示直角；只影响输出，不改变编辑画布显示。")
         self.check("editor_image_border_enabled", "输出图像添加边框",
-                   "边框写入最终输出图像")
+                   "是否为最终输出图像添加边框；只影响保存、复制与贴图输出，不改变编辑画布显示。")
         self.number("editor_image_border_width", "输出边框宽度 (px)", 0, 20,
-                    "边框宽度；0 表示不绘制")
-        self.color("editor_image_border_color", "输出边框颜色", "写入最终图像的边框颜色")
+                    "输出图像的边框宽度；0 表示不绘制；只影响输出，不改变编辑画布显示。")
+        self.color("editor_image_border_color", "输出边框颜色",
+                   "最终输出图像的边框颜色；只影响输出，不改变编辑器工具栏与画布边框。")
         self.check("editor_image_shadow_enabled", "输出图像添加阴影",
-                   "阴影写入最终输出图像，阴影会增加输出画布尺寸")
+                   "是否为最终输出图像添加阴影；会增加输出画布尺寸，只影响输出。")
         self.number("editor_image_shadow_size", "阴影模糊尺寸 (px)", 0, 60,
-                    "阴影扩散与模糊尺寸；0 表示无扩散")
+                    "阴影扩散与模糊尺寸；0 表示无扩散；只影响输出。")
         self.number("editor_image_shadow_strength", "阴影强度 (%)", 0, 100,
-                    "阴影不透明度；0 表示不绘制")
-        self.color("editor_image_shadow_color", "输出阴影颜色", "写入最终图像的阴影颜色")
+                    "阴影不透明度；0 表示不绘制；只影响输出。")
+        self.color("editor_image_shadow_color", "输出阴影颜色",
+                   "最终输出图像的阴影颜色；只影响输出，不改变编辑画布显示。")
         self.group("保存位置")
         widget = FilePathEdit(
             config.data["save_dir"],
@@ -60,11 +62,11 @@ class SaveOutputPage(SettingsPage):
         self.group("文件与目录")
         self.radios("save_format", "保存格式", [("PNG（无损）", "png"), ("JPEG", "jpg"),
                                             ("WebP", "webp"), ("BMP", "bmp")],
-                    "自动与手动保存使用的图片格式")
+                    "自动与手动保存使用的图片格式；不改变剪贴板中图像的格式。")
         self.number("save_quality", "图片质量", 1, 100,
-                    "仅 JPEG 与 WebP 生效；数值越大越清晰，文件也越大")
+                    "仅 JPEG 与 WebP 生效；数值越大越清晰，文件也越大。")
         self.color("save_background", "保存底色",
-                    "JPEG 与 BMP 不支持透明通道，保存时透明区域会先合成到这个颜色")
+                    "JPEG 与 BMP 不支持透明通道，保存时透明区域会先合成到这个颜色；仅影响这两种格式。")
         self.text("filename", "文件名模板", "使用 strftime 时间占位符生成文件名")
         hint = QLabel("%Y 四位年    %m 月    %d 日\n"
                   "%H 时（24 小时制）    %M 分    %S 秒\n"

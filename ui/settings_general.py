@@ -1,5 +1,6 @@
 """启动和通知设置。"""
 
+from config.config_manager import DEFAULTS
 from ui.widgets.tooltip import SettingsPage
 
 # 提示音选项（2026-10-11）：系统音 + 16 个随包内置音 + 自定义 wav。
@@ -112,7 +113,10 @@ class GeneralPage(SettingsPage):
         row.addStretch()
         container = QWidget()
         container.setLayout(row)
-        combo.setToolTip(help_text)
+        # 下拉选项较多，只报数量；默认项按实际数据反查，避免写死音色名。
+        index = combo.findData(DEFAULTS.get(key))
+        default_name = combo.itemText(index) if index >= 0 else "跟随全局"
+        combo.setToolTip(f"{help_text}\n取值：下拉列表中的 {combo.count()} 个选项，默认{default_name}")
         self.controls[key] = combo
         self.form.addRow(label, container)
         combo.currentIndexChanged.connect(
