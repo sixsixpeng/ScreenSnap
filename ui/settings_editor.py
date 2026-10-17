@@ -159,7 +159,7 @@ class EditorPage(SettingsPage):
                    "按鼠标右键结束连续绘制并保留已画图形。")
         self.group("矩形")
         self.preview("rect")
-        self.add_color("rect_color", "矩形颜色")
+        self.add_color("rect_color", "矩形边框颜色")
         self.number("rect_width", "矩形线宽", 1, 50, "矩形标注的边框粗细；只影响矩形工具，不改填充。")
         self.radios("rect_style", "矩形线型", [("实线", "solid"), ("虚线", "dash")],
                     "新建矩形的边框线型（实线或虚线）；只影响新建矩形，不改填充。")
@@ -172,7 +172,7 @@ class EditorPage(SettingsPage):
                     "0 为完全透明，100 为完全不透明")
         self.group("椭圆")
         self.preview("ellipse")
-        self.add_color("ellipse_color", "椭圆颜色")
+        self.add_color("ellipse_color", "椭圆边框颜色")
         self.number("ellipse_width", "椭圆线宽", 1, 50, "椭圆标注的边框粗细；只影响椭圆工具，不改填充。")
         self.radios("ellipse_style", "椭圆线型", [("实线", "solid"), ("虚线", "dash")],
                     "新建椭圆的边框线型（实线或虚线）；只影响新建椭圆，不改填充。")
@@ -330,8 +330,8 @@ class EditorPage(SettingsPage):
     def add_color(self, key, label):
         help_text = {
             "pen_color": "画笔描边颜色，用于画笔工具绘制的线条。",
-            "rect_color": "矩形**边框**颜色（填充色见下一项，两者各自独立）。",
-            "ellipse_color": "椭圆边框颜色；开启椭圆填充时也作为填充颜色。",
+            "rect_color": "矩形边框颜色（填充色见下一项，两者各自独立）。",
+            "ellipse_color": "椭圆边框颜色（填充色见下一项，两者各自独立）。",
             "arrow_color": "箭头线条与箭头头部的颜色。",
             "marker_color": "记号笔颜色；与记号笔不透明度共同决定覆盖效果。",
             "text_color": "新建文字标注的默认文字颜色。",
@@ -340,8 +340,8 @@ class EditorPage(SettingsPage):
             "editor_border_color": "编辑画布周围的边框颜色；只显示在编辑区，不会写入导出图片。",
             "crop_color": "编辑器裁剪框的线条颜色；只用于裁剪辅助显示。",
             "text_background": "新建文字标注背景色块的颜色；仅当“文字背景”开启时生效。",
-            "rect_fill_color": "矩形标注的**填充**颜色（与线条颜色各自独立，默认值相同）。",
-            "ellipse_fill_color": "椭圆标注的填充颜色；与线条颜色各自独立，默认值相同。",
+            "rect_fill_color": "矩形标注的填充颜色（与边框颜色各自独立，默认值相同）。",
+            "ellipse_fill_color": "椭圆标注的填充颜色；与边框颜色各自独立，默认值相同。",
             "mosaic_cursor_color": "编辑画布中马赛克涂抹范围示意圆圈的颜色。",
             "eraser_cursor_color": "编辑画布中橡皮擦直径示意圆圈的颜色。",
         }[key]

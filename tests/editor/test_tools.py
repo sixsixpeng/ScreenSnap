@@ -515,7 +515,7 @@ class ToolsTests(CoreTests):
             expected_labels = {
                 0: {"pen": "画笔颜色", "marker": "记号笔颜色",
                     "text": "文字颜色", "arrow": "箭头颜色",
-                    "rect": "矩形边框/填充颜色", "ellipse": "椭圆边框/填充颜色",
+                    "rect": "矩形边框颜色", "ellipse": "椭圆边框颜色",
                     "crop": "裁剪框颜色"}.get(tool),
                 1: "直径" if tool == "eraser" else "线宽",
                 2: "透明度", 3: "字体", 4: "字号", 5: "对齐",

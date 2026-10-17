@@ -19,6 +19,13 @@ from config.config_manager import DEFAULTS, TOOL_WIDTH_KEYS
 from core.constants import shortcut_label
 from logger import get_logger
 
+# 当前工具颜色行的标题：边框色与填充色各自独立，标题不再写成“边框/填充颜色”。
+TOOL_COLOR_LABELS = {
+    "pen": "画笔颜色", "marker": "记号笔颜色", "rect": "矩形边框颜色",
+    "ellipse": "椭圆边框颜色", "text": "文字颜色", "arrow": "箭头颜色",
+    "crop": "裁剪框颜色",
+}
+
 # 每个工具在“更多设置”里对应的实时预览类型。
 PREVIEW_KINDS = {"pen": "pen", "rect": "rect", "ellipse": "ellipse", "arrow": "arrow",
                  "marker": "marker", "mosaic": "mosaic", "text": "text", "eraser": "eraser",
@@ -1069,12 +1076,7 @@ class ToolbarWidget(QWidget):
             button.setVisible(color_keys.get(tool) == key)
         self.crop_color.setVisible(tool == "crop")
         self.active_color_label.setVisible(tool in color_keys or tool == "crop")
-        color_labels = {
-            "pen": "画笔颜色", "marker": "记号笔颜色", "rect": "矩形边框/填充颜色",
-            "ellipse": "椭圆边框/填充颜色", "text": "文字颜色", "arrow": "箭头颜色",
-            "crop": "裁剪框颜色",
-        }
-        self.active_color_label.setText(color_labels.get(tool, "当前工具颜色"))
+        self.active_color_label.setText(TOOL_COLOR_LABELS.get(tool, "当前工具颜色"))
         self.options_button.setEnabled(bool(rows))
         if not rows:
             self.options_button.menu().hide()
@@ -1337,7 +1339,7 @@ class ToolbarWidget(QWidget):
         color_tool = color_tool or tool
         color = self.settings.get(f"{color_tool}_color", self.settings.get("pen_color", "#ff0000"))
         self.pen_color.set_color(color)
-        self.active_color_label.setText(f"{color_tool} 颜色")
+        self.active_color_label.setText(TOOL_COLOR_LABELS.get(color_tool, "当前工具颜色"))
 
     def sync_tool_color(self, key, color):
         button = self.tool_color_buttons.get(key)

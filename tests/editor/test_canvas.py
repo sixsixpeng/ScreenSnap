@@ -1516,7 +1516,7 @@ class CanvasTests(CoreTests):
         editor.apply_picked_color("#abcdef")
         self.assertEqual(editor.settings["marker_color"], "#abcdef")
         self.assertEqual(editor.settings["pen_color"], pen_color)
-        self.assertEqual(editor.toolbar.active_color_label.text(), "marker 颜色")
+        self.assertEqual(editor.toolbar.active_color_label.text(), "记号笔颜色")
         editor.close()
 
 
