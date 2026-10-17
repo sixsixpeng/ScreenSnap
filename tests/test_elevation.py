@@ -287,6 +287,29 @@ class ElevationTests(CoreTests):
                       if item.text() == "以标准权限重启")
         self.assertIn("下次登录", action.toolTip())
 
+    def test_tray_menu_separates_hotkeys_privilege_and_settings(self):
+        """托盘菜单分组：热键维护 / 运行权限 / 设置 之间各有一条分隔线。"""
+        from ui.tray_menu import make_tray_menu
+
+        menu = make_tray_menu(self.app, lambda: None, lambda: None, lambda: None,
+                              restore_hotkeys=lambda: None,
+                              switch_privilege=lambda: None,
+                              elevated=False)
+        labels = ["---" if action.isSeparator() else action.text()
+                  for action in menu.actions()]
+        hotkey = labels.index("重新注册全局热键")
+        privilege = labels.index("以管理员身份重启")
+        settings = labels.index("设置")
+        self.assertEqual(labels[hotkey + 1], "---")
+        self.assertEqual(labels[privilege - 1], "---")
+        self.assertEqual(labels[privilege + 1], "---")
+        self.assertEqual(labels[settings - 1], "---")
+
+        # 两个入口都不可用时不能留下连续分隔线（空组）。
+        plain = make_tray_menu(self.app, lambda: None, lambda: None, lambda: None)
+        flags = [action.isSeparator() for action in plain.actions()]
+        self.assertFalse(any(first and second for first, second in zip(flags, flags[1:])))
+
     def test_startup_mode_admin_cancel_rolls_back(self):
         from PySide6.QtWidgets import QMessageBox
 
