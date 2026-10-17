@@ -92,6 +92,13 @@ INLINE_TRIM_KEEP_RATIO = 0.9
 # 悬停结果复用半径（物理像素）：光标还停在上次识别出的元素内、且移动不超过这个
 # 距离时，直接复用高亮，不重复查询；超过则重查，避免大容器里冒出更小控件时高亮不更新。
 HOVER_REUSE_RADIUS = 8
+# 标尺边带厚度（逻辑像素）：刻度只落在屏幕边缘一圈，拆成四条带后每帧只混合这一圈，
+# 避免整屏透明 pixmap 的 alpha 混合成本（2560×1440 实测约 0.8ms/帧）。
+# 上/右只有刻度线，下/左还要放数字，因此厚度不同。
+RULER_BAND_TOP = 12
+RULER_BAND_BOTTOM = 28
+RULER_BAND_LEFT = 64
+RULER_BAND_RIGHT = 12
 # 逐像素反色的「中灰补偿」判定带（亮度）：采样亮度落在阈值 ± 这个范围内时，反色后的
 # 对比度最低（≈ 仍是中灰），此时才额外补一条细描边（2026-10-14 新增可选项）。
 CROSSHAIR_MID_GREY_BAND = 32
@@ -219,6 +226,11 @@ class MaskSession:
         self.inline_editor = None
         self.multi_select_mode = False
         self.right_capture_mode = False
+        # 按屏收敛刷新的共享状态：调用 update_all 的可能是任意一块遮罩（鼠标事件、
+        # 主屏快捷键、原地编辑转发），而选区/悬停/模式都是会话共享的 ⇒ 状态必须挂在
+        # session 上，不能每个视图各存一份，否则换一个视图调用就会误判为“全量刷新”。
+        self.refresh_signature = None
+        self.last_cursor_view = None
 
 
 class MagnifierOverlay(QWidget):
@@ -233,7 +245,7 @@ class MagnifierOverlay(QWidget):
         self.setAttribute(Qt.WA_OpaquePaintEvent)
         self.hide()
 
-    def sync(self, frame=None):
+    def sync(self, frame=None, hints=None):
         view = self.view
         editor = view.session.inline_editor
         # 任意模态对话框或下拉弹出层（如取色框、字体选择下拉）打开时都隐藏放大镜，
@@ -249,7 +261,7 @@ class MagnifierOverlay(QWidget):
         # 调用方（`update_all`）可能在同一次刷新里已经算过，直接复用 ⇒ 不再与 InfoBar
         # 各自重算一遍（内含提示条排版与文字宽度测量）。
         if frame is None:
-            frame = view.magnifier_frame()
+            frame = view.magnifier_frame(hints)
         # 记下这个框：paintEvent 必须用**同一个**框来平移与绘制。重新算一遍是危险的 ——
         # `magnifier_frame()` 把提示条预留计入组翻转判定，触底/触右时可能与只算放大镜的
         # 结果翻到不同侧，内容就被画到窗口外、放大镜一片空白（2026-10-16 修复）。
@@ -300,22 +312,31 @@ class InfoBar(QWidget):
         self.style = None
         self.bar = QRect()
         self.align_right = False
+        # 上一次“抬到最上层”的结构签名：文字每帧都在变（坐标/尺寸），不能进签名，
+        # 只有行数、样式或原地编辑状态变化时才值得再做一次 z-order 操作。
+        self._raise_signature = None
         self.setAttribute(Qt.WA_TransparentForMouseEvents)
         self.hide()
 
-    def sync(self, frame=None):
+    def _hide_bar(self):
+        """隐藏并清空 raise 签名：下次重新显示时必须再抬一次。"""
+        self._raise_signature = None
+        self.hide()
+
+    def sync(self, frame=None, hints=None):
         """按当前光标位置重算位置与内容；没有内容或不该显示时整条隐藏。
 
         `frame` 可由调用方传入（同一次刷新里 `update_all` 已为光标所在屏算过一次），
         避免放大镜与提示条各自调用 `magnifier_frame()` 重复排版。
+        `hints` 是同一份 `(提示项, 警示文案)` 快照；不传时现场计算（旧调用路径保持可用）。
         """
         view = self.view
         if not view.isVisible():
-            self.hide()
+            self._hide_bar()
             return
         # 模态对话框或下拉弹出层打开时隐藏，避免作为置顶浮层盖住这些控件。
         if QGuiApplication.modalWindow() is not None or QApplication.activePopupWidget() is not None:
-            self.hide()
+            self._hide_bar()
             return
         # 2026-10-12（用户实测 ✓）：光标移到徽标上方时，事件可能落在**没被 eventFilter 覆盖**的部件上 ✗
         #   ⇒ 掩码不重绘 ⇒ 判定不跑 ⇒ “容差再大也不隐藏” ✗（100px 都无效正是这个原因 ✓）
@@ -344,33 +365,44 @@ class InfoBar(QWidget):
                 "截图提示条屏幕归属切换: monitor=%s visible=%s",
                 view.monitor_rect.getRect(), on_cursor_monitor)
         if not on_cursor_monitor:
-            self.hide()
+            self._hide_bar()
             return
         metrics = self.fontMetrics()
-        warning = view.self_check_warning()
         settings = view.settings or {}
+        if hints is None:
+            hints = view.hint_snapshot()
+        items, warning = hints
         if frame is None:
-            frame = view.magnifier_frame()
+            frame = view.magnifier_frame(hints)
         # 传入光标（逻辑坐标）：提示条据此与放大镜一起翻转、并与放大镜的边缘直接对齐。
         bar, rows, align_right = info_bar_layout(
-            metrics, view.rect(), frame, view.capture_hint_items(),
+            metrics, view.rect(), frame, items,
             warning=warning, per_line=view.hint_per_line(),
             cursor=view.to_logical_point(view.position),
             gap=int(settings.get("capture_hint_gap", 0) or 0))
         if bar.isEmpty():
             self.bar = QRect()
-            self.hide()
+            self._hide_bar()
             return
         self.bar, self.rows = bar, rows
         self.align_right = align_right
         self.warning = warning
         # 无警示时用普通样式；出现采集自检警示时整条换成警示样式。
-        self.style = hint_bar_style(settings, warning)
-        self.setGeometry(bar)
-        if not self.isVisible():
+        style = hint_bar_style(settings, warning)
+        style_changed = style != self.style
+        self.style = style
+        # 位置跟随光标，每帧必须更新；几何没变时跳过 setGeometry。
+        if self.geometry() != bar:
+            self.setGeometry(bar)
+        was_visible = self.isVisible()
+        if not was_visible:
             self.show()
-        # 画布与工具栏是遮罩的子控件：每次都重新抬到最上层，保证提示条不被它们盖住。
-        self.raise_()
+        # 画布与工具栏是遮罩的子控件：结构变化或重新显示时抬到最上层；
+        # 仅文字变化（坐标/尺寸）不影响 z-order，不再每帧 raise_。
+        raise_signature = (len(rows), style_changed, view.inline_active())
+        if not was_visible or raise_signature != self._raise_signature:
+            self._raise_signature = raise_signature
+            self.raise_()
         self.update()
 
     def paintEvent(self, event):
@@ -540,7 +572,9 @@ class InlineEditor(QWidget):
 
     def restore_magnifiers(self):
         if self.view is not None:
-            self.view.update_all()
+            # 浮层是直接 hide() 的，状态签名里并没有“菜单已关闭”这一项 ⇒ 必须强制全量刷新，
+            # 让光标屏重新计算放大镜框并显示（与按屏收敛的判定解耦）。
+            self.view.update_all(force=True)
 
     def install_mouse_forwarding(self):
         """转发编辑子控件上的光标位置，并让选区手柄优先交给遮罩处理。"""
@@ -616,7 +650,9 @@ class InlineEditor(QWidget):
             view.mouseMoveEvent(mapped)
             return view.selection.resizing is not None or view.selection.dragging is not None
         if event_type == QEvent.MouseButtonPress and event.button() == Qt.LeftButton:
-            if view.selection.handle_at(point) is not None or view.selection.border_at(point):
+            # 命中只算一次：手柄命中与边框命中复用同一结果（转发路径同样高频）。
+            hit = view.selection.handle_at(point)
+            if hit is not None or view.selection.border_at(point, hit):
                 view.mousePressEvent(mapped)
                 view.grabMouse()
                 return True
@@ -866,6 +902,8 @@ class InlineEditor(QWidget):
         else:
             self.toolbar.show()
             self.toolbar.raise_()
+            # 提示条不再每帧 raise_，这里显式补一次，保证工具栏重新显示后仍压在它下面。
+            self.view.info_bar.raise_()
             self.view.magnifier_overlay.raise_()
 
     def toggle_toolbar(self):
@@ -882,6 +920,8 @@ class InlineEditor(QWidget):
         if self.toolbar_handle is not None:
             self.toolbar_handle.setCursor(Qt.ClosedHandCursor)
         self.toolbar.raise_()
+        # 提示条不再每帧 raise_：拖动开始显式补一次，避免被工具栏盖住。
+        self.view.info_bar.raise_()
 
     def drag_toolbar_to(self, view_point):
         """工具栏跟着鼠标走，并限制在视图内，避免拖出屏幕看不见。"""
@@ -1370,6 +1410,20 @@ class MaskWindow(QWidget):
         # 重绘耗时统计（累计秒、次数、峰值秒）与上次输出时刻，由 _record_paint_cost 限频输出。
         self.paint_cost_stats = [0.0, 0, 0.0]
         self.paint_cost_log_at = 0.0
+        # 按屏收敛刷新：签名与光标屏记在 session 上（选区/悬停是会话共享的）。
+        # 只有签名变化才刷所有屏；纯光标移动只刷光标屏，并在切屏时补刷上一块屏。
+        self._update_all_stats = [0.0, 0.0, 0, 0, 0]   # 框耗时、同步耗时、次数、全量、收敛
+        # 显示器矩形是否互相重叠（镜像/复制显示）。重叠时十字线可能在两块屏上同时可见，
+        # 不能只刷光标屏，直接退回全量刷新（保守但正确）。
+        self.monitors_overlap = any(
+            QRect(monitors[left]["left"], monitors[left]["top"],
+                  monitors[left]["width"], monitors[left]["height"]).intersects(
+                QRect(monitors[right]["left"], monitors[right]["top"],
+                      monitors[right]["width"], monitors[right]["height"]))
+            for left in range(len(monitors))
+            for right in range(left + 1, len(monitors)))
+        # 徽标 150ms 轮询的“状态未变”判据：命中时只做 raise_，不再重算文本/几何。
+        self._badge_poll_key = None
         # 鼠标悬停识别出的元素矩形（bounds 局部物理坐标）与上次检测时刻。
         self.hover_rect = None
         # 悬停元素的控件名（UIA 控件类型中文名 / 窗口类名），与 hover_rect 在 detect_hover 成对写入；
@@ -1530,22 +1584,34 @@ class MaskWindow(QWidget):
             return 0
         return min(max(value, 0), 8)
 
-    def magnifier_frame(self):
+    def hint_snapshot(self):
+        """一次刷新内复用的「提示项 + 采集自检警示」快照。
+
+        放大镜框需要提示条宽高参与“组翻转”，InfoBar 又要用同一份内容绘制；原先两者
+        各算一次（开启采集自检时还会各遍历一次全部控件）。这里一次算好，由 `update_all`
+        同时传给两者，保证排版与绘制用的确实是同一份内容。
+        """
+        return self.capture_hint_items(), self.self_check_warning()
+
+    def magnifier_frame(self, hints=None):
         """放大镜框（本视图逻辑坐标）。
 
         放大镜关闭、被模态弹窗遮挡时**仍返回按同一避让规则算出的框**，提示条因此
         仍然跟着光标显示，不会因为放大镜不画了就消失。
+
+        `hints` 为 `(提示项, 警示文案)` 快照；不传时现场计算（旧调用路径保持可用）。
         """
         point = self.to_logical_point(self.position)
         bounds = self.rect()
         size = self.magnifier_size()
         offset = self.magnifier_offset()
+        items, warning = hints if hints is not None else self.hint_snapshot()
         frame = magnifier_rect(point, bounds, size, offset=offset)
         # 组翻转（2026-10-11 用户要求：任意一个触边/触底 ⇒ 整组一起翻）：先把提示条按当前
         # 放大镜位置算一遍拿到它的宽/高，再把它作为"预留"重算放大镜 ⇒ 两者用同一个判定。
         bar, _rows, _align = info_bar_layout(
-            self.fontMetrics(), bounds, frame, self.capture_hint_items(),
-            warning=self.self_check_warning(), per_line=self.hint_per_line(),
+            self.fontMetrics(), bounds, frame, items,
+            warning=warning, per_line=self.hint_per_line(),
             cursor=point, gap=int(self.settings.get("capture_hint_gap", 0) or 0))
         # 预留只在**空间足够**时参与：真实屏幕（≥4 倍放大镜尺寸）一定满足 ⇒ 整组翻转照常生效 ✓；
         # 小视图/离屏测试里提示条相对很大 ⇒ 若也参与，会总判"放不下"并把放大镜夹到 (0,0) ✗
@@ -1832,7 +1898,47 @@ class MaskWindow(QWidget):
         self._release_toolbar_hide_hotkey()
         self._release_quick_sticker_hotkey()
 
-    def update_all(self):
+    def _refresh_signature(self):
+        """影响遮罩/浮层绘制的状态快照；签名不变时只需重绘光标屏。
+
+        多屏约定：选区、悬停、交互模式与原地编辑状态都是**会话共享**的，任一变化都可能
+        影响其它屏的画面（跨屏选区、旧屏悬停框、Tab 元素高亮…），所以签名里必须包含
+        所有视图的 hover 矩形，而不是只看当前视图。
+        """
+        selection = self.selection
+        active = selection.active
+        editor = self.session.inline_editor
+        settings = self.settings or {}
+        return (
+            tuple(rect.getRect() for rect in selection.rects),
+            active.getRect() if active is not None else None,
+            selection.start is not None,
+            selection.dragging is not None,
+            selection.resizing is not None,
+            tuple(view.hover_rect.getRect() if view.hover_rect is not None else None
+                  for view in self.session.views),
+            self.session.element_selected,
+            self.session.multi_select_mode,
+            self.session.right_capture_mode,
+            editor is not None,
+            bool(editor is not None and editor.toolbar_hidden),
+            bool(settings.get("crosshair", True)),
+            bool(settings.get("ruler_enabled", False)),
+            str(settings.get("mask_color", "#000000")),
+            int(settings.get("mask_opacity", 70) or 0),
+            str(settings.get("anchor_style", "outline")),
+        )
+
+    def update_all(self, force=False):
+        """刷新遮罩与浮层；纯光标移动时只刷光标所在屏。
+
+        多屏刷新约定（与 InfoBar/放大镜的判定同口径）：
+        · 任何影响绘制的状态变化（选区、悬停、模式、原地编辑、遮罩设置）⇒ **全量**刷新；
+        · 只有光标位置变化 ⇒ 只刷光标屏；切屏时给上一块屏补刷一次，擦掉旧十字线；
+        · 显示器矩形互相重叠（镜像/复制显示）时退回全量，避免另一块屏的十字线残影；
+        · 调用方不是光标屏（键盘/主屏快捷键触发）时也全量，避免共享状态落在别的屏上不更新。
+        `force=True` 供“浮层可见性变化”等签名未覆盖的入口使用（如菜单关闭后恢复放大镜）。
+        """
         # 这里曾经按 selection.nudge_index 关闭 S：那是"上次微调"留下的记忆值，
         # 而 update_all() 每次鼠标移动都会跑，于是刚设成启用的 S 立刻又被关掉
         # （日志实证：S 快捷键就绪 启用=True，按 S 却毫无反应）。
@@ -1842,46 +1948,65 @@ class MaskWindow(QWidget):
             self.capture_save_shortcut.setEnabled(True)
         self.session.position = QPoint(self.position)
         started = time.perf_counter()
+        views = list(self.session.views)
+        for view in views:
+            view.position = QPoint(self.session.position)
+        # 光标屏判定与 `info_bar.hint_visible_on_monitor` 一致（QRect 右/下边界为开区间）：
+        # 光标落在两块屏接缝像素上时只会命中其中一块，不存在两屏各算一次的情况。
+        cursor_view = next((view for view in views
+                            if view.monitor_rect.contains(view.position)), None)
+        signature = self._refresh_signature()
+        full = (force or self.monitors_overlap or cursor_view is None
+                or cursor_view is not self
+                or signature != self.session.refresh_signature)
+        if full:
+            targets = views
+        else:
+            # 收敛：只刷光标屏；切屏时补刷上一块屏（旧十字线必须被整窗重绘擦掉）。
+            targets = [cursor_view]
+            previous = self.session.last_cursor_view
+            if previous is not None and previous is not cursor_view and previous in views:
+                targets.append(previous)
+        target_ids = {id(view) for view in targets}
+        # 提示项/自检警示只算一次，供放大镜框排版与 InfoBar 绘制共用（多屏时也只算光标屏）。
+        hints = cursor_view.hint_snapshot() if cursor_view is not None else None
         frame_cost = 0.0
         frame_views = 0
-        cursor_view = -1
-        for index, view in enumerate(self.session.views):
-            view.position = QPoint(self.session.position)
-            # 放大镜与提示条原本各自调用一次 magnifier_frame()（内含提示条排版与文字测量）。
-            # 只有光标所在屏需要显示它们，因此这里只在该屏算一次并复用给两个浮层。
-            # 判定口径与 `info_bar.hint_visible_on_monitor` 一致（QRect 右/下边界为开区间）：
-            # 光标落在两块屏接缝像素上时只会命中其中一块，不存在两屏各算一次的情况。
-            on_cursor = view.monitor_rect.contains(view.position)
-            if on_cursor:
-                cursor_view = index
+        cursor_index = -1
+        for index, view in enumerate(views):
+            if id(view) not in target_ids:
+                continue
+            frame = None
+            if view is cursor_view:
+                cursor_index = index
                 frame_started = time.perf_counter()
-                frame = view.magnifier_frame()
+                frame = view.magnifier_frame(hints)
                 frame_cost += time.perf_counter() - frame_started
                 frame_views += 1
-            else:
-                frame = None
             view.update()
-            view.magnifier_overlay.sync(frame)
-            # 提示条是子控件：位置与内容都跟着光标变，每帧同步一次并抬到画布之上。
-            view.info_bar.sync(frame)
-        # 限频 DEBUG 统计：用于确认“每帧只算了一次放大镜框”、以及同步本身的耗时量级。
+            # 非光标屏传 None：两块浮层按各自原有判定隐藏，不会残留上一屏的内容。
+            view_hints = hints if view is cursor_view else None
+            view.magnifier_overlay.sync(frame, view_hints)
+            view.info_bar.sync(frame, view_hints)
+        # 刷新状态是会话共享的：下一次任意视图调用 update_all 都沿用同一份签名。
+        self.session.last_cursor_view = cursor_view
+        self.session.refresh_signature = signature
+        # 限频 DEBUG 统计：确认“每帧只算一次放大镜框”与“纯移动只刷光标屏”。
         now = time.perf_counter()
-        stats = getattr(self, "_update_all_stats", None)
-        if stats is None:
-            stats = [0.0, 0.0, 0]
-            self._update_all_stats = stats
+        stats = self._update_all_stats
         stats[0] += frame_cost
         stats[1] += now - started
         stats[2] += 1
+        stats[3 if full else 4] += 1
         if now - getattr(self, "_update_all_log_at", 0.0) >= 5.0:
             count = max(1, stats[2])
             get_logger().debug(
-                "遮罩刷新(5s窗口): 次数=%d 屏数=%d 光标屏=%d 计算放大镜框=%d "
-                "平均放大镜框=%.3fms 平均同步=%.3fms",
-                stats[2], len(self.session.views), cursor_view, frame_views,
-                stats[0] / count * 1000, stats[1] / count * 1000)
+                "遮罩刷新(5s窗口): 次数=%d 屏数=%d 光标屏=%d 全量=%d 收敛=%d "
+                "计算放大镜框=%d 平均放大镜框=%.3fms 平均同步=%.3fms",
+                stats[2], len(views), cursor_index, stats[3], stats[4],
+                frame_views, stats[0] / count * 1000, stats[1] / count * 1000)
             self._update_all_log_at = now
-            self._update_all_stats = [0.0, 0.0, 0]
+            self._update_all_stats = [0.0, 0.0, 0, 0, 0]
 
     def _dismiss_inline_editor(self):
         """关掉原地编辑器并归还快捷键（沿用 toggle_multi_select_mode 的收尾顺序）。"""
@@ -3033,6 +3158,9 @@ class MaskWindow(QWidget):
             # 2026-10-12（降噪 ✓）：无选区时直接停表并返回 —— 否则 timer 会一直空转到下一次
             #   InfoBar.sync() 才停，期间每拍都往「无元素矩形」日志里刷屏（用户实测刷屏 ✓）。
             if not self.selection.rects and self.selection.active is None:
+                self._badge_poll_key = None
+                # 作废可能已排队的徽标更新，避免停表后迟到的回调又把徽标显示出来。
+                self._badge_pending = (False, QRect(), "")
                 _timer = getattr(self, '_badge_poll_timer', None)
                 if _timer is not None and _timer.isActive():
                     _timer.stop()
@@ -3049,22 +3177,49 @@ class MaskWindow(QWidget):
                            or any(getattr(view, "_nudge_hold", False) for view in self.session.views))
             if not interacting:
                 self.position = self._live_cursor_physical()
+            # 光标不在本屏：徽标只允许显示在光标屏（多屏约定），停表并确保隐藏，
+            # 避免非光标屏的 150ms 空转（下次光标回到本屏时 InfoBar.sync 会重新启动）。
+            if not hint_visible_on_monitor(self.position, self.monitor_rect):
+                # 走统一的延迟隐藏路径：_sync_size_badge 会请求重绘徽标旧区域，
+                # 直接 hide() 可能把数字残留在屏幕上（该屏此时不会跟随光标重绘）。
+                self._sync_size_badge(None, None)
+                self._badge_poll_key = None
+                _timer = getattr(self, '_badge_poll_timer', None)
+                if _timer is not None and _timer.isActive():
+                    _timer.stop()
+                return
             # 2026-10-12（真机日志定位 ✓）：进入原地编辑后遮罩被画布完全覆盖，`self.update()` **不触发
             #   paintEvent** ✗（日志：周期刷新拍到 position=(1233,27) 已在徽标上，却始终没有「尺寸徽标
             #   决策」日志）⇒ 徽标判定一直没跑 ✗。改为这里**直接**计算并同步徽标状态，不再依赖
             #   paintEvent → _sync_size_badge 的间接路径 ✓（_sync_size_badge 内部仍走延迟回调改可见性 ✓）。
             current_selection = self.selection.active or (
                 self.selection.rects[-1] if self.selection.rects else None)
+            import shiboken6
+            badge = getattr(self, "_size_badge", None)
+            badge_ok = badge is not None and shiboken6.isValid(badge)
+            # 150ms 周期在“什么都没变”时唯一需要保留的是叠放顺序（防止画布后建后盖住徽标）；
+            # 文本/几何/样式重算只在状态签名变化时做，避免空转。
+            state = (
+                self.position.x(), self.position.y(),
+                current_selection.getRect() if current_selection is not None else None,
+                self.hover_rect.getRect() if self.hover_rect is not None else None,
+                self.session.element_selected,
+                self.inline_active(),
+                bool(self.session.multi_select_mode),
+            )
+            if (state == getattr(self, "_badge_poll_key", None)
+                    and badge_ok and badge.isVisible()):
+                badge.raise_()
+                return
+            self._badge_poll_key = state
             if current_selection is not None:
                 element_rect = self.to_logical_rect(current_selection).toRect()
                 element_size = (current_selection.width(), current_selection.height())
                 self._sync_size_badge(element_rect, element_size)
             else:
                 self._sync_size_badge(None, None)
-            import shiboken6
-            _b = getattr(self, "_size_badge", None)
-            if _b is not None and shiboken6.isValid(self) and shiboken6.isValid(_b) and _b.isVisible():
-                _b.raise_()
+            if badge_ok and badge.isVisible():
+                badge.raise_()
         except Exception:                 # noqa: BLE001  仅兜底 ✓ 不影响功能 ✓
             return
 
@@ -3474,12 +3629,16 @@ class MaskWindow(QWidget):
                                 (mask_cost, selection_cost, crosshair_cost,
                                  ruler_cost, badge_cost))
 
-    def _ruler_pixmap(self):
-        """把标尺刻度画进一张透明覆盖层并缓存。
+    def _ruler_bands(self):
+        """标尺四边带缓存，返回 `(上, 下, 左, 右)` 四张透明 pixmap。
 
-        原来每次 paintEvent 都要在整窗范围内按 `ruler_step` 逐格 drawLine/drawText
-        （2560×1440、step=10 时约 800 次 drawLine + 80 次 drawText），而刻度只与窗口
-        尺寸、DPR 和三个配置项有关 ⇒ 缓存后每帧只需一次 drawPixmap。
+        原实现是一张整屏透明 pixmap，每帧都要对整屏做 alpha 混合（2560×1440 实测约
+        0.7–0.9ms）。刻度只落在屏幕边缘一圈，拆成四条带后混合面积降到约 3%，内存也从
+        每屏十几 MB 降到约 1MB。
+
+        缓存键包含窗口尺寸、DPR、颜色、步长与主刻度倍数；一轮截图内通常只重建一次。
+        四条带在四角会重叠：带区都按**原始坐标**绘制（靠 translate 平移），与原先
+        整屏绘制的像素位置一致，重叠处只是同色线再次覆盖，不会改变观感。
         """
         try:
             step = int(self.settings.get("ruler_step", 10) or 10)
@@ -3500,49 +3659,82 @@ class MaskWindow(QWidget):
         if cached is not None and getattr(self, "_ruler_cache_key", None) == key:
             return cached
         built_at = time.perf_counter()
-        pixmap = QPixmap(max(1, int(self.width() * ratio)),
-                         max(1, int(self.height() * ratio)))
-        pixmap.setDevicePixelRatio(ratio)
-        pixmap.fill(Qt.transparent)
-        painter = QPainter(pixmap)
-        # 与原先直接画在遮罩上时保持同样的抗锯齿设置（文字刻度观感一致）。
-        painter.setRenderHint(QPainter.Antialiasing, True)
-        painter.setPen(QPen(color, 1))
-        font = QFont()
-        font.setPixelSize(9)
-        painter.setFont(font)
-        rect = self.rect()
+        width, height = self.width(), self.height()
+        top_height = min(RULER_BAND_TOP, height)
+        bottom_height = min(RULER_BAND_BOTTOM, height)
+        left_width = min(RULER_BAND_LEFT, width)
+        right_width = min(RULER_BAND_RIGHT, width)
         major = step * multiple
         # 小刻度与大刻度的线长随间距缩放，间距很小时仍能区分主次（避免等长看不清）。
         small = 5 if step >= 20 else 3
         big = 9 if step >= 20 else 6
-        for x in range(0, rect.width() + 1, step):
+        font = QFont()
+        font.setPixelSize(9)
+
+        def band(band_width, band_height):
+            pixmap = QPixmap(max(1, int(band_width * ratio)),
+                             max(1, int(band_height * ratio)))
+            pixmap.setDevicePixelRatio(ratio)
+            pixmap.fill(Qt.transparent)
+            painter = QPainter(pixmap)
+            # 与原先直接画在遮罩上时保持同样的抗锯齿设置（文字刻度观感一致）。
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(QPen(color, 1))
+            painter.setFont(font)
+            return pixmap, painter
+
+        top, painter = band(width, top_height)
+        for x in range(0, width + 1, step):
             length = big if (x % major == 0) else small
             painter.drawLine(x, 0, x, length)
-            painter.drawLine(x, rect.height() - length, x, rect.height())
+        painter.end()
+
+        # 下边带：把原始 y 坐标平移到带内（越界部分由 pixmap 自然裁剪，与整屏绘制一致）。
+        bottom, painter = band(width, bottom_height)
+        painter.translate(0, bottom_height - height)
+        for x in range(0, width + 1, step):
+            length = big if (x % major == 0) else small
+            painter.drawLine(x, height - length, x, height)
             if x % major == 0 and x > 0:
-                painter.drawText(x + 2, rect.height() - length - 2, str(x))
-        for y in range(0, rect.height() + 1, step):
+                painter.drawText(x + 2, height - length - 2, str(x))
+        painter.end()
+
+        left, painter = band(left_width, height)
+        for y in range(0, height + 1, step):
             length = big if (y % major == 0) else small
             painter.drawLine(0, y, length, y)
-            painter.drawLine(rect.width() - length, y, rect.width(), y)
             if y % major == 0 and y > 0:
                 painter.drawText(length + 2, y - 2, str(y))
         painter.end()
-        self._ruler_cache = pixmap
+
+        right, painter = band(right_width, height)
+        painter.translate(right_width - width, 0)
+        for y in range(0, height + 1, step):
+            length = big if (y % major == 0) else small
+            painter.drawLine(width - length, y, width, y)
+        painter.end()
+
+        bands = (top, bottom, left, right)
+        self._ruler_cache = bands
         self._ruler_cache_key = key
-        # 只在“尺寸/DPR/刻度配置”变化时重建，不是每帧；记录一次重建成本便于对比优化前后。
+        # 只在“尺寸/DPR/刻度配置”变化时重建，不是每帧；记录一次重建成本便于对比。
         get_logger().debug(
-            "标尺缓存重建: 尺寸=%dx%d DPR=%.2f 步长=%d 主刻度=%d 耗时=%.2fms",
-            self.width(), self.height(), ratio, step, major,
+            "标尺边带缓存重建: 尺寸=%dx%d DPR=%.2f 步长=%d 主刻度=%d 带=(%d,%d,%d,%d) 耗时=%.2fms",
+            width, height, ratio, step, major,
+            top_height, bottom_height, left_width, right_width,
             (time.perf_counter() - built_at) * 1000)
-        return pixmap
+        return bands
 
     def _draw_ruler(self, painter):
         """在遮罩边缘绘制像素标尺（顶部/右侧仅短线，底部/左侧带数值），帮助定位。"""
         if not self.settings.get("ruler_enabled", False):
             return
-        painter.drawPixmap(0, 0, self._ruler_pixmap())
+        top, bottom, left, right = self._ruler_bands()
+        height, width = self.height(), self.width()
+        painter.drawPixmap(0, 0, top)
+        painter.drawPixmap(0, height - min(RULER_BAND_BOTTOM, height), bottom)
+        painter.drawPixmap(0, 0, left)
+        painter.drawPixmap(width - min(RULER_BAND_RIGHT, width), 0, right)
 
     def wheelEvent(self, event):
         super().wheelEvent(event)
@@ -3621,10 +3813,10 @@ class MaskWindow(QWidget):
             if event.button() == Qt.LeftButton:
                 self.position = self._mouse_event_position(event)
                 hit = self.selection.handle_at(self.position)
-                if hit is not None or self.selection.border_at(self.position):
+                if hit is not None or self.selection.border_at(self.position, hit):
                     if hit is not None:
                         self.resize_cursor = hit[2]
-                    self.selection.begin(self.position)
+                    self.selection.begin(self.position, hit)
                     if self.session.inline_editor is not None:
                         self.session.inline_editor.begin_region_resize()
             self.update_all()
@@ -3634,16 +3826,17 @@ class MaskWindow(QWidget):
         # sample_color_at），全仓库再无 `picker_mode = True` 的写入点，该分支永远进不去，故删除。
         if event.button() in (Qt.LeftButton, Qt.RightButton):
             self.position = self._mouse_event_position(event)
+            # 命中只算一次：缩放手柄的优先级最高，随后才判断整体拖动/新建或新建选区。
+            hit = self.selection.handle_at(self.position)
             if event.button() == Qt.RightButton:
                 self.selection.begin_new(self.position)
             else:
-                self.selection.begin(self.position)
+                self.selection.begin(self.position, hit)
             if self.quick_sticker_armed:
                 self.quick_sticker_armed = False
                 self.quick_sticker_pending = True
             # 记录按下位置，用于区分“单击确认元素”和“拖动手绘选区”。
             self.press_position = QPoint(self.position)
-            hit = self.selection.handle_at(self.position)
             if (hit is None and not any(rect.adjusted(-6, -6, 6, 6).contains(self.position)
                                         for rect in self.selection.rects)):
                 self.session.element_selected = False
@@ -3657,7 +3850,9 @@ class MaskWindow(QWidget):
         """将显示器及窗口的全局边缘转换为遮罩内的局部坐标。"""
         if self.inline_active():
             self.position = self._mouse_event_position(event)
-            hit = self.selection.handle_at(self.position)
+            # 正在缩放时手柄早已确定，不必再遍历；否则算一次并复用于 border_at。
+            hit = (None if self.selection.resizing is not None
+                   else self.selection.handle_at(self.position))
             if self.selection.resizing is not None or hit is not None:
                 cursor = self.resize_cursor if self.selection.resizing is not None else hit[2]
                 self.resize_cursor = cursor
@@ -3666,7 +3861,7 @@ class MaskWindow(QWidget):
                 self.setCursor(cursor_shapes[cursor])
             else:
                 self.setCursor(Qt.SizeAllCursor if self.selection.dragging is not None or
-                               self.selection.border_at(self.position) else Qt.ArrowCursor)
+                               self.selection.border_at(self.position, hit) else Qt.ArrowCursor)
             if self.selection.resizing is not None or self.selection.dragging is not None:
                 self.selection.update(self.position)
                 # 2026-10-12（规则 22 ✓ 物理空间）：拖到屏幕右下角时端点含端点 ⇒ 选区比屏幕多 1px ✗

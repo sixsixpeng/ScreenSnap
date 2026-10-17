@@ -1994,7 +1994,9 @@ class DpiTests(CoreTests):
         from PySide6.QtGui import QImage, QPainter
         from config.config_manager import DEFAULTS
         from core.dpi import DisplayMapper
-        from screenshot.mask_window import MaskSession, MaskWindow
+        from screenshot.mask_window import (RULER_BAND_BOTTOM, RULER_BAND_LEFT,
+                                            RULER_BAND_RIGHT, RULER_BAND_TOP,
+                                            MaskSession, MaskWindow)
 
         sizes = ((512, 384), (640, 480), (800, 600), (960, 540))
         scale_sets = ((1.0, 1.5), (1.25, 1.0, 1.75), (1.0, 1.25, 1.5, 1.75))
@@ -2103,14 +2105,21 @@ class DpiTests(CoreTests):
                                 self.assertAlmostEqual(getattr(actual, key)(),
                                                        getattr(expected, key)(),
                                                        places=6, msg=name)
-                        # ③ 标尺按本屏尺寸/DPR 缓存；重复取用命中同一对象。
+                        # ③ 标尺按本屏尺寸/DPR 缓存；重复取用命中同一组对象。
                         ratio = view.devicePixelRatioF() or 1.0
-                        first = view._ruler_pixmap()
-                        self.assertIs(first, view._ruler_pixmap(), name)
-                        self.assertEqual(first.width(),
-                                         max(1, int(view.width() * ratio)), name)
-                        self.assertEqual(first.height(),
-                                         max(1, int(view.height() * ratio)), name)
+                        first = view._ruler_bands()
+                        self.assertIs(first, view._ruler_bands(), name)
+                        expected_bands = (
+                            (view.width(), min(RULER_BAND_TOP, view.height())),
+                            (view.width(), min(RULER_BAND_BOTTOM, view.height())),
+                            (min(RULER_BAND_LEFT, view.width()), view.height()),
+                            (min(RULER_BAND_RIGHT, view.width()), view.height()),
+                        )
+                        for band, (band_width, band_height) in zip(first, expected_bands):
+                            self.assertEqual(band.width(),
+                                             max(1, int(band_width * ratio)), name)
+                            self.assertEqual(band.height(),
+                                             max(1, int(band_height * ratio)), name)
                         checker = QImage(view.size(), QImage.Format_ARGB32_Premultiplied)
                         checker.fill(Qt.transparent)
                         painter = QPainter(checker)
@@ -2123,7 +2132,7 @@ class DpiTests(CoreTests):
                         old_key = view._ruler_cache_key
                         view.settings["ruler_step"] = 20
                         try:
-                            self.assertIsNot(first, view._ruler_pixmap(), name)
+                            self.assertIsNot(first, view._ruler_bands(), name)
                             self.assertNotEqual(old_key, view._ruler_cache_key, name)
                         finally:
                             view.settings["ruler_step"] = DEFAULTS["ruler_step"]
@@ -2132,6 +2141,61 @@ class DpiTests(CoreTests):
                     for view in views:
                         view.close()
         self.assertGreaterEqual(checked, 36, "多屏组合覆盖不足")
+
+    def test_ruler_bands_match_full_screen_reference(self):
+        """标尺边带拼出来的像素必须与旧“整屏绘制”逐像素一致（含四角重叠区）。
+
+        边带方案只改变绘制载体，不改变刻度位置/文字基线；这里用同一套刻度公式渲染
+        一张整屏参考图，再与 `_draw_ruler` 的四条带拼合结果逐像素比较。
+        """
+        from PySide6.QtGui import QColor, QFont, QImage, QPainter, QPen
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 321, "height": 239}
+        settings = dict(DEFAULTS, window_detection=False, inline_edit=False,
+                        magnifier=False, crosshair=False, mask_opacity=0,
+                        ruler_step=10, ruler_major_multiple=5)
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (321, 239), "white"), bounds, [bounds], settings)
+        try:
+            view = mask.session.views[0]
+            composed = QImage(view.size(), QImage.Format_ARGB32_Premultiplied)
+            composed.fill(Qt.transparent)
+            painter = QPainter(composed)
+            view._draw_ruler(painter)
+            painter.end()
+
+            reference = QImage(view.size(), QImage.Format_ARGB32_Premultiplied)
+            reference.fill(Qt.transparent)
+            painter = QPainter(reference)
+            painter.setRenderHint(QPainter.Antialiasing, True)
+            painter.setPen(QPen(QColor(settings["ruler_color"]), 1))
+            font = QFont()
+            font.setPixelSize(9)
+            painter.setFont(font)
+            width, height = view.width(), view.height()
+            step, major = 10, 50
+            small, big = 3, 6
+            for x in range(0, width + 1, step):
+                length = big if x % major == 0 else small
+                painter.drawLine(x, 0, x, length)
+                painter.drawLine(x, height - length, x, height)
+                if x % major == 0 and x > 0:
+                    painter.drawText(x + 2, height - length - 2, str(x))
+            for y in range(0, height + 1, step):
+                length = big if y % major == 0 else small
+                painter.drawLine(0, y, length, y)
+                painter.drawLine(width - length, y, width, y)
+                if y % major == 0 and y > 0:
+                    painter.drawText(length + 2, y - 2, str(y))
+            painter.end()
+
+            mismatches = [(x, y) for y in range(height) for x in range(width)
+                          if composed.pixel(x, y) != reference.pixel(x, y)]
+            self.assertEqual(mismatches[:8], [], "边带拼合与整屏参考不一致")
+        finally:
+            mask.close()
 
     def test_mask_update_all_computes_magnifier_frame_once_on_cursor_screen(self):
         """多屏刷新约定：每帧只为光标所在屏算一次放大镜框，其它屏传 None。
@@ -2173,8 +2237,8 @@ class DpiTests(CoreTests):
         real_frame = MaskWindow.magnifier_frame
         frame_calls = []
 
-        def spy_frame(view):
-            frame = real_frame(view)
+        def spy_frame(view, hints=None):
+            frame = real_frame(view, hints)
             frame_calls.append((view, frame))
             return frame
 
@@ -2182,7 +2246,45 @@ class DpiTests(CoreTests):
             with patch.object(MaskWindow, "magnifier_frame", spy_frame), \
                     patch.object(MagnifierOverlay, "sync") as magnifier_sync, \
                     patch.object(InfoBar, "sync") as info_sync:
-                for index, view in enumerate(views):
+                def assert_targets(target_indices, cursor_index, label):
+                    """按 session.views 顺序核对：只有光标屏拿到 frame，其余为 None。"""
+                    called = [index for index in range(len(views))
+                              if index in target_indices]
+                    self.assertEqual(magnifier_sync.call_count, len(called), label)
+                    self.assertEqual(info_sync.call_count, len(called), label)
+                    for call_index, view_index in enumerate(called):
+                        frame_arg = magnifier_sync.call_args_list[call_index].args[0]
+                        info_arg = info_sync.call_args_list[call_index].args[0]
+                        # 两块浮层必须拿到同一个对象（或同时为 None）。
+                        self.assertIs(frame_arg, info_arg, (label, view_index))
+                        if view_index == cursor_index:
+                            self.assertIsNotNone(frame_arg, (label, view_index))
+                        else:
+                            self.assertIsNone(frame_arg, (label, view_index))
+
+                # ① 强制全量：所有屏同步，但放大镜框只为光标屏算一次。
+                views[0].position = views[0].monitor_rect.center()
+                frame_calls.clear()
+                magnifier_sync.reset_mock()
+                info_sync.reset_mock()
+                views[0].update_all(force=True)
+                self.assertEqual(session.position, views[0].monitor_rect.center())
+                self.assertEqual(len(frame_calls), 1)
+                self.assertIs(frame_calls[0][0], views[0])
+                assert_targets(set(range(len(views))), 0, "force")
+
+                # ② 同一块屏内继续移动（状态签名不变）：只刷新该屏。
+                frame_calls.clear()
+                magnifier_sync.reset_mock()
+                info_sync.reset_mock()
+                views[0].update_all()
+                self.assertEqual(len(frame_calls), 1)
+                self.assertIs(frame_calls[0][0], views[0])
+                assert_targets({0}, 0, "same-screen")
+
+                # ③ 逐屏切换：只刷新光标屏 + 上一块屏（擦掉旧十字线）。
+                for index in range(1, len(views)):
+                    view = views[index]
                     view.position = view.monitor_rect.center()
                     frame_calls.clear()
                     magnifier_sync.reset_mock()
@@ -2191,18 +2293,9 @@ class DpiTests(CoreTests):
                     self.assertEqual(session.position, view.monitor_rect.center(), index)
                     self.assertEqual(len(frame_calls), 1, index)
                     self.assertIs(frame_calls[0][0], view, index)
-                    cursor_frame = frame_calls[0][1]
-                    self.assertEqual(magnifier_sync.call_count, len(views), index)
-                    self.assertEqual(info_sync.call_count, len(views), index)
-                    for other_index, other in enumerate(views):
-                        expected = cursor_frame if other is view else None
-                        self.assertIs(
-                            magnifier_sync.call_args_list[other_index].args[0],
-                            expected, (index, other_index))
-                        self.assertIs(
-                            info_sync.call_args_list[other_index].args[0],
-                            expected, (index, other_index))
-                # 接缝：下一块屏的左上角属于下一块屏（QRect 右/下边界为开区间）。
+                    assert_targets({index, index - 1}, index, f"switch-{index}")
+
+                # ④ 接缝：下一块屏的左上角属于下一块屏（QRect 右/下边界为开区间）。
                 views[1].position = views[1].monitor_rect.topLeft()
                 frame_calls.clear()
                 magnifier_sync.reset_mock()
@@ -2210,8 +2303,17 @@ class DpiTests(CoreTests):
                 views[1].update_all()
                 self.assertEqual(len(frame_calls), 1)
                 self.assertIs(frame_calls[0][0], views[1])
-                self.assertIsNone(magnifier_sync.call_args_list[0].args[0])
-                self.assertIsNotNone(magnifier_sync.call_args_list[1].args[0])
+                assert_targets({1, 3}, 1, "seam")
+
+                # ⑤ 选区变化：必须退回全量，保证跨屏选区的其它屏也重绘。
+                views[1].selection.rects.append(QRect(10, 10, 40, 30))
+                frame_calls.clear()
+                magnifier_sync.reset_mock()
+                info_sync.reset_mock()
+                views[1].update_all()
+                self.assertEqual(len(frame_calls), 1)
+                self.assertIs(frame_calls[0][0], views[1])
+                assert_targets(set(range(len(views))), 1, "state-change")
         finally:
             for view in views:
                 view.close()

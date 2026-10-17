@@ -68,9 +68,15 @@ class SelectionRects:
         hit = self.handle_at(point)
         return hit[:4] if hit is not None and hit[4] == "both" else None
 
-    def border_at(self, point):
-        """非缩放手柄的边框窄带可用于拖动，编辑画布内部仍处理标注。"""
-        if self.handle_at(point) is not None:
+    def border_at(self, point, hit=None):
+        """非缩放手柄的边框窄带可用于拖动，编辑画布内部仍处理标注。
+
+        `hit` 可传入本次事件里已经算过的 `handle_at()` 结果：鼠标移动路径上两者
+        原本各遍历一次全部选区 × 8 个手柄，合并后只算一次。
+        """
+        if hit is None:
+            hit = self.handle_at(point)
+        if hit is not None:
             return False
         for rect in reversed(self.rects):
             if (rect.adjusted(-6, -6, 6, 6).contains(point) and
@@ -78,9 +84,13 @@ class SelectionRects:
                 return True
         return False
 
-    def begin(self, point):
-        """优先选中顶层选区的缩放手柄，再判断整体拖动或新建。"""
-        hit = self.handle_at(point)
+    def begin(self, point, hit=None):
+        """优先选中顶层选区的缩放手柄，再判断整体拖动或新建。
+
+        `hit` 可传入调用方已经算好的 `handle_at()` 结果，避免按下时重复遍历。
+        """
+        if hit is None:
+            hit = self.handle_at(point)
         if hit is not None:
             self.resizing, self.resize_anchor, _, corner, self.resize_axis = hit
             self.resize_anchor = QPoint(self.resize_anchor)
