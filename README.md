@@ -1881,6 +1881,7 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 6. 打包适配：Run 键、计划任务、提权/降权、看护子进程统一走 `core/startup.py::launch_command()`；打包后使用 exe 绝对路径，源码模式看护用 `python.exe`、自启/提权用 `pythonw.exe`。`supervisor.log` 改为写程序根目录（不再落 `_internal`/临时解包目录）。
 7. 已知限制：UAC 安全桌面无法截取；使用其他管理员账户完成 UAC 会切换到该账户的配置目录；管理员实例会被 UIPI 阻止接收资源管理器的拖入；`Program Files` 下标准权限启动时默认日志目录可能不可写。
 8. 验证：`tests.test_elevation` 24 条、`tests.test_supervisor` 6 条通过；配置/设置页相关 10 条通过。真实 UAC、计划任务登录触发、管理员→标准降权仍需真机 exe 验收。
+9. 托盘菜单分组：在「重新注册全局热键」「以管理员身份重启 / 以标准权限重启」「设置」之间各加一条分隔线；某个入口不可用时自动省略空组，不出现连续分隔线。新增 `test_tray_menu_separates_hotkeys_privilege_and_settings` 钉住分组。
 
 #### 贴图文件拖放与 GIF 动图
 
@@ -1892,3 +1893,23 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 6. 日志：拖入/拖出/面板/编辑器在 DEBUG 记录事件级细节（可接收、忽略原因、落点、文件数），INFO 记录完成汇总，WARNING 记录无管理器/超大 GIF/单文件读取失败，ERROR 带 `exc_info` 记录处理异常；GIF 初始化、逐帧、暂停/继续、速度与状态恢复均有对应级别日志。
 7. 验证：新增 `tests.test_sticker_drag_gif.py` 9 条（路径加载/级联/替换、真实 QDropEvent 替换与 Shift 新建、拖出 MIME、编辑器/面板视口转发与总开关、GIF 播放/暂停/逐帧、动画状态会话恢复、关闭开关回退静态）；`tests.test_sticker_lifecycle` 14 条、`tests.test_sticker_mask` 8 条、设置页/面板相关用例通过。`tests.test_sticker` 全量仍受沙箱禁止写 `%APPDATA%` 与既有序相关波动影响，未发现与本次改动相关的新失败。
 8. 未验收：真实桌面从资源管理器拖入/拖出、管理员权限下的 UIPI 限制、超大 GIF 解码性能，需在普通 PowerShell + 非提权实例上手工复测。
+
+#### 截图选区性能优化（遮罩绘制热点与按屏收敛）
+
+1. 标尺：由整屏透明 pixmap 改为上/下/左/右四条边带缓存（12/28/64/12 逻辑像素），每帧只混合屏幕边缘一圈；缓存键含窗口尺寸、DPR、颜色、步长与主刻度倍数。真机 2560×1440 实测 `标尺` 从 0.7–0.9ms 降到 0.09–0.11ms，重建只在首帧（约 1.7–2.5ms）。
+2. 提示项与采集自检警示改为每次刷新只算一次（`hint_snapshot()`），同时供放大镜框排版与 InfoBar 绘制；InfoBar 的 `setGeometry` 只在几何变化时调用，`raise_` 只在新显示/行数/样式/原地编辑状态变化时调用；工具栏重新显示与开始拖动时显式补抬 InfoBar，避免层级被盖。
+3. 尺寸徽标 150ms 轮询增加状态签名：光标、选区、悬停、模式都未变且徽标可见时只 `raise_`；光标不在本屏时走统一延迟隐藏路径并停表，同时作废排队中的 `_badge_pending`，避免非光标屏残影与空转。
+4. `update_all()` 按屏收敛：刷新签名挂在 `MaskSession` 上（选区、所有屏 hover、元素选中、多选/右键模式、原地编辑、工具栏隐藏、遮罩/标尺/十字线设置）。签名变化 ⇒ 全量；仅光标移动 ⇒ 只刷光标屏，切屏补刷上一块屏；调用方不是光标屏、显示器矩形重叠（镜像/复制）时退回全量；`force=True` 供菜单关闭后恢复放大镜等入口使用。提示项/警示/放大镜框每次刷新只算一次，两块浮层共享同一个 frame。
+5. `SelectionRects.border_at()` / `begin()` 支持传入已算好的 `handle_at()` 结果，鼠标移动、按下、原地编辑转发三条路径不再重复遍历“选区 × 8 手柄”。
+6. 新增/扩展日志（均为 DEBUG，5 秒窗口限频）：`遮罩重绘耗时(5s窗口)` 增加分阶段 `底图/选区/十字线/标尺/徽标/其它`；`遮罩刷新(5s窗口)` 增加 `全量/收敛` 计数；新增 `标尺边带缓存重建`、`坐标缩放缓存建立`、`吸附边缘缓存建立`、`冻结画面 pixmap 缓存建立`、`尺寸徽标样式已应用`。把日志等级调到 DEBUG 后搜索上述前缀即可查看。
+7. 真机数据（2560×1440 双屏）：稳定后单屏重绘 1.94–3.60ms（底图 1.3–2.3ms、标尺 0.09–0.11ms、十字线 0.26–0.63ms、徽标 0.10–0.21ms）；`遮罩刷新` 5 秒内 290–319 次中仅 11–24 次全量，其余为收敛刷新；`计算放大镜框=1` 保持成立。
+8. 回归：新增 `test_ruler_bands_match_full_screen_reference`（边带拼合与旧整屏绘制逐像素一致）、`test_mask_multiscreen_cache_invariants_across_layouts`（2/3/4 屏 × 横排/竖排/2×2/阶梯/间隙/负原点 × 混合 DPR，校验吸附边缘、坐标缩放、标尺缓存）与 `test_mask_update_all_computes_magnifier_frame_once_on_cursor_screen`（强制全量/同屏收敛/逐屏切换/接缝/选区变化）；既有 `test_capture`、`test_uia`、`test_capture_pointer`、`test_misc` 通过，失败项均为改动前已存在的环境/剪贴板/既有用例问题。
+9. 已知限制：镜像/复制显示为保证十字线不残影，始终走全量刷新；悬停变化目前仍会触发全量刷新（下一步可收敛为“只刷 hover 变化的屏”）。
+
+#### UIA 桌面图标识别修复
+
+1. 现象：直接在桌面上截图/悬停时，桌面被 `top_window_at()` 排除，UIA 拿不到 Progman/WorkerW 下的 `SysListView32`，只能拖选整块桌面，桌面上的图标无法识别。
+2. 修复：`top_window_at()` 新增 `include_shell` 参数，仅 UIA 查询路径传 `True`，允许把 `GetShellWindow()`（Progman/WorkerW）作为识别目标；贴图吸附与普通句柄识别仍保持排除，避免把整屏桌面当成吸附目标或元素。
+3. 过滤：命中桌面背景（桌面列表控件铺满虚拟桌面）时返回空，不把整块桌面作为悬停元素；桌面图标会在下钻后收窄到图标/列表项，正常显示尺寸徽标。
+4. 新增 `is_desktop_window()` 辅助判断；日志新增 `窗口识别命中系统桌面: hwnd=...（UIA 将继续下钻桌面图标）`（DEBUG，2 秒限频）。
+5. 验证：新增两条用例——`top_window_at` 默认排除 / `include_shell` 允许 shell；假控件树验证“图标收窄、空白桌面返回空”。真机用桌面上无窗口覆盖的点复测：默认返回空、`include_shell` 返回 shell、空白桌面链为空。
