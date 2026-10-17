@@ -220,7 +220,8 @@ class HotkeyDiagnosticsTests(unittest.TestCase):
         2026-10-16 真机实测：该判据出现在前台为提权窗口（任务管理器）时 —— 非提权进程拿不回被
         挡住的键盘输入，重建绑定无效，用户在日志之外看不到任何提示（旧文案只说"异常证据"）。
         """
-        generic = "热键输入链出现异常证据；绑定重建不保证原生钩子恢复"
+        # 2026-10-16：文案按通知长度精简（应用内提示与系统 toast 都只显示一两行）。
+        generic = "热键异常；重建绑定不保证恢复原生钩子"
         self.assertEqual(hm.HotkeyManager._fault_notice("unfired:capture"), generic)
         self.assertEqual(hm.HotkeyManager._fault_notice("phantom-pressed:1"), generic)
 

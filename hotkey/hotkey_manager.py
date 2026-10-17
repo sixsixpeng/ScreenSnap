@@ -559,9 +559,8 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         其余判据不猜原因，保持通用措辞（"不保证原生钩子恢复"仍是诚实的表述）。
         """
         if reason.startswith("input-stale"):
-            return ("键盘输入未到达本程序：前台可能是以管理员身份运行的程序；"
-                    "切换到其它窗口后重试即可，重建绑定对这种情况无效")
-        return "热键输入链出现异常证据；绑定重建不保证原生钩子恢复"
+            return "键盘输入被拦截：前台可能是管理员窗口，切换焦点后重试"
+        return "热键异常；重建绑定不保证恢复原生钩子"
 
     def health_evidence(self):
         """只读判定，可用于关闭自动体检后的手动检查；不重建绑定。"""
@@ -768,7 +767,7 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         now = time.monotonic()
         relevant = self.recovery.callback(action)
         if relevant and not self.recovery.reason and self.policy["hotkey_recovered_notice"]:
-            self.notice.emit("故障涉及的热键回调已到达主线程；不代表其他热键均已恢复")
+            self.notice.emit("热键回调已恢复（不代表其他热键已恢复）")
         if generation != self._verified_generation:
             self._verified_generation = generation
             self.log_diagnostics("callback-reached-qt")

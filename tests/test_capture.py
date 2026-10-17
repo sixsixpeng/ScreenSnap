@@ -170,6 +170,37 @@ class CaptureTests(CoreTests):
         self.assertTrue(bool(notification.preview.alignment() & Qt.AlignHCenter), "pixmap 必须水平居中")
         notification.close()
 
+    def test_capture_notification_supports_text_only_notice(self):
+        """2026-10-16：旧版应用通知下的文字提示复用同一个窗口（无缩略图）。
+
+        此前 legacy 走 tray.showMessage —— Windows 把托盘气泡画成系统 toast，于是文字提示
+        （启动、热键故障、保存失败）看起来仍像 Win11 原生通知，与应用内图片预览不一致。
+        """
+        from PySide6.QtWidgets import QLabel
+        from ui.capture_notification import CaptureNotification
+
+        message = "键盘输入被拦截：前台可能是管理员窗口，切换焦点后重试"
+        notice = CaptureNotification(None, title="ScreenSnap", detail=message,
+                                     backend="legacy", close_after=2)
+        try:
+            self.assertIsNone(notice.preview, "纯文字提示不应有缩略图控件")
+            detail = next(label for label in notice.findChildren(QLabel) if "键盘输入" in label.text())
+            self.assertTrue(detail.wordWrap(), "长文案必须换行，不能被省略成一行")
+            notice._show_local_preview = Mock()
+            with patch("ui.native_toast.show_native_toast") as native:
+                notice.show_preview()
+            native.assert_not_called()          # 没有图片就不能走图片 Toast
+            notice._show_local_preview.assert_called_once()
+        finally:
+            notice.close()
+
+        # 消息里已经写了保存位置时不再追加一行路径（否则同一信息出现两次）。
+        saved = CaptureNotification(None, detail="图片已保存: C:/x.png", target_path="C:/x.png")
+        try:
+            self.assertEqual(len(saved.labels), 2, "标题 + 消息；纯文字模式不追加路径行")
+        finally:
+            saved.close()
+
     def test_capture_notification_async_toast_failure_shows_local_preview(self):
         from ui.capture_notification import CaptureNotification
 

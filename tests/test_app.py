@@ -147,16 +147,26 @@ class AppTests(CoreTests):
             app.saved("capture.png")
             app.tray.showMessage.assert_not_called()
             app.config.data["save_notification"] = True
+            preview.reset_mock()
+            app.capture_notice = None
             app.saved("capture.png")
-            self.assertIn("图片已保存", app.tray.showMessage.call_args.args[1])
+            # 2026-10-16：旧版应用通知下的文字提示改走应用内预览（托盘气泡会让 Windows 画成系统 toast）。
+            preview.assert_called_once()
+            self.assertIn("图片已保存", preview.call_args.kwargs["detail"])
+            app.tray.showMessage.assert_not_called()
             app.tray.reset_mock()
 
+            preview.reset_mock()
+            app.capture_notice = None
             app.config.data["copy_notification"] = False
             app.notify_capture_copied()
+            preview.assert_not_called()
             app.tray.showMessage.assert_not_called()
             app.config.data["copy_notification"] = True
             app.notify_capture_copied()
-            self.assertIn("已复制到剪贴板", app.tray.showMessage.call_args.args[1])
+            preview.assert_called_once()
+            self.assertIn("已复制到剪贴板", preview.call_args.kwargs["detail"])
+            app.tray.showMessage.assert_not_called()
             app.tray.reset_mock()
             preview.reset_mock()
             app.config.data["copy_notification"] = False
@@ -205,17 +215,22 @@ class AppTests(CoreTests):
             preview.assert_called_once()
             _title = preview.call_args.kwargs.get("title") or (preview.call_args.args[1] if len(preview.call_args.args) > 1 else "")
             self.assertIn("#abcdef", _title)
-            app.tray.reset_mock()
+            preview.reset_mock()
+            app.capture_notice = None
             app.config.data["operation_notification"] = False
             app.notify("status")
+            preview.assert_not_called()
             app.tray.showMessage.assert_not_called()
             app.config.data["operation_notification"] = True
             app.notify("status")
-            self.assertIn("status", app.tray.showMessage.call_args.args[1])
-            self.assertEqual(app.tray.showMessage.call_args.args[3], 2000)
+            preview.assert_called_once()
+            self.assertIn("status", preview.call_args.kwargs["detail"])
+            self.assertEqual(preview.call_args.kwargs["close_after"], 2)
+            app.capture_notice = None
+            preview.reset_mock()
             app.config.data["notification_timeout"] = 6
             app.notify("timed status")
-            self.assertEqual(app.tray.showMessage.call_args.args[3], 6000)
+            self.assertEqual(preview.call_args.kwargs["close_after"], 6)
             app.tray.reset_mock()
 
             app.config.data["sticker_notification"] = False
@@ -248,7 +263,8 @@ class AppTests(CoreTests):
             app.tray.showMessage.assert_not_called()
             app.tray.reset_mock()
             app.dispatch("paste")
-            self.assertIn("已贴上次截图", app.tray.showMessage.call_args.args[1])
+            app.tray.showMessage.assert_not_called()
+            self.assertIn("已贴上次截图", preview.call_args.kwargs["detail"])
             app.tray.reset_mock()
             app.config.data["bubble"] = False
             app.saved("capture.png")
@@ -353,12 +369,19 @@ class AppTests(CoreTests):
         app.config = SimpleNamespace(data=DEFAULTS.copy())
         app.config.data["notification_backend"] = "legacy"
         app.tray = Mock()
-        with patch("main.QApplication.beep"):
+        app.capture_notice = None
+        with patch("main.QApplication.beep"), \
+                patch("app.notification_flow.CaptureNotification") as preview:
             app.announce_startup()
-            self.assertIn("已启动", app.tray.showMessage.call_args.args[1])
-            app.tray.reset_mock()
+            # 旧版应用通知：启动提示也走应用内预览（2026-10-16 统一文字提示的后端）。
+            preview.assert_called_once()
+            self.assertIn("已启动", preview.call_args.kwargs["detail"])
+            app.tray.showMessage.assert_not_called()
+            preview.reset_mock()
+            app.capture_notice = None
             app.config.data["bubble"] = False
             app.announce_startup()
+            preview.assert_not_called()
             app.tray.showMessage.assert_not_called()
 
     def test_tray_menu_dispatches_image_edit_actions(self):

@@ -151,6 +151,30 @@ class NotificationMixin:
         self._play_notification_sound(category)
 
 
+    def show_text_notice(self, message, target_path=None):
+        """旧版应用通知下的纯文字提示：复应用内预览窗口，只是没有缩略图。
+
+        2026-10-16：此前 legacy 直接 `tray.showMessage` —— 那是**系统托盘气泡**，Windows 10/11
+        会把它画成系统 toast，于是「通知方式 = 旧版应用通知」的文字提示（启动、热键故障、
+        保存失败等）看起来仍像 Win11 原生通知，与应用内图片预览的外观不一致。
+        现在文字提示改走同一个窗口；创建失败才退回托盘气泡。
+        """
+        if self.capture_notice is not None:
+            self.capture_notice.close()
+            self.capture_notice = None
+        try:
+            notice = CaptureNotification(None, title="ScreenSnap", detail=message,
+                                         target_path=target_path, backend="legacy",
+                                         close_after=self.config.data.get("notification_timeout", 2),
+                                         settings=self.config.data)
+        except (RuntimeError, TypeError, ValueError) as error:  # 兜底：绝不因为通知失败影响操作
+            self.logger.warning("应用内文字通知创建失败，退回托盘气泡: %s", error)
+            return False
+        notice.file_activated.connect(self.open_notification_target)
+        notice.show_preview()
+        self.capture_notice = notice
+        return True
+
     def notify(self, message, setting=None, target_path=None, fallback=None):
         """总开关与分类开关控制气泡；音效仍由音效设置独立控制。"""
         category = setting or "operation_notification"
@@ -173,7 +197,7 @@ class NotificationMixin:
                 if not sent:
                     self.tray.showMessage(
                         "ScreenSnap", message, QSystemTrayIcon.Information, timeout)
-            else:
+            elif not self.show_text_notice(message, self._notification_target_path):
                 self.tray.showMessage(
                     "ScreenSnap", message, QSystemTrayIcon.Information,
                     int(self.config.data.get("notification_timeout", 2)) * 1000)

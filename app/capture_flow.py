@@ -445,7 +445,7 @@ class CaptureFlowMixin:
         image = QGuiApplication.clipboard().image()
         if image.isNull():
             self.logger.debug("剪贴板中没有图片，无法打开编辑器")
-            self.notify("剪贴板中没有图片；文字、颜色或文件可用“贴剪贴板内容”直接贴出")
+            self.notify("剪贴板无图片；文字/颜色/文件可直接贴出")
             return
         try:
             source = qimage_to_pillow(image)

@@ -295,7 +295,7 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
             self.logger.warning("崩溃后自动重启（上次退出码=%s）", restarted)
             self.notify(f"ScreenSnap 上次异常退出（code={restarted}），已自动重启")
             return
-        self.notify("已启动，可使用快捷键截图或右键托盘打开设置")
+        self.notify("已启动：快捷键截图，右键托盘打开设置")
 
 
     def tray_clicked(self, reason):
@@ -478,10 +478,11 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
             mask.sync_keyboard_compatibility()
         accepted = self.hotkeys.manual_recover(self.config.data)
         if accepted is False:
-            self.notify("未提交重注册：当前冷却/停止策略或注册线程不可用；请查看诊断")
+            self.notify("重注册未提交：冷却中或注册线程不可用")
             return
         if self.config.data.get("hotkeys_enabled", True):
-            self.notify("已请求重新注册全局热键；仍无效请保留日志后重启")
+            # 只说"已请求"：重建绑定不等于原生钩子已恢复（与托盘提示、诊断口径一致）。
+            self.notify("已请求重新注册；仍无效请重启")
         else:
             self.notify("全局热键当前已关闭，未注册")
 
