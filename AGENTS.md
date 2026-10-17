@@ -497,6 +497,31 @@
   - 现象：同一轮里两次把**没验证过**的行为写进说明 —— 先写"`allow` 允许超出：编辑视图可见超出的部分"，实测被 `AnnotationCanvas.drawForeground()`（把画布外区域盖回主题底色）证伪；又写"直接裁切：超出的部分在编辑视图与导出里都裁掉"，这次是对的但当时同样没测过（2026-10-16）。
   - 避免：凡说明里出现"看得见 / 看不见 / 画得出去 / 会被裁掉 / 会自动缩小"这类**可观测行为**，先写像素探针确认（本次用「视口红色像素 790 → 0」与「clip/allow 都只有 600」两条数据定案），再写进 tooltip、README 或配置表 ✓；发现旧说明写错时**就地在原条目更正并标注日期**，不要只在新增记录里提一句 ✓。
 
+### E. 主题与自绘控件（黑暗模式）
+
+- **E1 自绘控件不能直接沿用原生默认前景/背景 ✗**
+  - 现象：Windows 原生风格只按调色板填菜单底色，菜单文字仍用固定深色 ⇒ 黑暗主题下「黑底黑字」（2026-10-04 已修）。同类风险：QToolTip、QMenu 子菜单、QComboBox 弹出列表、QWidgetAction 内的自绘面板。
+  - 避免：统一在 [ui/theme.py](file:///e:/code/ScreenSnap/ui/theme.py) 的调色板 + QSS 层解决（`MENU_STYLESHEET_TEMPLATE` / `CONTROL_STYLESHEET_TEMPLATE` / `_button_stylesheet`），不要在单个窗口里各写一套；新增菜单/浮层后同时检查 `QMenu::item:selected`、分隔线、禁用项与子菜单箭头。
+
+- **E2 「窗口装饰」必须取调色板，只有「示意内容」可以用固定色 ✓**
+  - 装饰 = 外框、说明文字、分隔线、选中/悬停态、禁用态：用 `palette()` 的 `Window / WindowText / Mid / Midlight / Highlight / Disabled`。
+  - 示意内容 = 模拟截图、色卡、透明棋盘、贴图缩略图：允许固定色，因为它们要还原真实像素/真实桌面。
+  - 反例（2026-10-17 巡检）：`AnnotationPreview`、`EditorEffectPreview`、`ScreenshotPreview` 的外框写死 `#c3ced6` —— 深色主题过亮、浅色主题几乎看不见；已改为 `palette().color(QPalette.Mid)`。
+
+- **E3 压在固定明暗背景上的文字，颜色跟「背景」走，不跟窗口主题走 ✗**
+  - 反例（2026-10-17 巡检）：编辑器「透明区域显示」预览把说明文字固定为 `#33413f`，在 `dark_checker` / 深色主题棋盘上几乎不可读。`theme` 模式按当前 `QPalette.Base` 判断棋盘明暗，`dark_checker` / `light_checker` 必须分别配浅色/深色文字。
+  - 验证：`tests.test_ui.UiTests.test_editor_checker_preview_caption_follows_checker_not_window_theme` 直接数预览底部像素亮度（深色棋盘要有亮字、浅色棋盘要有深字），不做“看起来差不多”的主观判断。
+
+- **E4 运行时切主题：缓存样式与图标必须能刷新 ✓**
+  - 自定义绘制在 `paintEvent` 里现取 `palette()`（`AnnotationCanvas.drawBackground`、预览控件）。
+  - 有缓存的实现要监听 `QApplication.paletteChanged` 或 `changeEvent(PaletteChange/ApplicationPaletteChange)`：`ToolbarWidget._apply_hover_style()` / `sync_theme_icons()`、`AnnotationCanvas._sync_checker_brush_to_palette()` 是既有范例。
+  - `QIcon` 不要缓存成固定颜色位图：`ui/action_icons.py` 每次 `pixmap()` 都按当前调色板渲染，才能在切主题后保持对比度。
+
+- **E5 黑暗模式验收：dark/light 双份离屏截图 + 像素/对比度断言 ✓**
+  - 每个新增/改动的自绘组件至少跑一次 `apply_theme(app, "dark")` 与 `"light"` 的 `grab()` 对照；菜单、工具栏、设置页三类都要看。
+  - 自动化优先断言**性质**：文字/背景对比度、深色主题下必须出现亮字、浅色主题下必须出现深字、禁用态与常态不同；不要写死某个抗锯齿像素。
+  - 平台差异说明：`QColorDialog` 用 `DontUseNativeDialog` 跟随调色板；`QFileDialog` 仍是 Windows 原生对话框，**它不跟随应用主题是预期行为**，不要据此判定“主题没生效”。
+
 ## Validation
 
 - Use the project environment's `python` executable. On the expected Windows setup, `py -3` may resolve to a different interpreter without project dependencies.

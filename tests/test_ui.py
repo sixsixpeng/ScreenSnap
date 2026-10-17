@@ -36,6 +36,41 @@ class UiTests(CoreTests):
             self.assertFalse(image.isNull(), kind)
             preview.deleteLater()
 
+    def test_editor_checker_preview_caption_follows_checker_not_window_theme(self):
+        """黑暗模式巡检（2026-10-17）：透明棋盘说明文字必须跟着棋盘明暗。
+
+        固定 #33413f 在深色棋盘上几乎看不见；这里直接数底部说明行的像素亮度：
+        深色主题必须出现浅色文字，浅色主题必须出现深色文字。
+        """
+        from config.config_manager import DEFAULTS
+        from ui.settings_editor import EditorEffectPreview
+        from ui.theme import apply_theme
+
+        class _Config:
+            data = dict(DEFAULTS, editor_transparent_background="theme")
+
+        def caption_pixels(image):
+            return [image.pixelColor(x, y)
+                    for y in range(max(0, image.height() - 22), image.height() - 4)
+                    for x in range(8, image.width() - 8)]
+
+        preview = EditorEffectPreview(_Config(), "transparent")
+        preview.resize(320, 84)
+        try:
+            apply_theme(self.app, "dark")
+            dark_pixels = caption_pixels(preview.grab().toImage())
+            self.assertTrue(dark_pixels)
+            self.assertGreaterEqual(max(color.lightness() for color in dark_pixels), 180,
+                                    "深色棋盘上说明文字应足够亮")
+            apply_theme(self.app, "light")
+            light_pixels = caption_pixels(preview.grab().toImage())
+            self.assertTrue(light_pixels)
+            self.assertLessEqual(min(color.lightness() for color in light_pixels), 80,
+                                 "浅色棋盘上说明文字应足够深")
+        finally:
+            apply_theme(self.app, "system")
+            preview.deleteLater()
+
     def test_hint_preview_magnifier_and_text_share_the_same_coordinates(self):
         from ui.widgets.hint_preview import HintBarPreview
 

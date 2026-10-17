@@ -1,7 +1,7 @@
 """编辑器工具的默认样式。"""
 
 from PySide6.QtCore import QRectF, Qt
-from PySide6.QtGui import QBrush, QColor, QFontDatabase, QPainter, QPen, QPixmap
+from PySide6.QtGui import QBrush, QColor, QFontDatabase, QPainter, QPalette, QPen, QPixmap
 from PySide6.QtWidgets import QSizePolicy, QWidget
 
 from ui.widgets.color_button import ColorButton
@@ -39,7 +39,9 @@ class EditorEffectPreview(QWidget):
         else:
             self._paint_toolbar_shadow(painter, area, data)
         painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor("#c3ced6"), 1))
+        # 预览外框属于窗口装饰（不是示意内容），跟随调色板：深色主题用中灰、浅色主题也不会
+        # 出现"浅灰框几乎看不见"的固定色问题。
+        painter.setPen(QPen(self.palette().color(QPalette.Mid), 1))
         painter.drawRect(area)
         painter.end()
 
@@ -58,7 +60,8 @@ class EditorEffectPreview(QWidget):
         dark_theme = self.palette().base().color().lightness() < 128
         if mode == "transparent":
             painter.fillRect(area, self.palette().base().color())
-            painter.setPen(QColor("#6b767c"))
+            # 纯透明模式没有棋盘，文字必须跟随主题前景色（固定 #6b767c 在深色底上对比不足）。
+            painter.setPen(self.palette().color(QPalette.WindowText))
             painter.drawText(area, Qt.AlignCenter, "纯透明：不画棋盘，透明处与画布底色一致")
             return
         if mode == "dark_checker":
@@ -69,6 +72,13 @@ class EditorEffectPreview(QWidget):
             first, second = "#3b3f45", "#4c5158"
         else:
             first, second = "#e0e3e6", "#f1f3f5"
+        # 说明文字压在棋盘上：颜色必须跟着**棋盘**走，而不是跟着窗口主题。
+        # 反例（2026-10-17 黑暗模式巡检）：固定 #33413f 在深色棋盘上几乎看不见。
+        # 走到这里只剩 theme / dark_checker / light_checker 三种（transparent 已提前返回）。
+        if mode == "dark_checker" or (mode == "theme" and dark_theme):
+            caption_color = QColor("#e8eaed")
+        else:
+            caption_color = QColor("#202020")
         pixmap = QPixmap(tile * 2, tile * 2)
         pixmap.fill(QColor(first))
         tile_painter = QPainter(pixmap)
@@ -80,7 +90,7 @@ class EditorEffectPreview(QWidget):
         painter.setPen(Qt.NoPen)
         painter.setBrush(QColor(0, 173, 145, 170))
         painter.drawEllipse(QRectF(area.center().x() - 26, area.center().y() - 18, 52, 36))
-        painter.setPen(QColor("#33413f"))
+        painter.setPen(caption_color)
         painter.setBrush(Qt.NoBrush)
         painter.drawText(area.adjusted(6, 0, -6, -4), Qt.AlignBottom | Qt.AlignHCenter,
                          f"透明棋盘 {tile}px（只影响编辑显示，不写入图片）")

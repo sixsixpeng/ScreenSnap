@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import QPointF, QRect, QRectF, Qt
 from PySide6.QtGui import (QColor, QFont, QLinearGradient, QImage, QPainter, QPainterPath,
-                           QPen, QPixmap)
+                           QPalette, QPen, QPixmap)
 from PySide6.QtWidgets import (QGraphicsPathItem, QGraphicsPixmapItem, QGraphicsRectItem,
                                QGraphicsEllipseItem, QGraphicsScene, QSizePolicy, QWidget)
 
@@ -77,7 +77,8 @@ class AnnotationPreview(QWidget):
         if self.scene is None:
             self.scene = self.build(area)
         self.scene.render(painter, area)
-        painter.setPen(QPen(QColor("#c3ced6"), 1))
+        # 外框是窗口装饰而非示意内容：跟随调色板，避免浅色主题下固定的浅灰框几乎看不见。
+        painter.setPen(QPen(self.palette().color(QPalette.Mid), 1))
         painter.drawRect(area)
         painter.end()
 

@@ -1,7 +1,7 @@
 """截图行为、画面识别和选区设置。"""
 
 from PySide6.QtCore import QSignalBlocker, QPointF, QRectF, Qt, Signal
-from PySide6.QtGui import QColor, QKeySequence, QPainter, QPen
+from PySide6.QtGui import QColor, QKeySequence, QPainter, QPalette, QPen
 from PySide6.QtWidgets import (QCheckBox, QComboBox, QHBoxLayout,
                                QSizePolicy, QSlider, QVBoxLayout, QWidget, QLabel)
 
@@ -101,7 +101,8 @@ class ScreenshotEffectPreview(QWidget):
                 painter.setBrush(anchor_color if fill_style else Qt.white)
                 painter.drawRect(QRectF(point.x() - size / 2, point.y() - size / 2, size, size))
         painter.setBrush(Qt.NoBrush)
-        painter.setPen(QPen(QColor("#c3ced6"), 1))
+        # 预览外框跟随调色板（窗口装饰，不属于模拟的截图内容）。
+        painter.setPen(QPen(self.palette().color(QPalette.Mid), 1))
         painter.drawRect(area)
 
     def _paint_crosshair(self, painter, area):

@@ -1942,3 +1942,11 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 4. 播放时机：遮罩新增 `capture_completed` 信号，在选区确认后、进入原地编辑/独立编辑器/保存/复制/另存为之前发出；`MaskSession.capture_sound_played` 保证一轮只响一次，双击/E/快速贴图不会重复。全屏、当前显示器、上次区域不显示遮罩，由 `complete_preset_capture` 与 `show_mask` 的 repeat 分支补播；取消与「打开图片」不播。
 5. `none` 在 `play_sound()` 提前返回，明确静音、不回落 beep；`custom` 复用 `notification_sound_file`，文件失效回落默认提示音；日志 `截图完成音效: kind=... 实际=...`（DEBUG）。
 6. 验证：`test_capture_completion_sound_is_independent_of_notification_switches`（与通知开关独立）、`test_capture_sound_none_stays_silent`（无声不 beep）、`test_mask_emits_capture_completed_once_per_round`（一轮一次）；`test_config` 试听按钮 7 个、`test_sticker` 内置音 34 个同步更新。真机听感需人工验收。
+
+#### 黑暗模式巡检（自绘组件与预览）
+
+1. 逐组件核对主题重构后新增的界面：设置页 9 页、编辑器工具栏/更多设置/外观浮层、托盘与贴图右键菜单、贴图管理/回收站/通知/文字标注对话框、取色对话框、遮罩内原地编辑工具栏；标准控件与菜单均随 `QPalette`，未发现黑底黑字或浅底浅字。
+2. 修复自绘预览的固定装饰色：`AnnotationPreview`、`EditorEffectPreview`、`ScreenshotPreview` 外框由固定 `#c3ced6` 改为 `palette().color(QPalette.Mid)`（深色不再过亮、浅色不再几乎不可见）。
+3. 修复编辑器「透明区域显示」预览说明文字：原先固定 `#33413f`，在深色棋盘/深色主题下几乎不可读；现按棋盘明暗取浅/深色（`theme` 模式看 `QPalette.Base`，`dark_checker`/`light_checker` 固定对应明暗）。
+4. 新增 `test_editor_checker_preview_caption_follows_checker_not_window_theme`：用像素亮度断言深色棋盘必须有亮字、浅色棋盘必须有深字；既有调色板、按钮对比度、菜单与图标主题用例继续通过。
+5. `AGENTS.md` 新增「E. 主题与自绘控件（黑暗模式）」经验：自绘组件不能沿用原生默认前景/背景；窗口装饰取调色板、示意内容才用固定色；压在固定明暗背景上的文字跟背景走；运行时切主题要刷新缓存样式与图标；验收用 dark/light 双份离屏截图与性质断言（`QFileDialog` 不跟随应用主题属预期）。
