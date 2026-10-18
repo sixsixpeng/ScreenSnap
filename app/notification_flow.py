@@ -77,8 +77,32 @@ class NotificationMixin:
         except OSError as error:
             self.logger.error("保存「另存为」目录失败: %s", error, exc_info=True)
 
+    def remember_recent_color(self, color):
+        """把一个用户确认的颜色写入最近颜色单池并落盘。
+
+        ColorButton（设置页 + 两个编辑器）和截图取色都走这里；写入失败只记
+        WARNING，不能影响颜色本身已经生效。
+        """
+        from core.recent_colors import push_recent
+
+        current = self.config.data.get("recent_colors", [])
+        updated = push_recent(current, color)
+        if updated == current:
+            return
+        self.config.data["recent_colors"] = updated
+        self.logger.debug("记录最近颜色: %s（池首=%s）", color, updated[0] if updated else "")
+        save = getattr(self.config, "save", None)
+        if not callable(save):
+            return
+        try:
+            save()
+        except (OSError, ValueError) as error:
+            # 保存失败不能让已经生效的颜色/取色流程失败；配置非法时按 warning 留痕。
+            self.logger.warning("保存最近颜色失败: %s", error)
+
     def notify_color_picked(self, color):
         """取色模式：色值已复制到剪贴板，提示带上色块缩略图（2026-10-11：除复制文字外都带图）。"""
+        self.remember_recent_color(color)
         if self.config.data.get("bubble", True) and self.config.data.get("picker_notification", True):
             try:
                 swatch = QImage(160, 90, QImage.Format_RGB32)

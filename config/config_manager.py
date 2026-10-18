@@ -7,6 +7,9 @@ import re
 
 from core.color_format import FORMATS as COLOR_FORMATS  # 取色复制格式（validate 用它校验）
 from core.sound import SOUND_KINDS  # 通知音效取值（validate 用它校验）
+from core.version import APP_VERSION
+from core.recent_colors import (DEFAULT_RECENT_COLORS, MAX_RECENT_COLORS,
+                                normalize_color)
 from core.hotkey_policy import (DEFAULTS as HOTKEY_POLICY_DEFAULTS, SPECS as HOTKEY_POLICY_SPECS,
                                 validate_preference, validate_relations)
 from pathlib import Path
@@ -121,7 +124,7 @@ PRESERVED_ON_VERSION_RESET = (
     "hotkeys", "hotkeys_enabled",
     "capture_quick_sticker_shortcut", "capture_save_shortcut", "capture_custom_size_shortcut",
     "capture_recapture_shortcut", "capture_window_edit_shortcut", "capture_multi_select_shortcut",
-    "capture_copy_shortcut", "capture_toolbar_hide_shortcut", "capture_picker_shortcut", "editor_save_as_shortcut", "editor_undo_shortcut", "editor_redo_shortcut", "editor_zoom_reset_shortcut", "capture_picker_format_shortcut",
+    "capture_copy_shortcut", "capture_toolbar_hide_shortcut", "capture_picker_shortcut", "editor_save_as_shortcut", "editor_undo_shortcut", "editor_redo_shortcut", "editor_zoom_reset_shortcut", "editor_arrow_curve_shortcut", "capture_picker_format_shortcut",
     # 输出组织习惯：与 save_dir 配套，重置会让归档方式突变
     # 注：历史上这里还有 image_archive_period，它已不在 DEFAULTS（由 archive_by_month/day 取代）⇒
     # 2026-10-11 移除；新用例 test_preserved_on_version_reset_keys_all_exist 会防止同类遗留再出现。
@@ -133,6 +136,8 @@ PRESERVED_ON_VERSION_RESET = (
     # 取值不合法或文件失效时 validate/resolve_kind 会兜底，保留不会让新版本启动失败。
     "sound", "notification_sound", "notification_sound_file", "capture_sound",
     "sound_copy", "sound_save", "sound_sticker", "sound_picker", "sound_operation",
+    # 最近颜色是用户挑颜色的习惯，跨版本保留；无效值会在 validate 时被丢弃。
+    "recent_colors",
     # 功能开关：用户显式关掉过的能力（识别、放大镜、标尺、诊断、回收站等）必须记住
     "window_detection", "window_hover_detect", "magnifier", "magnifier_size", "magnifier_grid",
     "magnifier_crosshair_enabled",
@@ -227,6 +232,14 @@ DEFAULTS = {
     "sticker_shadow_color": "#000000", "sticker_shadow_strength": 35,
     "sticker_background_mode": "transparent",
     "editor_image_round_corners": True, "editor_image_corner_radius": 16,
+    # 两个编辑器的「外观」面板默认只影响本次输出；勾选后才把圆角/边框/阴影写回默认配置。
+    "editor_output_sync_default": False,
+    # 局部放大标注：框选区域后按倍数生成放大的副本（工具按钮名为「放大」）。
+    "zoom_annotation_factor": 2,
+    "zoom_annotation_style": "circle",
+    "zoom_annotation_color": "#00b8a9",
+    "zoom_annotation_opacity": 100,
+    "zoom_annotation_max_size": 480,
     "rect_corner_enabled": True, "rect_corner_radius": 12,
     "editor_image_border_enabled": False, "editor_image_border_width": 2,
     "editor_image_border_color": "#ffffff",
@@ -240,7 +253,7 @@ DEFAULTS = {
     "editor_save_as_shortcut": "A",   # 单键（2026-10-11）：与 S 同样的双语义处理 —— 微调语境下让位给 A=左移，否则=另存为
     # 两个编辑器共用的编辑快捷键（2026-10-11 用户要求；设置 → 快捷键 → 编辑快捷键 可改）。
     "editor_undo_shortcut": "Ctrl+Z", "editor_redo_shortcut": "Ctrl+Y",
-    "editor_zoom_reset_shortcut": "Ctrl+0",
+    "editor_zoom_reset_shortcut": "Ctrl+0", "editor_arrow_curve_shortcut": "Alt+C",
     # 截图遮罩操作键：改为可配置快捷键；多选模式默认 Alt+M。
     "capture_custom_size_shortcut": "F",
     "capture_recapture_shortcut": "R",
@@ -326,12 +339,16 @@ DEFAULTS = {
     "cursor": False, "history_limit": 10,
     "last_capture_rect": [],
     "annotation_tool": DEFAULT_ANNOTATION_TOOL, "text_alignment": "left", "arrow_style": "filled",
+    "arrow_curve_direction": "right",
     "arrow_chain": False,
     "pen_chain": False, "marker_chain": False,
     "rect_style": "solid", "ellipse_style": "solid",
     "rect_color": "#ff0000", "ellipse_color": "#ff0000",
     "arrow_color": "#ff0000", "marker_color": "#ff0000", "text_color": "#ff0000",
     "text_background_enabled": False, "text_background": "#fff3a0",
+    # 文字背景增强：内边距、圆角与不透明度；0/0/100 与旧版完全一致。
+    "text_background_padding": 0, "text_background_radius": 0,
+    "text_background_opacity": 100,
     "text_width": 0, "text_height": 0,
     "text_bold": False, "text_italic": False, "text_underline": False, "text_strikethrough": False,
     "rect_fill_enabled": False, "rect_fill_opacity": 35, "rect_fill_color": "#ff0000",
@@ -399,6 +416,8 @@ DEFAULTS = {
     "sequence_font_size": 14, "sequence_start": 1,
     "sequence_shape": "circle", "sequence_text_color": "#ffffff",
     "sequence_fill_color": "#ff0000",     "sequence_preset": "custom",
+    # 最近使用颜色：单池，跨工具/跨编辑器共用；由 ColorButton 右键菜单读取。
+    "recent_colors": list(DEFAULT_RECENT_COLORS),
     # 贴图：回收站
     "sticker_recycle_enabled": True, "sticker_recycle_limit": 10,
     "logging_enabled": True, "log_level": "INFO", "log_when": "midnight", "log_dir": "",
@@ -588,6 +607,17 @@ def validate(data):
             raise ValueError("自动清理缓存时机只能是关闭、启动时或退出时")
         elif key == "crop_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError("裁剪框颜色必须是六位十六进制颜色")
+        elif key == "recent_colors":
+            if not isinstance(value, list):
+                raise ValueError("最近颜色必须是列表")
+            if len(value) > MAX_RECENT_COLORS:
+                raise ValueError("最近颜色最多 %d 个" % MAX_RECENT_COLORS)
+            normalized = [normalize_color(item) for item in value]
+            if any(not item for item in normalized):
+                raise ValueError("最近颜色包含无效色值")
+            if len(set(normalized)) != len(normalized):
+                raise ValueError("最近颜色不能重复")
+            result[key] = normalized
         elif key == "crop_width" and not 1 <= value <= 12:
             raise ValueError("裁剪框线宽必须在 1 到 12 像素之间")
         elif key in ("capture_quick_sticker_shortcut", "capture_save_shortcut", "capture_picker_format_shortcut",
@@ -599,7 +629,8 @@ def validate(data):
                      # 实测 validate("")→""、validate("notakey")→原样通过、repair({…:""}) 不回退 ✗，
                      # 而空串会让 QKeySequence 为空 ⇒ 两个编辑器**静默不注册**该键 ✗。现并入同一校验。
                      "editor_save_as_shortcut", "editor_undo_shortcut",
-                     "editor_redo_shortcut", "editor_zoom_reset_shortcut"):
+                     "editor_redo_shortcut", "editor_zoom_reset_shortcut",
+                     "editor_arrow_curve_shortcut"):
             from PySide6.QtGui import QKeySequence
 
             sequence = QKeySequence(value.strip())
@@ -625,6 +656,16 @@ def validate(data):
             raise ValueError("未知贴图透明背景模式")
         elif key in ("editor_image_corner_radius", "rect_corner_radius") and not 0 <= value <= 100:
             raise ValueError("圆角半径必须在 0 到 100 像素之间")
+        elif key == "zoom_annotation_factor" and not 1 <= value <= 16:
+            raise ValueError("局部放大倍数必须在 1 到 16 之间")
+        elif key == "zoom_annotation_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+            raise ValueError(f"配置项 {key} 需要 #RRGGBB 颜色：{value!r}")
+        elif key == "zoom_annotation_style" and value not in ("circle", "rect"):
+            raise ValueError("放大镜样式必须是圆形或矩形")
+        elif key == "zoom_annotation_opacity" and not 0 <= value <= 100:
+            raise ValueError("放大标注不透明度必须在 0 到 100 之间")
+        elif key == "zoom_annotation_max_size" and not 80 <= value <= 1200:
+            raise ValueError("放大标注最大边长必须在 80 到 1200 像素之间")
         elif key == "editor_image_border_width" and not 0 <= value <= 20:
             raise ValueError("输出边框宽度必须在 0 到 20 像素之间")
         elif key == "editor_image_shadow_size" and not 0 <= value <= 60:
@@ -802,6 +843,12 @@ def validate(data):
             raise ValueError("文字宽度必须在 0 到 2000 像素之间")
         elif key == "text_height" and not 0 <= value <= 2000:
             raise ValueError("文字高度必须在 0 到 2000 像素之间")
+        elif key == "text_background_padding" and not 0 <= value <= 32:
+            raise ValueError("文字背景内边距必须在 0 到 32 像素之间")
+        elif key == "text_background_radius" and not 0 <= value <= 32:
+            raise ValueError("文字背景圆角必须在 0 到 32 像素之间")
+        elif key == "text_background_opacity" and not 0 <= value <= 100:
+            raise ValueError("文字背景不透明度必须在 0 到 100 之间")
         elif key == "eraser_width" and not 10 <= value <= 100:
             raise ValueError("橡皮擦直径必须在 10 到 100 之间")
         elif key == "mosaic_width" and not 4 <= value <= 100:
@@ -816,7 +863,7 @@ def validate(data):
             raise ValueError("标注线宽必须在 1 到 50 之间")
         elif key == "annotation_tool" and value not in (
             "select", "rect", "ellipse", "arrow", "pen", "eraser", "text",
-            "mosaic", "picker", "crop", "marker", "number"
+            "mosaic", "picker", "crop", "marker", "number", "zoom"
         ):
             if value in ("wide", "square"):
                 # 旧版工具名（宽画笔/方块）迁移为默认标注工具；用模块常量而不是 DEFAULTS 取值，
@@ -835,9 +882,12 @@ def validate(data):
             raise ValueError("显示器间隙填充必须是透明、黑色或白色")
         elif key == "capture_multi_edit_action" and value not in ("save", "discard"):
             raise ValueError("进入多选前的编辑处理必须是保存或丢弃")
+        elif key == "arrow_curve_direction" and value not in ("left", "right"):
+            raise ValueError("未知曲线箭头方向")
         elif key == "arrow_style" and value not in (
             "filled", "open", "dashed", "double_filled", "double_open", "double_dashed",
             "line", "dashed_line", "rect_filled", "rect_open", "rect_dashed",
+            "curve_filled", "curve_open", "curve_open_dashed",
         ):
             raise ValueError("未知箭头样式")
         elif key in ("rect_style", "ellipse_style") and value not in ("solid", "dash"):
@@ -865,7 +915,7 @@ def validate(data):
         elif key == "sequence_preset" and value not in (
                 "custom", "red_circle", "blue_square", "green_star",
                 "amber_diamond", "purple_pentagon", "teal_hexagon",
-                "red_heart", "blue_arrow"):
+                "red_heart", "blue_arrow", "orange_bubble", "green_cloud"):
             raise ValueError("未知序号预设")
         elif key == "sequence_start" and not 0 <= value <= 999:
             raise ValueError("序号起始值必须在 0 到 999 之间")
@@ -1193,6 +1243,8 @@ class ConfigManager:
         """导入成功后才更新内存与本机配置，错误文件不会覆盖原设置。"""
         imported = validate(migrate_legacy_settings(
             json.loads(Path(path).read_text(encoding="utf-8"))))
+        # 导入的是设置，不是“换版本”：回填当前内置版本，避免导入后版本记录为空/界面空白。
+        imported["app_version"] = APP_VERSION
         self.data.clear()
         self.data.update(imported)
         self.save()

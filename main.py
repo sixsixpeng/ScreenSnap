@@ -116,6 +116,13 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
         # 显示器分辨率/缩放/增减变化时刷新坐标缓存与贴图（中间屏被改动的情形）。
         self.watch_screens()
         apply_theme(self.qt, self.config.data["theme"])
+        # 最近颜色单池：设置页与两个编辑器的 ColorButton 共用同一份配置。
+        from ui.widgets.color_button import (set_recent_color_recorder,
+                                             set_recent_colors_provider)
+
+        set_recent_colors_provider(
+            lambda: list(self.config.data.get("recent_colors", [])))
+        set_recent_color_recorder(self.remember_recent_color)
         if self.config.data["start_on_boot"] or self.config.data.get("start_on_boot_admin"):
             try:
                 from core.autostart_admin import sync_autostart
@@ -452,13 +459,26 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
                 if value is not None:
                     editor.settings[key] = value
                     editor.canvas.settings[key] = value
-                    if key == f"{editor.canvas.tool}_color":
-                        editor.canvas.set_selected_color(value)
+                    # 外部配置刷新只更新默认值/光标与预设匹配，不把当前工具颜色写回已选标注：
+                    # 标注参数由对象自己维护，切换工具不应改写其他类型的已有标注。
+                    editor.toolbar.sync_setting(key, value)
+            from editor.annotation_presets import PRESET_SETTING_KEYS
+            for key in PRESET_SETTING_KEYS:
+                value = self.config.data.get(key)
+                if value is None:
+                    continue
+                editor.settings[key] = value
+                editor.canvas.settings[key] = value
+                editor.toolbar.sync_setting(key, value)
             for key in ("rect_fill_enabled", "rect_fill_opacity", "rect_fill_color",
                         "ellipse_fill_enabled", "ellipse_fill_opacity", "ellipse_fill_color",
                         "mosaic_cursor_color", "eraser_cursor_color", "mosaic_width",
                         "mosaic_brush", "eraser_width", "eraser_brush",
-                        "editor_straight_modifier"):
+                        "editor_straight_modifier",
+                        "text_background_padding", "text_background_radius",
+                        "text_background_opacity", "zoom_annotation_factor",
+                        "zoom_annotation_color", "zoom_annotation_opacity",
+                        "zoom_annotation_max_size"):
                 value = self.config.data[key]
                 editor.settings[key] = value
                 editor.canvas.settings[key] = value
@@ -493,7 +513,8 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
                 editor.toolbar.font.setCurrentFont(QFont(self.config.data["font"] or "Microsoft YaHei"))
             with QSignalBlocker(editor.toolbar.font_size):
                 editor.toolbar.font_size.setValue(self.config.data["font_size"])
-            for key in ("mosaic_mode", "text_alignment", "arrow_style", "rect_style", "ellipse_style"):
+            for key in ("mosaic_mode", "text_alignment", "arrow_style", "arrow_curve_direction",
+                        "rect_style", "ellipse_style", "zoom_annotation_style"):
                 editor.toolbar.set_choice(key, self.config.data[key])
             editor.canvas.text_alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
                                             "right": Qt.AlignRight}[self.config.data["text_alignment"]]
