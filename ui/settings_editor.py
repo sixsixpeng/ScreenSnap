@@ -1,9 +1,11 @@
 """编辑器工具的默认样式。"""
 
-from PySide6.QtCore import QRectF, Qt
+from PySide6.QtCore import QRectF, QSignalBlocker, Qt
 from PySide6.QtGui import QBrush, QColor, QFontDatabase, QPainter, QPalette, QPen, QPixmap
-from PySide6.QtWidgets import QSizePolicy, QWidget
+from PySide6.QtWidgets import QComboBox, QGroupBox, QSizePolicy, QWidget
 
+from editor.annotation_presets import matching_preset, preset_values, presets_for
+from logger import get_logger
 from ui.widgets.color_button import ColorButton
 from ui.widgets.tooltip import SettingsPage
 
@@ -139,36 +141,48 @@ class EditorPage(SettingsPage):
     def __init__(self, config, changed):
         super().__init__(config, changed)
         self.color_buttons = {}
+        self._preset_combos = {}
         self.group("默认工具")
         self.choice("annotation_tool", "默认标注工具",
-                    [(label, key) for label, key in (("选择", "select"), ("矩形", "rect"),
-                        ("椭圆", "ellipse"), ("箭头", "arrow"), ("画笔", "pen"), ("记号笔", "marker"),
-                        ("橡皮擦", "eraser"), ("文字", "text"), ("序号", "number"),
-                        ("马赛克", "mosaic"), ("取色", "picker"), ("裁剪", "crop"))],
+                    [(label, key) for label, key in (
+                        ("选择", "select"), ("画笔", "pen"), ("记号笔", "marker"),
+                        ("箭头", "arrow"), ("矩形", "rect"), ("椭圆", "ellipse"),
+                        ("序号", "number"), ("文字", "text"),
+                        ("放大", "zoom"), ("马赛克", "mosaic"), ("橡皮擦", "eraser"),
+                        ("裁剪", "crop"),
+                        ("取色", "picker"))],
                     "新建编辑器默认启用的工具；只影响初始选择，之后可在工具栏随时切换。")
         self.group("箭头")
         self.preview("arrow")
+        self._add_annotation_preset("arrow")
         self.add_color("arrow_color", "箭头颜色")
         self.choice("arrow_style", "箭头样式", [
                                 ("箭头", "filled"), ("空心箭头", "open"), ("虚线箭头", "dashed"),
                                 ("双向箭头", "double_filled"), ("双向空心箭头", "double_open"), ("双向虚线箭头", "double_dashed"),
-                                ("线段", "line"), ("虚线", "dashed_line"),
-                                ("箭杆矩形", "rect_filled"), ("空心箭杆", "rect_open"), ("虚线箭杆", "rect_dashed")],
-                    "新建箭头使用的样式（单向/双向、实线/虚线、箭杆等）；只影响新建箭头。")
-        self.check("arrow_chain", "箭头多段绘制",
+                                ("箭杆矩形", "rect_filled"), ("空心箭杆", "rect_open"), ("虚线箭杆", "rect_dashed"),
+                                ("曲线箭头", "curve_filled"), ("曲线空心箭头", "curve_open"),
+                                ("曲线虚线箭头", "curve_open_dashed"),
+                                ("线段", "line"), ("虚线", "dashed_line")],
+                    "新建箭头使用的样式（单向/双向、实线/虚线、箭杆/曲线等）；只影响新建箭头。")
+        self.radios("arrow_curve_direction", "曲线箭头弯曲方向",
+                    [("向右弯", "right"), ("向左弯", "left")],
+                    "只对曲线箭头生效；默认向右弯。选中曲线箭头时可在「更多设置」或按快捷键即时切换该对象的方向；快捷键默认 Alt+C，可在设置 > 快捷键修改。")
+        self.check("arrow_chain", "箭头折线（多段直线）",
                    "开启后，绘制一个箭头后可继续在上一个终点与下一个点之间连续绘制相连的多段箭头；"
                    "按鼠标右键结束连续绘制并保留已画图形。")
         self.number("arrow_width", "箭头线宽", 1, 50,
                     "箭头标注的线条粗细；只影响箭头工具，不改画笔、矩形等其它工具。")
         self.group("画笔")
         self.preview("pen")
+        self._add_annotation_preset("pen")
         self.add_color("pen_color", "画笔颜色")
         self.number("pen_width", "画笔线宽", 1, 50, "画笔标注的线条粗细；只影响画笔工具。")
-        self.check("pen_chain", "画笔多段绘制",
+        self.check("pen_chain", "画笔折线（多段直线）",
                    "开启后，画笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
                    "按鼠标右键结束连续绘制并保留已画图形。")
         self.group("矩形")
         self.preview("rect")
+        self._add_annotation_preset("rect")
         self.add_color("rect_color", "矩形边框颜色")
         self.number("rect_width", "矩形线宽", 1, 50, "矩形标注的边框粗细；只影响矩形工具，不改填充。")
         self.radios("rect_style", "矩形线型", [("实线", "solid"), ("虚线", "dash")],
@@ -178,20 +192,22 @@ class EditorPage(SettingsPage):
                           "实线和虚线均适用，单张图片与窗口内编辑共用此设置")
         self.check("rect_fill_enabled", "矩形填充区域", "绘制矩形时填充区域")
         self.add_color("rect_fill_color", "矩形填充颜色")
-        self.number("rect_fill_opacity", "矩形填充不透明度 (%)", 0, 100,
+        self.percent_slider("rect_fill_opacity", "矩形填充不透明度 (%)",
                     "0 为完全透明，100 为完全不透明")
         self.group("椭圆")
         self.preview("ellipse")
+        self._add_annotation_preset("ellipse")
         self.add_color("ellipse_color", "椭圆边框颜色")
         self.number("ellipse_width", "椭圆线宽", 1, 50, "椭圆标注的边框粗细；只影响椭圆工具，不改填充。")
         self.radios("ellipse_style", "椭圆线型", [("实线", "solid"), ("虚线", "dash")],
                     "新建椭圆的边框线型（实线或虚线）；只影响新建椭圆，不改填充。")
         self.check("ellipse_fill_enabled", "椭圆填充区域", "绘制椭圆时填充区域")
         self.add_color("ellipse_fill_color", "椭圆填充颜色")
-        self.number("ellipse_fill_opacity", "椭圆填充不透明度 (%)", 0, 100,
+        self.percent_slider("ellipse_fill_opacity", "椭圆填充不透明度 (%)",
                     "0 为完全透明，100 为完全不透明")
         self.group("橡皮擦")
         self.preview("eraser")
+        self._add_annotation_preset("eraser")
         self.number("eraser_width", "橡皮擦直径", 10, 100, "只影响橡皮擦工具，范围 10–100")
         self.add_color("eraser_cursor_color", "示意圈颜色")
         self.radios("editor_straight_modifier", "直线绘制修饰键", [
@@ -204,15 +220,18 @@ class EditorPage(SettingsPage):
                    "开启后新擦除会同时擦掉截图原图（只影响之后的擦除）；关闭则只擦标注、露出原图（非破坏性）。已有擦除可在该处右键单独设置")
         self.group("记号笔")
         self.preview("marker")
+        self._add_annotation_preset("marker")
         self.add_color("marker_color", "记号笔颜色")
         self.number("marker_width", "记号笔线宽", 1, 50, "记号笔标注的线条粗细；只影响记号笔工具。")
-        self.number("marker_opacity", "记号笔不透明度", 1, 100,
-                    "记号笔颜色的不透明度；越低越能看清底图，记号笔仍使用标注颜色。")
-        self.check("marker_chain", "记号笔多段绘制",
+        self.percent_slider("marker_opacity", "记号笔不透明度",
+                    "记号笔颜色的不透明度；越低越能看清底图，记号笔仍使用标注颜色。",
+                    minimum=1)
+        self.check("marker_chain", "记号笔折线（多段直线）",
                    "开启后，记号笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
                    "按鼠标右键结束连续绘制并保留已画图形。")
         self.group("文字")
         self.preview("text", 120)
+        self._add_annotation_preset("text")
         self.add_color("text_color", "文字颜色")
         self.number("font_size", "文字大小", 6, 200,
                     "编辑器文字标注的默认字号；之后可在工具栏临时调整，不改写此项。")
@@ -232,6 +251,12 @@ class EditorPage(SettingsPage):
         self.check("text_background_enabled", "文字背景",
                    "是否为新建文字标注添加背景色块；颜色由下方「文字背景色」决定。")
         self.add_color("text_background", "文字背景色")
+        self.number("text_background_padding", "文字背景内边距 (px)", 0, 32,
+                    "背景色块相对文字内容向外扩展的像素；0 表示与文字框完全贴合。")
+        self.number("text_background_radius", "文字背景圆角 (px)", 0, 32,
+                    "背景色块的圆角半径；0 表示直角。")
+        self.percent_slider("text_background_opacity", "文字背景不透明度 (%)",
+                    "背景色块的不透明度；100 表示完全不透明。")
         self.group("序号标注")
         self.preview("sequence", 120)
         self.choice("sequence_shape", "序号形状",
@@ -252,10 +277,27 @@ class EditorPage(SettingsPage):
                     [("自定义", "custom"), ("红圆", "red_circle"), ("蓝方", "blue_square"),
                      ("绿星", "green_star"), ("琥珀菱形", "amber_diamond"),
                      ("紫五边形", "purple_pentagon"), ("青六边形", "teal_hexagon"),
-                     ("红心", "red_heart"), ("蓝箭头", "blue_arrow")],
+                     ("红心", "red_heart"), ("蓝箭头", "blue_arrow"),
+                     ("橙气泡", "orange_bubble"), ("绿云朵", "green_cloud")],
                     "一键套用形状与配色组合；选自定义后可逐项自由调整")
+        self.group("局部放大")
+        self.preview("zoom", 120)
+        self.number("zoom_annotation_factor", "放大倍数", 1, 16,
+                    "「放大」工具框选区域后生成副本的放大倍数；1 表示原尺寸，4 表示四倍。"
+                    "只影响之后新建的局部放大标注。")
+        self.radios("zoom_annotation_style", "镜片样式",
+                    [("圆形", "circle"), ("矩形", "rect")],
+                    "放大标注的镜片外轮廓；默认圆形。圆形会裁掉四角，矩形显示完整图像。")
+        self.add_color("zoom_annotation_color", "放大标注颜色")
+        self.percent_slider("zoom_annotation_opacity", "放大标注不透明度 (%)",
+                    "放大镜片与云朵尾巴的整体不透明度；100 表示完全不透明。"
+                    "选中放大标注时可在「更多设置」改该对象，未选中时改后续默认值。")
+        self.number("zoom_annotation_max_size", "最大边长 (px)", 80, 1200,
+                    "放大标注镜片的最长边上限；80–1200 像素，默认 480。\n"
+                    "框选大区域或倍率过高时按比例缩小，避免无限膨胀；不影响源图。")
         self.group("马赛克")
         self.preview("mosaic")
+        self._add_annotation_preset("mosaic")
         self.radios("mosaic_mode", "马赛克类型", [("方块", "blocks"), ("毛玻璃", "blur"),
                              ("细粒", "fine")],
                     "马赛克工具的处理方式：方块像素化、毛玻璃模糊或细粒；只影响马赛克工具。")
@@ -312,6 +354,7 @@ class EditorPage(SettingsPage):
                     "文字工具单击后等待多久才弹出输入框，用来与“双击保存”区分，范围 60–400ms。\n调大：更不容易把想双击保存的动作误判成两次单击，但每次加文字都要多等一会儿。\n调小：更跟手，但手速偏慢时可能误弹输入框，挡住刚画的标注。\n实际等待不会超过系统双击间隔；系统双击间隔很短时此值会被压缩。")
         self.group("裁剪框")
         self.preview("crop", 84)
+        self._add_annotation_preset("crop")
         self.add_color("crop_color", "裁剪框颜色")
         self.number("crop_width", "裁剪框线宽", 1, 12,
                     "编辑器裁剪框的线条宽度；仅编辑时显示，不写入导出图片。")
@@ -321,6 +364,74 @@ class EditorPage(SettingsPage):
         preset_control = self.controls.get("sequence_preset")
         if preset_control is not None:
             preset_control.changed.connect(self._apply_sequence_preset)
+        self._reorder_editor_groups()
+
+    def _reorder_editor_groups(self):
+        """设置页标注分组与编辑工具栏工具顺序一致；不受代码构建顺序影响。"""
+        order = [
+            "默认工具", "画笔", "记号笔", "箭头", "矩形", "椭圆",
+            "序号标注", "文字", "局部放大", "马赛克", "橡皮擦",
+            "裁剪框", "取色", "编辑区边框", "透明背景", "编辑工具栏",
+            "画布与标注交互",
+        ]
+        boxes = {}
+        for index in range(self.groups.count()):
+            widget = self.groups.itemAt(index).widget()
+            if isinstance(widget, QGroupBox):
+                boxes[widget.title()] = widget
+        for box in boxes.values():
+            self.groups.removeWidget(box)
+        for index, title in enumerate(order):
+            box = boxes.get(title)
+            if box is not None:
+                self.groups.insertWidget(index, box)
+
+    def _add_annotation_preset(self, tool):
+        """在工具预览下方插入「样式预设」下拉（与编辑器工具栏同一份预设数据）。"""
+        combo = QComboBox()
+        combo.addItem("自定义", "custom")
+        for preset_id, label, _values in presets_for(tool):
+            combo.addItem(label, preset_id)
+        matched = matching_preset(tool, self.config.data)
+        index = combo.findData(matched)
+        combo.setCurrentIndex(index if index >= 0 else 0)
+        combo.setToolTip("一键套用该工具的样式组合；套用后仍可在本页或编辑器工具栏逐项微调")
+        combo.currentIndexChanged.connect(
+            lambda _index, target=tool, control=combo:
+            self._apply_annotation_preset(target, control))
+        self._preset_combos[tool] = combo
+        self._add_row("样式预设", combo)
+        return combo
+
+    def _apply_annotation_preset(self, tool, combo):
+        """设置页套用预设：写入该工具的现有配置键并刷新本页控件/预览。"""
+        preset_id = combo.currentData()
+        values = preset_values(tool, preset_id) if preset_id else {}
+        if not values:
+            return
+        self.config.data.update(values)
+        self.changed()
+        self.sync_controls()
+        self.refresh_previews()
+        get_logger().debug("设置页套用标注样式预设: 工具=%s 预设=%s 项数=%d",
+                           tool, preset_id, len(values))
+
+    def _sync_preset_choices(self):
+        """按当前配置把各工具的预设下拉反选到匹配项；被改坏则回到「自定义」。"""
+        for tool, combo in getattr(self, "_preset_combos", {}).items():
+            matched = matching_preset(tool, self.config.data)
+            with QSignalBlocker(combo):
+                index = combo.findData(matched)
+                combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def update_value(self, key, value):
+        """控件改动写回配置后，同步各工具预设下拉的当前匹配项。"""
+        super().update_value(key, value)
+        self._sync_preset_choices()
+
+    def sync_controls(self):
+        super().sync_controls()
+        self._sync_preset_choices()
 
     def _apply_sequence_preset(self, preset_key):
         from editor.annotation_items import SEQUENCE_PRESETS
@@ -350,6 +461,7 @@ class EditorPage(SettingsPage):
             "editor_border_color": "编辑画布周围的边框颜色；只显示在编辑区，不会写入导出图片。",
             "crop_color": "编辑器裁剪框的线条颜色；只用于裁剪辅助显示。",
             "text_background": "新建文字标注背景色块的颜色；仅当“文字背景”开启时生效。",
+            "zoom_annotation_color": "放大标注的镜片边框、源区域框和鼠标光标颜色；默认清亮青绿色。",
             "rect_fill_color": "矩形标注的填充颜色（与边框颜色各自独立，默认值相同）。",
             "ellipse_fill_color": "椭圆标注的填充颜色；与边框颜色各自独立，默认值相同。",
             "mosaic_cursor_color": "编辑画布中马赛克涂抹范围示意圆圈的颜色。",

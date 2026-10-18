@@ -38,6 +38,9 @@ class SaveOutputPage(SettingsPage):
                     "阴影不透明度；0 表示不绘制；只影响输出。")
         self.color("editor_image_shadow_color", "输出阴影颜色",
                    "最终输出图像的阴影颜色；只影响输出，不改变编辑画布显示。")
+        self.check("editor_output_sync_default", "编辑器外观同步为默认",
+                   "开启后，在任意编辑器的「外观」面板里调整圆角/边框/阴影会同时改写这里的默认值；"
+                   "关闭时只影响当前这次输出，下次新建编辑器仍使用这里的设置。")
         self.group("保存位置")
         widget = FilePathEdit(
             config.data["save_dir"],

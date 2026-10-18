@@ -570,6 +570,7 @@ class ConfigTests(CoreTests):
     def test_default_directory_display_survives_full_reset_import_and_reload(self):
         from PySide6.QtWidgets import QMessageBox
         from core.path_utils import configured_dir
+        from core.version import APP_VERSION
 
         with tempfile.TemporaryDirectory() as folder, \
                 patch("logger.log_setup.sys.argv", [str(Path(folder) / "main.py")]), \
@@ -589,6 +590,11 @@ class ConfigTests(CoreTests):
                                    if key in settings.pages.widget(index).controls)
                     self.assertEqual(control.input.text(), str(expected))
                     self.assertEqual(config.data[key], "")
+                version_page = next(settings.pages.widget(index)
+                                    for index in range(settings.pages.count())
+                                    if "app_version" in settings.pages.widget(index).controls)
+                self.assertEqual(config.data["app_version"], APP_VERSION)
+                self.assertEqual(version_page.controls["app_version"].text(), APP_VERSION)
 
             try:
                 with patch("ui.settings_window.yes_no_dialog") as confirmation:
@@ -622,6 +628,24 @@ class ConfigTests(CoreTests):
                                   for key in custom}, custom)
             finally:
                 settings.close()
+
+
+    def test_general_page_reset_backfills_builtin_version(self):
+        """恢复本页默认不能把版本号清空；版本是程序内置值，不是可清空的普通默认项。"""
+        from core.version import APP_VERSION
+        from ui.settings_general import GeneralPage
+
+        with tempfile.TemporaryDirectory() as folder:
+            manager = ConfigManager(Path(folder) / "settings.json")
+            manager.data["app_version"] = "0.0.1"
+            manager.save()
+            page = GeneralPage(manager, manager.save)
+            try:
+                page.reset_page()
+                self.assertEqual(manager.data["app_version"], APP_VERSION)
+                self.assertEqual(page.controls["app_version"].text(), APP_VERSION)
+            finally:
+                page.deleteLater()
 
     def test_directory_display_after_version_gate_and_complete_data_clear(self):
         from core.path_utils import clear_data_directory, configured_dir
@@ -1241,6 +1265,7 @@ class ConfigTests(CoreTests):
         现在自由笔刷独占空闲行 14（0–36 中唯一未被任何工具占用的行），且行 33（椭圆填充色）不再串进橡皮擦弹层。"""
         from config.config_manager import DEFAULTS
         from editor.toolbar_widget import ToolbarWidget
+        from PySide6.QtWidgets import QGridLayout
 
         toolbar = ToolbarWidget(DEFAULTS["pen_color"], dict(DEFAULTS), "select")
         try:
@@ -1266,7 +1291,9 @@ class ConfigTests(CoreTests):
 
             # 结构性护栏：除第 0 行第 1..2 列的「当前工具颜色」按钮组（同一格互斥显示）外，
             # 选项面板里任何两个控件都不允许落在同一格 —— 否则某个工具的弹层里就会叠在一起。
-            layout = toolbar.options_button.menu().actions()[0].defaultWidget().layout()
+            # 顶部样式预设行在参数网格之外，这里只检查参数网格本身。
+            panel = toolbar.options_button.menu().actions()[0].defaultWidget()
+            layout = panel.findChild(QGridLayout)
             cells = {}
             for index in range(layout.count()):
                 widget = layout.itemAt(index).widget()
@@ -1293,8 +1320,9 @@ class ConfigTests(CoreTests):
 
         text_keys = {"font", "font_size", "text_alignment", "text_color",
                      "text_bold", "text_italic", "text_underline", "text_strikethrough",
-                     "text_background_enabled", "text_background", "text_width",
-                     "text_height"}
+                     "text_background_enabled", "text_background",
+                     "text_background_padding", "text_background_radius",
+                     "text_background_opacity", "text_width", "text_height"}
 
         # ① 设置页：控件齐全且有文字预览。
         with tempfile.TemporaryDirectory() as folder:
@@ -1311,7 +1339,7 @@ class ConfigTests(CoreTests):
         toolbar.tool_buttons["text"].click()
         # 未显示工具栏时用 isHidden 判断（其未被显式隐藏即为可见）。
         self.assertFalse(toolbar.previews["text"].isHidden())
-        self.assertLessEqual({0, 3, 4, 5, 28, 29, 35, 36},
+        self.assertLessEqual({0, 3, 4, 5, 28, 29, 35, 36, 38},
                              set(toolbar._last_option_rows))
         # 工具栏「外观」弹层是 Qt.Tool 的 QFrame，需自报标签才会被采集自检点名。
         self.assertEqual(toolbar.appearance_menu.property("screensnap_self_window"), "外观弹层")
@@ -1322,12 +1350,15 @@ class ConfigTests(CoreTests):
                        "text_color": "#ff0000", "text_bold": False, "text_italic": False,
                        "text_underline": False, "text_strikethrough": False,
                        "text_background_enabled": False, "text_background": "#fff3a0",
+                       "text_background_padding": 4, "text_background_radius": 6,
+                       "text_background_opacity": 80,
                        "text_width": 120, "text_height": 0}
         for values in (None, item_values):
             dialog = TextInputDialog(None, "文字", settings, "abc", values=values)
             for attr in ("font", "font_size", "alignment", "text_color",
                          "background_enabled", "background", "text_width", "width_hint",
-                         "text_height", "height_hint"):
+                         "text_height", "height_hint", "background_padding",
+                         "background_radius", "background_opacity"):
                 self.assertIsNotNone(getattr(dialog, attr, None), attr)
             self.assertEqual(dialog.per_annotation, values is not None)
             self.assertEqual(dialog.preview.kind, "text")
@@ -1612,7 +1643,8 @@ class ConfigTests(CoreTests):
                 ("编辑器", "矩形", ("rect_color", "rect_width", "rect_style",
                                     "rect_corner_enabled", "rect_corner_radius")),
                 ("编辑器", "椭圆", ("ellipse_color", "ellipse_width", "ellipse_style")),
-                ("编辑器", "箭头", ("arrow_color", "arrow_style", "arrow_width")),
+                ("编辑器", "箭头", ("arrow_color", "arrow_style", "arrow_curve_direction",
+                                    "arrow_width")),
                 ("编辑器", "记号笔", ("marker_color", "marker_width")),
                 ("编辑器", "文字", ("text_color", "font", "font_size", "line_spacing")),
                 ("编辑器", "橡皮擦", ("eraser_width",)),
@@ -2472,6 +2504,61 @@ class ConfigTests(CoreTests):
         finally:
             mask.close()
 
+
+    def test_editor_settings_groups_follow_toolbar_order(self):
+        """编辑器设置页的标注分组上下顺序与工具栏工具顺序一致。"""
+        from config.config_manager import DEFAULTS
+        from ui.settings_editor import EditorPage
+        from PySide6.QtWidgets import QGroupBox
+
+        with tempfile.TemporaryDirectory() as folder:
+            config = ConfigManager(Path(folder) / "settings.json")
+            page = EditorPage(config, config.save)
+            try:
+                titles = []
+                for index in range(page.groups.count()):
+                    widget = page.groups.itemAt(index).widget()
+                    if isinstance(widget, QGroupBox):
+                        titles.append(widget.title())
+                self.assertEqual(titles, [
+                    "默认工具", "画笔", "记号笔", "箭头", "矩形", "椭圆",
+                    "序号标注", "文字", "局部放大", "马赛克", "橡皮擦",
+                    "裁剪框", "取色", "编辑区边框", "透明背景", "编辑工具栏",
+                    "画布与标注交互",
+                ])
+            finally:
+                page.close()
+
+
+    def test_settings_window_has_fixed_width_and_no_page_overflows(self):
+        """设置窗口宽度固定；所有页面在固定宽度下都不出现横向滚动条。"""
+        from PySide6.QtWidgets import QScrollArea
+        from ui.settings_window import SETTINGS_WINDOW_WIDTH
+
+        with tempfile.TemporaryDirectory() as folder:
+            config = ConfigManager(Path(folder) / "settings.json")
+            window = SettingsWindow(config)
+            try:
+                window.show()
+                self.app.processEvents()
+                self.assertEqual(window.width(), SETTINGS_WINDOW_WIDTH)
+                self.assertEqual(window.minimumWidth(), SETTINGS_WINDOW_WIDTH)
+                self.assertEqual(window.maximumWidth(), SETTINGS_WINDOW_WIDTH)
+                for index in range(window.pages.count()):
+                    window.navigation.setCurrentRow(index)
+                    self.app.processEvents()
+                    page = window.pages.widget(index)
+                    scroll = page.findChild(QScrollArea)
+                    if scroll is not None:
+                        self.assertEqual(
+                            scroll.horizontalScrollBar().maximum(), 0,
+                            f"{window.navigation.item(index).text()} 页出现横向溢出")
+                window.resize(640, 570)
+                self.app.processEvents()
+                self.assertEqual(window.width(), SETTINGS_WINDOW_WIDTH)
+            finally:
+                window.close()
+
     def test_small_choice_controls_use_radio_row(self):
         """2026-10-14（用户要求）：选项不超过 10 个的枚举设置改为**一组单选按钮**（多时自动折两行），
         点击即选、不必展开下拉；取值仍写入配置，也能被「恢复本页默认」还原；超过 10 项仍是下拉。"""
@@ -2914,6 +3001,13 @@ class ConfigTests(CoreTests):
             self.assertTrue(restored_window.toolbar.choice_buttons["arrow_style"]["open"].isChecked())
             restored_window.close()
             window = EditorWindow(frame, config.data)
+            from editor.annotation_items import shape
+            from PySide6.QtCore import QPointF
+            rect_item = shape("rect", QPointF(10, 10), QPointF(80, 60), "#00ff00", 3)
+            window.canvas.scene_data.addItem(rect_item)
+            rect_item.setSelected(True)
+            window.canvas.set_tool("pen")
+            config.data["pen_color"] = "#112233"
             app.qt = self.app
             app.tray = Mock()
             app.hotkey_recording = True
@@ -2945,6 +3039,8 @@ class ConfigTests(CoreTests):
                 self.assertEqual(active.canvas.settings["mosaic_cursor_color"], "#00aa55")
                 self.assertEqual(active.canvas.settings["eraser_cursor_color"], "#cc6600")
             self.assertEqual((window.canvas.crop_color, window.canvas.crop_width), ("#234567", 5))
+            # 外部配置刷新不能把当前工具颜色写回已选标注。
+            self.assertEqual(rect_item.pen().color().name(), "#00ff00")
             self.assertEqual(window.toolbar.crop_color.color, "#234567")
             self.assertEqual(window.toolbar.crop_width.value(), 5)
             window.close()
@@ -3743,10 +3839,11 @@ class ConfigTests(CoreTests):
                 page = settings.pages.widget(index)
                 keys.update(page.controls)
                 keys.update(page.color_buttons)
-            # 热键、上次区域与「另存为」目录由专用控件或程序内部维护，不需要普通设置项入口。
-            # save_as_dir 是「另存为」上次选择的目录（内部记忆值），按规则 4 刻意不做设置页控件。
+            # 热键、上次区域、「另存为」目录与最近颜色由专用控件/程序内部维护，不需要普通设置项入口。
+            # save_as_dir 是「另存为」上次选择的目录（内部记忆值），按规则 4 刻意不做设置页控件；
+            # recent_colors 由 ColorButton 右键菜单维护，同样是记忆状态而不是可编辑默认值。
             self.assertEqual(set(DEFAULTS) - keys,
-                             {"hotkeys", "last_capture_rect", "save_as_dir"})
+                             {"hotkeys", "last_capture_rect", "save_as_dir", "recent_colors"})
             self.assertIn("save_dir", keys)
             self.assertNotIn("auto_dir", keys)
             self.assertNotIn("manual_dir", keys)
@@ -3825,7 +3922,7 @@ class ConfigTests(CoreTests):
             self.assertEqual(sorted(previews),
                              ["arrow", "crop", "editor_border", "ellipse", "eraser", "marker",
                               "mosaic", "pen", "picker", "rect", "sequence", "text",
-                              "toolbar_shadow", "transparent"])
+                              "toolbar_shadow", "transparent", "zoom"])
             page.controls["font_size"].setValue(42)
             text = previews["text"]
             self.assertIsNone(text.scene)
@@ -3999,6 +4096,7 @@ class ConfigTests(CoreTests):
     def test_settings_window_resets_defaults_and_clears_session(self):
         from PySide6.QtWidgets import QMessageBox, QPushButton
         from config.config_manager import DEFAULTS
+        from core.version import APP_VERSION
 
         with tempfile.TemporaryDirectory() as folder, \
                 patch("ui.settings_window.set_start_on_boot"), \
@@ -4048,6 +4146,9 @@ class ConfigTests(CoreTests):
                     self.assertEqual(manager.data[key], "save")
                 self.assertEqual(manager.data["capture_gap_fill"], "transparent")
                 self.assertEqual(manager.data["save_dir"], "")
+                self.assertEqual(manager.data["app_version"], APP_VERSION)
+                self.assertEqual(settings.page("启动与通知").controls["app_version"].text(),
+                                 APP_VERSION)
                 self.assertTrue(manager.data["sound"])
                 self.assertEqual(manager.data["crosshair_color"], "#ff0000")
                 self.assertEqual(manager.data["element_depth"], 8)

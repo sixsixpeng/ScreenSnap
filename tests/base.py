@@ -1,4 +1,4 @@
-﻿"""ScreenSnap 测试共享基类：公共导入、QApplication 夹具与断言辅助。"""
+"""ScreenSnap 测试共享基类：公共导入、QApplication 夹具与断言辅助。"""
 
 import json
 import tempfile

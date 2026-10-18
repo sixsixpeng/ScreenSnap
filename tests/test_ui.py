@@ -27,7 +27,7 @@ class UiTests(CoreTests):
         from ui.widgets.annotation_preview import AnnotationPreview
 
         kinds = ("output", "text", "arrow", "rect", "ellipse", "pen", "eraser",
-                 "marker", "mosaic", "crop", "sequence", "picker")
+                 "marker", "mosaic", "crop", "sequence", "picker", "zoom")
         settings = dict(DEFAULTS)
         for kind in kinds:
             preview = AnnotationPreview(settings, kind, 104)

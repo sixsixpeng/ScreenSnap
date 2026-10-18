@@ -1,6 +1,7 @@
 """启动和通知设置。"""
 
 from config.config_manager import DEFAULTS
+from core.version import APP_VERSION
 from ui.widgets.tooltip import SettingsPage
 
 # 提示音选项（2026-10-11）：系统音 + 16 个随包内置音 + 自定义 wav。
@@ -255,6 +256,10 @@ class GeneralPage(SettingsPage):
             self.controls.update(special)
         self._sync_startup_mode_control()
         self._refresh_privilege_row()
+        control = self.controls.get("app_version")
+        if control is not None and not control.text().strip():
+            # 恢复默认/导入旧配置可能把值变成空串；输入框显示当前内置版本，避免看起来“版本丢了”。
+            control.setText(APP_VERSION)
 
     def reset_page(self):
         """恢复本页默认：管理员模式需要先删掉系统里的计划任务（可能弹一次 UAC）。

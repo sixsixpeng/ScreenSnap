@@ -802,8 +802,9 @@ class ScreenshotPage(SettingsPage):
                      ("半透明颜色填充", "fill")),
                     "透出模式会移除候选区域上的遮罩并显示原始截图，边框和尺寸标签仍保留。")
         self._hover_box_controls(config)
-        hover_opacity = self.number("window_hover_opacity", "候选框填充不透明度(%)", 0, 100,
-                "调整蓝色高亮区域的填充浓淡；35% 默认值可突出目标，同时保留底层内容可见。\n"
+        hover_opacity = self.percent_slider(
+            "window_hover_opacity", "候选框填充不透明度(%)",
+            "调整蓝色高亮区域的填充浓淡；35% 默认值可突出目标，同时保留底层内容可见。\n"
             "边框保持实色，便于看清识别范围").valueChanged.connect(
                 self._mark_hover_style_custom)
         hover_opacity_control = self.controls["window_hover_opacity"]
@@ -856,7 +857,7 @@ class ScreenshotPage(SettingsPage):
                "只记录名称、控件类型和屏幕矩形，不读取控件值；控件名称仍可能包含应用标题或文件名，请分享日志前先检查并在诊断后关闭。")
         self.group("遮罩与选区")
         self._mask_color_controls(config)
-        self.number("mask_opacity", "遮罩不透明度 (%)", 0, 100,
+        self.percent_slider("mask_opacity", "遮罩不透明度 (%)",
                 "选区之外颜色叠加的浓度；0 为完全透明，100 为完全遮挡")
         border_key = "selection_border_color"
         border = ColorButton(config.data[border_key],

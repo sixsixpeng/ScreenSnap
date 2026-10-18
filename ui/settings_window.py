@@ -8,6 +8,7 @@ from PySide6.QtWidgets import (QApplication, QWidget, QHBoxLayout, QVBoxLayout, 
 
 from config.config_manager import DEFAULTS
 from core.path_utils import data_dir
+from core.version import APP_VERSION
 from logger import get_logger
 from ui.settings_general import GeneralPage
 from ui.settings_screenshot import ScreenshotPage
@@ -21,6 +22,12 @@ from ui.settings_clipboard import ClipboardPage
 from core.startup import remove_run_entry, set_start_on_boot
 from ui.action_icons import action_icon
 from ui.widgets.confirmation import yes_no_dialog
+
+
+# 设置页长枚举/单选行已按窄栏折行；最宽页面内容约 552px，固定 780px
+# 给页面约 592px，扣掉纵向滚动条后仍能容纳全部页面，避免横向滚动条和
+# 用户拉宽/拉窄后控件越界。高度仍可调整。
+SETTINGS_WINDOW_WIDTH = 780
 
 
 class SettingsWindow(QWidget):
@@ -53,7 +60,7 @@ class SettingsWindow(QWidget):
         if app is not None:
             app.aboutToQuit.connect(self.flush_persist)
         self.setWindowTitle("ScreenSnap · 设置")
-        self.resize(760, 570)
+        self.resize(SETTINGS_WINDOW_WIDTH, 570)
         outer = QVBoxLayout(self)
         row = QHBoxLayout()
         self.navigation = QListWidget()
@@ -109,6 +116,9 @@ class SettingsWindow(QWidget):
         buttons.addWidget(self.reset_all_data_button)
         buttons.addStretch()
         outer.addLayout(buttons)
+        # 宽度固定：各页表单不做横向缩放；避免手动拖动窗口宽度时
+        # QFormLayout/组合框最小宽度与滚动区互相挤压。高度保持可调整。
+        self.setFixedWidth(SETTINGS_WINDOW_WIDTH)
 
     def populate(self):
         """注册各设置分类页；顺序即左侧导航顺序。"""
@@ -294,11 +304,27 @@ class SettingsWindow(QWidget):
         self.config.data[key] = value
         if key == "cursor":
             page = self.page("截图")
-        elif key.startswith("editor_image_"):
+        elif key.startswith("editor_image_") or key == "editor_output_sync_default":
             page = self.page("保存与输出")
         else:
             page = self.page("编辑器")
-        control = page.color_buttons[key] if key in page.color_buttons else page.controls[key]
+        control = (page.color_buttons[key] if key in page.color_buttons
+                   else page.controls.get(key))
+        if control is None:
+            # 新键可能只存在于别的页面（例如保存与输出相关的开关）：按实际持有控件的页面查找，
+            # 不能直接 KeyError 中断——那会让配置已改、却没 persist()，界面与磁盘同时不同步。
+            for index in range(self.pages.count()):
+                candidate = self.pages.widget(index)
+                color_buttons = getattr(candidate, "color_buttons", {})
+                controls = getattr(candidate, "controls", {})
+                if key in color_buttons or key in controls:
+                    page = candidate
+                    control = color_buttons.get(key) or controls[key]
+                    break
+        if control is None:
+            get_logger().warning("设置页未找到配置键 %s 的控件，仅保存配置", key)
+            self.persist()
+            return
         with QSignalBlocker(control):
             if key in page.color_buttons:
                 control.set_color(value)
@@ -364,6 +390,8 @@ class SettingsWindow(QWidget):
                 backup.write_bytes(self.config.path.read_bytes())
             self.config.data.clear()
             self.config.data.update(copy.deepcopy(DEFAULTS))
+            # 恢复出厂设置不是“首次运行”：版本记录回填当前内置版本，避免界面空白/下次启动再判首次运行。
+            self.config.data["app_version"] = APP_VERSION
             defaults_applied = True
             self._sync_autostart()
             self.config.save()

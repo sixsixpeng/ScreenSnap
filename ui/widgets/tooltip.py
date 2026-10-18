@@ -7,12 +7,14 @@ from PySide6.QtGui import QKeySequence
 from PySide6.QtWidgets import (QWidget, QFormLayout, QCheckBox, QSpinBox, QDoubleSpinBox,
                                QLineEdit, QComboBox, QGroupBox, QHBoxLayout, QScrollArea,
                                QVBoxLayout, QPushButton, QStyle, QRadioButton, QButtonGroup,
-                               QGridLayout, QKeySequenceEdit)
+                               QGridLayout, QKeySequenceEdit, QSizePolicy)
 
 from config.config_manager import DEFAULTS
+from core.version import APP_VERSION
 from logger import get_logger
 from ui.widgets.color_button import ColorButton
 from ui.widgets.file_path_edit import FilePathEdit
+from ui.widgets.opacity_slider import OpacitySlider
 
 _MISSING = object()
 
@@ -40,8 +42,17 @@ class RadioRow(QWidget):
         self._buttons = {}
         count = len(options)
         if columns is None:
-            # 5–10 个折成两行（如 5 个 → 3+2），既不挤一行也不拉长整页。
-            columns = count if count <= 4 else (count + 1) // 2
+            # 设置页是窄竖栏：短标签可一行排完；长标签或较多选项按两列折行。
+            # 按一半/四列平铺会把「Ctrl 或 Alt（任一）」这类长文案撑到
+            # 700px 以上并触发横向滚动，纵向换行只增加滚动高度。
+            labels = [str(name) for name, _value in options]
+            longest = max((len(name) for name in labels), default=0)
+            if count <= 4 and longest <= 6 and sum(map(len, labels)) <= 20:
+                columns = count
+            elif longest <= 5 and count <= 8:
+                columns = 3
+            else:
+                columns = 2
         columns = max(1, int(columns))
         for index, (name, key) in enumerate(options):
             button = QRadioButton(name)
@@ -118,7 +129,10 @@ class SettingsPage(QWidget):
 
         keys = list(self.controls) + list(self.color_buttons)
         for key in keys:
-            if key in DEFAULTS:
+            if key == "app_version":
+                # app_version 是版本记录，不是可清空的普通默认项；页内恢复默认回填当前内置版本。
+                self.config.data[key] = APP_VERSION
+            elif key in DEFAULTS:
                 self.config.data[key] = copy.deepcopy(DEFAULTS[key])
         self.sync_controls()
         self.changed()
@@ -133,6 +147,8 @@ class SettingsPage(QWidget):
             with QSignalBlocker(widget):
                 if isinstance(widget, QCheckBox):
                     widget.setChecked(bool(value))
+                elif isinstance(widget, OpacitySlider):
+                    widget.setValue(value)
                 elif isinstance(widget, (QSpinBox, QDoubleSpinBox)):
                     widget.setValue(value)
                 elif isinstance(widget, QComboBox):
@@ -171,7 +187,10 @@ class SettingsPage(QWidget):
         default = DEFAULTS.get(key, _MISSING)
         if default is _MISSING:
             return help_text
-        if isinstance(widget, QDoubleSpinBox):
+        if isinstance(widget, OpacitySlider):
+            text = (f"取值：{widget.slider.minimum()}–{widget.slider.maximum()}%，"
+                    f"默认 {default}%")
+        elif isinstance(widget, QDoubleSpinBox):
             if "默认" in help_text and f"{default:g}" in help_text:
                 return help_text
             text = (f"取值：{widget.minimum():g}–{widget.maximum():g}{widget.suffix()}"
@@ -287,6 +306,11 @@ class SettingsPage(QWidget):
         widget.setValue(self.config.data[key])
         return self.bind(key, widget, widget.valueChanged, widget.value, label, help_text)
 
+    def percent_slider(self, key, label, help_text, minimum=0, maximum=100):
+        """百分比滑块（不透明度）；数值由标签展示，不使用输入框。"""
+        widget = OpacitySlider(self.config.data[key], minimum, maximum)
+        return self.bind(key, widget, widget.valueChanged, widget.value, label, help_text)
+
     def text(self, key, label, help_text):
         """文本编辑结束后保存，避免输入过程中频繁写文件。"""
         widget = QLineEdit(self.config.data[key])
@@ -297,6 +321,11 @@ class SettingsPage(QWidget):
         widget = QComboBox()
         for name, value in options:
             widget.addItem(name, value)
+        # 字体族/长枚举按内容决定最小宽度会把设置页撑到 800px 以上；
+        # 允许横向收缩，实际宽度仍由 QFormLayout 分配给整行。
+        widget.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        widget.setMinimumContentsLength(10)
+        widget.setSizePolicy(QSizePolicy.Ignored, QSizePolicy.Fixed)
         widget.setCurrentIndex(widget.findData(self.config.data[key]))
         return self.bind(key, widget, widget.currentIndexChanged, widget.currentData, label, help_text)
 
