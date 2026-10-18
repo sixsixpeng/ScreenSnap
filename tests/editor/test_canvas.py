@@ -1576,7 +1576,8 @@ class CanvasTests(CoreTests):
             editor = EditorWindow(Image.new("RGB", (40, 30), "white"), manager.data)
             editor.setting_changed.connect(settings.set_annotation_setting)
             page = settings.page("编辑器")
-            for key in (*TOOL_WIDTH_KEYS.values(), "arrow_style", "rect_style", "ellipse_style",
+            for key in (*TOOL_WIDTH_KEYS.values(), "arrow_style", "arrow_curve_direction",
+                        "rect_style", "ellipse_style",
                         "marker_opacity", "font", "font_size", "text_alignment", "line_spacing",
                         "mosaic_mode", "mosaic_size", "annotation_tool"):
                 self.assertIn(key, page.controls)
@@ -1592,6 +1593,8 @@ class CanvasTests(CoreTests):
             self.assertEqual(manager.data["arrow_style"], "double_filled")
             editor.toolbar.choice_buttons["arrow_style"]["double_open"].click()
             self.assertEqual(manager.data["arrow_style"], "double_open")
+            editor.toolbar.choice_buttons["arrow_curve_direction"]["left"].click()
+            self.assertEqual(manager.data["arrow_curve_direction"], "left")
             editor.toolbar.tool_buttons["text"].click()
             editor.toolbar.choice_buttons["text_alignment"]["center"].click()
             editor.toolbar.tool_buttons["mosaic"].click()
@@ -1601,6 +1604,7 @@ class CanvasTests(CoreTests):
             for index, key in enumerate(TOOL_WIDTH_KEYS.values(), 7):
                 self.assertEqual(restored[key], index)
             self.assertEqual(restored["arrow_style"], "double_open")
+            self.assertEqual(restored["arrow_curve_direction"], "left")
             self.assertEqual(restored["text_alignment"], "center")
             self.assertEqual(restored["font_size"], 31)
             editor.close()
@@ -1626,6 +1630,8 @@ class CanvasTests(CoreTests):
         rect_open = shape("arrow", start, end, "#ff0000", 4, "rect_open")
         dashed_line = shape("arrow", start, end, "#ff0000", 4, "dashed_line")
         rect_dashed = shape("arrow", start, end, "#ff0000", 4, "rect_dashed")
+        curve_open = shape("arrow", start, end, "#ff0000", 4, "curve_open")
+        curve_dashed = shape("arrow", start, end, "#ff0000", 4, "curve_open_dashed")
         self.assertEqual(filled.brush().color().name(), "#ff0000")
         self.assertEqual(open_arrow.brush().style(), Qt.NoBrush)
         self.assertEqual(double_open.brush().style(), Qt.NoBrush)
@@ -1636,6 +1642,10 @@ class CanvasTests(CoreTests):
         self.assertEqual(dashed_line.pen().style(), Qt.DashLine)
         self.assertEqual(rect_dashed.pen().style(), Qt.DashLine)
         self.assertEqual(rect_dashed.brush().style(), Qt.NoBrush)
+        self.assertEqual(curve_open.brush().style(), Qt.NoBrush)
+        self.assertEqual(curve_open.pen().style(), Qt.SolidLine)
+        self.assertEqual(curve_dashed.brush().style(), Qt.NoBrush)
+        self.assertEqual(curve_dashed.pen().style(), Qt.DashLine)
         shaft_end = open_arrow.path().elementAt(1)
         self.assertLess(shaft_end.x, end.x())
         self.assertGreater(double_open.path().elementCount(), open_arrow.path().elementCount())
@@ -1655,8 +1665,19 @@ class CanvasTests(CoreTests):
         self.assertEqual(validate({"arrow_style": "double_open"})["arrow_style"], "double_open")
         self.assertEqual(validate({"arrow_style": "line"})["arrow_style"], "line")
         self.assertEqual(validate({"arrow_style": "rect_dashed"})["arrow_style"], "rect_dashed")
+        self.assertEqual(validate({"arrow_style": "curve_open"})["arrow_style"], "curve_open")
+        self.assertEqual(validate({"arrow_style": "curve_open_dashed"})["arrow_style"],
+                         "curve_open_dashed")
+        from editor.annotation_properties import ARROW_STYLE_OPTIONS
+        style_keys = [value for _label, value in ARROW_STYLE_OPTIONS]
+        self.assertEqual(style_keys[-2:], ["line", "dashed_line"])
+        self.assertEqual(style_keys[-5:-2], ["curve_filled", "curve_open", "curve_open_dashed"])
+        self.assertEqual(validate({"arrow_curve_direction": "left"})["arrow_curve_direction"],
+                         "left")
         with self.assertRaises(ValueError):
             validate({"arrow_style": "dotted"})
+        with self.assertRaises(ValueError):
+            validate({"arrow_curve_direction": "up"})
 
     def test_rect_and_ellipse_support_solid_and_dash_styles(self):
         from PySide6.QtCore import QPointF
@@ -2701,6 +2722,31 @@ class CanvasTests(CoreTests):
         self.assertEqual(restored.arrow_style, "filled")
         canvas.close()
 
+    def test_arrow_curve_direction_survives_style_switch_and_snapshot(self):
+        from config.config_manager import DEFAULTS
+        from editor.annotation_items import shape
+        from PySide6.QtCore import QPointF
+
+        canvas = AnnotationCanvas(Image.new("RGB", (240, 180), "white"), dict(DEFAULTS))
+        try:
+            item = shape("arrow", QPointF(20, 60), QPointF(220, 60), "#ff0000", 4,
+                         arrow_style="curve_filled", arrow_curve_direction="left")
+            canvas.scene_data.addItem(item)
+            canvas.checkpoint()
+            item.setSelected(True)
+            self.assertEqual(item.arrow_curve_direction, "left")
+            canvas.set_selected_arrow_style("filled")
+            self.assertEqual(item.arrow_curve_direction, "left")
+            canvas.set_selected_arrow_style("curve_filled")
+            self.assertEqual(item.arrow_curve_direction, "left")
+            canvas.undo()
+            canvas.undo()
+            restored = [a for a in canvas.annotations()
+                        if getattr(a, "arrow_style", None) == "curve_filled"][0]
+            self.assertEqual(restored.arrow_curve_direction, "left")
+        finally:
+            canvas.close()
+
     def test_canvas_undo_export(self):
         from config.config_manager import DEFAULTS
         canvas = AnnotationCanvas(Image.new("RGB", (120, 100), "white"), DEFAULTS)
@@ -3083,13 +3129,21 @@ class CanvasTests(CoreTests):
             toolbar.reflow(width)
             grid = toolbar.tool_grid
             columns = toolbar._layout_mode[1]
-            ordered = [toolbar.cursor_switch, toolbar.options_button]
-            ordered.extend(toolbar.tool_buttons[key] for key in "select pen marker rect ellipse number text arrow mosaic eraser picker crop".split())
+            ordered = [toolbar.options_button]
+            ordered.extend(toolbar.tool_buttons[key] for key in
+                           "select pen marker arrow rect ellipse number text".split())
+            ordered.append(toolbar.tool_buttons["image"])
+            ordered.extend(toolbar.tool_buttons[key] for key in
+                           "zoom mosaic eraser crop picker".split())
             for index, button in enumerate(ordered):
                 row, column = divmod(index, columns)
                 self.assertEqual(grid.getItemPosition(grid.indexOf(button)), (row, column, 1, 1))
             self.assertEqual(grid.indexOf(toolbar.pen_color), -1)
             self.assertEqual(toolbar.image_grid.indexOf(toolbar.cursor_switch), -1)
+            self.assertGreaterEqual(toolbar.output_grid.indexOf(toolbar.cursor_switch), 0)
+            self.assertEqual(toolbar.output_grid.getItemPosition(
+                toolbar.output_grid.indexOf(toolbar.cursor_switch))[:2], (0, 0))
+            self.assertEqual(grid.indexOf(toolbar.cursor_switch), -1)
             self.assertEqual(toolbar.pen_color.text(), "颜色")
             self.assertNotIn("square", toolbar.tool_buttons)
             # 当前 UI 已不再把独立的"当前颜色"按钮放进 options 菜单（改用各工具颜色按钮 + active_color_label）。
@@ -3100,7 +3154,7 @@ class CanvasTests(CoreTests):
 
     def test_annotation_options_sliders_show_live_values(self):
         from editor.toolbar_widget import ToolbarWidget
-        from PySide6.QtWidgets import QWidgetAction, QLabel
+        from PySide6.QtWidgets import QGridLayout, QWidgetAction, QLabel
         toolbar = ToolbarWidget(settings={"pen_width": 7, "mosaic_size": 18})
         toolbar.tool_buttons["pen"].click()
         panel = next(action.defaultWidget() for action in toolbar.options_button.menu().actions()
@@ -3111,9 +3165,10 @@ class CanvasTests(CoreTests):
         self.assertGreaterEqual(toolbar.options_button.menu().sizeHint().width(), 240)
         panel.show()
         self.app.processEvents()
+        grid = panel.findChild(QGridLayout)
         for row in (1,):
-            label = panel.layout().itemAtPosition(row, 0).widget()
-            control = panel.layout().itemAtPosition(row, 1).widget()
+            label = grid.itemAtPosition(row, 0).widget()
+            control = grid.itemAtPosition(row, 1).widget()
             self.assertIsInstance(label, QLabel)
             self.assertEqual(label.alignment(), Qt.AlignRight | Qt.AlignVCenter)
             self.assertLess(label.geometry().right(), control.geometry().left())
@@ -3142,11 +3197,16 @@ class CanvasTests(CoreTests):
 
         toolbar = ToolbarWidget()
         toolbar.reflow(1100)
-        first_row = [toolbar.cursor_switch, toolbar.options_button]
-        first_row.extend(toolbar.tool_buttons[key] for key in "select pen marker rect".split())
+        columns = toolbar._layout_mode[1]
+        first_row = [toolbar.options_button]
+        first_row.extend(toolbar.tool_buttons[key] for key in
+                         "select pen marker arrow rect ellipse number text".split())
+        first_row.append(toolbar.tool_buttons["image"])
+        first_row.extend(toolbar.tool_buttons[key] for key in
+                         "zoom mosaic eraser crop picker".split())
         positions = [toolbar.tool_grid.getItemPosition(toolbar.tool_grid.indexOf(widget))
-                     for widget in first_row]
-        self.assertEqual(positions, [(0, column, 1, 1) for column in range(6)])
+                     for widget in first_row[:columns]]
+        self.assertEqual(positions, [(0, column, 1, 1) for column in range(columns)])
         self.assertEqual(toolbar.tool_grid.indexOf(toolbar.pen_color), -1)
         for widget in (toolbar.options_button, *toolbar.tool_buttons.values()):
             item = toolbar.tool_grid.itemAt(toolbar.tool_grid.indexOf(widget))
@@ -3164,6 +3224,12 @@ class CanvasTests(CoreTests):
         self.assertEqual(text.pixelColor(0, 0).alpha(), 0)
         self.assertFalse(toolbar.tool_buttons["arrow"].icon().isNull())
         self.assertFalse(toolbar.tool_buttons["crop"].icon().isNull())
+        self.assertFalse(toolbar.tool_buttons["image"].icon().isNull())
+        self.assertNotEqual(toolbar.tool_buttons["image"].icon().pixmap(24, 24).toImage(),
+                            toolbar.tool_buttons["crop"].icon().pixmap(24, 24).toImage())
+        order = list(toolbar.tool_buttons)
+        self.assertEqual(order[-1], "picker")
+        self.assertLess(order.index("zoom"), order.index("mosaic"))
         eraser = toolbar.tool_buttons["eraser"].icon().pixmap(24, 24).toImage()
         delete = next(button for button in toolbar.edit_buttons if button.text() == "删除").icon().pixmap(24, 24).toImage()
         self.assertNotEqual(eraser, delete)
@@ -3598,4 +3664,3 @@ class CanvasTests(CoreTests):
             self.assertEqual(statuses, [])
             self.assertEqual(len(copies), 1)
             self.assertIsNotNone(copies[0])
-

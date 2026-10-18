@@ -1015,6 +1015,8 @@ class CaptureTests(CoreTests):
             self.assertEqual(mask.session.inline_editor.toolbar.cursor_switch.text(), "")
             self.assertEqual(mask.session.inline_editor.toolbar.options_button.text(), "")
             toolbar = mask.session.inline_editor.toolbar
+            self.assertEqual(list(toolbar.tool_buttons)[-5:],
+                             ["zoom", "mosaic", "eraser", "crop", "picker"])
             self.assertTrue(toolbar.sections[1].isHidden())
             self.assertTrue(toolbar.tool_buttons["crop"].isHidden())
             mask.session.inline_editor.apply_picked_color("#123456")
@@ -2475,6 +2477,46 @@ class CaptureTests(CoreTests):
             finally:
                 editor.close()
 
+
+    def test_inline_insert_image_tool_places_at_canvas_click(self):
+        """原地编辑也要先选图片工具、再点画布，图片落在点击位置。"""
+        from unittest.mock import patch
+        from PySide6.QtWidgets import QGraphicsPixmapItem
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        with tempfile.TemporaryDirectory() as folder:
+            source = Path(folder) / "inline_insert.png"
+            Image.new("RGB", (40, 30), "#00a000").save(source)
+            bounds = {"left": 0, "top": 0, "width": 400, "height": 300}
+            settings = {**DEFAULTS, "save_dir": folder, "inline_edit": True,
+                        "magnifier": False, "capture_after_selection": "edit",
+                        "mask_opacity": 0, "bubble": False}
+            with patch("screenshot.mask_window.visible_windows", return_value=[]):
+                mask = MaskWindow(Image.new("RGB", (400, 300), "white"), bounds,
+                                  [bounds], settings)
+            mask.selection.rects.append(QRect(40, 40, 180, 140))
+            mask.complete()
+            editor = mask.session.inline_editor
+            try:
+                button = editor.toolbar.tool_buttons["image"]
+                button.click()
+                self.assertEqual(editor.canvas.tool, "image")
+                point = editor.canvas.mapFromScene(QPointF(130, 110))
+                with patch("screenshot.mask_window.QFileDialog.getOpenFileName",
+                           return_value=(str(source), "")):
+                    QTest.mouseClick(editor.canvas.viewport(), Qt.LeftButton, pos=point)
+                items = [item for item in editor.canvas.annotations()
+                         if isinstance(item, QGraphicsPixmapItem)]
+                self.assertEqual(len(items), 1)
+                expected = editor.canvas.mapToScene(point)
+                center = items[0].pos() + QPointF(items[0].pixmap().width() / 2,
+                                                 items[0].pixmap().height() / 2)
+                self.assertAlmostEqual(center.x(), expected.x(), delta=2)
+                self.assertAlmostEqual(center.y(), expected.y(), delta=2)
+            finally:
+                mask.close()
+
     def test_mask_inline_cursor_switch_and_toolbar_repositions_after_resize(self):
         from PySide6.QtWidgets import QStyle, QStyleOptionButton
         from config.config_manager import DEFAULTS
@@ -2514,6 +2556,14 @@ class CaptureTests(CoreTests):
             self.assertEqual(editor.canvas.image.getpixel((0, 0)), (255, 0, 0))
             self.assertEqual(cursor_switch.text(), "")
             self.assertTrue(cursor_switch.isChecked())
+            self.assertEqual(editor.toolbar.output_grid.getItemPosition(
+                editor.toolbar.output_grid.indexOf(cursor_switch))[:2], (0, 0))
+            # 显示鼠标移入输出组后，inline 合并布局必须把它重新排列；
+            # 否则它会停在旧位置并与「仅复制」等输出按钮重叠。
+            for button in editor.toolbar.output_buttons:
+                if button.isVisible():
+                    self.assertFalse(cursor_switch.geometry().intersects(button.geometry()),
+                                     button.text())
 
             old_toolbar = QRect(editor.toolbar.geometry())
             QTest.mousePress(mask, Qt.LeftButton, pos=QPoint(1019, 579))
@@ -2948,6 +2998,16 @@ class CaptureTests(CoreTests):
             canvas.settings["rect_color"] = "#0000ff"
             canvas.refresh_tool_cursor()
             self.assertEqual(pixels(canvas.cursor()), after)
+            # 放大工具的光标同时跟随专用颜色和镜片样式。
+            canvas.set_tool("zoom")
+            zoom_before = pixels(canvas.cursor())
+            canvas.settings["zoom_annotation_color"] = "#123456"
+            canvas.refresh_tool_cursor()
+            self.assertNotEqual(pixels(canvas.cursor()), zoom_before)
+            zoom_color = pixels(canvas.cursor())
+            canvas.settings["zoom_annotation_style"] = "rect"
+            canvas.refresh_tool_cursor()
+            self.assertNotEqual(pixels(canvas.cursor()), zoom_color)
         finally:
             canvas.close()
 

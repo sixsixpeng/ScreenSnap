@@ -11,7 +11,7 @@ from PySide6.QtWidgets import (QMainWindow, QWidget, QVBoxLayout, QFileDialog, Q
                                QDialog, QDialogButtonBox, QDial, QDoubleSpinBox, QHBoxLayout, QLabel,
                                QLineEdit, QStyle, QSlider, QSpinBox, QGraphicsView)
 
-from core.image_io import (IMAGE_FILE_SUFFIXES, SAVE_FORMATS, filter_extension,
+from core.image_io import (IMAGE_FILE_FILTER, IMAGE_FILE_SUFFIXES, SAVE_FORMATS, filter_extension,
                            matches_saved_format, normalize_save_as_path,
                            save_as_filter, save_image, saved_extension)
 from core.path_utils import resolved_dir, save_as_directory
@@ -159,6 +159,50 @@ def save_as_sidebar_urls():
 
 ANNOTATION_COLOR_TOOLS = frozenset(("pen", "rect", "ellipse", "arrow", "marker", "text"))
 
+# 输出外观参数：默认只作用于当前编辑器；勾选「同步修改默认配置」后才写回设置。
+
+def annotation_object_tool_for_key(key):
+    """返回某个工具栏参数键对应的标注类型；只用于“对象级编辑”判定。"""
+    if key in ("pen_color", "marker_color", "rect_color", "ellipse_color",
+               "text_color", "arrow_color"):
+        return key[:-6]
+    if key in TOOL_WIDTH_KEYS.values():
+        return key[:-6]
+    if key in ("rect_style", "ellipse_style"):
+        return key[:-6]
+    if key in ("arrow_style", "arrow_curve_direction"):
+        return "arrow"
+    if key in ("rect_fill_enabled", "rect_fill_opacity", "rect_fill_color"):
+        return "rect"
+    if key in ("ellipse_fill_enabled", "ellipse_fill_opacity", "ellipse_fill_color"):
+        return "ellipse"
+    if key in ("rect_corner_enabled", "rect_corner_radius"):
+        return "rect"
+    if key == "marker_opacity":
+        return "marker"
+    if key in ("zoom_annotation_factor", "zoom_annotation_style",
+               "zoom_annotation_color", "zoom_annotation_opacity",
+               "zoom_annotation_max_size"):
+        return "zoom"
+    if key in ("sequence_shape", "sequence_fill_color", "sequence_text_color",
+               "sequence_font_size"):
+        return "number"
+    if key in ("font", "font_size", "text_alignment", "text_width", "text_height",
+               "text_bold", "text_italic", "text_underline", "text_strikethrough",
+               "text_background_enabled", "text_background",
+               "text_background_padding", "text_background_radius",
+               "text_background_opacity"):
+        return "text"
+    return None
+
+OUTPUT_APPEARANCE_KEYS = (
+    "editor_image_round_corners", "editor_image_corner_radius",
+    "editor_image_border_enabled", "editor_image_border_width",
+    "editor_image_border_color", "editor_image_shadow_enabled",
+    "editor_image_shadow_size", "editor_image_shadow_strength",
+    "editor_image_shadow_color",
+)
+
 
 class EditorWindow(QMainWindow):
     """将工具栏命令接入画布，并统一处理保存、剪贴板与贴图输出。"""
@@ -179,9 +223,13 @@ class EditorWindow(QMainWindow):
         super().__init__()
         self.setAcceptDrops(True)
         self.settings = settings
+        # 外观参数默认只影响本次输出：未勾选「同步修改默认配置」时写进这里，
+        # 不改共享配置（配置对象同时被设置页与其它编辑器使用）。
+        self.appearance_overrides = {}
         self.from_capture = from_capture
         self.round_corners = bool(settings.get("editor_image_round_corners", True))
         self.last_path = None
+        self._image_dialog_open = False
         self.setWindowTitle("截图编辑器")
         self.resize(1200, 760)
         container = QWidget()
@@ -191,10 +239,13 @@ class EditorWindow(QMainWindow):
         self.toolbar = ToolbarWidget(settings["pen_color"], settings,
                          show_capture_actions=False)
         self.canvas = AnnotationCanvas(image, settings, alternate)
+        # 工具栏批量套用（样式预设等）期间把多次参数变更合并成一个撤销点。
+        self.toolbar.settings_batch.connect(self._on_settings_batch)
         # QGraphicsView 默认接受拖放，会截走画布区域的事件；在视口上装过滤器统一转发给窗口。
         self.canvas.viewport().installEventFilter(self)
         # D8 ④（2026-10-11）：画布会吞掉 Space（拖动画布用于它）⇒ 画布侧那份快捷键转成同一条贴图命令。
         self.canvas.sticker_shortcut.connect(lambda: self.toolbar.command.emit("paste"))
+        self.canvas.arrow_curve_toggle.connect(self.toggle_arrow_curve_direction)
         # 2026-10-11：单键 A = 另存为（画布内处理，避免无修饰可打印键被 ShortcutOverride 吞掉）。
         self.canvas.save_as_requested.connect(lambda: self.toolbar.command.emit("save_as"))
         self.canvas.save_requested.connect(lambda: self.toolbar.command.emit("save"))
@@ -300,6 +351,7 @@ class EditorWindow(QMainWindow):
         # Esc 会被画布接收并直接关掉整个编辑窗口。改为仅取消当前选中，不关闭窗口。
         self.canvas.cancelled.connect(lambda: self.canvas.scene_data.clearSelection())
         self.canvas.color_picked.connect(self.apply_picked_color)
+        self.canvas.image_insert_requested.connect(self.insert_image_at)
 
     def eventFilter(self, watched, event):
         if watched is self.canvas.viewport() and event.type() in (
@@ -365,21 +417,54 @@ class EditorWindow(QMainWindow):
         self.canvas.eraser_point = None
         self.canvas.viewport().update()
         self.toolbar.set_active_tool(tool, self.last_color_tool)
-        self.set_annotation_setting("annotation_tool", tool)
+        # 「插入图片」是瞬态工具，不写入默认标注工具（配置校验也不接受它）。
+        if tool != "image":
+            self.set_annotation_setting("annotation_tool", tool)
+
+    def insert_image_at(self, point):
+        """图片工具点击画布后选择文件，并把图片中心放到点击位置。"""
+        if self._image_dialog_open:
+            return
+        self._image_dialog_open = True
+        try:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "插入图片", "",
+                IMAGE_FILE_FILTER + ";;所有文件 (*)")
+            if path:
+                self.canvas.add_pixmap_file(path, point)
+        finally:
+            self._image_dialog_open = False
+
+    def toggle_arrow_curve_direction(self):
+        """快捷键切换曲线箭头弯向；有选中箭头时只改对象，否则改后续默认值。"""
+        selected = self.canvas.selected_items_for_tool("arrow")
+        current = (getattr(selected[0], "arrow_curve_direction", "right")
+                   if selected else self.settings.get("arrow_curve_direction", "right"))
+        value = "left" if current == "right" else "right"
+        self.set_annotation_setting("arrow_curve_direction", value)
+        self.toolbar.sync_setting("arrow_curve_direction", value)
+        get_logger().info("切换曲线箭头弯曲方向: %s（对象级=%s）", value, bool(selected))
 
     def set_pen_color(self, color):
         """更新当前标注工具颜色，并同步已选图元与设置页。"""
+        from ui.widgets.color_button import record_recent_color
+
         tool = self.canvas.tool if self.canvas.tool in ANNOTATION_COLOR_TOOLS else self.last_color_tool
         key = "pen_color" if tool == "pen" else f"{tool}_color"
-        self.settings[key] = color
-        self.toolbar.sync_tool_color(key, color)
-        self.canvas.settings[key] = color
-        self.canvas.set_selected_color(color)
+        object_local = bool(self.canvas.selected_items_for_tool(tool))
+        if not object_local:
+            self.settings[key] = color
+            self.canvas.settings[key] = color
+        # 只改该工具类型的选中标注：切换工具后旧类型仍选中时不能被当前工具颜色染过去。
+        self.toolbar.sync_setting(key, color)
+        self.canvas.set_selected_color(color, tool)
         self.canvas.refresh_tool_cursor()
         self.canvas.update()
-        self.tool_color_changed.emit(tool, color)
-        if tool == "pen":
-            self.pen_color_changed.emit(color)
+        if not object_local:
+            self.tool_color_changed.emit(tool, color)
+            if tool == "pen":
+                self.pen_color_changed.emit(color)
+        record_recent_color(color)
 
     def apply_picked_color(self, color):
         """将取样色写入吸管前最近使用的可调色工具，并复制色值。"""
@@ -393,11 +478,30 @@ class EditorWindow(QMainWindow):
         self.set_annotation_setting(key, value)
         self.toolbar.sync_setting(key, value)
 
+    def _on_settings_batch(self, active):
+        """工具栏批量套用期间合并画布撤销点。"""
+        if active:
+            self.canvas.begin_history_batch()
+        else:
+            self.canvas.end_history_batch()
+
     def set_annotation_setting(self, key, value):
         """保存当前工具参数，并更新适用的已选标注。"""
+        # 外观参数：默认只改本次输出；勾选同步后才写入共享配置。
+        local_output_only = (key in OUTPUT_APPEARANCE_KEYS
+                             and not self.settings.get(
+                                 "editor_output_sync_default", False))
+        object_tool = annotation_object_tool_for_key(key)
+        object_local = bool(object_tool and
+                            self.canvas.selected_items_for_tool(object_tool))
+        if local_output_only:
+            self.appearance_overrides[key] = value
+            self.toolbar.set_appearance_preview(key, value)
+        elif not object_local:
+            # 有同类型选中标注时只改对象，不写共享默认配置。
+            self.settings[key] = value
+            self.canvas.settings[key] = value
         # 2026-10-12：填充色与线色**各自独立** ✓（原先这里会让填充色跟随线色 ✗ 已移除 ✓）
-        self.settings[key] = value
-        self.canvas.settings[key] = value
         if key in ("rect_fill_enabled", "rect_fill_opacity", "rect_fill_color",
                    "ellipse_fill_enabled", "ellipse_fill_opacity", "ellipse_fill_color",
                    "mosaic_cursor_color", "eraser_cursor_color", "mosaic_width",
@@ -410,38 +514,53 @@ class EditorWindow(QMainWindow):
         if key in ("editor_toolbar_shadow_enabled", "editor_toolbar_shadow_color",
                    "editor_toolbar_shadow_strength"):
             self.toolbar.apply_toolbar_shadow()
+        if key in ("zoom_annotation_color", "zoom_annotation_style"):
+            self.canvas.refresh_tool_cursor()
         if key in self.toolbar.tool_color_buttons:
             self.toolbar.sync_tool_color(key, value)
-            tool = (self.canvas.selected_annotation_tool() if self.canvas.tool == "select"
-                    else self.canvas.tool)
-            if key == f"{tool}_color":
-                self.canvas.set_selected_color(value)
-                self.canvas.update()
+            # 按颜色键本身对应的工具过滤，不要用“当前画布工具”：选中矩形后切到画笔时，
+            # 当前工具是画笔，但 pen_color 不能改到矩形上（跨类型污染）。
+            self.canvas.set_selected_color(value, key[:-6])
+            self.canvas.update()
             # 当前工具光标颜色跟随该工具的取色项变化即时刷新。
             self.canvas.refresh_tool_cursor()
         if key == "editor_image_round_corners":
             self.round_corners = value
         if key in ("editor_image_round_corners", "editor_image_corner_radius"):
             self.canvas.set_round_corner_preview(
-                self.round_corners, self.settings.get("editor_image_corner_radius", 16))
+                self.round_corners,
+                self.output_settings().get("editor_image_corner_radius", 16))
         if key in TOOL_WIDTH_KEYS.values():
-            self.canvas.set_selected_width(value)
+            self.canvas.set_selected_width(value, key[:-6])
         elif key in ("rect_style", "ellipse_style"):
-            self.canvas.set_selected_line_style(value)
+            self.canvas.set_selected_line_style(value, key[:-6])
         elif key == "arrow_style":
             self.canvas.set_selected_arrow_style(value)
+        elif key == "arrow_curve_direction":
+            self.canvas.set_selected_arrow_curve_direction(value)
         elif key in ("text_bold", "text_italic", "text_underline", "text_strikethrough"):
-            self.canvas.set_selected_text_format()
+            self.canvas.set_selected_text_format(
+                {key: bool(value)} if object_local else None)
         elif key in ("rect_fill_enabled", "rect_fill_opacity", "rect_fill_color"):
-            self.canvas.set_selected_fill(
-                "rect", self.settings.get("rect_fill_enabled", False),
-                self.settings.get("rect_fill_opacity", 35),
-                self.settings.get("rect_fill_color"))
+            self.canvas.set_selected_fill_property("rect", key, value)
         elif key in ("ellipse_fill_enabled", "ellipse_fill_opacity", "ellipse_fill_color"):
-            self.canvas.set_selected_fill(
-                "ellipse", self.settings.get("ellipse_fill_enabled", False),
-                self.settings.get("ellipse_fill_opacity", 35),
-                self.settings.get("ellipse_fill_color"))
+            self.canvas.set_selected_fill_property("ellipse", key, value)
+        elif key == "marker_opacity":
+            self.canvas.set_selected_marker_opacity(value)
+        elif key in ("zoom_annotation_factor", "zoom_annotation_style",
+                     "zoom_annotation_color", "zoom_annotation_opacity",
+                     "zoom_annotation_max_size"):
+            self.canvas.set_selected_zoom_settings(**{key: value})
+        elif key in ("rect_corner_enabled", "rect_corner_radius"):
+            if object_local:
+                if key == "rect_corner_enabled":
+                    self.canvas.set_selected_rect_corner(enabled=bool(value))
+                else:
+                    self.canvas.set_selected_rect_corner(radius=int(value))
+        elif key in ("sequence_shape", "sequence_fill_color", "sequence_text_color",
+                     "sequence_font_size"):
+            if object_local:
+                self.canvas.set_selected_sequence_settings(**{key: value})
         elif key == "font":
             self.canvas.set_selected_font(value)
         elif key == "font_size":
@@ -450,10 +569,35 @@ class EditorWindow(QMainWindow):
             self.canvas.set_selected_text_width(value)
         elif key == "text_height":
             self.canvas.set_selected_text_height(value)
+        elif key == "text_background_enabled":
+            self.canvas.set_selected_text_background_style(enabled=bool(value))
+        elif key == "text_background":
+            self.canvas.set_selected_text_background_style(color=value)
+        elif key in ("text_background_padding", "text_background_radius",
+                     "text_background_opacity"):
+            self.canvas.set_selected_text_background(**{key: value})
         elif key == "text_alignment":
-            self.canvas.text_alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
-                                          "right": Qt.AlignRight}[value]
+            if object_local:
+                self.canvas.set_selected_text_alignment(value)
+            else:
+                self.canvas.text_alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
+                                              "right": Qt.AlignRight}[value]
         self.canvas.update()
+        # 外观参数：默认只改本次输出；勾选「同步修改默认配置」后才写回共享配置。
+        if key == "editor_output_sync_default" and value:
+            # 打开同步时，把本次编辑器里已经调整过的外观值一并写回。
+            for appearance_key in OUTPUT_APPEARANCE_KEYS:
+                synced = self.appearance_overrides.get(
+                    appearance_key, self.settings.get(appearance_key))
+                self.settings[appearance_key] = synced
+                self.canvas.settings[appearance_key] = synced
+                self.setting_changed.emit(appearance_key, synced)
+            self.appearance_overrides.clear()
+            get_logger().debug("输出外观已同步为默认配置: 项数=%d",
+                               len(OUTPUT_APPEARANCE_KEYS))
+        if local_output_only or object_local:
+            # 对象级编辑不写共享默认配置，也不需要设置页持久化。
+            return
         self.setting_changed.emit(key, value)
 
     def _on_selected_annotation_changed(self, tool):
@@ -475,11 +619,18 @@ class EditorWindow(QMainWindow):
             self.toolbar.cursor_switch.setEnabled(self.canvas.alternate is not None)
             self.toolbar.cursor_switch.setChecked(self.canvas.cursor_enabled)
 
+    def output_settings(self):
+        """输出使用的配置：叠加本次编辑器内的外观覆盖（不写回共享配置）。"""
+        if not self.appearance_overrides:
+            return self.settings
+        return {**self.settings, **self.appearance_overrides}
+
     def output_image(self):
         """所有导出操作共用同一张合成图，避免保存与剪贴板结果不一致。"""
-        return apply_output_effects(self.canvas.render_image(), self.settings,
-                                    self.round_corners,
-                                    self.settings.get("editor_image_corner_radius", 16))
+        settings = self.output_settings()
+        return apply_output_effects(self.canvas.render_image(), settings,
+                                    bool(settings.get("editor_image_round_corners", True)),
+                                    settings.get("editor_image_corner_radius", 16))
 
     def allocate_path(self, automatic=False, directory=None):
         """首次保存时分配唯一文件名；之后保存复用 last_path 覆盖。
@@ -698,6 +849,9 @@ class EditorWindow(QMainWindow):
             self.canvas.checkpoint()
         elif action == "delete":
             self.canvas.remove_selected()
+        elif action == "insert_image":
+            # 兼容旧命令入口：只切到图片工具，仍由画布点击决定落点。
+            self.set_tool("image")
         elif action in ("top", "bottom", "up", "down"):
             self.canvas.layer(action)
         elif action in ("erase_one", "erase_clear"):

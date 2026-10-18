@@ -2,7 +2,8 @@
 
 from functools import lru_cache
 
-from PySide6.QtCore import Signal, Qt, QSize, QTimer, QSignalBlocker, QEvent, QRect, QRectF
+from PySide6.QtCore import (Signal, Qt, QSize, QTimer, QSignalBlocker, QEvent, QRect,
+                            QRectF, QPointF)
 from PySide6.QtGui import (QFont, QIcon, QPainter, QPainterPath, QPen, QPixmap, QColor,
                            QGuiApplication)
 from PySide6.QtGui import QCursor
@@ -12,6 +13,7 @@ from PySide6.QtWidgets import (QWidget, QHBoxLayout, QVBoxLayout, QGridLayout, Q
                                QRadioButton, QSpinBox, QScrollArea, QFrame,
                                QApplication, QComboBox, QGraphicsDropShadowEffect)
 from editor.annotation_items import SEQUENCE_PRESETS
+from editor.annotation_presets import presets_for, preset_values, matching_preset
 from ui.widgets.color_button import ColorButton
 from ui.window_bounds import anchored_popup_geometry
 from ui.action_icons import action_icon
@@ -29,6 +31,7 @@ TOOL_COLOR_LABELS = {
 # 每个工具在“更多设置”里对应的实时预览类型。
 PREVIEW_KINDS = {"pen": "pen", "rect": "rect", "ellipse": "ellipse", "arrow": "arrow",
                  "marker": "marker", "mosaic": "mosaic", "text": "text", "eraser": "eraser",
+                 "zoom": "zoom",
                  "crop": "crop", "number": "sequence", "picker": "picker"}
 
 
@@ -92,6 +95,13 @@ def _annotation_icon_cached(tool, theme_ink):
         painter.setBrush(ink)
         painter.setPen(QPen(QColor("white"), 1))
         painter.drawPath(path)
+    elif tool == "zoom":
+        painter.setPen(QPen(ink, 1.6, Qt.SolidLine))
+        painter.drawRoundedRect(QRectF(4, 4, 15, 15), 2, 2)
+        painter.setBrush(QColor("white"))
+        painter.setPen(QPen(ink, 1.8, Qt.SolidLine))
+        painter.drawEllipse(QPointF(14, 14), 4.2, 4.2)
+        painter.drawLine(QPointF(17.2, 17.2), QPointF(21.5, 21.5))
     elif tool == "rect":
         painter.drawRect(4, 4, 16, 16)
     elif tool == "ellipse":
@@ -164,6 +174,11 @@ class _OptionsPanel(QWidget):
         if self.layout():
             self.layout().invalidate()
             self.layout().activate()
+        # 顶部预设行 + 参数网格是两层布局：只 activate 外层时，内层控件几何可能仍是 0，
+        # 导致标签/控件的相对位置断言和菜单高度取到旧值。
+        for child in self.findChildren(QGridLayout):
+            child.invalidate()
+            child.activate()
 
 
 class ToolbarWidget(QWidget):
@@ -174,6 +189,8 @@ class ToolbarWidget(QWidget):
     color_changed = Signal(str)
     setting_changed = Signal(str, object)
     crop_style_changed = Signal(str, object)
+    # 批量参数变更（一次套用多个键的样式预设）开始/结束：编辑器据此合并撤销点。
+    settings_batch = Signal(bool)
 
     def __init__(self, pen_color=DEFAULTS["pen_color"], settings=None,
                  show_capture_actions=True):
@@ -213,13 +230,16 @@ class ToolbarWidget(QWidget):
         for label, key in [("选择", "select"), ("画笔", "pen"),
                            ("记号笔", "marker"), ("箭头", "arrow"), ("矩形", "rect"),
                            ("椭圆", "ellipse"), ("序号", "number"), ("文字", "text"),
-                           ("橡皮擦", "eraser"), ("马赛克", "mosaic"), ("取色", "picker"), ("裁剪", "crop")]:
+                           ("图片", "image"), ("放大", "zoom"), ("马赛克", "mosaic"),
+                           ("橡皮擦", "eraser"), ("裁剪", "crop"),
+                           ("取色", "picker")]:
             button = QToolButton()
             # 2026-10-11（审查实测回归）：A/S/Ctrl+S/Space/方向键/WASD 都是**画布专属**键 ⇒ 按钮若可获焦，
             # 点过按钮后这些键全部失效 ✗（必须先点回画布）。工具栏按钮不需要键盘焦点 ⇒ 统一 NoFocus ✓。
             button.setFocusPolicy(Qt.NoFocus)
             button.setProperty("annotationTool", True)
-            icon = action_icon("eraser") if key == "eraser" else annotation_icon(key)
+            icon = (action_icon("image_insert") if key == "image"
+                    else action_icon("eraser") if key == "eraser" else annotation_icon(key))
             button.setIcon(icon)
             button.setIconSize(QSize(20, 20))
             button.setText(label)
@@ -236,6 +256,8 @@ class ToolbarWidget(QWidget):
                 "mosaic": "默认按笔迹涂抹毛玻璃；涂抹时按住 Ctrl 或 Alt 任一键可直线涂抹；关闭涂抹后拖框选区域",
                 "picker": "从图片中取色，并设置为后续标注颜色",
                 "number": "单击图片放置步骤序号；号码自动递增，颜色与字号在设置中调整",
+                "image": "选中后在画布上单击，选择本地图片并放到单击位置；过大时按画布比例缩小",
+                "zoom": "拖动框选局部区域，生成带云朵尾巴的放大标注；倍率、镜片样式与不透明度在更多设置中调整",
                 "crop": "拖动裁剪图片；裁剪框颜色和线宽会保存为下次编辑的默认值",
             }
             button.setToolTip(rich_tooltip(label, tool_tips[key]))
@@ -397,6 +419,68 @@ class ToolbarWidget(QWidget):
         self.text_height.setToolTip("新建文字的文本框高度；0 表示按内容自动增长，超出部分裁剪")
         self.text_height.valueChanged.connect(
             lambda value: self.setting_changed.emit("text_height", value))
+        self.text_background_padding = QSpinBox()
+        self.text_background_padding.setRange(0, 32)
+        self.text_background_padding.setValue(int(settings.get("text_background_padding", 0)))
+        self.text_background_padding.setSuffix(" px")
+        self.text_background_padding.setMinimumHeight(34)
+        self.text_background_padding.setToolTip("背景色块相对文字向外扩展的像素；0 表示与文字框贴合")
+        self.text_background_padding.valueChanged.connect(
+            lambda value: self.setting_changed.emit("text_background_padding", value))
+        self.text_background_radius = QSpinBox()
+        self.text_background_radius.setRange(0, 32)
+        self.text_background_radius.setValue(int(settings.get("text_background_radius", 0)))
+        self.text_background_radius.setSuffix(" px")
+        self.text_background_radius.setMinimumHeight(34)
+        self.text_background_radius.setToolTip("背景色块的圆角半径；0 表示直角")
+        self.text_background_radius.valueChanged.connect(
+            lambda value: self.setting_changed.emit("text_background_radius", value))
+        self.text_background_opacity = QSlider(Qt.Horizontal)
+        self.text_background_opacity.setRange(0, 100)
+        self.text_background_opacity.setValue(int(settings.get("text_background_opacity", 100)))
+        self.text_background_opacity.setMinimumWidth(180)
+        self.text_background_opacity.setMinimumHeight(34)
+        self.text_background_opacity.setToolTip("背景色块的不透明度；100 表示完全不透明")
+        self.text_background_opacity_label = QLabel(
+            f"{self.text_background_opacity.value()}%")
+        self.text_background_opacity_label.setMinimumWidth(44)
+        self.text_background_opacity_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.text_background_opacity.valueChanged.connect(
+            lambda value: self.text_background_opacity_label.setText(f"{value}%"))
+        self.text_background_opacity.valueChanged.connect(
+            lambda value: self.setting_changed.emit("text_background_opacity", value))
+        self.zoom_factor = QSpinBox()
+        self.zoom_factor.setRange(1, 16)
+        self.zoom_factor.setValue(int(settings.get("zoom_annotation_factor", 2)))
+        self.zoom_factor.setSuffix("×")
+        self.zoom_factor.setMinimumHeight(34)
+        self.zoom_factor.setToolTip("「放大」工具框选后生成副本的放大倍数")
+        self.zoom_factor.valueChanged.connect(
+            lambda value: self.setting_changed.emit("zoom_annotation_factor", value))
+        self.zoom_style = self.radio_options(
+            "zoom_annotation_style", (("圆形", "circle"), ("矩形", "rect")),
+            settings.get("zoom_annotation_style", "circle"),
+            "放大标注镜片形状；圆形为默认样式", columns=0)
+        self.zoom_color = ColorButton(settings.get("zoom_annotation_color", "#00b8a9"),
+                          lambda color: self.setting_changed.emit("zoom_annotation_color", color),
+                          compact=True, purpose="放大标注颜色")
+        self.zoom_opacity = QSlider(Qt.Horizontal)
+        self.zoom_opacity.setRange(0, 100)
+        self.zoom_opacity.setValue(int(settings.get("zoom_annotation_opacity", 100)))
+        self.zoom_opacity.setMinimumWidth(180)
+        self.zoom_opacity.setMinimumHeight(34)
+        self.zoom_opacity.setToolTip("放大标注整体不透明度；100 表示完全不透明")
+        self.zoom_opacity.valueChanged.connect(
+            lambda value: self.setting_changed.emit("zoom_annotation_opacity", value))
+        self.zoom_opacity_label = QLabel(f"{self.zoom_opacity.value()}%")
+        self.zoom_max_size = QSpinBox()
+        self.zoom_max_size.setRange(80, 1200)
+        self.zoom_max_size.setValue(int(settings.get("zoom_annotation_max_size", 480)))
+        self.zoom_max_size.setSuffix(" px")
+        self.zoom_max_size.setMinimumHeight(34)
+        self.zoom_max_size.setToolTip("放大标注镜片的最长边上限；超出时按比例缩小")
+        self.zoom_max_size.valueChanged.connect(
+            lambda value: self.setting_changed.emit("zoom_annotation_max_size", value))
         self.text_bold = QCheckBox("粗体")
         self.text_bold.setChecked(settings.get("text_bold", False))
         self.text_bold.toggled.connect(lambda v: self.setting_changed.emit("text_bold", v))
@@ -420,22 +504,29 @@ class ToolbarWidget(QWidget):
             "arrow_style", (
                 ("箭头", "filled"), ("空心箭头", "open"), ("虚线箭头", "dashed"),
                 ("双向箭头", "double_filled"), ("双向空心箭头", "double_open"), ("双向虚线箭头", "double_dashed"),
-                ("线段", "line"), ("虚线", "dashed_line"),
                 ("箭杆矩形", "rect_filled"), ("空心箭杆", "rect_open"), ("虚线箭杆", "rect_dashed"),
+                ("曲线箭头", "curve_filled"), ("曲线空心箭头", "curve_open"),
+                ("曲线虚线箭头", "curve_open_dashed"),
+                ("线段", "line"), ("虚线", "dashed_line"),
             ),
             settings.get("arrow_style", "filled"), "设置新箭头的样式", columns=3)
         self.arrow_style.setToolTip("设置新箭头的箭头头部样式")
-        self.arrow_chain = QCheckBox("多段绘制")
+        self.arrow_curve_direction = self.radio_options(
+            "arrow_curve_direction", (("向右弯", "right"), ("向左弯", "left")),
+            settings.get("arrow_curve_direction", "right"),
+            "曲线箭头沿绘制方向向哪一侧弯曲；只对曲线箭头生效。快捷键默认 Alt+C（设置 > 快捷键可改）",
+            columns=0)
+        self.arrow_chain = QCheckBox("折线（多段直线）")
         self.arrow_chain.setChecked(settings.get("arrow_chain", False))
         self.arrow_chain.setToolTip("开启后，绘制一个箭头后可继续在上一个终点与下一个点之间连续绘制相连的多段箭头；"
                                     "按鼠标右键结束连续绘制并保留已画图形。")
         self.arrow_chain.toggled.connect(lambda value: self.setting_changed.emit("arrow_chain", value))
-        self.pen_chain = QCheckBox("多段绘制")
+        self.pen_chain = QCheckBox("折线（多段直线）")
         self.pen_chain.setChecked(settings.get("pen_chain", False))
         self.pen_chain.setToolTip("开启后，画笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
                       "按鼠标右键结束连续绘制。未开启时按住 Ctrl 或 Alt 任一键也可临时绘制单段直线。")
         self.pen_chain.toggled.connect(lambda value: self.setting_changed.emit("pen_chain", value))
-        self.marker_chain = QCheckBox("多段绘制")
+        self.marker_chain = QCheckBox("折线（多段直线）")
         self.marker_chain.setChecked(settings.get("marker_chain", False))
         self.marker_chain.setToolTip("开启后，记号笔将在上一个终点与下一个点之间连续绘制相连的多段直线；"
                         "按鼠标右键结束连续绘制。未开启时按住 Ctrl 或 Alt 任一键也可临时绘制单段直线。")
@@ -521,12 +612,31 @@ class ToolbarWidget(QWidget):
         options.setPopupMode(QToolButton.InstantPopup)
         menu = QMenu(options)
         panel = _OptionsPanel(menu)
-        panel_layout = QGridLayout(panel)
-        panel_layout.setContentsMargins(8, 6, 8, 6)
+        # 样式预设固定在「更多设置」顶部：先于工具专属参数与预览，两个编辑器共用。
+        panel_outer = QVBoxLayout(panel)
+        panel_outer.setContentsMargins(8, 6, 8, 6)
+        panel_outer.setSpacing(4)
+        self._applying_preset = False
+        self.preset_row = QWidget()
+        preset_row_layout = QHBoxLayout(self.preset_row)
+        preset_row_layout.setContentsMargins(0, 0, 0, 0)
+        preset_row_layout.setSpacing(8)
+        preset_row_layout.addWidget(QLabel("样式预设"))
+        self.preset_combo = QComboBox()
+        self.preset_combo.setToolTip("一键套用当前工具的样式组合；套用后仍可逐项微调")
+        self.preset_combo.currentIndexChanged.connect(
+            lambda _index: self._apply_annotation_preset(self.preset_combo.currentData()))
+        preset_row_layout.addWidget(self.preset_combo, 1)
+        self.preset_row.hide()
+        panel_outer.addWidget(self.preset_row)
+        grid_host = QWidget()
+        panel_layout = QGridLayout(grid_host)
+        panel_layout.setContentsMargins(0, 0, 0, 0)
         panel_layout.setHorizontalSpacing(12)
         panel_layout.setVerticalSpacing(4)
         panel_layout.setColumnStretch(1, 1)
         panel_layout.setColumnStretch(3, 1)
+        panel_outer.addWidget(grid_host)
         from ui.widgets.annotation_preview import AnnotationPreview
 
         preview_box = QWidget()
@@ -537,7 +647,7 @@ class ToolbarWidget(QWidget):
         screen = self.screen() or QGuiApplication.primaryScreen()
         usable = screen.availableGeometry().height() if screen is not None else 900
         self.previews = {}
-        for kind in ("text", "arrow", "pen", "rect", "ellipse", "marker", "mosaic", "eraser", "crop", "sequence", "picker"):
+        for kind in ("text", "arrow", "pen", "rect", "ellipse", "marker", "mosaic", "eraser", "crop", "sequence", "picker", "zoom"):
             widget = AnnotationPreview(settings, kind, 88 if usable < 800 else 104)
             widget.setMinimumWidth(200)
             widget.setVisible(False)
@@ -573,6 +683,8 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(self.mosaic_size_label, 7, 2)
         panel_layout.addWidget(QLabel("样式"), 8, 0)
         panel_layout.addWidget(self.arrow_style, 8, 1, 1, 2)
+        panel_layout.addWidget(QLabel("弯曲方向"), 37, 0)
+        panel_layout.addWidget(self.arrow_curve_direction, 37, 1, 1, 2)
         panel_layout.addWidget(self.arrow_chain, 25, 0, 1, 3)
         panel_layout.addWidget(self.pen_chain, 26, 0, 1, 3)
         panel_layout.addWidget(self.marker_chain, 27, 0, 1, 3)
@@ -620,13 +732,38 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(self.text_width, 35, 1, 1, 2)
         panel_layout.addWidget(QLabel("文字高度"), 36, 0)
         panel_layout.addWidget(self.text_height, 36, 1, 1, 2)
+        # 文字背景增强：内边距/圆角/不透明度合并为一行，避免把文字面板撑得过高。
+        background_style_row = QWidget()
+        background_style_layout = QHBoxLayout(background_style_row)
+        background_style_layout.setContentsMargins(0, 0, 0, 0)
+        background_style_layout.setSpacing(6)
+        background_style_layout.addWidget(self.text_background_padding)
+        background_style_layout.addWidget(QLabel("圆角"))
+        background_style_layout.addWidget(self.text_background_radius)
+        background_style_layout.addWidget(QLabel("不透明度"))
+        background_style_layout.addWidget(self.text_background_opacity)
+        background_style_layout.addWidget(self.text_background_opacity_label)
+        panel_layout.addWidget(QLabel("背景样式"), 38, 0)
+        panel_layout.addWidget(background_style_row, 38, 1, 1, 2)
+        panel_layout.addWidget(QLabel("放大倍数"), 39, 0)
+        panel_layout.addWidget(self.zoom_factor, 39, 1, 1, 2)
+        panel_layout.addWidget(QLabel("镜片样式"), 40, 0)
+        panel_layout.addWidget(self.zoom_style, 40, 1, 1, 2)
+        panel_layout.addWidget(QLabel("不透明度"), 41, 0)
+        panel_layout.addWidget(self.zoom_opacity, 41, 1)
+        panel_layout.addWidget(self.zoom_opacity_label, 41, 2)
+        panel_layout.addWidget(QLabel("最大边长"), 42, 0)
+        panel_layout.addWidget(self.zoom_max_size, 42, 1, 1, 2)
+        panel_layout.addWidget(QLabel("标注颜色"), 43, 0)
+        panel_layout.addWidget(self.zoom_color, 43, 1, 1, 2)
         panel_layout.addWidget(self.mosaic_brush, 30, 0, 1, 3)
         panel_layout.addWidget(self.eraser_erase_base, 31, 0, 1, 3)
         # 2026-10-14 修复（用户报告：文字「更多设置」底部两行叠在一起、还带橡皮擦的 tooltip ✗）：
         # 原先把橡皮擦的「涂抹模式（自由笔刷）」从行 33 挪走时**误放进行 36 的第 0 列** —— 该格
         # 已被文字工具的 `QLabel("文字高度")` 占用 ⇒ 同格重叠，文字弹层里两行叠在一起。
-        # 现在独占**行 14**：它是 0–36 之间唯一没有任何工具占用的行（序号在 19–24、擦原图 31、
-        # 文字宽度 35、文字高度 36 等），既不产生跨工具串行冲突，也不把面板撑高（<37 ⇒ 高度预算不变 ✓）。
+        # 现在独占**行 14**：它是 0–37 之间未被任何工具专属参数占用的行（序号在 19–24、
+        # 擦原图 31、文字宽度 35、文字高度 36、通用样式预设 37 等），既不产生跨工具串行冲突，
+        # 也不把面板撑高。
         panel_layout.addWidget(self.eraser_brush, 14, 0, 1, 3)
         # 序号标注专属参数：形状、填充色、文字色、字号、起始值与预设组合。
         sequence_shape_options = (
@@ -660,7 +797,8 @@ class ToolbarWidget(QWidget):
         for label, key in (("自定义", "custom"), ("红圆", "red_circle"), ("蓝方", "blue_square"),
                            ("绿星", "green_star"), ("琥珀菱形", "amber_diamond"),
                            ("紫五边形", "purple_pentagon"), ("青六边形", "teal_hexagon"),
-                           ("红心", "red_heart"), ("蓝箭头", "blue_arrow")):
+                           ("红心", "red_heart"), ("蓝箭头", "blue_arrow"),
+                           ("橙气泡", "orange_bubble"), ("绿云朵", "green_cloud")):
             self.sequence_preset.addItem(label, key)
         self.sequence_preset.setCurrentIndex(self.sequence_preset.findData(settings.get("sequence_preset", "custom")))
         self.sequence_preset.setToolTip("一键套用形状与配色组合；选自定义后可逐项自由调整")
@@ -679,7 +817,7 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(QLabel("预设组合"), 24, 0)
         panel_layout.addWidget(self.sequence_preset, 24, 1, 1, 2)
         self.sequence_rows = (19, 20, 21, 22, 23, 24)
-        option_row_count = 37
+        option_row_count = 44
         for row in range(option_row_count):
             label_item = panel_layout.itemAtPosition(row, 0)
             label = label_item.widget() if label_item is not None else None
@@ -698,6 +836,8 @@ class ToolbarWidget(QWidget):
         self.setting_changed.connect(lambda *args: self._on_option_content_changed())
         self.crop_style_changed.connect(lambda *args: self._on_option_content_changed())
         self.color_changed.connect(lambda *args: self._on_option_content_changed())
+        self.setting_changed.connect(self._mark_annotation_preset_custom)
+        self.crop_style_changed.connect(self._mark_annotation_preset_custom)
         panel_action = QWidgetAction(menu)
         panel_action.setDefaultWidget(panel)
         menu.addAction(panel_action)
@@ -771,8 +911,21 @@ class ToolbarWidget(QWidget):
         appearance_layout.addWidget(QLabel("颜色"), 3, 6)
         appearance_layout.addWidget(shadow_color, 3, 7, 1, 2)
         self.appearance_controls["editor_image_shadow_color"] = shadow_color
+        # 默认只改本次输出；勾选后才把外观参数同步回默认配置（两个编辑器共用同一个键）。
+        self.output_sync_check = QCheckBox("同步修改默认配置")
+        self.output_sync_check.setChecked(bool(settings.get("editor_output_sync_default", False)))
+        self.output_sync_check.setToolTip(
+            "勾选后：这里调整的圆角/边框/阴影会同时写入设置，作为下次编辑的默认值。\n"
+            "不勾选：只影响当前这次输出，设置页与下次新建编辑器保持原值。")
+        self.output_sync_check.toggled.connect(
+            lambda value: self.setting_changed.emit("editor_output_sync_default", value))
+        self.appearance_controls["editor_output_sync_default"] = self.output_sync_check
+        appearance_layout.addWidget(self.output_sync_check, 4, 0, 1, 9)
         from ui.widgets.annotation_preview import AnnotationPreview
-        self.output_preview = AnnotationPreview(settings, "output", 36)
+        # 预览使用独立副本：编辑器未勾选「同步默认配置」时，外观改动不能写回共享配置，
+        # 但预览仍要立即反映本次编辑器的实际输出。
+        self.appearance_settings = dict(settings)
+        self.output_preview = AnnotationPreview(self.appearance_settings, "output", 36)
         self.output_preview.setMinimumHeight(128)
         self.output_preview.setMinimumWidth(320)
         preview_box = QWidget(self.appearance_panel)
@@ -782,6 +935,7 @@ class ToolbarWidget(QWidget):
         preview_layout.addWidget(self.output_preview)
         appearance_outer.addWidget(preview_box)
         self.appearance_toggle = None
+        self.setting_changed.connect(self._remember_appearance_setting)
         self.setting_changed.connect(lambda *args: self.output_preview.refresh())
         self.crop_style_changed.connect(lambda *args: self.output_preview.refresh())
         self.color_changed.connect(lambda *args: self.output_preview.refresh())
@@ -890,6 +1044,11 @@ class ToolbarWidget(QWidget):
         self.edit_image_layout.setContentsMargins(0, 0, 0, 0)
         self.edit_image_layout.setSpacing(self.section_layout.horizontalSpacing())
         self.edit_image_layout.addStretch()
+        self.pair_top_row = QWidget(self)
+        self.pair_top_layout = QHBoxLayout(self.pair_top_row)
+        self.pair_top_layout.setContentsMargins(0, 0, 0, 0)
+        self.pair_top_layout.setSpacing(self.section_layout.horizontalSpacing())
+        self.pair_top_layout.addStretch()
         self.reflow(1100)
         self.apply_toolbar_shadow()
 
@@ -1035,14 +1194,14 @@ class ToolbarWidget(QWidget):
         elif tool == "pen":
             rows.add(26)
         elif tool == "text":
-            rows.update((3, 4, 5, 28, 29, 35, 36))
+            rows.update((3, 4, 5, 28, 29, 35, 36, 38))
         elif tool == "mosaic":
             rows.update((6, 7, 30))
             # 笔刷宽度仅在涂抹模式（自由笔刷）下生效。
             if self.mosaic_brush.isChecked():
                 rows.add(34)
         elif tool == "arrow":
-            rows.update((8, 25))
+            rows.update((8, 25, 37))
         elif tool == "crop":
             rows.add(9)
         elif tool == "rect":
@@ -1051,6 +1210,8 @@ class ToolbarWidget(QWidget):
             rows.update((11, 17, 18, 33))
         elif tool == "number":
             rows.update(self.sequence_rows)
+        elif tool == "zoom":
+            rows.update((39, 40, 41, 42, 43))
         if tool in ("pen", "rect", "ellipse", "arrow", "marker", "text"):
             rows.add(0)
         elif tool == "crop":
@@ -1063,6 +1224,13 @@ class ToolbarWidget(QWidget):
             widget.setVisible(name == kind)
         if kind:
             self.previews[kind].refresh()
+        has_presets = bool(tool and presets_for(tool))
+        self.preset_row.setVisible(has_presets)
+        if has_presets:
+            self._populate_annotation_presets(tool)
+        else:
+            with QSignalBlocker(self.preset_combo):
+                self.preset_combo.clear()
         # 同一个弹出面板只展示当前工具的参数，切换时保留各自的线宽。
         self._last_option_rows = set(rows)
         for index, widgets in enumerate(self.option_rows):
@@ -1093,6 +1261,7 @@ class ToolbarWidget(QWidget):
             "pen": "设置画笔线宽；可开启多段绘制连续画直线",
             "eraser": "设置橡皮擦直径",
             "number": "设置序号标记的形状、填充色、文字色与字号",
+            "zoom": "设置局部放大标注的放大倍数、镜片样式与不透明度",
             "picker": "预览取色放大镜与像素网格；取到的色值会设为当前标注颜色",
         }
         detail = (f"调整选中的{name}标注参数" if selection_mode and rows
@@ -1137,13 +1306,13 @@ class ToolbarWidget(QWidget):
         elif tool == "pen":
             rows.add(26)
         elif tool == "text":
-            rows.update((3, 4, 5, 28, 29, 35, 36))
+            rows.update((3, 4, 5, 28, 29, 35, 36, 38))
         elif tool == "mosaic":
             rows.update((6, 7, 30))
             if self.mosaic_brush.isChecked():
                 rows.add(34)
         elif tool == "arrow":
-            rows.update((8, 25))
+            rows.update((8, 25, 37))
         elif tool == "crop":
             rows.add(9)
         elif tool == "rect":
@@ -1152,6 +1321,8 @@ class ToolbarWidget(QWidget):
             rows.update((11, 17, 18, 33))
         elif tool == "number":
             rows.update(self.sequence_rows)
+        elif tool == "zoom":
+            rows.update((39, 40, 41, 42, 43))
         return rows
 
     # 「更多设置」弹层：宽度完全由当前可见内容决定，这里只做可用性上下限的夹取。
@@ -1191,6 +1362,10 @@ class ToolbarWidget(QWidget):
         panel.setMaximumHeight(16777215)
         layout.invalidate()
         layout.activate()
+        grid = panel.findChild(QGridLayout)
+        if grid is not None:
+            grid.invalidate()
+            grid.activate()
         margins = layout.contentsMargins()
         hint = layout.sizeHint()
         width = max(self.OPTIONS_PANEL_MIN_WIDTH,
@@ -1237,30 +1412,142 @@ class ToolbarWidget(QWidget):
         return row
 
     def reflow(self, width):
-        tool_order = [self.cursor_switch, self.options_button,
-                      self.tool_buttons["select"],
+        # 工具顺序 = 设置页「默认标注工具」顺序：插入图片在文字与橡皮擦之间，取色固定最后。
+        tool_order = [self.options_button, self.tool_buttons["select"],
+                      *(self.tool_buttons[key] for key in ("pen", "marker", "arrow")),
                       *(self.tool_buttons[key] for key in
-                        ("pen", "marker", "rect", "ellipse", "number", "text", "arrow",
-                                                 "mosaic", "eraser", "picker", "crop")
-                        if key != "crop" or not self.property("inline_edit"))]
+                        ("rect", "ellipse", "number", "text", "image")),
+                      *(self.tool_buttons[key] for key in
+                        ("zoom", "mosaic", "eraser", "crop")
+                        if key != "crop" or not self.property("inline_edit")),
+                      self.tool_buttons["picker"]]
         gap = self.tool_grid.horizontalSpacing()
         tool_widths = ([widget.width() for widget in tool_order] if self.property("inline_edit") else
                        [max(widget.sizeHint().width(), widget.minimumWidth())
                         for widget in tool_order])
         drawing_width = sum(tool_widths) + gap * (len(tool_order) - 1)
-        other_widths = [sum(button.sizeHint().width() for button in buttons) +
-                max(grid.horizontalSpacing(), 3) * (len(buttons) - 1)
-                        for grid, buttons in ((self.edit_grid, self.edit_buttons),
+        # 「显示鼠标」固定为输出组第一个；其余输出按钮顺序不变。
+        output_widgets = [self.cursor_switch, *self.output_buttons]
+        other_widths = [sum(widget.sizeHint().width() for widget in widgets) +
+                grid.horizontalSpacing() * (len(widgets) - 1)
+                        for grid, widgets in ((self.edit_grid, self.edit_buttons),
                                               (self.image_grid, self.image_buttons),
-                                              (self.output_grid, self.output_buttons))]
+                                              (self.output_grid, output_widgets))]
         margins = self.section_layout.contentsMargins()
         available = width - margins.left() - margins.right()
-        wide_layout = available >= drawing_width + sum(other_widths) + 3 * max(
-            self.section_layout.horizontalSpacing(), 12)
+        section_gap = self.section_layout.horizontalSpacing()
+        def grid_width(widgets, columns, grid):
+            if not widgets:
+                return 0
+            widths = [0] * columns
+            for index, widget in enumerate(widgets):
+                widths[index % columns] = max(widths[index % columns],
+                                               widget.sizeHint().width())
+            return sum(widths) + grid.horizontalSpacing() * (columns - 1)
+
+        # 真正的一行判断用图像旋转/输出“组内单行”的自然宽度；
+        # 不能用它们已经换行后的窄宽度，否则 2560px 会被误判成可单行，
+        # 再在单行里把两个小组强行压成两行。
+        natural_side_width = (
+            other_widths[0]
+            + grid_width(self.image_buttons, 8, self.image_grid)
+            + grid_width(output_widgets, 8, self.output_grid))
+        wide_layout = available >= (self.sections[0].sizeHint().width()
+                                    + natural_side_width + 3 * section_gap)
+
+        # 四组同一行：允许组内换行（图像旋转 8/4 列、输出 8/4 列），
+        # 按实际内容挑能放下的最少内部行数，而不是要求每组内部也全是一行。
+        compact_row_layout = False
+        compact_columns = 0
+        compact_tool_width = 0
+        compact_image_columns = 4
+        compact_output_columns = 4
+        edit_columns = 6
+        output_columns = (len(output_widgets) if self.property("inline_edit")
+                          else 3 if width < 500 else len(output_widgets))
+        if not self.property("inline_edit") and not wide_layout:
+            compact_edit = grid_width(self.edit_buttons, 6, self.edit_grid)
+            compact_image_8 = grid_width(self.image_buttons, 8, self.image_grid)
+            compact_output_8 = grid_width(output_widgets, 8, self.output_grid)
+            compact_image_4 = grid_width(self.image_buttons, 4, self.image_grid)
+            compact_output_4 = grid_width(output_widgets, 4, self.output_grid)
+            # 优先保证「图像旋转 / 输出」两个小组内部单行；
+            # 只有放不下时才退到 4 列，由这两个小组内部换行。
+            for candidate in range(len(tool_order), 1, -1):
+                tool_rows = (len(tool_order) + candidate - 1) // candidate
+                if tool_rows > 2:
+                    continue
+                tool_width = grid_width(tool_order, candidate, self.tool_grid)
+                total = (tool_width + compact_edit + compact_image_8 + compact_output_8
+                         + 3 * section_gap)
+                if total <= available:
+                    compact_row_layout = True
+                    compact_columns = candidate
+                    compact_tool_width = tool_width
+                    compact_image_columns = 8
+                    compact_output_columns = 8
+                    break
+            if not compact_row_layout:
+                for candidate in range(len(tool_order), 1, -1):
+                    tool_rows = (len(tool_order) + candidate - 1) // candidate
+                    if tool_rows > 2:
+                        continue
+                    tool_width = grid_width(tool_order, candidate, self.tool_grid)
+                    total = (tool_width + compact_edit + compact_image_4 + compact_output_4
+                             + 3 * section_gap)
+                    if total <= available:
+                        compact_row_layout = True
+                        compact_columns = candidate
+                        compact_tool_width = tool_width
+                        compact_image_columns = 4
+                        compact_output_columns = 4
+                        break
+
+        # 图像旋转组可用 8 列（一排）或 4 列（两排）；大窗口先用 4 列尝试
+        # 把编辑/旋转/输出合并到第二行，避免多占一整行。
+        image_width_8 = grid_width(self.image_buttons, 8, self.image_grid)
+        image_width_4 = grid_width(self.image_buttons, 4, self.image_grid)
+        side_base = other_widths[0] + other_widths[2]
+        side_width_8 = side_base + image_width_8 + 2 * section_gap
+        side_width_4 = side_base + image_width_4 + 2 * section_gap
+        # 2×2：标注 + 编辑一行，图像旋转 + 输出一行。
+        pair_8 = (not self.property("inline_edit") and not wide_layout
+                  and available >= max(drawing_width + other_widths[0] + section_gap,
+                                       image_width_8 + other_widths[2] + section_gap))
+        pair_4 = (not self.property("inline_edit") and not wide_layout
+                  and available >= max(drawing_width + other_widths[0] + section_gap,
+                                       image_width_4 + other_widths[2] + section_gap))
+        pair_layout = pair_8 or pair_4
+        two_row_8 = (not self.property("inline_edit") and not wide_layout and not pair_layout
+                     and available >= max(drawing_width, side_width_8))
+        two_row_4 = (not self.property("inline_edit") and not wide_layout and not pair_layout
+                     and available >= max(drawing_width, side_width_4))
+        two_row_layout = two_row_8 or two_row_4
+        if pair_8 or two_row_8:
+            image_columns = 8
+        elif pair_layout or two_row_layout:
+            image_columns = 4
+        else:
+            image_columns = (8 if available >= other_widths[0] + other_widths[1] +
+                             self.section_layout.horizontalSpacing()
+                             else 4 if width >= 500 else 3)
+        if compact_row_layout:
+            # 四组同处一行时优先保证图像旋转/输出组内单行，不能被
+            # 2×2/三行分支改写列数。
+            pair_layout = False
+            two_row_layout = False
+            image_columns = compact_image_columns
+            output_columns = compact_output_columns
         if self.property("inline_edit"):
             positions = [(0, 0, 1), (2, 0, 1), (2, 1, 1), (1, 0, 1)]
         elif wide_layout:
             positions = [(0, 0, 1), (0, 1, 1), (0, 2, 1), (0, 3, 1)]
+        elif compact_row_layout:
+            positions = [(0, 0, 1), (0, 1, 1), (0, 2, 1), (0, 3, 1)]
+        elif pair_layout:
+            positions = [(0, 0, 6), (1, 0, 6)]
+        elif two_row_layout:
+            positions = [(0, 0, 7), (1, 0, 7)]
         elif width >= 1200:
             positions = [(0, 0, 7), (1, 0, 7), (2, 0, 7)]
         elif width >= 875:
@@ -1271,6 +1558,8 @@ class ToolbarWidget(QWidget):
                          if wide_layout else available)
         if self.property("inline_edit"):
             columns = len(tool_order)
+        elif compact_row_layout:
+            columns = compact_columns
         else:
             columns = 2
             for count in range(2, len(tool_order) + 1):
@@ -1278,15 +1567,26 @@ class ToolbarWidget(QWidget):
                              for column in range(count)) + gap * (count - 1)
                 if needed <= drawing_space:
                     columns = count
-        self.sections[0].setMinimumWidth(0)
-        image_columns = (8 if available >= other_widths[0] + other_widths[1] +
-                 self.section_layout.horizontalSpacing() else 4 if width >= 500 else 3)
-        mode = (tuple(positions), columns, image_columns)
+        # 两行/2×2 模式下必须给标注组完整宽度，否则 QGridLayout 会把
+        # 绘图按钮列压窄、造成工具被裁切。四组一行时若标注组需要两行，
+        # 只能按实际列布局宽度占位——用单行 drawing_width 会挤压右侧组并重叠。
+        if compact_row_layout:
+            annotation_min_width = compact_tool_width
+        elif wide_layout and columns < len(tool_order):
+            annotation_min_width = grid_width(tool_order, columns, self.tool_grid)
+        elif wide_layout or pair_layout or two_row_layout:
+            annotation_min_width = drawing_width
+        else:
+            annotation_min_width = 0
+        self.sections[0].setMinimumWidth(annotation_min_width)
+        mode = (tuple(positions), columns, image_columns, edit_columns, output_columns)
         if mode == self._layout_mode:
             return
         self._layout_mode = mode
         trailing_column = (None if self.property("inline_edit") else
-                   3 if wide_layout else 6 if width >= 1200 else 4 if width >= 875 else 0)
+                   3 if wide_layout or compact_row_layout else 6 if pair_layout
+                   else 6 if two_row_layout or width >= 1200
+                   else 4 if width >= 875 else 0)
         for index in range(7):
             self.section_layout.setColumnStretch(index, int(index == trailing_column))
         while self.tool_grid.count():
@@ -1294,19 +1594,40 @@ class ToolbarWidget(QWidget):
         for index, button in enumerate(tool_order):
             row, column = divmod(index, columns)
             self.tool_grid.addWidget(button, row, column, Qt.AlignVCenter)
-        for grid, buttons, count in ((self.edit_grid, self.edit_buttons, 3 if width < 500 else 5),
+        for grid, widgets, count in ((self.edit_grid, self.edit_buttons, edit_columns),
                          (self.image_grid, self.image_buttons, image_columns),
-                 (self.output_grid, self.output_buttons,
-                  3 if width < 500 else len(self.output_buttons))):
-            for index, button in enumerate(buttons):
-                grid.addWidget(button, index // count, index % count, Qt.AlignVCenter)
+                 (self.output_grid, output_widgets, output_columns)):
+            for index, widget in enumerate(widgets):
+                grid.addWidget(widget, index // count, index % count, Qt.AlignVCenter)
         for container in self.sections:
             self.section_layout.removeWidget(container)
+            self.pair_top_layout.removeWidget(container)
         self.section_layout.removeWidget(self.edit_image_row)
-        for container in self.sections[1:3]:
+        self.section_layout.removeWidget(self.pair_top_row)
+        for container in self.sections[1:]:
             self.edit_image_layout.removeWidget(container)
-        if self.property("inline_edit") or wide_layout or width < 875:
+        if self.property("inline_edit") or wide_layout or compact_row_layout or width < 875:
             for container, (row, column, span) in zip(self.sections, positions):
+                self.section_layout.addWidget(container, row, column, 1, span,
+                                              Qt.AlignLeft | Qt.AlignTop)
+        elif pair_layout:
+            for container in self.sections[:2]:
+                self.pair_top_layout.insertWidget(self.pair_top_layout.count() - 1,
+                                                   container, 0, Qt.AlignTop)
+            for container in self.sections[2:]:
+                self.edit_image_layout.insertWidget(self.edit_image_layout.count() - 1,
+                                                     container, 0, Qt.AlignTop)
+            for container, (row, column, span) in zip(
+                    (self.pair_top_row, self.edit_image_row), positions):
+                self.section_layout.addWidget(container, row, column, 1, span,
+                                              Qt.AlignLeft | Qt.AlignTop)
+        elif two_row_layout:
+            # 第二行一次容纳编辑、图像旋转、输出三个组，避免多占一行。
+            for container in self.sections[1:]:
+                self.edit_image_layout.insertWidget(self.edit_image_layout.count() - 1,
+                                                    container, 0, Qt.AlignTop)
+            for container, (row, column, span) in zip(
+                    (self.sections[0], self.edit_image_row), positions):
                 self.section_layout.addWidget(container, row, column, 1, span,
                                               Qt.AlignLeft | Qt.AlignTop)
         else:
@@ -1416,6 +1737,7 @@ class ToolbarWidget(QWidget):
             "vertical": "沿垂直方向翻转截图及标注",
             "custom_size": "按指定宽高重设选区，中心位置保持不变，并立即按新尺寸重新载入该区域画面",
             "recapture": "放弃当前画面并重新进入截图，可等画面变化后再框选同一区域",
+            "insert_image": "把本地图片插入画布，作为一个可移动、可缩放的标注；过大时按画布比例缩小",
         }
         # 2026-10-11：统一走 editor_binding() —— 它同时处理「贴图=空格」（不要用全局 paste 的 F3，
         # 会误导用户）与「保存 S / 仅复制 Y / 另存为 A / 撤销 Ctrl+Z / 重做 Ctrl+Y / 复位缩放 Ctrl+0」，
@@ -1532,14 +1854,46 @@ class ToolbarWidget(QWidget):
                     "text_strikethrough": self.text_strikethrough,
                     "text_background_enabled": self.text_background_enabled,
                     "rect_fill_enabled": self.rect_fill_enabled,
+                    "rect_corner_enabled": self.rect_corner_enabled,
                     "ellipse_fill_enabled": self.ellipse_fill_enabled,
                     "mosaic_brush": self.mosaic_brush,
-                    "eraser_brush": self.eraser_brush}.get(key)
+                    "eraser_brush": self.eraser_brush,
+                    "eraser_erase_base": self.eraser_erase_base}.get(key)
         if checkbox is not None:
             with QSignalBlocker(checkbox):
                 checkbox.setChecked(bool(value))
             if key in ("mosaic_brush", "eraser_brush"):
                 self._refresh_option_rows()
+        elif key in self.tool_color_buttons:
+            self.sync_tool_color(key, value)
+        elif key == "crop_color":
+            self.crop_color.set_color(value)
+        elif key in TOOL_WIDTH_KEYS.values():
+            tool = key[:-6]
+            self.tool_widths[tool] = int(value)
+            if self._preset_tool() == tool:
+                with QSignalBlocker(self.pen_width):
+                    self.pen_width.setValue(int(value))
+                self.pen_width_label.setText(f"{int(value)} px")
+        elif key in ("rect_style", "ellipse_style", "arrow_style",
+                     "arrow_curve_direction", "mosaic_mode"):
+            self.set_choice(key, value)
+        elif key == "rect_corner_radius":
+            with QSignalBlocker(self.rect_corner_radius):
+                self.rect_corner_radius.setValue(int(value))
+            self.rect_corner_radius_label.setText(f"{int(value)} px")
+        elif key == "marker_opacity":
+            with QSignalBlocker(self.marker_opacity):
+                self.marker_opacity.setValue(int(value))
+            self.marker_opacity_label.setText(f"{int(value)}%")
+        elif key == "mosaic_size":
+            with QSignalBlocker(self.mosaic_size):
+                self.mosaic_size.setValue(int(value))
+            self.mosaic_size_label.setText(f"{int(value)} px")
+        elif key == "crop_width":
+            with QSignalBlocker(self.crop_width):
+                self.crop_width.setValue(int(value))
+            self.crop_width_label.setText(f"{int(value)} px")
         elif key == "text_background":
             self.text_background.set_color(value)
         elif key == "mosaic_width":
@@ -1556,8 +1910,6 @@ class ToolbarWidget(QWidget):
             self.rect_fill_color.set_color(value)
         elif key == "ellipse_fill_color":
             self.ellipse_fill_color.set_color(value)
-        elif key == "text_color":
-            self.sync_tool_color("text_color", value)
         elif key == "font_size":
             with QSignalBlocker(self.font_size):
                 self.font_size.setValue(int(value))
@@ -1567,11 +1919,41 @@ class ToolbarWidget(QWidget):
         elif key == "text_height":
             with QSignalBlocker(self.text_height):
                 self.text_height.setValue(int(value))
+        elif key in ("text_background_padding", "text_background_radius",
+                     "text_background_opacity"):
+            control = {"text_background_padding": self.text_background_padding,
+                       "text_background_radius": self.text_background_radius,
+                       "text_background_opacity": self.text_background_opacity}[key]
+            with QSignalBlocker(control):
+                control.setValue(int(value))
+            if key == "text_background_opacity":
+                self.text_background_opacity_label.setText(f"{int(value)}%")
+        elif key in ("zoom_annotation_style",):
+            self.set_choice("zoom_annotation_style", value)
+        elif key == "zoom_annotation_color":
+            self.zoom_color.set_color(value)
+        elif key == "zoom_annotation_opacity":
+            with QSignalBlocker(self.zoom_opacity):
+                self.zoom_opacity.setValue(int(value))
+            self.zoom_opacity_label.setText(f"{int(value)}%")
+        elif key == "zoom_annotation_max_size":
+            with QSignalBlocker(self.zoom_max_size):
+                self.zoom_max_size.setValue(int(value))
+        elif key == "zoom_annotation_factor":
+            with QSignalBlocker(self.zoom_factor):
+                self.zoom_factor.setValue(int(value))
         elif key == "font" and value:
             with QSignalBlocker(self.font):
                 self.font.setCurrentFont(QFont(value))
         elif key == "text_alignment":
             self.set_choice("text_alignment", value)
+        # 外部入口（设置页/应用刷新）可能直接改配置而不发 setting_changed：
+        # 这里按当前工具刷新预设下拉的匹配项，避免显示与实际值不符的旧预设。
+        if not self._applying_preset:
+            tool = self._preset_tool()
+            if tool and key in {item for _preset_id, _label, values in presets_for(tool)
+                                for item in values}:
+                self._populate_annotation_presets(tool)
 
     def _apply_sequence_preset(self, preset_key):
         """套用序号预设组合，同步本地控件与画布设置。"""
@@ -1588,6 +1970,61 @@ class ToolbarWidget(QWidget):
             elif key == "sequence_text_color":
                 self.sequence_text.set_color(value)
         self.refresh_previews()
+
+    def _preset_tool(self):
+        """返回当前要展示预设的工具；选择工具下取单选标注的类型。"""
+        return self.selected_tool if self.current_tool == "select" else self.current_tool
+
+    def _populate_annotation_presets(self, tool):
+        """按工具重填预设下拉，并按当前配置反选匹配项。"""
+        presets = presets_for(tool)
+        with QSignalBlocker(self.preset_combo):
+            self.preset_combo.clear()
+            if not presets:
+                return
+            self.preset_combo.addItem("自定义", "custom")
+            for preset_id, label, _values in presets:
+                self.preset_combo.addItem(label, preset_id)
+            matched = matching_preset(tool, self.settings)
+            index = self.preset_combo.findData(matched)
+            self.preset_combo.setCurrentIndex(index if index >= 0 else 0)
+
+    def _apply_annotation_preset(self, preset_id):
+        """套用预设：只写预设包含的现有配置键，随后仍可逐项微调。"""
+        tool = self._preset_tool()
+        values = preset_values(tool, preset_id) if preset_id else {}
+        if not values:
+            return
+        self._applying_preset = True
+        self.settings_batch.emit(True)
+        try:
+            for key, value in values.items():
+                self.sync_setting(key, value)
+                if key.startswith("crop_"):
+                    self.crop_style_changed.emit(key, value)
+                else:
+                    self.setting_changed.emit(key, value)
+        finally:
+            self._applying_preset = False
+            # 结束批量：期间确有参数落到画布时，由画布合并成一个撤销点。
+            self.settings_batch.emit(False)
+        self.refresh_previews()
+        get_logger().debug(
+            "套用标注样式预设: 工具=%s 预设=%s 项数=%d", tool, preset_id, len(values))
+
+    def _mark_annotation_preset_custom(self, key=None, _value=None):
+        """手动改任一项后把预设下拉切回“自定义”，避免显示与实际值不一致。"""
+        tool = self._preset_tool()
+        if self._applying_preset or not key or not tool:
+            return
+        keys = {item for _preset_id, _label, values in presets_for(tool)
+                for item in values}
+        if key not in keys:
+            return
+        with QSignalBlocker(self.preset_combo):
+            index = self.preset_combo.findData("custom")
+            if index >= 0:
+                self.preset_combo.setCurrentIndex(index)
 
     def toggle_appearance_menu(self, checked=False):
         if not checked:
@@ -1660,7 +2097,20 @@ class ToolbarWidget(QWidget):
         if app is not None:
             app.removeEventFilter(self)
 
+    def _remember_appearance_setting(self, key, value):
+        """记录外观参数到预览副本（不触碰共享配置）。"""
+        if key in self.appearance_controls:
+            self.appearance_settings[key] = value
+
+    def set_appearance_preview(self, key, value):
+        """外部入口改外观参数时同步预览副本并立即重绘。"""
+        if key in self.appearance_controls:
+            self.appearance_settings[key] = value
+            self.output_preview.refresh()
+
     def sync_appearance_controls(self, settings):
+        self.appearance_settings.update(
+            {key: settings.get(key, DEFAULTS[key]) for key in self.appearance_controls})
         for key, control in self.appearance_controls.items():
             value = settings.get(key, DEFAULTS[key])
             if isinstance(control, ColorButton):

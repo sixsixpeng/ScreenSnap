@@ -10,7 +10,8 @@ from config.config_manager import DEFAULTS
 from core.constants import CHECKER_TILE_SIZE
 from core.screen_capture import qimage_to_pillow, to_qimage
 from editor.annotation_canvas import mosaic_image
-from editor.annotation_items import shape, text_item, AnnotationSequenceItem
+from editor.annotation_items import (shape, text_item, AnnotationSequenceItem,
+                                     AnnotationZoomItem)
 from editor.image_effects import apply_output_effects
 
 # 示例文字同时包含中英文与数字，便于比较不同字体的观感。
@@ -137,7 +138,10 @@ class AnnotationPreview(QWidget):
         elif self.kind == "arrow":
             scene.addItem(shape("arrow", QPointF(width * 0.12, height * 0.72),
                                 QPointF(width * 0.88, height * 0.28),
-                                settings.get("arrow_color", color), settings["arrow_width"], settings["arrow_style"]))
+                                settings.get("arrow_color", color), settings["arrow_width"],
+                                settings["arrow_style"],
+                                arrow_curve_direction=settings.get(
+                                    "arrow_curve_direction", "right")))
         elif self.kind == "rect":
             scene.addItem(shape("rect", QPointF(width * 0.29, height * 0.21),
                                 QPointF(width * 0.71, height * 0.79),
@@ -294,6 +298,21 @@ class AnnotationPreview(QWidget):
                     settings.get("font", ""))
                 item.setPos(offset[0], offset[1])
                 scene.addItem(item)
+        elif self.kind == "zoom":
+            # 局部放大预览：使用真实 ZoomAnnotationItem，保证圆形/矩形镜片与云朵尾巴所见即所得。
+            source_rect = QRectF(width * 0.08, height * 0.18,
+                                 max(24, width * 0.24), max(24, height * 0.26))
+            source = background.copy(source_rect.toRect())
+            zoom = AnnotationZoomItem(
+                QPixmap.fromImage(source), source_rect,
+                settings.get("zoom_annotation_factor", 2),
+                settings.get("zoom_annotation_style", "circle"),
+                settings.get("zoom_annotation_color", "#00b8a9"),
+                max(1, int(settings.get("crop_width", 2))),
+                int(settings.get("zoom_annotation_opacity", 100)),
+                int(settings.get("zoom_annotation_max_size", 480)))
+            zoom.setPos(width * 0.44, height * 0.08)
+            scene.addItem(zoom)
         elif self.kind == "picker":
             # 取色工具预览：方形放大镜（可叠加像素网格）+ 采样点十字 + 取到的色值与十六进制色号。
             # 2026-10-16：镜片由圆形改为**方形**，与截图遮罩上的放大镜（magnifier_widget）口径一致。

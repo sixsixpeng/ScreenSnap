@@ -18,8 +18,8 @@ from PySide6.QtWidgets import (QWidget, QApplication, QDialog, QFileDialog, QDia
                                QFrame, QGraphicsView, QMenu, QToolButton, QLabel)
 
 from core.dpi import DisplayMapper
-from core.image_io import (matches_saved_format, normalize_save_as_path, save_as_filter,
-                           save_image, saved_extension)
+from core.image_io import (IMAGE_FILE_FILTER, matches_saved_format, normalize_save_as_path,
+                           save_as_filter, save_image, saved_extension)
 from core.path_utils import resolved_dir, save_as_directory
 from core.screen_capture import to_qimage
 from core import qimage_to_pillow
@@ -427,9 +427,12 @@ class InlineEditor(QWidget):
         self.view = view
         self.rect = QRect(rect)
         self.settings = view.settings
+        # 外观参数默认只影响本次输出，不改共享配置（设置页与其它编辑器共用同一份配置）。
+        self.appearance_overrides = {}
         self.round_corners = bool(self.settings.get("editor_image_round_corners", True))
         self.corner_radius = self.settings.get("editor_image_corner_radius", 16)
         self.last_path = None
+        self._image_dialog_open = False
         self.suppress_save_notification = False
         self.resizing_region = False
         # 工具栏拖放与临时隐藏：都只影响本次原地编辑，不落盘。
@@ -441,6 +444,8 @@ class InlineEditor(QWidget):
         self.toolbar_handle = None
         self.toolbar = ToolbarWidget(self.settings["pen_color"], self.settings,
                          show_capture_actions=True)
+        # 工具栏批量套用（样式预设等）期间把多次参数变更合并成一个撤销点。
+        self.toolbar.settings_batch.connect(self._on_settings_batch)
         self.toolbar.setObjectName("inlineCaptureToolbar")
         self.toolbar.setToolTip(rich_tooltip(
             "原地编辑工具栏",
@@ -466,6 +471,8 @@ class InlineEditor(QWidget):
             # 2026-10-11：Ctrl+S 也走画布（挂窗口快捷键会因「哪块屏 / 哪种选区入口创建」而漏）。
             self.canvas.save_requested.connect(
                 lambda: self.toolbar.command.emit("save"))
+            self.canvas.arrow_curve_toggle.connect(
+                self.toggle_arrow_curve_direction)
             get_logger().debug("原地编辑器 Space 贴图已接线（canvas → 工具栏 paste）")
         # 2026-10-11 用户要求：另存为在两个编辑器都要有（默认单键 A，走工具栏同一条命令）。
         # 2026-10-11（faulthandler 取证：test_capture 全量卡死；与 D8 ④ 同款结论）：「A」是**双语义**键
@@ -555,6 +562,7 @@ class InlineEditor(QWidget):
             if (QGuiApplication.modalWindow() is None and
                 QApplication.activePopupWidget() is None) else None)
         self.canvas.color_picked.connect(self.apply_picked_color)
+        self.canvas.image_insert_requested.connect(self.insert_image_at)
         self.canvas.selection_requested.connect(self.toolbar.tool_buttons["select"].click)
         self.canvas.selected_annotation_changed.connect(self._on_selected_annotation_changed)
         self.canvas.setting_changed.connect(self.apply_canvas_setting)
@@ -796,8 +804,10 @@ class InlineEditor(QWidget):
         if not hasattr(self, "output_edit_spacer"):
             self.output_edit_spacer = QWidget(self.toolbar)
             self.output_edit_spacer.setFixedSize(8, INLINE_BUTTON_SIZE)
-        widgets = [*output_buttons, self.output_edit_spacer,
-                   *self.toolbar.edit_buttons]
+        # 显示鼠标已移入输出组：inline 的合并布局必须重新收编它，
+        # 否则它仍停在旧 geometry 上，会与「仅复制」等输出按钮重叠。
+        widgets = [self.toolbar.cursor_switch, *output_buttons,
+                   self.output_edit_spacer, *self.toolbar.edit_buttons]
         for column, widget in enumerate(widgets):
             self.toolbar.output_grid.addWidget(widget, 0, column, Qt.AlignVCenter)
 
@@ -828,6 +838,9 @@ class InlineEditor(QWidget):
         self.toolbar.section_layout.activate()
         self.toolbar.sync_height()
         self.toolbar.adjustSize()
+        # 上面的固定宽度/调整尺寸可能再次触发布局；必须在最终尺寸落定后
+        # 再把输出组收成一行，否则窄选区会退回 3 行并让按钮/显示鼠标错位。
+        self.arrange_inline_output_edit()
         margin = 8
         toolbar_size = self.toolbar.sizeHint().expandedTo(self.toolbar.minimumSizeHint())
         toolbar_size.setWidth(min(available, max(toolbar_size.width(), row_width)))
@@ -994,9 +1007,17 @@ class InlineEditor(QWidget):
             number += 1
         return path
 
+    def output_settings(self):
+        """输出使用的配置：叠加本次原地编辑内的外观覆盖（不写回共享配置）。"""
+        if not self.appearance_overrides:
+            return self.settings
+        return {**self.settings, **self.appearance_overrides}
+
     def output_image(self):
-        return apply_output_effects(self.canvas.render_image(), self.settings,
-                                    self.round_corners, self.corner_radius)
+        settings = self.output_settings()
+        return apply_output_effects(self.canvas.render_image(), settings,
+                                    bool(settings.get("editor_image_round_corners", True)),
+                                    settings.get("editor_image_corner_radius", 16))
 
     def save_as(self):
         """另存为：可选目录与文件名（默认定位上次目录、预填当前命名），并记住该目录。
@@ -1067,22 +1088,55 @@ class InlineEditor(QWidget):
         self.canvas.setDragMode(QGraphicsView.RubberBandDrag if tool == "select" else QGraphicsView.NoDrag)
         self.canvas.viewport().update()
         self.toolbar.set_active_tool(tool, self.last_color_tool)
-        self.set_annotation_setting("annotation_tool", tool)
+        if tool != "image":
+            self.set_annotation_setting("annotation_tool", tool)
+
+    def insert_image_at(self, point):
+        """图片工具点击画布后选择文件，并把图片中心放到点击位置。"""
+        if self._image_dialog_open:
+            return
+        self._image_dialog_open = True
+        try:
+            path, _ = QFileDialog.getOpenFileName(
+                self, "插入图片", "",
+                IMAGE_FILE_FILTER + ";;所有文件 (*)")
+            if path:
+                self.canvas.add_pixmap_file(path, point)
+        finally:
+            self._image_dialog_open = False
+
+    def toggle_arrow_curve_direction(self):
+        """快捷键切换曲线箭头弯向；有选中箭头时只改对象，否则改后续默认值。"""
+        selected = self.canvas.selected_items_for_tool("arrow")
+        current = (getattr(selected[0], "arrow_curve_direction", "right")
+                   if selected else self.settings.get("arrow_curve_direction", "right"))
+        value = "left" if current == "right" else "right"
+        self.set_annotation_setting("arrow_curve_direction", value)
+        self.toolbar.sync_setting("arrow_curve_direction", value)
+        get_logger().info("原地编辑器切换曲线箭头弯曲方向: %s（对象级=%s）",
+                          value, bool(selected))
 
     def set_pen_color(self, color):
+        from ui.widgets.color_button import record_recent_color
+
         tool = (self.canvas.tool if self.canvas.tool in
             ("pen", "rect", "ellipse", "arrow", "marker", "text")
             else self.last_color_tool)
         key = "pen_color" if tool == "pen" else f"{tool}_color"
-        self.settings[key] = color
-        self.toolbar.sync_tool_color(key, color)
-        self.canvas.set_selected_color(color)
+        object_local = bool(self.canvas.selected_items_for_tool(tool))
+        if not object_local:
+            self.settings[key] = color
+        # 取色/颜色按钮只改该工具类型的选中标注，并让预设下拉按新颜色回到匹配项。
+        self.toolbar.sync_setting(key, color)
+        self.canvas.set_selected_color(color, tool)
         self.canvas.refresh_tool_cursor()
         self.canvas.update()
         self.toolbar.set_active_tool(self.canvas.tool, self.last_color_tool)
-        self.view.tool_color_changed.emit(tool, color)
-        if tool == "pen":
-            self.view.pen_color_changed.emit(color)
+        if not object_local:
+            self.view.tool_color_changed.emit(tool, color)
+            if tool == "pen":
+                self.view.pen_color_changed.emit(color)
+        record_recent_color(color)
 
     def _picked_color_text(self, color):
         """InlineEditor 的取色复制文本（共享实现见模块级 picked_color_text）。"""
@@ -1106,17 +1160,36 @@ class InlineEditor(QWidget):
         """选中标注类型变化时，让工具栏「更多设置」展示该类型专属参数。"""
         self.toolbar.set_selected_tool(tool or None)
 
+    def _on_settings_batch(self, active):
+        """工具栏批量套用期间合并画布撤销点。"""
+        if active:
+            self.canvas.begin_history_batch()
+        else:
+            self.canvas.end_history_batch()
+
     def set_annotation_setting(self, key, value):
         from config.config_manager import TOOL_WIDTH_KEYS
+        from editor.editor_window import (OUTPUT_APPEARANCE_KEYS,
+                                          annotation_object_tool_for_key)
+
+        # 外观参数：默认只改本次输出；勾选同步后才写入共享配置。
+        local_output_only = (key in OUTPUT_APPEARANCE_KEYS
+                             and not self.settings.get(
+                                 "editor_output_sync_default", False))
+        object_tool = annotation_object_tool_for_key(key)
+        object_local = bool(object_tool and
+                            self.canvas.selected_items_for_tool(object_tool))
+        if local_output_only:
+            self.appearance_overrides[key] = value
+            self.toolbar.set_appearance_preview(key, value)
+        elif not object_local:
+            self.settings[key] = value
+            self.canvas.settings[key] = value
         # 2026-10-12：填充色与线色**各自独立** ✓（原先这里会让填充色跟随线色 ✗ 已移除 ✓）
-        self.settings[key] = value
-        self.canvas.settings[key] = value
         if key in self.toolbar.tool_color_buttons:
             self.toolbar.sync_tool_color(key, value)
-            tool = (self.canvas.selected_annotation_tool() if self.canvas.tool == "select"
-                    else self.canvas.tool)
-            if key == f"{tool}_color":
-                self.canvas.set_selected_color(value)
+            # 按颜色键对应的工具过滤，不能用当前画布工具（切工具后旧选中项会被误染）。
+            self.canvas.set_selected_color(value, key[:-6])
             # 当前工具光标颜色跟随该工具的取色项变化即时刷新。
             self.canvas.refresh_tool_cursor()
         if key == "editor_image_round_corners":
@@ -1130,20 +1203,39 @@ class InlineEditor(QWidget):
         if key in ("editor_toolbar_shadow_enabled", "editor_toolbar_shadow_color",
                    "editor_toolbar_shadow_strength"):
             self.toolbar.apply_toolbar_shadow()
+        if key in ("zoom_annotation_color", "zoom_annotation_style"):
+            self.canvas.refresh_tool_cursor()
         if key in TOOL_WIDTH_KEYS.values():
-            self.canvas.set_selected_width(value)
+            self.canvas.set_selected_width(value, key[:-6])
         elif key in ("rect_style", "ellipse_style"):
-            self.canvas.set_selected_line_style(value)
+            self.canvas.set_selected_line_style(value, key[:-6])
+        elif key == "arrow_style":
+            self.canvas.set_selected_arrow_style(value)
+        elif key == "arrow_curve_direction":
+            self.canvas.set_selected_arrow_curve_direction(value)
+        elif key in ("text_bold", "text_italic", "text_underline", "text_strikethrough"):
+            self.canvas.set_selected_text_format(
+                {key: bool(value)} if object_local else None)
         elif key in ("rect_fill_enabled", "rect_fill_opacity", "rect_fill_color"):
-            self.canvas.set_selected_fill(
-                "rect", self.settings.get("rect_fill_enabled", False),
-                self.settings.get("rect_fill_opacity", 35),
-                self.settings.get("rect_fill_color"))
+            self.canvas.set_selected_fill_property("rect", key, value)
         elif key in ("ellipse_fill_enabled", "ellipse_fill_opacity", "ellipse_fill_color"):
-            self.canvas.set_selected_fill(
-                "ellipse", self.settings.get("ellipse_fill_enabled", False),
-                self.settings.get("ellipse_fill_opacity", 35),
-                self.settings.get("ellipse_fill_color"))
+            self.canvas.set_selected_fill_property("ellipse", key, value)
+        elif key == "marker_opacity":
+            self.canvas.set_selected_marker_opacity(value)
+        elif key in ("zoom_annotation_factor", "zoom_annotation_style",
+                     "zoom_annotation_color", "zoom_annotation_opacity",
+                     "zoom_annotation_max_size"):
+            self.canvas.set_selected_zoom_settings(**{key: value})
+        elif key in ("rect_corner_enabled", "rect_corner_radius"):
+            if object_local:
+                if key == "rect_corner_enabled":
+                    self.canvas.set_selected_rect_corner(enabled=bool(value))
+                else:
+                    self.canvas.set_selected_rect_corner(radius=int(value))
+        elif key in ("sequence_shape", "sequence_fill_color", "sequence_text_color",
+                     "sequence_font_size"):
+            if object_local:
+                self.canvas.set_selected_sequence_settings(**{key: value})
         elif key == "font":
             self.canvas.set_selected_font(value)
         elif key == "font_size":
@@ -1152,10 +1244,35 @@ class InlineEditor(QWidget):
             self.canvas.set_selected_text_width(value)
         elif key == "text_height":
             self.canvas.set_selected_text_height(value)
+        elif key == "text_background_enabled":
+            self.canvas.set_selected_text_background_style(enabled=bool(value))
+        elif key == "text_background":
+            self.canvas.set_selected_text_background_style(color=value)
+        elif key in ("text_background_padding", "text_background_radius",
+                     "text_background_opacity"):
+            self.canvas.set_selected_text_background(**{key: value})
         elif key == "text_alignment":
-            self.canvas.text_alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
-                                          "right": Qt.AlignRight}[value]
+            if object_local:
+                self.canvas.set_selected_text_alignment(value)
+            else:
+                self.canvas.text_alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
+                                              "right": Qt.AlignRight}[value]
         self.canvas.update()
+        # 外观参数与独立编辑器一致：默认只影响当前输出，勾选同步后才写回默认配置。
+        if key == "editor_output_sync_default" and value:
+            for appearance_key in OUTPUT_APPEARANCE_KEYS:
+                synced = self.appearance_overrides.get(
+                    appearance_key, self.settings.get(appearance_key))
+                self.settings[appearance_key] = synced
+                self.canvas.settings[appearance_key] = synced
+                self.view.session.views[0].annotation_setting_changed.emit(
+                    appearance_key, synced)
+            self.appearance_overrides.clear()
+            get_logger().debug("原地编辑输出外观已同步为默认配置: 项数=%d",
+                               len(OUTPUT_APPEARANCE_KEYS))
+        if local_output_only or object_local:
+            # 对象级编辑不写共享默认配置，也不需要设置页持久化。
+            return
         self.view.session.views[0].annotation_setting_changed.emit(key, value)
 
     def set_crop_style(self, key, value):
@@ -1164,6 +1281,11 @@ class InlineEditor(QWidget):
         elif key == "crop_width":
             self.canvas.crop_width = value
         self.canvas.viewport().update()
+        # 与独立编辑器一致：裁剪框样式也要经遮罩转发给应用持久化，
+        # 否则样式预设只改本次画布、设置页与下次新建仍是旧值。
+        views = getattr(getattr(self, "view", None), "session", None)
+        if views is not None and views.views:
+            views.views[0].annotation_setting_changed.emit(key, value)
 
     def execute(self, action):
         if action in ("undo", "redo", "reset"):
@@ -1178,6 +1300,9 @@ class InlineEditor(QWidget):
         elif action in ("left", "right", "half", "horizontal", "vertical", "angle", "reset_rotation"):
             # 第一版原地编辑禁用会改变图片尺寸/几何的图像变换，避免 DPI 和选区映射风险。
             return
+        elif action == "insert_image":
+            # 兼容旧命令入口：只切到图片工具，仍由画布点击决定落点。
+            self.set_tool("image")
         elif action == "paste":
             if self.view.session.closing or self.view.quick_sticker_consumed:
                 get_logger().debug("原地编辑贴图忽略：会话已关闭或请求已消费")

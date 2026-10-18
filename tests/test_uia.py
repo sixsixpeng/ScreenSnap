@@ -546,7 +546,9 @@ class UiaTests(CoreTests):
         labels = [label for label in editor.toolbar.findChildren(QLabel)
               if label.text() in ("标注", "编辑", "图像旋转", "输出")]
         self.assertIs(editor.toolbar.image_buttons[0], editor.toolbar.reset_rotation_button)
-        for width, rows in ((3200, 1), (2300, 3), (1300, 3), (1100, 3), (950, 3),
+        for width, rows in ((3200, 1), (2560, 1), (2300, 1), (2000, 1),
+                (1920, 2), (1700, 2), (1600, 2),
+                (1300, 3), (1100, 3), (950, 3),
                 (800, 4), (700, 4), (699, 4), (660, 4), (659, 4),
                 (500, 4), (420, 4)):
             editor.resize(width, 760)
@@ -554,13 +556,16 @@ class UiaTests(CoreTests):
             self.app.processEvents()
             grid = editor.toolbar.tool_grid
             tool_rows = {grid.getItemPosition(index)[0] for index in range(grid.count())}
-            if width in (1300, 2300, 3200):
-                self.assertEqual(len(tool_rows) == 1, width in (1300, 2300, 3200), width)
-            self.assertEqual(grid.getItemPosition(grid.indexOf(editor.toolbar.cursor_switch))[:2],
-                             (0, 0), width)
+            if width in (1300, 2300, 2560, 3200):
+                # 2560 优先让图像旋转/输出组内单行，标注组换成两行；
+                # 3200 才达到标注组也单行。
+                self.assertEqual(len(tool_rows), 1 if width == 3200 else 2, width)
+            self.assertEqual(grid.indexOf(editor.toolbar.cursor_switch), -1, width)
+            self.assertGreaterEqual(editor.toolbar.output_grid.indexOf(
+                editor.toolbar.cursor_switch), 0, width)
             self.assertEqual(grid.indexOf(editor.toolbar.pen_color), -1, width)
             self.assertEqual(grid.getItemPosition(grid.indexOf(editor.toolbar.options_button))[:2],
-                             (0, 1), width)
+                             (0, 0), width)
             if width == 1300:
                 wide_height = editor.toolbar.height()
             top_positions = {label.mapTo(editor.toolbar, QPoint(0, 0)).y() for label in labels}
@@ -572,13 +577,15 @@ class UiaTests(CoreTests):
                 self.assertLessEqual(section.right(), editor.toolbar.width(), (width, index, section))
                 for other in sections[index + 1:]:
                     self.assertFalse(section.intersects(other), (width, section, other))
-            for section, buttons in ((editor.toolbar.sections[1], editor.toolbar.edit_buttons),
+            output_widgets = [editor.toolbar.cursor_switch, *editor.toolbar.output_buttons]
+            for section, widgets in ((editor.toolbar.sections[1], editor.toolbar.edit_buttons),
                                      (editor.toolbar.sections[2], editor.toolbar.image_buttons),
-                                     (editor.toolbar.sections[3], editor.toolbar.output_buttons)):
-                self.assertLessEqual(buttons[0].mapTo(section, QPoint(0, 0)).x(), 4,
-                                     (width, buttons[0].text()))
-            output_rectangles = [QRect(button.mapTo(editor.toolbar, QPoint(0, 0)), button.size())
-                                for button in editor.toolbar.output_buttons]
+                                     (editor.toolbar.sections[3], output_widgets)):
+                self.assertLessEqual(widgets[0].mapTo(section, QPoint(0, 0)).x(), 4,
+                                     (width, getattr(widgets[0], "text", lambda: "output")()))
+            output_widgets = [editor.toolbar.cursor_switch, *editor.toolbar.output_buttons]
+            output_rectangles = [QRect(widget.mapTo(editor.toolbar, QPoint(0, 0)), widget.size())
+                                for widget in output_widgets]
             for index, rectangle in enumerate(output_rectangles):
                 self.assertLessEqual(rectangle.right(), editor.toolbar.width(), (width, rectangle))
                 for other in output_rectangles[index + 1:]:
@@ -588,10 +595,8 @@ class UiaTests(CoreTests):
                                      editor.toolbar.width())
                 self.assertGreaterEqual(button.height(), 40)
             drawing_buttons = list(editor.toolbar.tool_buttons.values())
-            # 直接引用设置按钮：其文本会随当前工具变化（"更多设置" / "记号笔设置" 等），
-            # 不能按固定文本查找（默认工具改为记号笔后即为"记号笔设置"）。
+            # 直接引用设置按钮：文本会随当前工具或功能变化，不能按固定文本查找。
             drawing_buttons.append(editor.toolbar.options_button)
-            drawing_buttons.append(editor.toolbar.cursor_switch)
             rectangles = [QRect(button.mapTo(editor.toolbar, QPoint(0, 0)), button.size())
                           for button in drawing_buttons]
             for index, rectangle in enumerate(rectangles):
@@ -608,7 +613,7 @@ class UiaTests(CoreTests):
         self.app.processEvents()
         self.assertEqual(editor.toolbar.height(), wide_height)
         self.assertEqual({editor.toolbar.tool_grid.getItemPosition(index)[0]
-                          for index in range(editor.toolbar.tool_grid.count())}, {0})
+                          for index in range(editor.toolbar.tool_grid.count())}, {0, 1})
         self.assertEqual(editor.canvas.alignment(), Qt.AlignCenter)
         editor.close()
 
@@ -674,9 +679,9 @@ class UiaTests(CoreTests):
             inline_editor = mask.session.inline_editor
             self.assertEqual(window_editor.toolbar.capture_action_buttons, [])
             window_editor.toolbar.reflow(1100)
-            self.assertEqual(len(window_editor.toolbar.edit_buttons), 5)
+            self.assertEqual(len(window_editor.toolbar.edit_buttons), 6)
             self.assertTrue(all(window_editor.toolbar.edit_grid.itemAtPosition(0, column)
-                                is not None for column in range(5)))
+                                is not None for column in range(6)))
             self.assertEqual([button.text() for button in inline_editor.toolbar.capture_action_buttons],
                              ["自定义尺寸", "重新截图"])
             output_grid = inline_editor.toolbar.output_grid

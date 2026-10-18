@@ -9,7 +9,7 @@ from PySide6.QtGui import (QBrush, QShortcut, QPainter, QPainterPath, QPen, QCol
                              QTextCursor, QTransform, QCursor, QKeySequence)
 from PySide6.QtWidgets import (QApplication, QGraphicsView, QGraphicsScene, QGraphicsPixmapItem, QGraphicsItem,
                                QGraphicsRectItem, QGraphicsEllipseItem,
-                               QGraphicsTextItem, QDialog, QMenu, QToolTip)
+                               QGraphicsTextItem, QDialog, QFileDialog, QMenu, QToolTip)
 
 from core.constants import checker_tile_size
 from core.screen_capture import to_qimage
@@ -17,9 +17,10 @@ from config.config_manager import TOOL_WIDTH_KEYS
 from editor.annotation_items import (shape, text_item, editable, RoundedRectItem,
                                      AnnotationRectItem, AnnotationEllipseItem,
                                      AnnotationPathItem, AnnotationTextItem,
-                                     AnnotationPixmapItem, AnnotationSequenceItem,
+                                     AnnotationPixmapItem, AnnotationZoomItem, AnnotationSequenceItem,
                                      EraseMaskItem, auto_text_width,
-                                     apply_text_format, read_text_format)
+                                     apply_text_format, read_text_format,
+                                     annotation_locked, set_annotation_locked)
 from logger import get_logger
 
 # 直线/折线模式下单段最短位移（像素），低于此值视为“未确定第二点”，不绘制。
@@ -48,13 +49,15 @@ MIN_TEXT_HEIGHT = 24.0
 
 # 绘制类工具在画布上使用的工具字形光标：位图逻辑尺寸、热点（锚点即真实落点）与配色来源。
 CURSOR_BITMAP_SIZE = 32
-TOOL_CURSOR_TOOLS = ("pen", "marker", "rect", "ellipse", "text", "arrow")
+TOOL_CURSOR_TOOLS = ("pen", "marker", "rect", "ellipse", "text", "arrow", "zoom")
 TOOL_CURSOR_COLOR_KEYS = {"pen": "pen_color", "marker": "marker_color",
                           "rect": "rect_color", "ellipse": "ellipse_color",
-                          "text": "text_color", "arrow": "arrow_color"}
-# pen/marker/arrow 热点在笔尖/箭尾，rect/ellipse 在拖拽起始角，text 在插入点。
+                          "text": "text_color", "arrow": "arrow_color",
+                          "zoom": "zoom_annotation_color"}
+# pen/marker/arrow 热点在笔尖/箭尾，rect/ellipse 在拖拽起始角，text 在插入点，zoom 同框选。
 TOOL_CURSOR_HOTSPOTS = {"pen": (5, 27), "marker": (5, 27), "arrow": (5, 27),
-                        "rect": (6, 26), "ellipse": (6, 26), "text": (7, 25)}
+                        "rect": (6, 26), "ellipse": (6, 26), "text": (7, 25),
+                        "zoom": (6, 26)}
 # 白色外描边 + 深青内描边，保证深浅底色下都清晰可辨，与取色光标同一配色语言。
 CURSOR_OUTLINE_LIGHT = "#f7fbfa"
 CURSOR_OUTLINE_DARK = "#142c32"
@@ -83,6 +86,9 @@ class AnnotationCanvas(QGraphicsView):
     # 2026-10-11：Ctrl+S 也走画布（挂窗口快捷键会因「哪块屏/哪种选区入口创建的原地编辑器」而漏 ✓）。
     save_requested = Signal()
     color_picked = Signal(str)
+    image_insert_requested = Signal(QPointF)
+    # 曲线箭头弯曲方向切换（默认 Alt+C）；两个编辑器的画布都走这条信号。
+    arrow_curve_toggle = Signal()
     confirmed = Signal()
     cancelled = Signal()
     zoom_changed = Signal(int)
@@ -216,6 +222,9 @@ class AnnotationCanvas(QGraphicsView):
         self.selection_area = None
         self.history = [(self.image, self.alternate, self.cursor_enabled, [])]
         self.cursor_index = 0
+        # 批量编辑（如一次套用多个样式预设项）期间把多个 checkpoint 合并成一个撤销点。
+        self._history_batch = 0
+        self._history_batch_dirty = False
         self.zoom_percent = 100
         # Ctrl+滚轮缩放只在窗口编辑器启用（原地编辑画布太小、也没有缩放控件可复位）。
         self.wheel_zoom_enabled = False
@@ -278,7 +287,7 @@ class AnnotationCanvas(QGraphicsView):
 
     @staticmethod
     def _create_tool_cursor(tool, color, pressed=False, fill_color=None,
-                            fill_opacity=0):
+                            fill_opacity=0, zoom_style=None):
         """绘制绘制类工具的字形光标。
 
         位图为 32×32 逻辑像素、透明底：先以浅色画粗描边作衬底，再以深青描边勾形，
@@ -348,12 +357,12 @@ class AnnotationCanvas(QGraphicsView):
             painter.setBrush(light)
             painter.setPen(QPen(dark, 1.2))
             painter.drawEllipse(QPointF(5, 27), 2.2, 2.2)
-        elif tool in ("rect", "ellipse"):
+        elif tool in ("rect", "ellipse", "zoom"):
             body = QPainterPath()
-            if tool == "rect":
-                body.addRoundedRect(QRectF(9, 6, 19, 19), 2.5, 2.5)
-            else:
+            if tool == "ellipse" or (tool == "zoom" and zoom_style == "circle"):
                 body.addEllipse(QRectF(9, 6, 19, 19))
+            else:
+                body.addRoundedRect(QRectF(9, 6, 19, 19), 2.5, 2.5)
             fill = QColor(fill_color) if fill_color else QColor(ink)
             fill.setAlpha(round(max(0, min(100, fill_opacity)) * 255 / 100)
                            if fill_color else 0)
@@ -414,11 +423,13 @@ class AnnotationCanvas(QGraphicsView):
                 fill_color = QColor(self.settings.get(
                     f"{tool}_fill_color", color)).name()
                 fill_opacity = int(self.settings.get(f"{tool}_fill_opacity", 35))
-        key = (tool, color, bool(pressed), fill_color, fill_opacity)
+        zoom_style = (self.settings.get("zoom_annotation_style", "circle")
+                      if tool == "zoom" else None)
+        key = (tool, color, bool(pressed), fill_color, fill_opacity, zoom_style)
         cursor = self._tool_cursor_cache.get(key)
         if cursor is None:
             cursor = self._create_tool_cursor(tool, color, pressed,
-                                              fill_color, fill_opacity)
+                                              fill_color, fill_opacity, zoom_style)
             if len(self._tool_cursor_cache) >= 64:
                 self._tool_cursor_cache.clear()
             self._tool_cursor_cache[key] = cursor
@@ -935,6 +946,211 @@ class AnnotationCanvas(QGraphicsView):
         self.scene_data.addItem(item)
         return item
 
+    def add_pixmap_file(self, path, position=None):
+        """把本地图片插入为图片标注；position 为画布坐标（图片中心点），None 时居中。
+
+        过大的图片按画布尺寸等比缩小，可像其它标注一样移动/缩放/复制。
+        """
+        pixmap = QPixmap(str(path))
+        if pixmap.isNull():
+            get_logger().warning("插入图片失败（无法读取）: %s", path)
+            return None
+        scene = self.sceneRect()
+        limit = QRectF(scene).size() * 0.8
+        if pixmap.width() > limit.width() or pixmap.height() > limit.height():
+            pixmap = pixmap.scaled(limit.toSize(), Qt.KeepAspectRatio,
+                                   Qt.SmoothTransformation)
+        item = editable(AnnotationPixmapItem(pixmap))
+        item.image_source_path = str(path)
+        if position is None:
+            position = QPointF(scene.width() / 2, scene.height() / 2)
+        x = position.x() - pixmap.width() / 2
+        y = position.y() - pixmap.height() / 2
+        # 保持图片完整可见：中心点落点也夹在画布内。
+        x = max(0.0, min(float(x), max(0.0, scene.width() - pixmap.width())))
+        y = max(0.0, min(float(y), max(0.0, scene.height() - pixmap.height())))
+        item.setPos(QPointF(x, y))
+        self._add_annotation(item)
+        # 与 Ctrl+D 复制一致：新插入的图片成为唯一选中项，否则旧标注仍选中会变成多选。
+        self.scene_data.clearSelection()
+        item.setSelected(True)
+        self._on_selection_changed()
+        self.viewport().update()
+        self.checkpoint()
+        get_logger().debug("插入图片标注: %s (%dx%d)", path, pixmap.width(), pixmap.height())
+        return item
+
+    def replace_image_item(self, item):
+        """替换图片标注：保留当前位置/大小上限，只换图并记录一次撤销点。"""
+        from core.image_io import IMAGE_FILE_FILTER
+
+        path, _ = QFileDialog.getOpenFileName(self, "替换图片", "", IMAGE_FILE_FILTER)
+        if not path:
+            return None
+        replacement = QPixmap(str(path))
+        if replacement.isNull():
+            get_logger().warning("替换图片失败（无法读取）: %s", path)
+            return None
+        old_size = item.pixmap().size()
+        if old_size.isValid() and old_size.width() > 0 and old_size.height() > 0:
+            replacement = replacement.scaled(old_size, Qt.KeepAspectRatio,
+                                             Qt.SmoothTransformation)
+        # 不调用 setPos：替换只换内容，当前位置保持不变。
+        item.setPixmap(replacement)
+        item.image_source_path = str(path)
+        item.setSelected(True)
+        self._on_selection_changed()
+        self.viewport().update()
+        self.checkpoint()
+        get_logger().debug("图片标注已替换: %s (%dx%d)", path,
+                           replacement.width(), replacement.height())
+        return item
+
+    def _item_record(self, item):
+        """记录单个可编辑标注的类型与属性（擦除层在 snapshot 里单独处理）。"""
+        kind = ("RoundedRectItem" if isinstance(item, RoundedRectItem) else
+                "QGraphicsRectItem" if isinstance(item, AnnotationRectItem) else
+                "QGraphicsEllipseItem" if isinstance(item, AnnotationEllipseItem) else
+                "QGraphicsPathItem" if isinstance(item, AnnotationPathItem) else
+                "QGraphicsTextItem" if isinstance(item, AnnotationTextItem) else
+                "AnnotationZoomItem" if isinstance(item, AnnotationZoomItem) else
+                "QGraphicsPixmapItem" if isinstance(item, AnnotationPixmapItem) else
+                "AnnotationSequenceItem" if isinstance(item, AnnotationSequenceItem) else
+                type(item).__name__)
+        data = {"type": kind, "pos": (item.pos().x(), item.pos().y()),
+                "scale": item.scale(), "z": item.zValue(),
+                "transform": QTransform(item.transform()),
+                "rotation": item.rotation(),
+                "origin": (item.transformOriginPoint().x(),
+                           item.transformOriginPoint().y()),
+                "opacity": item.opacity(),
+                "locked": annotation_locked(item)}
+        if hasattr(item, "corner_radius"):
+            data["corner_radius"] = item.corner_radius
+        if hasattr(item, "pen"):
+            data["pen"] = QPen(item.pen())
+        if hasattr(item, "brush"):
+            data["brush"] = item.brush()
+        if data["type"] in ("QGraphicsRectItem", "RoundedRectItem", "QGraphicsEllipseItem"):
+            rect = item.rect()
+            data["rect"] = (rect.x(), rect.y(), rect.width(), rect.height())
+        elif data["type"] == "QGraphicsPathItem":
+            data["path"] = QPainterPath(item.path())
+            # 记号笔与画笔共用 AnnotationPathItem；存下显式标记，避免 100% 不透明时误判成画笔。
+            data["marker"] = bool(getattr(item, "marker", False))
+            if getattr(item, "arrow_style", None) is not None:
+                data["arrow_style"] = item.arrow_style
+                data["arrow_curve_direction"] = getattr(item, "arrow_curve_direction", "right")
+                data["start"] = item.start
+                data["end"] = item.end
+                data["line_color"] = item.line_color
+                data["line_width"] = item.line_width
+        elif data["type"] == "QGraphicsTextItem":
+            data.update(text=item.toHtml(), font=item.font(),
+                        text_width=item.document().textWidth(),
+                        text_height=getattr(item, "fixed_height", 0.0),
+                        color=item.defaultTextColor().name(),
+                        background=item.background_color,
+                        background_padding=getattr(item, "background_padding", 0),
+                        background_radius=getattr(item, "background_radius", 0),
+                        background_opacity=getattr(item, "background_opacity", 100))
+            bold, italic, underline, strike = read_text_format(item)
+            data.update(bold=bold, italic=italic, underline=underline, strike=strike)
+        elif data["type"] == "AnnotationZoomItem":
+            data["source_pixmap"] = QPixmap(item.zoom_source)
+            data["source_rect"] = (item.source_rect.x(), item.source_rect.y(),
+                                    item.source_rect.width(), item.source_rect.height())
+            data["zoom_factor"] = item.zoom_factor
+            data["zoom_style"] = item.zoom_style
+            data["zoom_border_color"] = item.zoom_border_color
+            data["zoom_border_width"] = item.zoom_border_width
+            data["zoom_max_size"] = item.zoom_max_size
+        elif data["type"] == "QGraphicsPixmapItem":
+            data["pixmap"] = QPixmap(item.pixmap())
+            data["offset"] = (item.offset().x(), item.offset().y())
+            path = getattr(item, "image_source_path", None)
+            if path is not None:
+                data["image_source_path"] = path
+        elif data["type"] == "AnnotationSequenceItem":
+            data["number"] = item.number
+            data["sequence_fill_color"] = item.sequence_fill_color
+            data["sequence_text_color"] = item.sequence_text_color
+            data["sequence_font_size"] = item.sequence_font_size
+            data["sequence_shape"] = item.sequence_shape
+            data["sequence_font_family"] = item.sequence_font_family
+        return data
+
+    def _item_from_record(self, data):
+        """按 `_item_record` 的记录重建一个标注并恢复几何/样式/锁定状态。"""
+        kind = data["type"]
+        if kind == "RoundedRectItem":
+            item = RoundedRectItem(QRectF(*data["rect"]), data.get("corner_radius", 0))
+        elif kind == "QGraphicsRectItem":
+            item = AnnotationRectItem(QRectF(*data["rect"]))
+        elif kind == "QGraphicsEllipseItem":
+            item = AnnotationEllipseItem(QRectF(*data["rect"]))
+        elif kind == "QGraphicsPathItem":
+            item = AnnotationPathItem(data["path"])
+            item.marker = bool(data.get("marker", False))
+            if "arrow_style" in data:
+                item.start = data["start"]
+                item.end = data["end"]
+                item.arrow_style = data["arrow_style"]
+                item.arrow_curve_direction = data.get("arrow_curve_direction", "right")
+                item.line_color = data["line_color"]
+                item.line_width = data["line_width"]
+        elif kind == "QGraphicsTextItem":
+            item = AnnotationTextItem()
+            item.setHtml(data["text"])
+            item.setFont(data["font"])
+            item.document().setTextWidth(data["text_width"])
+            if data.get("text_height"):
+                item.set_text_height(data["text_height"])
+            item.setDefaultTextColor(QColor(data["color"]))
+            item.background_color = data.get("background")
+            item.set_background_style(
+                data.get("background_padding", 0),
+                data.get("background_radius", 0),
+                data.get("background_opacity", 100))
+            apply_text_format(item, data.get("bold", False), data.get("italic", False),
+                              data.get("underline", False), data.get("strike", False))
+        elif kind == "AnnotationSequenceItem":
+            item = AnnotationSequenceItem(
+                data["number"],
+                data.get("sequence_fill_color", "#ff0000"),
+                data.get("sequence_text_color", "#ffffff"),
+                data.get("sequence_font_size", 14),
+                data.get("sequence_shape", "circle"),
+                data.get("sequence_font_family", ""))
+        elif kind == "AnnotationZoomItem":
+            item = AnnotationZoomItem(
+                data["source_pixmap"], QRectF(*data["source_rect"]),
+                data.get("zoom_factor", 2), data.get("zoom_style", "circle"),
+                data.get("zoom_border_color", "#00ad91"),
+                data.get("zoom_border_width", 2),
+                round(data.get("opacity", 1.0) * 100),
+                data.get("zoom_max_size", 480))
+        else:
+            item = AnnotationPixmapItem(data["pixmap"])
+            item.setOffset(QPointF(*data.get("offset", (0, 0))))
+            if data.get("image_source_path"):
+                item.image_source_path = data["image_source_path"]
+        if "pen" in data:
+            item.setPen(QPen(data["pen"]))
+        if "brush" in data and hasattr(item, "setBrush"):
+            item.setBrush(data["brush"])
+        editable(item)
+        item.setPos(QPointF(*data["pos"]))
+        item.setTransformOriginPoint(QPointF(*data.get("origin", (0, 0))))
+        item.setScale(data["scale"])
+        item.setTransform(data.get("transform", QTransform()))
+        item.setRotation(data.get("rotation", 0))
+        item.setZValue(data["z"])
+        item.setOpacity(data.get("opacity", 1.0))
+        if data.get("locked"):
+            set_annotation_locked(item, True)
+        return item
+
     def snapshot(self):
         """以可重建的属性记录图元，供撤销历史使用。"""
         # 使用图元的深拷贝代价较高；记录图元类型与属性以支持撤销/重做。
@@ -952,56 +1168,7 @@ class AnnotationCanvas(QGraphicsView):
                                 "strokes": [tuple(stroke) for stroke in item.strokes],
                                 "size": (rect.width(), rect.height())})
                 continue
-            kind = ("RoundedRectItem" if isinstance(item, RoundedRectItem) else
-                    "QGraphicsRectItem" if isinstance(item, AnnotationRectItem) else
-                    "QGraphicsEllipseItem" if isinstance(item, AnnotationEllipseItem) else
-                    "QGraphicsPathItem" if isinstance(item, AnnotationPathItem) else
-                    "QGraphicsTextItem" if isinstance(item, AnnotationTextItem) else
-                    "QGraphicsPixmapItem" if isinstance(item, AnnotationPixmapItem) else
-                    "AnnotationSequenceItem" if isinstance(item, AnnotationSequenceItem) else
-                    type(item).__name__)
-            data = {"type": kind, "pos": (item.pos().x(), item.pos().y()),
-                "scale": item.scale(), "z": item.zValue(), "transform": QTransform(item.transform()),
-                "rotation": item.rotation(),
-                "origin": (item.transformOriginPoint().x(), item.transformOriginPoint().y())}
-            if hasattr(item, "corner_radius"):
-                data["corner_radius"] = item.corner_radius
-            if hasattr(item, "pen"):
-                data["pen"] = QPen(item.pen())
-            if hasattr(item, "brush"):
-                data["brush"] = item.brush()
-            if data["type"] in ("QGraphicsRectItem", "RoundedRectItem", "QGraphicsEllipseItem"):
-                rect = item.rect()
-                data["rect"] = (rect.x(), rect.y(), rect.width(), rect.height())
-                if data["type"] == "RoundedRectItem":
-                    data["corner_radius"] = item.corner_radius
-            elif data["type"] == "QGraphicsPathItem":
-                data["path"] = QPainterPath(item.path())
-                if getattr(item, "arrow_style", None) is not None:
-                    data["arrow_style"] = item.arrow_style
-                    data["start"] = item.start
-                    data["end"] = item.end
-                    data["line_color"] = item.line_color
-                    data["line_width"] = item.line_width
-            elif data["type"] == "QGraphicsTextItem":
-                data.update(text=item.toHtml(), font=item.font(),
-                            text_width=item.document().textWidth(),
-                            text_height=getattr(item, "fixed_height", 0.0),
-                            color=item.defaultTextColor().name(),
-                            background=item.background_color)
-                bold, italic, underline, strike = read_text_format(item)
-                data.update(bold=bold, italic=italic, underline=underline, strike=strike)
-            elif data["type"] == "QGraphicsPixmapItem":
-                data["pixmap"] = QPixmap(item.pixmap())
-                data["offset"] = (item.offset().x(), item.offset().y())
-            elif data["type"] == "AnnotationSequenceItem":
-                data["number"] = item.number
-                data["sequence_fill_color"] = item.sequence_fill_color
-                data["sequence_text_color"] = item.sequence_text_color
-                data["sequence_font_size"] = item.sequence_font_size
-                data["sequence_shape"] = item.sequence_shape
-                data["sequence_font_family"] = item.sequence_font_family
-            records.append(data)
+            records.append(self._item_record(item))
         return records
 
     def next_sequence_number(self):
@@ -1026,23 +1193,30 @@ class AnnotationCanvas(QGraphicsView):
         1/2/3…，不留空缺；相对顺序保持不变。已是最优编号的项不会被改写，避免无谓重绘。
         """
         start = self.settings.get("sequence_start", 1)
+        locked_numbers = {item.number for item in self.annotations()
+                          if isinstance(item, AnnotationSequenceItem)
+                          and annotation_locked(item)}
         items = sorted(
             (item for item in self.annotations()
-             if isinstance(item, AnnotationSequenceItem)),
+             if isinstance(item, AnnotationSequenceItem)
+             and not annotation_locked(item)),
             key=lambda item: item.number)
-        for index, item in enumerate(items):
-            new_number = start + index
-            if item.number != new_number:
-                item.number = new_number
+        number = start
+        for item in items:
+            # 锁定项的编号保持不变，重排时跳过它们占用的号码，避免出现重号。
+            while number in locked_numbers:
+                number += 1
+            if item.number != number:
+                item.number = number
                 item.update()
+            number += 1
 
     def restore(self, records):
         """清除现有标注，再按快照重建类型、样式和图层。"""
         for item in self._layer_items():
             self.scene_data.removeItem(item)
         for data in records:
-            kind = data["type"]
-            if kind == "EraseMask":
+            if data["type"] == "EraseMask":
                 width, height = data["size"]
                 mask_item = EraseMaskItem(QImage(data["mask"]), width, height,
                                           data.get("strokes", []))
@@ -1052,54 +1226,7 @@ class AnnotationCanvas(QGraphicsView):
                 mask_item.setZValue(data["z"])
                 self.scene_data.addItem(mask_item)
                 continue
-            if kind == "RoundedRectItem":
-                item = RoundedRectItem(QRectF(*data["rect"]), data.get("corner_radius", 0))
-            elif kind == "QGraphicsRectItem":
-                item = AnnotationRectItem(QRectF(*data["rect"]))
-            elif kind == "QGraphicsEllipseItem":
-                item = AnnotationEllipseItem(QRectF(*data["rect"]))
-            elif kind == "QGraphicsPathItem":
-                item = AnnotationPathItem(data["path"])
-                if "arrow_style" in data:
-                    item.start = data["start"]
-                    item.end = data["end"]
-                    item.arrow_style = data["arrow_style"]
-                    item.line_color = data["line_color"]
-                    item.line_width = data["line_width"]
-            elif kind == "QGraphicsTextItem":
-                item = AnnotationTextItem()
-                item.setHtml(data["text"])
-                item.setFont(data["font"])
-                item.document().setTextWidth(data["text_width"])
-                if data.get("text_height"):
-                    item.set_text_height(data["text_height"])
-                item.setDefaultTextColor(QColor(data["color"]))
-                item.background_color = data.get("background")
-                apply_text_format(item, data.get("bold", False), data.get("italic", False),
-                                 data.get("underline", False), data.get("strike", False))
-            elif kind == "AnnotationSequenceItem":
-                item = AnnotationSequenceItem(
-                    data["number"],
-                    data.get("sequence_fill_color", "#ff0000"),
-                    data.get("sequence_text_color", "#ffffff"),
-                    data.get("sequence_font_size", 14),
-                    data.get("sequence_shape", "circle"),
-                    data.get("sequence_font_family", ""))
-            else:
-                item = AnnotationPixmapItem(data["pixmap"])
-                item.setOffset(QPointF(*data.get("offset", (0, 0))))
-            if "pen" in data:
-                item.setPen(QPen(data["pen"]))
-            if "brush" in data and hasattr(item, "setBrush"):
-                item.setBrush(data["brush"])
-            editable(item)
-            item.setPos(QPointF(*data["pos"]))
-            item.setTransformOriginPoint(QPointF(*data.get("origin", (0, 0))))
-            item.setScale(data["scale"])
-            item.setTransform(data.get("transform", QTransform()))
-            item.setRotation(data.get("rotation", 0))
-            item.setZValue(data["z"])
-            self.scene_data.addItem(item)
+            self.scene_data.addItem(self._item_from_record(data))
         self.changed.emit()
 
     def constrain_selected_to_canvas(self):
@@ -1129,6 +1256,10 @@ class AnnotationCanvas(QGraphicsView):
 
     def checkpoint(self):
         """编辑后截断重做分支，记录两版图片、光标状态和全部标注。"""
+        if self._history_batch:
+            # 批量操作期间只记“确有改动”，结束后由 end_history_batch 合并为一个撤销点。
+            self._history_batch_dirty = True
+            return
         self.constrain_selected_to_canvas()
         self.history = self.history[:self.cursor_index + 1]
         self.history.append((self.image, self.alternate, self.cursor_enabled,
@@ -1136,6 +1267,17 @@ class AnnotationCanvas(QGraphicsView):
         self.cursor_index += 1
         self.erase_mask_dirty = bool(self.erase_items())
         self.changed.emit()
+
+    def begin_history_batch(self):
+        """开始一次批量编辑：期间所有 checkpoint 合并为结束时的一个撤销点。"""
+        self._history_batch += 1
+
+    def end_history_batch(self):
+        """结束批量编辑；期间确有改动时补记一个撤销点。"""
+        self._history_batch = max(0, self._history_batch - 1)
+        if self._history_batch == 0 and self._history_batch_dirty:
+            self._history_batch_dirty = False
+            self.checkpoint()
 
     def export_edit_history(self):
         history = list(self.history)
@@ -1211,8 +1353,9 @@ class AnnotationCanvas(QGraphicsView):
         self.checkpoint()
 
     def remove_selected(self):
-        """删除选中的标注并记录撤销历史。"""
-        selected = self.scene_data.selectedItems()
+        """删除选中的标注并记录撤销历史（已锁定的标注不会被删除）。"""
+        selected = [item for item in self.scene_data.selectedItems()
+                    if not annotation_locked(item)]
         if not selected:
             return
         for item in selected:
@@ -1224,19 +1367,23 @@ class AnnotationCanvas(QGraphicsView):
             "标注删除完成: 删除=%d, 剩余=%d, 选中类型=%s",
             len(selected), len(self.annotations()), self.selected_annotation_tool() or "无")
 
-    def set_selected_width(self, width):
-        """对所选矢量标注重新描边，保持历史记录可撤销。"""
-        selected = [item for item in self.scene_data.selectedItems() if hasattr(item, "pen")]
+    def set_selected_width(self, width, tool=None):
+        """对所选矢量标注重新描边；tool 非空时只改该类型，避免预设/工具色串到别的标注。"""
+        selected = [item for item in self._selected_items_for_tool(tool)
+                    if hasattr(item, "pen")]
         for item in selected:
             pen = item.pen()
             pen.setWidth(max(12, width * 5) if pen.color().alpha() < 255 else width)
             item.setPen(pen)
+            if getattr(item, "arrow_style", None) is not None:
+                # 箭头换样式/套预设时按 line_width 重建路径，这里必须同步，否则线宽会被旧值覆盖。
+                item.line_width = pen.widthF()
         if selected:
             self.checkpoint()
 
-    def set_selected_line_style(self, style):
-        """对所选矩形或椭圆切换实线/虚线线型。"""
-        selected = [item for item in self.scene_data.selectedItems()
+    def set_selected_line_style(self, style, tool=None):
+        """对所选矩形或椭圆切换线型；tool 非空时只改对应类型。"""
+        selected = [item for item in self._selected_items_for_tool(tool)
                 if isinstance(item, (QGraphicsRectItem, QGraphicsEllipseItem))]
         for item in selected:
             pen = item.pen()
@@ -1250,31 +1397,123 @@ class AnnotationCanvas(QGraphicsView):
         selected = [item for item in self.scene_data.selectedItems()
                    if getattr(item, "arrow_style", None) is not None]
         for item in selected:
-            rebuilt = shape("arrow", item.start, item.end, item.line_color,
-                            item.line_width, arrow_style=style)
+            # 以当前 pen 为准重建（line_color/line_width 可能落后于用户刚改的颜色/线宽）。
+            color = item.pen().color().name()
+            item.line_color = color
+            direction = getattr(item, "arrow_curve_direction", "right")
+            rebuilt = shape("arrow", item.start, item.end, color,
+                            item.pen().widthF(), arrow_style=style,
+                            arrow_curve_direction=direction)
             item.setPath(rebuilt.path())
             item.setPen(rebuilt.pen())
             item.setBrush(rebuilt.brush())
             item.arrow_style = style
+            item.arrow_curve_direction = direction
         if selected:
             self.checkpoint()
 
-    def set_selected_text_format(self):
-        """把当前文字格式开关应用到选中的文字标注（整篇生效）。"""
+    def set_selected_arrow_curve_direction(self, direction):
+        """曲线箭头对象级切换弯曲方向；其他箭头样式只记录，供切换到曲线时使用。"""
+        direction = "left" if direction == "left" else "right"
+        selected = [item for item in self.scene_data.selectedItems()
+                    if getattr(item, "arrow_style", None) is not None]
+        for item in selected:
+            item.arrow_curve_direction = direction
+            if item.arrow_style == "curve_filled":
+                color = item.pen().color().name()
+                rebuilt = shape("arrow", item.start, item.end, color,
+                                item.pen().widthF(), arrow_style="curve_filled",
+                                arrow_curve_direction=direction)
+                item.setPath(rebuilt.path())
+                item.setPen(rebuilt.pen())
+                item.setBrush(rebuilt.brush())
+        if selected:
+            self.checkpoint()
+
+    def set_selected_zoom_settings(self, **values):
+        """对象级更新放大标注的倍率/镜片形状/不透明度。"""
+        selected = self._selected_items_for_tool("zoom")
+        changed = False
+        for item in selected:
+            if "zoom_annotation_factor" in values:
+                factor = max(1, min(16, int(values["zoom_annotation_factor"])))
+                if factor != item.zoom_factor:
+                    item.set_zoom_factor(factor)
+                    changed = True
+            if "zoom_annotation_style" in values:
+                style = "rect" if values["zoom_annotation_style"] == "rect" else "circle"
+                if style != item.zoom_style:
+                    item.set_zoom_style(style)
+                    changed = True
+            if "zoom_annotation_opacity" in values:
+                opacity = max(0, min(100, int(values["zoom_annotation_opacity"])))
+                if item.opacity() != opacity / 100:
+                    item.set_zoom_opacity(opacity)
+                    changed = True
+            if "zoom_annotation_color" in values:
+                color = QColor(values["zoom_annotation_color"])
+                if color.isValid() and color.name() != item.zoom_border_color:
+                    item.set_zoom_border_color(color.name())
+                    changed = True
+            if "zoom_annotation_max_size" in values:
+                size = max(80, min(1200, int(values["zoom_annotation_max_size"])))
+                if item.zoom_max_size != size:
+                    item.set_zoom_max_size(size)
+                    changed = True
+        if changed:
+            self.checkpoint()
+
+    def set_selected_text_format(self, overrides=None):
+        """把文字格式开关应用到选中的文字标注（整篇生效）。
+
+        overrides 非空时只覆盖指定开关，保留该标注自己的其它格式（对象级编辑）；
+        为空时沿用默认配置（工具栏改默认值）。
+        """
         changed = False
         for item in self.scene_data.selectedItems():
             if isinstance(item, QGraphicsTextItem):
-                apply_text_format(item, self.settings.get("text_bold", False),
-                                 self.settings.get("text_italic", False),
-                                 self.settings.get("text_underline", False),
-                                 self.settings.get("text_strikethrough", False))
+                current = dict(zip(("text_bold", "text_italic", "text_underline",
+                                    "text_strikethrough"), read_text_format(item)))
+                values = dict(current) if overrides else {
+                    "text_bold": self.settings.get("text_bold", False),
+                    "text_italic": self.settings.get("text_italic", False),
+                    "text_underline": self.settings.get("text_underline", False),
+                    "text_strikethrough": self.settings.get("text_strikethrough", False),
+                }
+                if overrides:
+                    values.update(overrides)
+                apply_text_format(item, values["text_bold"], values["text_italic"],
+                                  values["text_underline"], values["text_strikethrough"])
                 changed = True
         if changed:
             self.checkpoint()
 
-    def set_selected_color(self, color):
-        """当前选中的线条或文字使用新颜色，后续新标注也使用该颜色。"""
-        selected = self.scene_data.selectedItems()
+    def set_selected_text_alignment(self, value):
+        """把对齐方式应用到选中的文字标注（对象级编辑）。"""
+        alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
+                     "right": Qt.AlignRight}.get(value, Qt.AlignLeft)
+        selected = [item for item in self._selected_items_for_tool("text")]
+        changed = False
+        for item in selected:
+            option = item.document().defaultTextOption()
+            option.setAlignment(alignment)
+            item.document().setDefaultTextOption(option)
+            cursor = QTextCursor(item.document())
+            cursor.select(QTextCursor.Document)
+            block = QTextBlockFormat()
+            block.setAlignment(alignment)
+            cursor.mergeBlockFormat(block)
+            changed = True
+        if changed:
+            self.checkpoint()
+
+    def set_selected_color(self, color, tool=None):
+        """当前选中的线条或文字使用新颜色；tool 非空时只改该类型。
+
+        切换工具/套预设时经常仍选中着别的类型（例如选中矩形后切到画笔），若不按类型过滤，
+        画笔颜色会把矩形也染成画笔色——这是 2026-10-18 实测的跨类型污染。
+        """
+        selected = self._selected_items_for_tool(tool)
         for item in selected:
             if hasattr(item, "pen"):
                 pen = item.pen()
@@ -1282,7 +1521,13 @@ class AnnotationCanvas(QGraphicsView):
                 replacement.setAlpha(pen.color().alpha())
                 pen.setColor(replacement)
                 item.setPen(pen)
-                if isinstance(item, (QGraphicsRectItem, QGraphicsEllipseItem)) and item.brush().style() != Qt.NoBrush:
+                if getattr(item, "arrow_style", None) is not None:
+                    # 箭头下次换样式/套预设会用 line_color 重建路径：颜色必须一并写回，
+                    # 否则“先改色、再改样式”会让颜色回退到旧值。
+                    item.line_color = color
+                    if item.brush().style() != Qt.NoBrush:
+                        item.setBrush(QColor(color))
+                elif isinstance(item, (QGraphicsRectItem, QGraphicsEllipseItem)) and item.brush().style() != Qt.NoBrush:
                     fill = QColor(color)
                     fill.setAlpha(item.brush().color().alpha())
                     item.setBrush(fill)
@@ -1305,6 +1550,117 @@ class AnnotationCanvas(QGraphicsView):
             fill.setAlpha(round(255 * max(0, min(100, opacity)) / 100))
             item.setBrush(fill)
         if selected:
+            self.checkpoint()
+
+    def set_selected_fill_property(self, tool, key, value):
+        """对象级编辑用：只改选中项的一个填充属性，保留其它填充参数。"""
+        item_type = QGraphicsRectItem if tool == "rect" else QGraphicsEllipseItem
+        selected = [item for item in self._selected_items_for_tool(tool)
+                    if isinstance(item, item_type)]
+        changed = False
+        for item in selected:
+            brush = item.brush()
+            if key.endswith("_fill_enabled"):
+                if value:
+                    if brush.style() == Qt.NoBrush:
+                        color = QColor(self.settings.get(f"{tool}_fill_color", item.pen().color()))
+                        opacity = self.settings.get(f"{tool}_fill_opacity", 35)
+                        color.setAlpha(round(255 * max(0, min(100, opacity)) / 100))
+                        item.setBrush(color)
+                    changed = True
+                elif brush.style() != Qt.NoBrush:
+                    item.setBrush(Qt.NoBrush)
+                    changed = True
+            elif key.endswith("_fill_opacity"):
+                if brush.style() != Qt.NoBrush and brush.color().alpha() != round(255 * value / 100):
+                    color = brush.color()
+                    color.setAlpha(round(255 * max(0, min(100, value)) / 100))
+                    item.setBrush(color)
+                    changed = True
+            elif key.endswith("_fill_color"):
+                if brush.style() != Qt.NoBrush:
+                    color = QColor(value)
+                    color.setAlpha(brush.color().alpha())
+                    item.setBrush(color)
+                    changed = True
+        if changed:
+            self.checkpoint()
+
+    def set_selected_sequence_settings(self, **values):
+        """对象级编辑用：把序号形状/颜色/字号应用到选中序号，保留其他参数。"""
+        selected = self._selected_items_for_tool("number")
+        changed = False
+        for item in selected:
+            if "sequence_shape" in values and values["sequence_shape"] != item.sequence_shape:
+                item.sequence_shape = values["sequence_shape"]
+                changed = True
+            if "sequence_fill_color" in values and values["sequence_fill_color"] != item.sequence_fill_color:
+                item.sequence_fill_color = values["sequence_fill_color"]
+                changed = True
+            if "sequence_text_color" in values and values["sequence_text_color"] != item.sequence_text_color:
+                item.sequence_text_color = values["sequence_text_color"]
+                changed = True
+            if "sequence_font_size" in values:
+                size = int(values["sequence_font_size"])
+                if size != item.sequence_font_size:
+                    item.prepareGeometryChange()
+                    item.sequence_font_size = size
+                    item._radius = max(11, size + 2)
+                    changed = True
+            if changed:
+                item.update()
+        if changed:
+            self.checkpoint()
+
+    def set_selected_marker_opacity(self, opacity):
+        """对象级编辑用：只改选中记号笔的透明度。"""
+        selected = self._selected_items_for_tool("marker")
+        changed = False
+        for item in selected:
+            pen = item.pen()
+            color = pen.color()
+            alpha = round(255 * max(0, min(100, opacity)) / 100)
+            if color.alpha() == alpha:
+                continue
+            color.setAlpha(alpha)
+            pen.setColor(color)
+            item.setPen(pen)
+            changed = True
+        if changed:
+            self.checkpoint()
+
+    def set_selected_rect_corner(self, enabled=None, radius=None):
+        """对象级编辑用：把圆角开关/半径应用到选中矩形（必要时替换图元类）。"""
+        selected = [item for item in self._selected_items_for_tool("rect")]
+        changed = False
+        for item in selected:
+            current = int(getattr(item, "corner_radius", 0))
+            target = current
+            if enabled is False:
+                target = 0
+            elif radius is not None:
+                target = max(0, int(radius))
+            elif enabled is True and current <= 0:
+                target = int(self.settings.get("rect_corner_radius", 12))
+            if target == current:
+                continue
+            replacement = (RoundedRectItem(item.rect(), target) if target > 0
+                           else AnnotationRectItem(item.rect()))
+            replacement.setPen(QPen(item.pen()))
+            replacement.setBrush(item.brush())
+            replacement.setPos(item.pos())
+            replacement.setZValue(item.zValue())
+            replacement.setTransform(item.transform())
+            replacement.setRotation(item.rotation())
+            replacement.setScale(item.scale())
+            replacement.setTransformOriginPoint(item.transformOriginPoint())
+            replacement.setOpacity(item.opacity())
+            editable(replacement)
+            replacement.setSelected(True)
+            self.scene_data.removeItem(item)
+            self.scene_data.addItem(replacement)
+            changed = True
+        if changed:
             self.checkpoint()
 
     def set_selected_font(self, family):
@@ -1352,12 +1708,54 @@ class AnnotationCanvas(QGraphicsView):
         if selected:
             self.checkpoint()
 
-    def selected_annotation_tool(self):
-        """返回当前选中的单个标注对应的工具类型，多选/未选/不可识别时返回空串。"""
-        selected = self.scene_data.selectedItems()
-        if len(selected) != 1:
-            return ""
-        item = selected[0]
+    def set_selected_text_background(self, **values):
+        """把背景内边距/圆角/不透明度应用到选中的文字标注。"""
+        selected = [item for item in self.scene_data.selectedItems()
+                    if isinstance(item, AnnotationTextItem)]
+        if not selected:
+            return
+        changed = False
+        for item in selected:
+            before = (item.background_padding, item.background_radius,
+                      item.background_opacity)
+            item.set_background_style(
+                values.get("text_background_padding", item.background_padding),
+                values.get("text_background_radius", item.background_radius),
+                values.get("text_background_opacity", item.background_opacity))
+            changed = changed or (item.background_padding, item.background_radius,
+                                  item.background_opacity) != before
+        if changed:
+            self.checkpoint()
+
+    def set_selected_text_background_style(self, enabled=None, color=None):
+        """把背景开关/颜色应用到选中的文字标注（不影响默认配置）。
+
+        enabled=None 表示只改颜色；color=None 表示沿用当前背景色或默认背景色。
+        背景未启用时改颜色不会自动打开背景，避免一次改色意外铺满色块。
+        """
+        selected = [item for item in self.scene_data.selectedItems()
+                    if isinstance(item, AnnotationTextItem)]
+        if not selected:
+            return
+        changed = False
+        for item in selected:
+            target = item.background_color
+            if enabled is False:
+                target = None
+            elif enabled is True:
+                target = (color or item.background_color
+                          or self.settings.get("text_background", "#fff3a0"))
+            elif color is not None and item.background_color:
+                target = color
+            if target != item.background_color:
+                item.background_color = target
+                item.update()
+                changed = True
+        if changed:
+            self.checkpoint()
+
+    def _tool_for_item(self, item):
+        """一个标注图元对应的工具类型；记号笔按半透明描边与画笔区分。"""
         if isinstance(item, (AnnotationRectItem, RoundedRectItem)):
             return "rect"
         if isinstance(item, AnnotationEllipseItem):
@@ -1366,9 +1764,33 @@ class AnnotationCanvas(QGraphicsView):
             return "text"
         if isinstance(item, AnnotationSequenceItem):
             return "number"
+        if isinstance(item, AnnotationZoomItem):
+            return "zoom"
         if isinstance(item, AnnotationPathItem):
-            return "arrow" if getattr(item, "arrow_style", None) is not None else "pen"
+            if getattr(item, "arrow_style", None) is not None:
+                return "arrow"
+            if getattr(item, "marker", None) is not None:
+                return "marker" if item.marker else "pen"
+            return "marker" if item.pen().color().alpha() < 255 else "pen"
         return ""
+
+    def _selected_items_for_tool(self, tool=None):
+        """当前选中的标注；tool 非空时只保留该类型的图元。"""
+        selected = self.scene_data.selectedItems()
+        if tool is None:
+            return selected
+        return [item for item in selected if self._tool_for_item(item) == tool]
+
+    def selected_items_for_tool(self, tool):
+        """公开的选中项查询：编辑器判断“本次改动是否只作用于对象”。"""
+        return self._selected_items_for_tool(tool)
+
+    def selected_annotation_tool(self):
+        """返回当前选中的单个标注对应的工具类型，多选/未选/不可识别时返回空串。"""
+        selected = self.scene_data.selectedItems()
+        if len(selected) != 1:
+            return ""
+        return self._tool_for_item(selected[0])
 
     def _on_selection_changed(self):
         """选中项变化后通知工具栏，使其「更多设置」展示对应类型参数。"""
@@ -1866,10 +2288,23 @@ class AnnotationCanvas(QGraphicsView):
                                     1, Qt.DashLine))
             elif self.tool == "mosaic":
                 painter.setPen(QPen(QColor("#00ad91"), 1, Qt.DashLine))
+            elif self.tool == "zoom":
+                # 预览边框与生成副本一致：使用放大标注专用颜色，不是裁剪框颜色。
+                painter.setPen(QPen(QColor(self.settings.get("zoom_annotation_color", "#00b8a9")),
+                                    max(1, int(self.settings.get("crop_width", 2))),
+                                    Qt.DashLine))
             else:
                 painter.setPen(self.stroke_pen())
             area = QRectF(self.start, self.preview_end).normalized()
-            if self.tool in ("rect", "crop", "mosaic") or eraser_rect_active:
+            if self.tool == "zoom":
+                # 预览形状必须与最终镜片一致：圆形模式拖动时也画椭圆/正圆，
+                # 矩形模式画与最终镜片一致的圆角矩形。
+                if self.settings.get("zoom_annotation_style", "circle") == "circle":
+                    painter.drawEllipse(area)
+                else:
+                    radius = min(10.0, area.width() / 2, area.height() / 2)
+                    painter.drawRoundedRect(area, radius, radius)
+            elif self.tool in ("rect", "crop", "mosaic") or eraser_rect_active:
                 if self.tool == "crop":
                     fill = QColor(self.crop_color)
                     fill.setAlpha(50)
@@ -1884,7 +2319,9 @@ class AnnotationCanvas(QGraphicsView):
             elif self.tool == "arrow":
                 arrow = shape("arrow", self.start, self.preview_end,
                               self.tool_color("arrow"), self.tool_width(),
-                              self.settings.get("arrow_style", "filled"))
+                              self.settings.get("arrow_style", "filled"),
+                              arrow_curve_direction=self.settings.get(
+                                  "arrow_curve_direction", "right"))
                 painter.setBrush(arrow.brush())
                 painter.drawPath(arrow.path())
         if self.mosaic_preview is not None:
@@ -2311,6 +2748,22 @@ class AnnotationCanvas(QGraphicsView):
         if self.tool not in ("select", "hand") and not self.sceneRect().contains(point):
             event.accept()
             return
+        if self.tool == "image":
+            # 图片工具也必须先吃完选择/手柄/拖动这些特殊交互；
+            # 只有点在空白画布上才弹文件框，绝不能在已有标注或其手柄上插入新图。
+            if event.button() == Qt.LeftButton:
+                hit = self.annotation_at(point)
+                if hit is not None:
+                    if not hit.isSelected():
+                        self.scene_data.clearSelection()
+                        hit.setSelected(True)
+                        self._on_selection_changed()
+                    self._tool_item_drag = True
+                    super().mousePressEvent(event)
+                else:
+                    self.image_insert_requested.emit(QPointF(point))
+            event.accept()
+            return
         if self.tool == "text":
             self._activate_click_tool("text", point)
             return
@@ -2517,7 +2970,7 @@ class AnnotationCanvas(QGraphicsView):
             return
         if self.start is not None:
             end = self.image_point(self.mapToScene(event.position().toPoint()))
-            if (self.tool in ("rect", "ellipse")
+            if (self.tool in ("rect", "ellipse", "zoom")
                     and self._shape_constraint_active(event)):
                 end = constrained_shape_endpoint(self.start, end)
             self.preview_end = end
@@ -2560,9 +3013,12 @@ class AnnotationCanvas(QGraphicsView):
         """
         if self.text_resize_origin is None:
             # 首帧捕获：按下后（锚点已就位）的文本框尺寸与实际位置。
+            # 用内容高度作基准：boundingRect 已含背景 padding，直接当 fixed_height 会在
+            # 首次拖上下手柄时把 padding 再算一次（高度跳 2×padding）。
             self.text_resize_origin = (
                 float(item.document().textWidth()),
-                float(item.boundingRect().height()),
+                float(item.content_rect().height()
+                      if hasattr(item, "content_rect") else item.boundingRect().height()),
                 float(getattr(item, "fixed_height", 0.0)),
                 QPointF(item.pos()))
         origin_width, origin_height, origin_fixed, origin_pos = self.text_resize_origin
@@ -2741,6 +3197,9 @@ class AnnotationCanvas(QGraphicsView):
             "text_underline": underline, "text_strikethrough": strike,
             "text_background_enabled": bool(item.background_color),
             "text_background": item.background_color or self.settings.get("text_background", "#fff3a0"),
+            "text_background_padding": int(getattr(item, "background_padding", 0)),
+            "text_background_radius": int(getattr(item, "background_radius", 0)),
+            "text_background_opacity": int(getattr(item, "background_opacity", 100)),
             "text_width": int(round(item.document().textWidth())),
             "text_height": int(round(getattr(item, "fixed_height", 0.0))),
         }
@@ -2760,6 +3219,10 @@ class AnnotationCanvas(QGraphicsView):
                                         or self.settings.get("text_color", "#ff0000")))
         item.background_color = (values.get("text_background")
                                  if values.get("text_background_enabled") else None)
+        item.set_background_style(
+            values.get("text_background_padding", 0),
+            values.get("text_background_radius", 0),
+            values.get("text_background_opacity", 100))
         apply_text_format(item, bool(values.get("text_bold")), bool(values.get("text_italic")),
                           bool(values.get("text_underline")), bool(values.get("text_strikethrough")))
         alignment = {"left": Qt.AlignLeft, "center": Qt.AlignHCenter,
@@ -2775,6 +3238,9 @@ class AnnotationCanvas(QGraphicsView):
 
     def edit_text_item(self, item):
         """编辑已有文字标注：对话框各项只作用于该标注，不回写公共配置。"""
+        if annotation_locked(item):
+            get_logger().debug("锁定文字标注忽略编辑请求")
+            return
         values = self._text_values_from_item(item)
         original_text = item.toPlainText()
         text, changed, ok = self.input_text("修改文字标注", original_text,
@@ -2799,13 +3265,86 @@ class AnnotationCanvas(QGraphicsView):
         if text_changed or changed:
             self.checkpoint()
 
+    def edit_annotation_parameters(self, item):
+        """右键「编辑参数…」：只改当前标注，不回写默认配置。"""
+        from editor.annotation_properties import edit_annotation_parameters
+
+        updated, changed = edit_annotation_parameters(self, item)
+        if updated is None:
+            get_logger().debug("标注参数编辑取消: 类型=%s", type(item).__name__)
+            return
+        if not changed:
+            # 直接点“确定”没有改动 ⇒ 不产生空撤销点。
+            get_logger().debug("标注参数编辑无改动: 类型=%s", type(item).__name__)
+            return
+        self._on_selection_changed()
+        self.viewport().update()
+        self.checkpoint()
+        get_logger().debug("标注参数已更新: 类型=%s", type(updated).__name__)
+
+    def set_item_locked(self, item, locked):
+        """锁定/解锁单个标注；锁定不删除，解锁后恢复可选中与移动。"""
+        set_annotation_locked(item, locked)
+        if not locked:
+            item.setSelected(True)
+        self._on_selection_changed()
+        self.viewport().update()
+        self.checkpoint()
+        get_logger().debug("标注%s: 类型=%s",
+                           "锁定" if locked else "解锁", type(item).__name__)
+
+    def duplicate_selected(self):
+        """Ctrl+D：复制选中标注（保留大小/旋转/颜色），偏移后自动选中副本。"""
+        selected = [item for item in self.scene_data.selectedItems()
+                    if not annotation_locked(item)]
+        if not selected:
+            return False
+        copies = []
+        for item in selected:
+            data = self._item_record(item)
+            x, y = data["pos"]
+            data["pos"] = (x + 12, y + 12)
+            copy = self._item_from_record(data)
+            if isinstance(copy, AnnotationSequenceItem):
+                # 序号副本取下一个可用编号，避免与原标注重号。
+                copy.number = self.next_sequence_number()
+                copy.update()
+            self.scene_data.addItem(copy)
+            copies.append(copy)
+        self.scene_data.clearSelection()
+        for copy in copies:
+            copy.setSelected(True)
+        self._on_selection_changed()
+        self.viewport().update()
+        self.checkpoint()
+        get_logger().debug("标注复制完成: 复制=%d, 选中类型=%s",
+                           len(copies), self.selected_annotation_tool() or "无")
+        return True
+
     def annotation_menu(self, item):
         menu = QMenu(self)
-        edit_action = menu.addAction("编辑文字") if isinstance(item, QGraphicsTextItem) else None
+        locked = annotation_locked(item)
+        if locked:
+            menu.addAction("解锁标注").triggered.connect(
+                lambda: self.set_item_locked(item, False))
+        else:
+            if isinstance(item, QGraphicsTextItem):
+                edit_action = menu.addAction("编辑文字")
+                edit_action.triggered.connect(lambda: self.edit_text_item(item))
+            else:
+                edit_action = menu.addAction("编辑参数…")
+                edit_action.triggered.connect(
+                    lambda: self.edit_annotation_parameters(item))
+                if isinstance(item, AnnotationPixmapItem) and not isinstance(item, AnnotationZoomItem):
+                    replace_action = menu.addAction("替换图片…")
+                    replace_action.triggered.connect(
+                        lambda: self.replace_image_item(item))
+            menu.addAction("复制标注").triggered.connect(self.duplicate_selected)
+            menu.addAction("锁定标注").triggered.connect(
+                lambda: self.set_item_locked(item, True))
         delete_action = menu.addAction("删除标注")
+        delete_action.setEnabled(not locked)
         delete_action.triggered.connect(lambda: (item.setSelected(True), self.remove_selected()))
-        if edit_action is not None:
-            edit_action.triggered.connect(lambda: self.edit_text_item(item))
         menu.aboutToHide.connect(menu.deleteLater)
         return menu
 
@@ -2963,7 +3502,7 @@ class AnnotationCanvas(QGraphicsView):
             return
         if self.start is not None:
             end = self.image_point(self.mapToScene(event.position().toPoint()))
-            if (self.tool in ("rect", "ellipse")
+            if (self.tool in ("rect", "ellipse", "zoom")
                     and self._shape_constraint_active(event)):
                 end = constrained_shape_endpoint(self.start, end)
             dragged = (end - self.start).manhattanLength() >= STRAIGHT_MIN_DISTANCE
@@ -2974,6 +3513,7 @@ class AnnotationCanvas(QGraphicsView):
                     seg = QPainterPath(self.start)
                     seg.lineTo(end)
                     item = AnnotationPathItem(seg)
+                    item.marker = self.tool == "marker"
                     item.setPen(self.stroke_pen())
                     editable(item)
                     self._add_annotation(item)
@@ -3001,6 +3541,7 @@ class AnnotationCanvas(QGraphicsView):
                 self.preview_end = None
                 if dragged:
                     item = AnnotationPathItem(self._smooth_freehand_path(self.drawing))
+                    item.marker = self.tool == "marker"
                     item.setPen(self.stroke_pen())
                     editable(item)
                     self._add_annotation(item)
@@ -3023,6 +3564,39 @@ class AnnotationCanvas(QGraphicsView):
                 result = mosaic_image(sample, mode, size)
                 item = editable(AnnotationPixmapItem(QPixmap.fromImage(to_qimage(result))))
                 item.setPos(area.topLeft())
+            elif self.tool == "zoom":
+                # 局部放大：框选底图区域，生成放大副本贴在旁边；副本本身是可移动/可撤销的图片标注。
+                area = QRectF(self.start, end).normalized().toRect().intersected(
+                    self.sceneRect().toRect())
+                if area.isEmpty():
+                    self.start = None
+                    return
+                sample = self.image.crop(
+                    (area.left(), area.top(), area.right() + 1, area.bottom() + 1))
+                factor = max(1, min(16, int(self.settings.get("zoom_annotation_factor", 2))))
+                source_pixmap = QPixmap.fromImage(to_qimage(sample))
+                item = editable(AnnotationZoomItem(
+                    source_pixmap, QRectF(area), factor,
+                    self.settings.get("zoom_annotation_style", "circle"),
+                    self.settings.get("zoom_annotation_color", "#00b8a9"),
+                    max(1, int(self.settings.get("crop_width", 2))),
+                    int(self.settings.get("zoom_annotation_opacity", 100)),
+                    int(self.settings.get("zoom_annotation_max_size", 480))))
+                scaled = item.pixmap()
+                scene = self.sceneRect()
+                x = area.right() + 12
+                if x + scaled.width() > scene.right():
+                    x = area.left() - scaled.width() - 12
+                if x < scene.left():
+                    x = min(max(scene.left(), area.left()),
+                            max(scene.left(), scene.right() - scaled.width()))
+                y = min(max(scene.top(), area.top()),
+                        max(scene.top(), scene.bottom() - scaled.height()))
+                item.setPos(QPointF(x, y))
+                get_logger().debug(
+                    "局部放大标注: 选区=%s 倍数=%d 输出=%dx%d",
+                    area.getRect(), int(self.settings.get("zoom_annotation_factor", 2)),
+                    scaled.width(), scaled.height())
             elif self.tool == "crop":
                 area = QRectF(self.start, end).normalized().toRect().intersected(self.sceneRect().toRect())
                 if not area.isEmpty():
@@ -3051,7 +3625,8 @@ class AnnotationCanvas(QGraphicsView):
                              else 0,
                              self.settings.get(f"{self.tool}_fill_enabled", False),
                              self.settings.get(f"{self.tool}_fill_opacity", 35),
-                             self.settings.get(f"{self.tool}_fill_color"))
+                             self.settings.get(f"{self.tool}_fill_color"),
+                             self.settings.get("arrow_curve_direction", "right"))
             self._add_annotation(item)
             if self.tool == "arrow" and self.settings.get("arrow_chain", False):
                 # 多段绘制：保留上一终点作为下一段起点；按右键结束连续绘制。
@@ -3102,7 +3677,12 @@ class AnnotationCanvas(QGraphicsView):
         if item is not None:
             if isinstance(item, AnnotationTextItem):
                 # 双击文字直接进编辑框：任何工具下都成立（编辑不依赖工具状态）。
-                self.edit_text_item(item)
+                # 锁定标注不响应任何修改入口（右键菜单同样只提供解锁）。
+                if annotation_locked(item):
+                    get_logger().debug("锁定文字标注忽略双击编辑: 场景点=(%.1f,%.1f)",
+                                       point.x(), point.y())
+                else:
+                    self.edit_text_item(item)
                 self._update_resize_cursor(event.position().toPoint())
                 return
             if self.tool != "select":
@@ -3123,6 +3703,10 @@ class AnnotationCanvas(QGraphicsView):
             item.setSelected(True)
             self._update_resize_cursor(event.position().toPoint())
             self.viewport().update()
+            return
+        if self.tool == "image":
+            # 图片工具双击空白不执行保存/二次插入；单击空白已经进入选图流程。
+            event.accept()
             return
         self.confirmed.emit()
 
@@ -3605,6 +4189,15 @@ class AnnotationCanvas(QGraphicsView):
             # 复位缩放到 100%（Ctrl+0）：直接在画布内执行，避免又被吞掉。
             get_logger().info("画布 Ctrl+0 ⇒ 复位缩放到 100%%")
             self.set_zoom(100)
+            event.accept()
+        elif (event.key() == Qt.Key_D and event.modifiers() == Qt.ControlModifier):
+            # Ctrl+D：复制选中标注（保留大小/旋转/颜色），偏移后自动选中副本。
+            self.duplicate_selected()
+            event.accept()
+        elif self._binding_matches(event, "editor_arrow_curve_shortcut", "Alt+C"):
+            # 曲线箭头弯曲方向：选中箭头时改该对象，未选中时改后续新建箭头的默认方向。
+            get_logger().info("画布曲线箭头方向切换键按下")
+            self.arrow_curve_toggle.emit()
             event.accept()
         elif event.key() in (Qt.Key_Delete, Qt.Key_Backspace):
             self.remove_selected()

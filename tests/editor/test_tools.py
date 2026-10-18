@@ -150,9 +150,11 @@ class ToolsTests(CoreTests):
                                  (editor.toolbar.geometry(), drawing.geometry(), output.geometry()))
                 output_buttons = [button for button in editor.toolbar.output_buttons
                                   if not button.isHidden()]
-                buttons = tools + output_buttons + editor.toolbar.edit_buttons
+                # 显示鼠标已移入输出组第一个，inline 布局宽度/对齐也把它算进去。
+                output_row_widgets = [editor.toolbar.cursor_switch] + output_buttons
+                buttons = tools + output_row_widgets + editor.toolbar.edit_buttons
                 output_rows = {button.mapTo(editor.toolbar, QPoint(0, 0)).y()
-                               for button in output_buttons}
+                               for button in output_row_widgets}
                 edit_rows = {button.mapTo(editor.toolbar, QPoint(0, 0)).y()
                              for button in editor.toolbar.edit_buttons}
                 self.assertEqual(len(output_rows), 1)
@@ -179,10 +181,12 @@ class ToolsTests(CoreTests):
                                  for button in tools) if align_right else
                              min(button.mapTo(editor.toolbar, QPoint(0, 0)).x() for button in tools))
                 output_edge = (max(button.mapTo(editor.toolbar, QPoint(button.width(), 0)).x()
-                                   for button in output_buttons + editor.toolbar.edit_buttons)
+                                   for button in output_row_widgets
+                                   + editor.toolbar.edit_buttons)
                                if align_right else
                                min(button.mapTo(editor.toolbar, QPoint(0, 0)).x()
-                                   for button in output_buttons + editor.toolbar.edit_buttons))
+                                   for button in output_row_widgets
+                                   + editor.toolbar.edit_buttons))
                 self.assertEqual(tool_edge, output_edge,
                                  (editor.toolbar.geometry(), drawing.geometry(), output.geometry(),
                                   tools[0].mapTo(editor.toolbar, QPoint(0, 0)),
@@ -363,7 +367,7 @@ class ToolsTests(CoreTests):
         toolbar = ToolbarWidget(settings=dict(DEFAULTS))
         try:
             self.assertEqual(sorted(toolbar.previews),
-                             ["arrow", "crop", "ellipse", "eraser", "marker", "mosaic", "pen", "picker", "rect", "sequence", "text"])
+                             ["arrow", "crop", "ellipse", "eraser", "marker", "mosaic", "pen", "picker", "rect", "sequence", "text", "zoom"])
             # 弹窗未显示时 isVisible 恒为 False，这里只看控件自身的显式隐藏状态。
             toolbar.tool_buttons["arrow"].click()
             self.assertEqual([name for name, widget in toolbar.previews.items() if not widget.isHidden()],
@@ -494,13 +498,15 @@ class ToolsTests(CoreTests):
             apply_theme(self.app, "system")
 
     def test_multirow_tool_options_fit_and_labels_are_vertically_centered(self):
-        from PySide6.QtWidgets import QWidgetAction
+        from PySide6.QtWidgets import QGridLayout, QWidgetAction
         from editor.toolbar_widget import ToolbarWidget
 
         toolbar = ToolbarWidget()
         panel = next(action.defaultWidget() for action in toolbar.options_button.menu().actions()
                      if isinstance(action, QWidgetAction))
         panel.show()
+        # 顶部样式预设行独立于参数网格；网格布局仍是第二层子控件。
+        grid = panel.findChild(QGridLayout)
         for tool, rows in (("pen", (0, 1, 12)), ("marker", (0, 1, 2, 12)),
              ("text", (0, 3, 4, 5, 12)), ("mosaic", (6, 7, 12)),
              ("arrow", (0, 1, 8, 12)),
@@ -510,7 +516,7 @@ class ToolsTests(CoreTests):
             toolbar.tool_buttons[tool].click()
             self.app.processEvents()
             panel.adjustSize()
-            panel.layout().activate()
+            grid.activate()
             self.assertGreaterEqual(toolbar.options_button.menu().height(), panel.sizeHint().height())
             expected_labels = {
                 0: {"pen": "画笔颜色", "marker": "记号笔颜色",
@@ -525,14 +531,14 @@ class ToolsTests(CoreTests):
                 16: "填充透明度", 17: "椭圆填充", 18: "填充透明度",
             }
             for row in rows:
-                cell = panel.layout().itemAtPosition(row, 0)
+                cell = grid.itemAtPosition(row, 0)
                 if cell is None:  # 该工具不占此行（面板按当前工具动态建行）
                     continue
                 self.assertEqual(cell.widget().text(), expected_labels[row])
                 row_widgets = []
-                for index in range(panel.layout().count()):
-                    item = panel.layout().itemAt(index)
-                    item_row, _, _, _ = panel.layout().getItemPosition(index)
+                for index in range(grid.count()):
+                    item = grid.itemAt(index)
+                    item_row, _, _, _ = grid.getItemPosition(index)
                     widget = item.widget()
                     if item_row == row and widget is not None and not widget.isHidden():
                         row_widgets.append(widget)
@@ -541,7 +547,8 @@ class ToolsTests(CoreTests):
                 self.assertLessEqual(max(centers) - min(centers), 3,
                                      f"row {row} is not vertically centered")
             if tool == "pen":
-                self.assertLess(panel.sizeHint().height(), 250)
+                # 2026-10-17：新增「样式预设」行（行 37），高度预算从 250 调到 280。
+                self.assertLess(panel.sizeHint().height(), 280)
             if tool == "rect":
                 self.assertLess(panel.sizeHint().height(), 440)
             if tool == "text":
@@ -550,8 +557,12 @@ class ToolsTests(CoreTests):
                 self.assertEqual(set(toolbar.choice_buttons["arrow_style"]),
                                   {"filled", "open", "dashed", "double_filled", "double_open",
                                    "double_dashed", "line", "dashed_line", "rect_filled",
-                                   "rect_open", "rect_dashed"})
+                                   "rect_open", "rect_dashed", "curve_filled",
+                                   "curve_open", "curve_open_dashed"})
                 self.assertTrue(toolbar.choice_buttons["arrow_style"]["open"].isChecked() is False)
+                self.assertEqual(set(toolbar.choice_buttons["arrow_curve_direction"]),
+                                 {"left", "right"})
+                self.assertTrue(toolbar.choice_buttons["arrow_curve_direction"]["right"].isChecked())
                 # 2026-10-16：弹层宽度改为由内容决定，不再写死 760（旧值比实际内容宽一倍）。
                 self.assertLessEqual(panel.minimumWidth(), toolbar.OPTIONS_PANEL_MAX_WIDTH)
             if tool in ("rect", "ellipse"):

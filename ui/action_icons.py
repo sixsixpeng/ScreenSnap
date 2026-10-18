@@ -47,6 +47,26 @@ def _render_action_icon(name, ink_color, accent_color):
         painter.drawRoundedRect(QRectF(3, 7, 18, 13), 2, 2)
         painter.drawRoundedRect(QRectF(7, 4, 6, 3), 1, 1)
         painter.drawEllipse(QRectF(9, 10, 6, 6))
+    elif name in ("image_insert", "image_replace"):
+        # 可识别的“插入图片”图标：相框 + 山/太阳；替换额外叠加回转箭头。
+        painter.drawRoundedRect(QRectF(3, 5, 18, 14), 2, 2)
+        painter.setPen(QPen(accent, 1.4))
+        painter.drawEllipse(QRectF(7, 8, 3, 3))
+        painter.setPen(QPen(ink, 1.6, Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawLine(4, 17, 9, 12)
+        painter.drawLine(9, 12, 12, 15)
+        painter.drawLine(12, 15, 16, 11)
+        painter.drawLine(16, 11, 20, 17)
+        if name == "image_insert":
+            painter.setPen(QPen(accent, 2.2, Qt.SolidLine, Qt.RoundCap))
+            painter.drawLine(18, 18, 22, 18)
+            painter.drawLine(20, 16, 22, 18)
+            painter.drawLine(20, 20, 22, 18)
+        else:
+            painter.setPen(QPen(accent, 1.8, Qt.SolidLine, Qt.RoundCap))
+            painter.drawArc(QRectF(15, 15, 7, 7), 35 * 16, 285 * 16)
+            painter.drawLine(18.5, 14.5, 21.5, 16.5)
+            painter.drawLine(21.5, 16.5, 18.5, 18.5)
     elif name == "resize":
         painter.drawRect(QRectF(5, 5, 14, 14))
         painter.drawLine(2, 8, 2, 2)

@@ -2,7 +2,7 @@
 
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QFont
-from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFontComboBox,
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QDialog, QDialogButtonBox, QFontComboBox, QSlider,
                                QFormLayout, QGroupBox, QHBoxLayout, QLabel, QPlainTextEdit,
                                QSpinBox, QVBoxLayout, QWidget)
 
@@ -12,15 +12,18 @@ from ui.widgets.color_button import ColorButton
 # 对话框可直接调整并回写到配置的文字相关设置项。
 TEXT_SETTING_KEYS = ("font", "font_size", "text_alignment", "text_color",
                      "text_bold", "text_italic", "text_underline", "text_strikethrough",
-                     "text_background_enabled", "text_background", "text_width",
-                     "text_height")
+                     "text_background_enabled", "text_background",
+                     "text_background_padding", "text_background_radius",
+                     "text_background_opacity", "text_width", "text_height")
 
 # 配置缺失时的兜底值，与 config.DEFAULTS 保持一致。
 TEXT_SETTING_FALLBACKS = {
     "font": "", "font_size": 18, "text_alignment": "left", "text_color": "#ff0000",
     "text_bold": False, "text_italic": False, "text_underline": False,
     "text_strikethrough": False, "text_background_enabled": False,
-    "text_background": "#fff3a0", "text_width": 0, "text_height": 0,
+    "text_background": "#fff3a0", "text_background_padding": 0,
+    "text_background_radius": 0, "text_background_opacity": 100,
+    "text_width": 0, "text_height": 0,
 }
 
 ALIGNMENT_OPTIONS = (("左对齐", "left"), ("居中", "center"), ("右对齐", "right"))
@@ -172,6 +175,43 @@ class TextInputDialog(QDialog):
         color_row.addWidget(self.background)
         color_row.addStretch()
         form.addRow("颜色", _row(color_row))
+
+        self.background_padding = QSpinBox()
+        self.background_padding.setRange(0, 32)
+        self.background_padding.setValue(int(self._values["text_background_padding"]))
+        self.background_padding.setSuffix(" px")
+        self.background_padding.setToolTip("背景色块相对文字向外扩展的像素；0 表示贴合")
+        self.background_padding.valueChanged.connect(
+            lambda value: self._set("text_background_padding", value))
+        self.background_radius = QSpinBox()
+        self.background_radius.setRange(0, 32)
+        self.background_radius.setValue(int(self._values["text_background_radius"]))
+        self.background_radius.setSuffix(" px")
+        self.background_radius.setToolTip("背景色块的圆角半径；0 表示直角")
+        self.background_radius.valueChanged.connect(
+            lambda value: self._set("text_background_radius", value))
+        self.background_opacity = QSlider(Qt.Horizontal)
+        self.background_opacity.setRange(0, 100)
+        self.background_opacity.setValue(int(self._values["text_background_opacity"]))
+        self.background_opacity.setMinimumWidth(150)
+        self.background_opacity.setToolTip("背景色块的不透明度；100 表示完全不透明")
+        self.background_opacity_label = QLabel(f"{self.background_opacity.value()}%")
+        self.background_opacity_label.setMinimumWidth(44)
+        self.background_opacity_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.background_opacity.valueChanged.connect(
+            lambda value: self.background_opacity_label.setText(f"{value}%"))
+        self.background_opacity.valueChanged.connect(
+            lambda value: self._set("text_background_opacity", value))
+        background_row = QHBoxLayout()
+        background_row.addWidget(QLabel("内边距"))
+        background_row.addWidget(self.background_padding)
+        background_row.addWidget(QLabel("圆角"))
+        background_row.addWidget(self.background_radius)
+        background_row.addWidget(QLabel("不透明度"))
+        background_row.addWidget(self.background_opacity)
+        background_row.addWidget(self.background_opacity_label)
+        background_row.addStretch()
+        form.addRow("背景样式", _row(background_row))
 
         self.text_width = QSpinBox()
         self.text_width.setRange(0, 2000)

@@ -4,7 +4,8 @@ import math
 
 from PySide6.QtCore import Qt, QPointF, QRectF
 from PySide6.QtGui import (QColor, QPen, QPainter, QPainterPath, QPainterPathStroker, QFont,
-                           QFontMetricsF, QTextCursor, QTextBlockFormat, QTextCharFormat)
+                           QPolygonF,
+                           QFontMetricsF, QPixmap, QTextCursor, QTextBlockFormat, QTextCharFormat)
 from PySide6.QtWidgets import (QGraphicsItem, QGraphicsRectItem, QGraphicsEllipseItem,
                                QGraphicsPathItem, QGraphicsTextItem, QGraphicsPixmapItem,
                                QStyle, QStyleOptionGraphicsItem)
@@ -34,6 +35,10 @@ SEQUENCE_PRESETS = {
                   "sequence_text_color": "#ffffff"},
     "blue_arrow": {"sequence_shape": "arrow", "sequence_fill_color": "#168cff",
                    "sequence_text_color": "#ffffff"},
+    "orange_bubble": {"sequence_shape": "bubble", "sequence_fill_color": "#ff8c00",
+                      "sequence_text_color": "#ffffff"},
+    "green_cloud": {"sequence_shape": "cloud", "sequence_fill_color": "#2e9e5b",
+                    "sequence_text_color": "#ffffff"},
 }
 
 
@@ -97,6 +102,12 @@ class AnnotationTextItem(AnnotationPaintMixin, QGraphicsTextItem):
         super().__init__(*args, **kwargs)
         self.background_color = None
         self.fixed_height = 0.0
+        # 文字背景增强：内边距让背景比文字略大，圆角柔化边角，不透明度可压暗背景。
+        # 三者默认 0/0/100，与旧版背景完全一致（不改变已有用户的既有输出）。
+        self.background_padding = 0
+        self.background_radius = 0
+        self.background_opacity = 100
+        self.locked = False
 
     def set_text_height(self, height):
         """设置固定高度；0 表示按内容自动（恢复自然高度）。"""
@@ -107,32 +118,247 @@ class AnnotationTextItem(AnnotationPaintMixin, QGraphicsTextItem):
         self.fixed_height = height
         self.update()
 
+    def set_background_style(self, padding=0, radius=0, opacity=100):
+        """设置背景内边距/圆角/不透明度（只作用于当前文字标注）。"""
+        padding = max(0, int(padding or 0))
+        radius = max(0, int(radius or 0))
+        opacity = max(0, min(100, int(opacity if opacity is not None else 100)))
+        if (padding, radius, opacity) == (self.background_padding,
+                                          self.background_radius,
+                                          self.background_opacity):
+            return
+        if padding != self.background_padding:
+            self.prepareGeometryChange()
+        self.background_padding = padding
+        self.background_radius = radius
+        self.background_opacity = opacity
+        self.update()
+
     def auto_height(self):
         """按内容自动排版后的自然高度（忽略固定高度裁剪）。"""
         return float(super().boundingRect().height())
 
-    def boundingRect(self):
+    def content_rect(self):
+        """文字内容本身的矩形（背景内边距不包含在内）。"""
         rect = super().boundingRect()
         if self.fixed_height > 0:
             rect.setHeight(self.fixed_height)
         return rect
 
+    def boundingRect(self):
+        rect = self.content_rect()
+        padding = self.background_padding
+        if padding:
+            rect = rect.adjusted(-padding, -padding, padding, padding)
+        return rect
+
+    def contains(self, point):
+        """命中区域包含可见的背景内边距，否则点击色块边缘选不中文字标注。
+
+        注意：QGraphicsTextItem 的 shape() 覆写不会被 Qt 的 scene 命中测试采用
+        （实测 scene.items(..., IntersectsItemShape) 走的是 contains），因此这里覆写 contains。
+        """
+        if self.background_color and self.background_padding:
+            return self.boundingRect().contains(point)
+        return super().contains(point)
+
     def paint(self, painter, option, widget=None):
-        rect = self.boundingRect()
+        content = self.content_rect()
         if self.background_color:
+            rect = content.adjusted(-self.background_padding, -self.background_padding,
+                                    self.background_padding, self.background_padding)
+            color = QColor(self.background_color)
+            color.setAlpha(round(255 * self.background_opacity / 100))
             painter.save()
             painter.setPen(Qt.NoPen)
-            painter.setBrush(QColor(self.background_color))
-            painter.drawRect(rect)
+            painter.setBrush(color)
+            if self.background_radius > 0:
+                radius = min(self.background_radius,
+                             rect.width() / 2, rect.height() / 2)
+                painter.drawRoundedRect(rect, radius, radius)
+            else:
+                painter.drawRect(rect)
             painter.restore()
         if self.fixed_height > 0:
-            # 固定高度时裁剪超出区域，使显示范围与手柄位置一致。
+            # 固定高度时只裁剪文字内容，背景仍完整显示（否则内边距会被一起切掉）。
             painter.save()
-            painter.setClipRect(rect)
+            painter.setClipRect(content)
             super().paint(painter, option, widget)
             painter.restore()
             return
         super().paint(painter, option, widget)
+
+
+class AnnotationZoomItem(AnnotationPaintMixin, QGraphicsPixmapItem):
+    """局部放大标注：圆形/矩形镜片 + 指向原选区的云朵小尾巴。
+
+    source_pixmap 保存未放大的原图块；编辑倍率时只重建显示 pixmap，不丢源图。
+    source_rect 是场景坐标里的原选区，尾巴终点随图元移动/缩放实时重算。
+    """
+
+    def __init__(self, source_pixmap, source_rect, factor=2, style="circle",
+                 border_color="#00ad91", border_width=2, opacity=100,
+                 max_size=480):
+        super().__init__()
+        self.zoom_source = QPixmap(source_pixmap)
+        self.source_rect = QRectF(source_rect)
+        self.zoom_factor = max(1, min(16, int(factor)))
+        self.zoom_style = "rect" if style == "rect" else "circle"
+        self.zoom_border_color = border_color
+        self.zoom_border_width = max(1, int(border_width))
+        self.zoom_max_size = max(80, min(1200, int(max_size)))
+        self.zoom_display_scale = 1.0
+        self._rebuild_pixmap()
+        self.setOpacity(max(0, min(100, int(opacity))) / 100)
+
+    def _content_rect(self):
+        return QRectF(self.offset().x(), self.offset().y(),
+                      self.pixmap().width(), self.pixmap().height())
+
+    def _frame_path(self, rect=None):
+        rect = QRectF(rect or self._content_rect())
+        path = QPainterPath()
+        if self.zoom_style == "rect":
+            radius = min(10.0, rect.width() / 2, rect.height() / 2)
+            path.addRoundedRect(rect, radius, radius)
+        else:
+            path.addEllipse(rect)
+        return path
+
+    def _rebuild_pixmap(self):
+        source = self.zoom_source
+        if source.isNull():
+            return
+        self.prepareGeometryChange()
+        requested_w = max(1, source.width() * self.zoom_factor)
+        requested_h = max(1, source.height() * self.zoom_factor)
+        # 倍率只是请求值；最终显示尺寸受最大边长约束，避免框选大区域后无限膨胀。
+        self.zoom_display_scale = min(1.0, self.zoom_max_size / max(requested_w, requested_h))
+        scaled = source.scaled(max(1, round(requested_w * self.zoom_display_scale)),
+                               max(1, round(requested_h * self.zoom_display_scale)),
+                               Qt.IgnoreAspectRatio, Qt.SmoothTransformation)
+        self.setPixmap(scaled)
+        self.update()
+
+    def set_zoom_max_size(self, max_size):
+        value = max(80, min(1200, int(max_size)))
+        if value == self.zoom_max_size:
+            return
+        self.zoom_max_size = value
+        self._rebuild_pixmap()
+
+    def set_zoom_factor(self, factor):
+        value = max(1, min(16, int(factor)))
+        if value == self.zoom_factor:
+            return
+        self.zoom_factor = value
+        self._rebuild_pixmap()
+
+    def set_zoom_style(self, style):
+        value = "rect" if style == "rect" else "circle"
+        if value != self.zoom_style:
+            self.zoom_style = value
+            self.update()
+
+    def set_zoom_opacity(self, opacity):
+        self.setOpacity(max(0, min(100, int(opacity))) / 100)
+
+    def set_zoom_border_color(self, color):
+        value = QColor(color)
+        if value.isValid() and value.name() != self.zoom_border_color:
+            self.zoom_border_color = value.name()
+            self.update()
+
+    def _source_marker(self):
+        """源区域轮廓，映射到本图元局部坐标；形状跟随镜片圆/方样式。"""
+        if self.zoom_source.isNull() or self.source_rect.isEmpty():
+            return None
+        frame = self._frame_path()
+        if frame.contains(self.mapFromScene(self.source_rect.center())):
+            return None
+        local = QRectF(
+            self.mapFromScene(self.source_rect.topLeft()),
+            self.mapFromScene(self.source_rect.bottomRight())).normalized()
+        path = QPainterPath()
+        if self.zoom_style == "circle":
+            path.addEllipse(local)
+        else:
+            radius = min(8.0, local.width() / 2, local.height() / 2)
+            path.addRoundedRect(local, radius, radius)
+        return path
+
+    def boundingRect(self):
+        base = super().boundingRect()
+        halo_padding = max(8.0, self.zoom_border_width + 5.0)
+        base = base.adjusted(-halo_padding, -halo_padding, halo_padding, halo_padding)
+        marker = self._source_marker()
+        if marker is None:
+            return base
+        padding = 10.0
+        return base.united(marker.boundingRect().adjusted(-padding, -padding, padding, padding))
+
+    def shape(self):
+        path = self._frame_path()
+        marker = self._source_marker()
+        if marker is not None:
+            stroker = QPainterPathStroker()
+            stroker.setWidth(max(3.0, self.zoom_border_width * 1.5))
+            stroker.setCapStyle(Qt.RoundCap)
+            stroker.setJoinStyle(Qt.RoundJoin)
+            path.addPath(stroker.createStroke(marker))
+        return path
+
+    def _draw_source_marker(self, painter, marker):
+        """圆形镜片画虚线椭圆源区；矩形镜片画虚线圆角框 + 四角短实线。"""
+        color = QColor(self.zoom_border_color)
+        color.setAlpha(190)
+        painter.setBrush(Qt.NoBrush)
+        painter.setPen(QPen(color, max(1.0, self.zoom_border_width * 0.85),
+                            Qt.DashLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.drawPath(marker)
+        if self.zoom_style != "rect":
+            return
+        corner_color = QColor(self.zoom_border_color)
+        corner_color.setAlpha(235)
+        painter.setPen(QPen(corner_color, max(1.4, self.zoom_border_width * 1.1),
+                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        bounds = marker.boundingRect()
+        points = [bounds.topLeft(), bounds.topRight(),
+                  bounds.bottomRight(), bounds.bottomLeft()]
+        for index, point in enumerate(points):
+            for neighbor in (points[(index - 1) % 4], points[(index + 1) % 4]):
+                vx, vy = neighbor.x() - point.x(), neighbor.y() - point.y()
+                length = math.hypot(vx, vy)
+                if length <= 0.01:
+                    continue
+                reach = min(10.0, length * 0.28)
+                painter.drawLine(point, QPointF(point.x() + vx * reach / length,
+                                                point.y() + vy * reach / length))
+
+    def paint(self, painter, option, widget=None):
+        painter.save()
+        painter.setRenderHint(QPainter.Antialiasing, True)
+        frame = self._frame_path()
+        marker = self._source_marker()
+        if marker is not None:
+            self._draw_source_marker(painter, marker)
+        # 镜片外圈柔光：先铺一圈低透明度同色光晕，镜片不再像硬切出来的一块区域。
+        halo = QColor(self.zoom_border_color)
+        halo.setAlpha(55)
+        painter.setPen(QPen(halo, max(4.0, self.zoom_border_width + 5.0),
+                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(frame)
+        painter.save()
+        painter.setClipPath(frame)
+        painter.drawPixmap(self.offset(), self.pixmap())
+        painter.restore()
+        painter.setPen(QPen(QColor(self.zoom_border_color),
+                            self.zoom_border_width, Qt.SolidLine,
+                            Qt.RoundCap, Qt.RoundJoin))
+        painter.setBrush(Qt.NoBrush)
+        painter.drawPath(frame)
+        painter.restore()
 
 
 class AnnotationPixmapItem(AnnotationPaintMixin, QGraphicsPixmapItem):
@@ -341,17 +567,121 @@ def editable(item):
     """统一开启标注的选中和移动能力，保持各图元交互一致。"""
     item.setFlags(QGraphicsItem.ItemIsSelectable | QGraphicsItem.ItemIsMovable |
                   QGraphicsItem.ItemSendsGeometryChanges)
+    if not hasattr(item, "locked"):
+        item.locked = False
     return item
 
 
+def annotation_locked(item):
+    """标注是否已锁定。"""
+    return bool(getattr(item, "locked", False))
+
+
+def set_annotation_locked(item, locked):
+    """锁定/解锁单个标注。
+
+    锁定后取消选中并移除选中/移动标志：右键菜单仍能命中它并提供「解锁」，
+    但拖动、缩放、旋转、删除与样式批量修改都不会再作用到它。
+    """
+    item.locked = bool(locked)
+    if item.locked:
+        item.setSelected(False)
+    item.setFlag(QGraphicsItem.ItemIsSelectable, not item.locked)
+    item.setFlag(QGraphicsItem.ItemIsMovable, not item.locked)
+    item.update()
+    return item.locked
+
+
+def _quadratic_point(start, control, end, t):
+    """二次贝塞尔曲线在参数 t 处的点。"""
+    inverse = 1.0 - t
+    return QPointF(inverse * inverse * start.x() + 2 * inverse * t * control.x() + t * t * end.x(),
+                   inverse * inverse * start.y() + 2 * inverse * t * control.y() + t * t * end.y())
+
+
+def curved_arrow_polygon(start, end, width, direction="right"):
+    """生成曲线箭头轮廓：弯曲方向可切换，箭头头部沿用直线单箭头的三角头。
+
+    direction 为 "left"/"right"，表示沿 start→end 行进时向哪一侧弯。
+    箭杆沿二次曲线采样；头部使用终点切线、与直线箭头相同的
+    head_length/shaft_half/head_half/shoulder 比例，避免旧实现把弯曲点直接当
+    头底导致箭头歪斜。返回 None 表示起止点重合、无法建模。
+    """
+    direction_value = end - start
+    length = math.hypot(direction_value.x(), direction_value.y())
+    if length < 1:
+        return None
+    axis = QPointF(direction_value.x() / length, direction_value.y() / length)
+    normal = QPointF(-axis.y(), axis.x())
+    bend = -1.0 if direction == "left" else 1.0
+    control = QPointF((start.x() + end.x()) / 2 + normal.x() * length * 0.22 * bend,
+                      (start.y() + end.y()) / 2 + normal.y() * length * 0.22 * bend)
+    head_length = min(length * 0.48, max(24, width * 8), length * 0.9)
+    shaft_half = min(max(3.5, width * 1.15), head_length * 0.8)
+    head_half = max(shaft_half * 1.2, head_length * 0.7)
+    shoulder = min(head_length * 0.22, (head_half - shaft_half) * 0.6)
+    # 采样曲线并按累计弧长定位头部底边，避免按参数 t 估算导致头过长/过短。
+    samples = []
+    previous = start
+    total = 0.0
+    for index in range(25):
+        t = index / 24.0
+        point = _quadratic_point(start, control, end, t)
+        total += math.hypot(point.x() - previous.x(), point.y() - previous.y())
+        if index > 0:
+            samples.append((t, point, total))
+        previous = point
+    if not samples or total <= 1e-6:
+        return None
+    # 终点切线决定箭头朝向；曲线在末端仍有明显弯曲时，不能拿起止直线当箭轴。
+    end_axis = end - _quadratic_point(start, control, end, 23.0 / 24.0)
+    end_axis_length = math.hypot(end_axis.x(), end_axis.y())
+    if end_axis_length > 1e-9:
+        head_axis = QPointF(end_axis.x() / end_axis_length, end_axis.y() / end_axis_length)
+    else:
+        head_axis = axis
+    head_side = QPointF(-head_axis.y(), head_axis.x())
+    target = max(0.0, total - (head_length - shoulder))
+    base_t, base_point = samples[-1][0], samples[-1][1]
+    for t, point, distance in samples:
+        if distance >= target:
+            base_t, base_point = t, point
+            break
+    base_tangent = _quadratic_point(start, control, end, min(1.0, base_t + 0.01)) - base_point
+    base_tangent_length = math.hypot(base_tangent.x(), base_tangent.y())
+    base_normal = (QPointF(-base_tangent.y() / base_tangent_length,
+                           base_tangent.x() / base_tangent_length)
+                   if base_tangent_length > 1e-9 else normal)
+    left = [start + normal * shaft_half]
+    right = [start - normal * shaft_half]
+    for t, point, _distance in samples:
+        if t > base_t:
+            break
+        tangent = _quadratic_point(start, control, end, min(1.0, t + 0.01)) - point
+        tangent_length = math.hypot(tangent.x(), tangent.y())
+        side = (QPointF(-tangent.y() / tangent_length, tangent.x() / tangent_length)
+                if tangent_length > 1e-9 else normal)
+        left.append(point + side * shaft_half)
+        right.append(point - side * shaft_half)
+    left.append(base_point + base_normal * shaft_half)
+    right.append(base_point - base_normal * shaft_half)
+    back = base_point - head_axis * shoulder
+    polygon = left + [back + head_side * head_half, end, back - head_side * head_half]
+    polygon += list(reversed(right))
+    return polygon
+
+
+
 def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
-          fill_enabled=False, fill_opacity=35, fill_color=None):
+          fill_enabled=False, fill_opacity=35, fill_color=None,
+          arrow_curve_direction="right"):
     """按工具类型建立可选中、可移动的矢量图元。
 
     fill_color 为 None 时填充沿用线条颜色，保持旧行为。
     """
     bounds = QRectF(start, end).normalized()
-    dashed = arrow_style in ("dashed", "double_dashed", "dashed_line", "rect_dashed", "dash")
+    dashed = arrow_style in ("dashed", "double_dashed", "dashed_line", "rect_dashed",
+                             "curve_open_dashed", "dash")
     pen = QPen(QColor(color), width, Qt.DashLine if dashed else Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin)
     fill = QColor(fill_color or color)
     fill.setAlpha(round(255 * max(0, min(100, fill_opacity)) / 100))
@@ -381,6 +711,7 @@ def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
                 item.start = start
                 item.end = end
                 item.arrow_style = arrow_style
+                item.arrow_curve_direction = arrow_curve_direction
                 item.line_color = color
                 item.line_width = width
                 return editable(item)
@@ -398,6 +729,27 @@ def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
                 item.start = start
                 item.end = end
                 item.arrow_style = arrow_style
+                item.arrow_curve_direction = arrow_curve_direction
+                item.line_color = color
+                item.line_width = width
+                return editable(item)
+            if arrow_style in ("curve_filled", "curve_open", "curve_open_dashed"):
+                points = curved_arrow_polygon(start, end, width, arrow_curve_direction)
+                if points is None:
+                    item = AnnotationPathItem(path)
+                    item.setPen(pen)
+                    return editable(item)
+                curved = QPainterPath(points[0])
+                for point in points[1:]:
+                    curved.lineTo(point)
+                curved.closeSubpath()
+                item = AnnotationPathItem(curved)
+                item.setPen(pen)
+                item.setBrush(QColor(color) if arrow_style == "curve_filled" else Qt.NoBrush)
+                item.start = start
+                item.end = end
+                item.arrow_style = arrow_style
+                item.arrow_curve_direction = arrow_curve_direction
                 item.line_color = color
                 item.line_width = width
                 return editable(item)
@@ -443,6 +795,7 @@ def shape(tool, start, end, color, width, arrow_style="filled", corner_radius=0,
             item.start = start
             item.end = end
             item.arrow_style = arrow_style
+            item.arrow_curve_direction = arrow_curve_direction
             item.line_color = color
             item.line_width = width
     return editable(item)
@@ -493,6 +846,10 @@ def text_item(point, text, settings, alignment):
                                     or "#ff0000"))
     if settings.get("text_background_enabled"):
         item.background_color = settings.get("text_background", "#fff3a0")
+        item.set_background_style(
+            settings.get("text_background_padding", 0),
+            settings.get("text_background_radius", 0),
+            settings.get("text_background_opacity", 100))
     apply_text_format(item, settings.get("text_bold", False), settings.get("text_italic", False),
                      settings.get("text_underline", False), settings.get("text_strikethrough", False))
     option = item.document().defaultTextOption()
