@@ -135,7 +135,7 @@ class GeneralPage(SettingsPage):
                "取值：关闭 / 标准权限 / 管理员权限，默认关闭")
         widget = RadioRow(
             [("关闭", "off"), ("标准权限", "standard"), ("管理员权限（免 UAC）", "admin")],
-            self._startup_mode(), tip, self._select_startup_mode)
+            self._startup_mode(), tip, self._select_startup_mode, columns=3)
         widget.setToolTip(tip)
         for button in widget._buttons.values():
             button.setToolTip(tip)

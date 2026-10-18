@@ -145,6 +145,8 @@ class ElevationTests(CoreTests):
                               page.controls["start_on_boot_admin"])
                 control = page.controls["start_on_boot"]
                 self.assertEqual(control.value(), "off")
+                self.assertEqual(len({button.y() for button in control._buttons.values()}), 1,
+                                 "开机启动方式的三个选项应在同一行")
                 self.assertTrue(control.toolTip().strip())
                 self.assertTrue(page._privilege_button.text().strip())
                 self.assertFalse(page._privilege_button.icon().isNull())
