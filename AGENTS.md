@@ -106,6 +106,10 @@
 
 37. **文档（README / RELEASE_NOTES / AGENTS）只写「是什么、怎么做」，不写「谁要求、我做了什么」的前因叙述。** 调整记录、发布说明、经验条目里禁止出现「用户要求…」「用户报告…」「按用户要求…」「我改成…」这类叙事，直接给结论、行为、参数与验证方式即可。例如不要写「用户要求把默认工具改成记号笔，于是我把 `annotation_tool` 默认值改为 `marker`」，直接写「默认标注工具为记号笔（`annotation_tool` 默认 `marker`）；旧工具名 `wide`/`square` 迁移到该默认值」。有效信息是日期、键名、`文件:行号`、命令与预期结果；动机与对话过程不是。例外：经验条目允许写「现象」，但只描述**可观察现象**（报错、日志、截图、断言差异），不写"用户当时说了什么"。
 
+
+38. **标注/编辑器改动必须在两个编辑器上同时验证。** 涉及标注工具、参数、颜色/预设、快捷键、工具栏布局、取色或对象级编辑时，`EditorWindow` 与 `InlineEditor` 都要检查；改动共享画布/工具栏时至少各有一个真实入口测试，报告要分别写明两个入口做了什么验证。只测一个编辑器不算完成。选中矩形切到画笔后画笔颜色/预设把矩形改色，就是只按当前工具、没有按标注类型过滤造成的。
+39. **修复一个入口后先发散同类，再收工。** 颜色/样式/预设/工具栏/快捷键这类共享状态出问题时，立即 grep 同类调用点与同类数据（所有 `set_selected_*`、全部工具颜色键、预设键、两个编辑器、两种画布入口），一次修完同类并列出「已检查/未检查」清单；不要等用户指出下一个同类问题。发现一个新缺陷时，至少回答：还有哪些入口/键/控件会走同一条代码？
+
 - **D35 绘制期绝不改可见性（子控件与场景图元都不行）**
   - 现象：给"全屏截图松开后尺寸标签消失"做修复时，我在 `drawForeground`（绘制期）里直接 `show()` 一个子控件 `QLabel` ✗ ⇒ `tests.test_capture -k mask` 由 **Ran 22 OK** 变成**摘要前原生崩溃**（`exit=-1073740791` / `0xC0000409` ✓ 无 Ran ✓）。另一次同族隐患：`_paint_erased_composite` → `_cached_annotation_layer` 在绘制期 `base.hide() … scene.render() … base.show()` ✗（改的是**场景图元**可见性 ✓ 同样属风险族 ✓）。
   - 排查：`git stash push <改动文件>` 后跑同一子集（HEAD 版本 **Ran 22 OK** ✓）⇒ 确认是本次改动触发 ✓（C7）；把 `show()` 换成 `QTimer.singleShot(0, …)` 后同子集恢复 **Ran 22 OK** ✓。
@@ -183,6 +187,15 @@
   - 现象：字符串里的换行被当成表达式。
   - 排查：JS 模板把反引号当成模板分隔符。
   - 避免：用 [char]13 加 [char]10 拼接；或把脚本写成独立文件再执行。
+
+- **B5 PowerShell 自动变量 `$PID` / `$HOME` 被当普通循环变量 ⇒ 结束进程脚本"执行了但没杀"**
+  - 现象：用 `foreach ($pid in $pids) { Stop-Process -Id $pid -Force }` 结束 4 个残留 unittest 进程，脚本先打印 `KILLING: 16116,...`，复核却仍是 `STILL_RUNNING`；同一段还报 `无法覆盖变量 PID，因为该变量为只读变量或常量`（2026-10-18）。
+  - 排查：报错行指向循环变量赋值；PowerShell 变量名大小写不敏感，`$PID` 是内置只读自动变量。改名为 `$procId` 后 4/4 `stopped`，复核 `ALL_STOPPED`。
+  - 避免：循环/局部变量避开 `$PID`、`$HOME`、`$PWD`、`$TEMP`、`$ERROR` 等自动变量（用 `$procId` / `$targetPath`）；批量杀进程后**按 PID 重新枚举**复核，不能只看脚本自己的打印；只按本次匹配到的 PID 回收，绝不按进程名批杀。
+- **B6 `Start-Process -PassThru` 的 `ExitCode` 可能为空 ⇒ 批量检查被误判为"全部失败"**
+  - 现象：用 `Start-Process -PassThru` + `WaitForExit()` 逐模块做 import 自检，97/97 全部记为失败；同一模块手工 `python -c` 成功、stderr 为空，打印 `$p.ExitCode` 为空（2026-10-18）。
+  - 排查：单进程打印 `HasExited=True / ExitCode=` 仍为空；PowerShell 里 `$null -ne 0` 为真 ⇒ `elseif ($p.ExitCode -ne 0)` 把空值当成非零。改用 Python `subprocess.run(..., timeout=20)` 控制器后 94 个模块 0 失败。
+  - 避免：批量退出码不要只信 Start-Process 对象；优先用 Python 控制器或前台 `& $exe ...; $LASTEXITCODE`；对 `$null` 单独判错并打印；"全部失败 + 无 stderr"先怀疑运行器而不是产品代码（与 C4/C10 同类）。
 
 ### C. 测试与环境
 
@@ -497,6 +510,21 @@
   - 现象：同一轮里两次把**没验证过**的行为写进说明 —— 先写"`allow` 允许超出：编辑视图可见超出的部分"，实测被 `AnnotationCanvas.drawForeground()`（把画布外区域盖回主题底色）证伪；又写"直接裁切：超出的部分在编辑视图与导出里都裁掉"，这次是对的但当时同样没测过（2026-10-16）。
   - 避免：凡说明里出现"看得见 / 看不见 / 画得出去 / 会被裁掉 / 会自动缩小"这类**可观测行为**，先写像素探针确认（本次用「视口红色像素 790 → 0」与「clip/allow 都只有 600」两条数据定案），再写进 tooltip、README 或配置表 ✓；发现旧说明写错时**就地在原条目更正并标注日期**，不要只在新增记录里提一句 ✓。
 
+- **D52 新增可选工具只接线"能画"，漏了 `annotation_tool` 白名单与默认工具下拉 ⇒ 选中即配置保存失败**
+  - 现象：新增「放大」工具后，点工具栏即 `set_annotation_tool("zoom")`；`validate()` 白名单与设置页「默认标注工具」下拉未含 `zoom` ⇒ `config.save()` 抛「未知标注工具」，设置窗弹「设置未保存」，本会话后续设置全部无法落盘（2026-10-17）。
+  - 排查：`grep -n "annotation_tool"` 对照四类位置（校验白名单/设置下拉/默认常量/读取点）；探针 `editor.set_tool("zoom"); config.save()` 立即复现。
+  - 避免：新增可持久化的工具/枚举值时同时更新工具栏列表、`validate()` 允许值、设置页选项、README 配置表；用例必须走真实入口 `editor.set_tool(...)` 再 `config.save()`，不能只测 `canvas.set_tool` 或渲染结果（本轮的 `test_zoom_tool_creates_magnified_copy` 就是这样漏掉的）。
+- **D53 设置页 `set_annotation_setting` 按前缀路由 ⇒ 新键不在该页抛 KeyError，配置已改却不落盘**
+  - 现象：`editor_output_sync_default` 只在「保存与输出」页，但路由按 `editor_image_*` 前缀选页、其余落「编辑器」页 ⇒ 编辑器面板切换该开关时 `page.controls[key]` 抛 `KeyError`；内存配置已改、`persist()` 未执行，设置页复选框仍为旧值（关闭后重启又变开启）（2026-10-17）。
+  - 排查：用 `SettingsWindow.set_annotation_setting(key, True/False)` 直接探针（不是只测控件）复现 KeyError；核对页面 `controls/color_buttons` 的实际归属。
+  - 避免：新增配置键时除 DEFAULTS/validate 外，必须跑"真实设置槽"探针（每个入口 → `set_annotation_setting` → `flush_persist` → 重新加载配置）；路由不要只靠前缀，控件缺失时按实际页面查找并兜底 persist；在 `test_config` 增加逐键路由用例。
+
+
+- **D54 工具颜色/样式预设跨类型污染：切换工具或刷新配置后，已选的其他类型标注被改色/改宽**
+  - 现象：选中矩形并单独改色后切到画笔，打开「更多设置」或触发配置保存后，矩形颜色变成画笔预设色；根因是 `set_selected_color()`/`set_selected_width()` 未按标注类型过滤，且 `main.refresh()` 按当前工具把 `*_color` 回写到所有选中项（2026-10-18 实测）。
+  - 排查：复现后 grep `set_selected_color|set_selected_width|main.refresh`；在画布打印选中项类型与当前工具；确认颜色键对应工具与标注类型不一致仍被应用。修复后 `set_selected_*` 接收 tool 过滤，外部配置刷新只更新默认值/光标，不写已选标注；预设只作用于同类选中项。
+  - 避免：每个 `set_selected_*` 都必须能按工具/图元类型过滤；工具色与预设只改同类标注；切换工具/配置刷新不得回写已有标注；两个编辑器各补一条「选中 A 类型、改 B 工具颜色/预设、A 不变」的回归用例。
+
 ### E. 主题与自绘控件（黑暗模式）
 
 - **E1 自绘控件不能直接沿用原生默认前景/背景 ✗**
@@ -521,6 +549,13 @@
   - 每个新增/改动的自绘组件至少跑一次 `apply_theme(app, "dark")` 与 `"light"` 的 `grab()` 对照；菜单、工具栏、设置页三类都要看。
   - 自动化优先断言**性质**：文字/背景对比度、深色主题下必须出现亮字、浅色主题下必须出现深字、禁用态与常态不同；不要写死某个抗锯齿像素。
   - 平台差异说明：`QColorDialog` 用 `DontUseNativeDialog` 跟随调色板；`QFileDialog` 仍是 Windows 原生对话框，**它不跟随应用主题是预期行为**，不要据此判定“主题没生效”。
+
+### F. Qt 图元与命中测试
+
+- **F1 `QGraphicsTextItem` 子类覆写 `shape()` 不会被 Qt 场景命中采用 —— 扩大命中区要覆写 `contains()`**
+  - 现象：给文字标注背景 padding 扩命中区，覆写 `shape()` 后直接 `item.shape().contains(point)` 为 True，但 `item.contains(point)` 为 False、`scene.items(point, Qt.IntersectsItemShape)` 找不到该项（点在 padding 内、文字布局外）；最小复现同样失败（2026-10-17）。
+  - 排查：对比直接 Python 调用与 `QGraphicsScene.items(..., IntersectsItemShape)`；用"padding 内、文字外"的点才暴露；改覆写 `contains()` 后场景命中与真实点击都正常。
+  - 避免：QGraphicsTextItem（以及依赖内部文本布局的图元）需要扩大/改变命中区域时覆写 `contains()`，不要只覆写 `shape()`；验证用 `scene.items(..., IntersectsItemShape)` 或真实点击，不能只用 `shape().contains()` 断言。
 
 ## Validation
 
