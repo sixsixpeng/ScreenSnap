@@ -2429,6 +2429,7 @@ class CaptureTests(CoreTests):
                 self.save_calls = []
                 self.copy_done = Mock()          # 应用接线：仅复制通知
                 self.save_as_dir_chosen = Mock()  # 应用接线：记住另存为目录
+                self.files_dropped = Mock()       # 应用接线：拖入文件打开
 
             def setAttribute(self, key, value=True):
                 self.attributes[key] = value

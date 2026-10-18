@@ -116,7 +116,8 @@ class CoreTests(unittest.TestCase):
         self.assertEqual(panel.width(), expected)
         self.assertEqual(menu.width(), panel.width())
         self.assertEqual(rect.pen().width(), 7)
-        self.assertEqual(editor.settings[TOOL_WIDTH_KEYS["rect"]], 7)
+        # 对象级编辑只改选中矩形；默认矩形线宽保持 2（2026-10-18 参数独立性契约）。
+        self.assertEqual(editor.settings[TOOL_WIDTH_KEYS["rect"]], 2)
         self.assertEqual(toolbar.pen_width_label.text(), "7 px")
         toolbar.setting_changed.emit("rect_color", "#123456")
         self.assertEqual(rect.pen().color().name(), "#123456")

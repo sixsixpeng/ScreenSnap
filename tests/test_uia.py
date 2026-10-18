@@ -679,15 +679,16 @@ class UiaTests(CoreTests):
             inline_editor = mask.session.inline_editor
             self.assertEqual(window_editor.toolbar.capture_action_buttons, [])
             window_editor.toolbar.reflow(1100)
-            self.assertEqual(len(window_editor.toolbar.edit_buttons), 6)
+            self.assertEqual(len(window_editor.toolbar.edit_buttons), 5)
             self.assertTrue(all(window_editor.toolbar.edit_grid.itemAtPosition(0, column)
-                                is not None for column in range(6)))
+                                is not None for column in range(5)))
             self.assertEqual([button.text() for button in inline_editor.toolbar.capture_action_buttons],
                              ["自定义尺寸", "重新截图"])
             output_grid = inline_editor.toolbar.output_grid
             self.assertEqual(output_grid.verticalSpacing(), 0)
             # 输出按钮与编辑按钮之间还有一个间隔占位控件。
             self.assertEqual(output_grid.count(),
+                             1 +  # 「显示鼠标」固定为输出组第一个
                              len([button for button in inline_editor.toolbar.output_buttons
                                   if not button.isHidden()]) +
                              len(inline_editor.toolbar.edit_buttons) + 1)
