@@ -1108,7 +1108,7 @@ python run_tests.py --list               # 列出模块
 
 程序入口为 `main.py`，仅面向 Windows（依赖 `pywin32`、`win11toast`、`uiautomation` 与 `ctypes.windll`，见 [requirements.txt](requirements.txt) 中带 `sys_platform == "win32"` 的包）。仓库已消除动态导入、相对导入与隐式导入，所有模块均为静态绝对导入，PyInstaller 可静态分析识别；若个别模块仍报缺失，追加 `--hidden-import=<模块全名>` 即可。
 
-程序图标 `icon.ico` / `icon.png` 与 checkbox 勾号、radio 圆点 SVG 统一放在 `ui/assets`；`core/app_icon.py` 在源码模式按模块路径、PyInstaller 模式按 `sys._MEIPASS/ui/assets` 读取。打包时将整个 `ui/assets` 目录作为一项资源加入。Windows 下 `--add-data` 分隔符为 `;`，其他平台为 `:`。 通知提示音的内置音放在 `ui/assets/sounds`（`chime1-4.wav`，标准库 `wave` 生成、共约 27KB）：`core/sound.py` 的 `builtin_dir()` 在源码模式取仓库根、在 PyInstaller 冻结环境取 `sys._MEIPASS`，两条路径都落在 `ui/assets/sounds`，因此上面命令的 `--add-data "ui/assets;ui/assets"`（以及 `ScreenSnap.spec` 的 `datas=[('ui/assets','ui/assets')]`）**整目录复制**即可覆盖，无需额外加参数；`tests/test_sticker.py::test_builtin_sound_files_ship_with_the_package` 会守住这条约定。
+程序图标 `icon.ico` / `icon.png` 与 checkbox 勾号、radio 圆点 SVG 统一放在 `ui/assets`；`core/app_icon.py` 在源码模式按模块路径、PyInstaller 模式按 `sys._MEIPASS/ui/assets` 读取。打包时将整个 `ui/assets` 目录作为一项资源加入。Windows 下 `--add-data` 分隔符为 `;`，其他平台为 `:`。 通知提示音/截图完成音放在 `ui/assets/sounds`（`chime1-30.wav` 与 `shutter_{classic,soft,double,phone}.wav`，共 34 个 wav）：`core/sound.py` 的 `builtin_dir()` 在源码模式取仓库根、在 PyInstaller 冻结环境取 `sys._MEIPASS`，两条路径都落在 `ui/assets/sounds`，因此上面命令的 `--add-data "ui/assets;ui/assets"`（以及 `ScreenSnap.spec` 的 `datas=[('ui/assets','ui/assets')]`）**整目录复制**即可覆盖，无需额外加参数；`tests/test_sticker.py::test_builtin_sound_files_ship_with_the_package` 会守住这条约定。
 
 推荐在 PowerShell 中于项目根目录执行（先激活 `.venv`）：
 
@@ -1132,9 +1132,11 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 - `--console` / `--windowed`（等价于 `--noconsole`）：是否保留黑色控制台窗口。调试阶段用 `--console` 可看到标准输出、日志与异常回溯；发布给普通用户用 `--windowed`，否则托盘程序会多出一个控制台窗口。两者都不会影响程序自身的日志文件（`logs/`）。
 - `--onefile` / `--onedir`：`-onefile` 把所有依赖压缩进单个 exe，分发方便但启动更慢、临时解包到 `%TEMP%`；`-onedir` 保留依赖文件夹，启动快、便于排查缺失文件，分发时需连同整个 `dist/ScreenSnap` 目录一起打包。
 - `--icon ui/assets/icon.ico`：exe 与任务栏图标；托盘图标使用 `ui/assets/icon.ico`，损坏或缺失时回退到同目录 PNG。
-- `--add-data "ui/assets;ui/assets"`：将 ICO、PNG 和主题 indicator SVG 一并放入打包目录，运行时从 `sys._MEIPASS/ui/assets` 读取。
+- `--add-data "ui/assets;ui/assets"`：将 ICO、PNG、主题 indicator SVG 与 `sounds/*.wav` 一并放入打包目录，运行时从 `sys._MEIPASS/ui/assets` 读取。
 
 构建产物在 `dist/ScreenSnap`（目录模式）或 `dist/ScreenSnap.exe`（单文件模式）。增量构建建议加 `--clean` 避免旧缓存干扰。Windows 全局热键、原生 Toast 与混合 DPI 等仍应在目标 Windows 环境最终验收；源码测试通过不能代替真实桌面打包验收。
+
+打包后截图/通知无声时，先确认打包产物包含 `ui/assets/sounds/shutter_classic.wav`；单文件 exe 的音效实际在 `_MEIPASS/ui/assets/sounds`，不是 exe 同级目录。当前 `build.bat` 的四种模式都已带 `--add-data "ui/assets;ui/assets"`，旧包请用当前脚本重新打包；运行日志出现「内置音效文件缺失」即说明资源未进包。
 
 打包不需要额外收集模块：`main.py` 对 `core` / `config` / `editor` / `screenshot` / `sticker` / `ui` / `app` 全部使用静态绝对导入，PyInstaller 自动跟进（项目刻意不使用 `importlib` 动态导入）；除 `ui/assets` 外没有其它运行时数据文件，因此不需要 `--hidden-import` 或额外的 `--add-data`。根目录的 `build.bat` 会自动检测 Python、创建/修复 `.venv`、安装依赖并让你选择四种打包方式（内置 `--clean --noconfirm`，打包前会清理上次的 `dist` 产物，结束后保留窗口）。
 
@@ -2039,6 +2041,7 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 12. 修复（UIA 桌面图标）：空桌面/桌面图标识别不再从 shell 根深挖壁纸树。`desktop_list_control()` 先定位桌面图标 ListControl，再只对图标列表下钻；桌面 ListControl 走 `deepest_at` 后再判断空白桌面。`is_desktop_window()` 补充 WorkerW/Progman 识别。实测桌面图标查询从约 1.1s 降到约 0.2s，空桌面约 0.08s；不再触发 UIA 慢查询熔断。验证：`test_uia_recognizes_desktop_icon_and_ignores_empty_desktop`、`tests.test_uia -k desktop`、`test_capture -k mask` 23 条。
 13. 调整：开机启动方式的「关闭 / 标准权限 / 管理员权限（免 UAC）」三选一显式使用 3 列，不再被通用两列折行规则拆成两行。验证：`tests.test_elevation` 中启动方式行按钮 y 坐标一致，25 条通过。
 14. 修复（桌面空白/Tab）：桌面图标区、桌面空白区、完全空桌面统一返回桌面 `ListControl`；悬停空白桌面仍不显示整屏高亮，但 Tab/初始识别会返回桌面背景层，`apply_element` 将整块虚拟桌面夹到当前显示器。除显式桌面标记外，第一层几何覆盖当前显示器时也强制夹取，避免“有图标的桌面空白处”仍高亮其他屏。Tab/Shift+Tab 先按光标所在显示器路由到对应遮罩视图，不再始终由主遮罩处理；路由前用 mapper 把 Qt 原生坐标转成物理坐标，并按各视图自己的 `view.monitor` 判断——各遮罩共用 `session.mapper` 时 `physical_bounds` 是整块虚拟桌面，不能拿它区分屏幕。这样也避免混合 DPI/负原点串屏。桌面快路径不再 `hide()`/`show()` 遮罩，避免按 Tab 时闪一下黑屏；UIA 关闭时桌面目标也回退到当前显示器背景。验证：桌面组合矩阵覆盖单屏/横竖双屏/负原点/主屏在右/显示器间隙/三屏/2×2/4K/双 4K/2K+1080p/混合 DPI；`test_uia_recognizes_desktop_icon_and_ignores_empty_desktop`、`test_desktop_tab_detection_does_not_hide_mask`、`test_view_at_cursor_covers_screen_arrangements_and_dpi_conversion`、`test_apply_desktop_element_clamps_to_monitor_across_arrangements`、`tests.test_uia -k desktop` 4 条、`test_capture -k mask` 23 条。
+15. 修复（截图音效）：每块显示器视图的 `capture_completed` 与 UIA Tab 的 `selection_sound` 都接到应用播放；右键框选松开也发一次交互反馈音。源码直跑和打包统一使用 `ui/assets/sounds`；若打包后仍无声，检查 `dist` 内 `ui/assets/sounds/shutter_*.wav` 是否存在并按当前 `build.bat` 重新打包。验证：`tests.test_capture -k sound` 3 条、`test_mask_tab_cycle_emits_selection_sound`。
 
 #### 曲线箭头弯向与头部重绘
 

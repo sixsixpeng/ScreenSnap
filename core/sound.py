@@ -105,6 +105,10 @@ def play_sound(kind="default", path=""):
             if resolved in BUILTIN_FILES:
                 builtin = builtin_path(resolved)
                 if builtin is None:
+                    # 打包后没有把 ui/assets/sounds 带进去时，这里必须留下可检索的警告；
+                    # 源码模式文件缺失同样可见，而不是静默退化成系统 beep。
+                    logger.warning("内置音效文件缺失，回落默认提示音: kind=%s dir=%s",
+                                   resolved, builtin_dir())
                     resolved = "default"   # 随包文件缺失（异常安装）⇒ 回落默认提示音
                 else:
                     winsound.PlaySound(str(builtin), winsound.SND_FILENAME | winsound.SND_ASYNC)

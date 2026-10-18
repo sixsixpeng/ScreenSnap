@@ -1432,6 +1432,9 @@ class MaskWindow(QWidget):
     # 2026-10-17：本轮截图已经确认（选区提交/快速贴图），应用据此播放一次完成音效。
     # 必须由遮罩发出：默认开启的原地编辑不会走 edit_requested/save_requested。
     capture_completed = Signal()
+    # UIA Tab/Shift+Tab 切换层级：只播放一次交互反馈音，不设置 capture_sound_played，
+    # 不抑制之后真正确认选区时的完成音效。
+    selection_sound = Signal()
     # 2026-10-11 用户定案：另存为在多选时**依次弹出对话框**（模态 ⇒ 天然按顺序、互不抢焦点）。
     save_as_requested = Signal(object, object)
     last_region = Signal(object)
@@ -4128,6 +4131,8 @@ class MaskWindow(QWidget):
             new_region = bool(active and active.width() > 2 and active.height() > 2)
             self.selection.finish()
             if event.button() == Qt.RightButton and new_region:
+                # 右键框选即使还要按 Enter 确认，也在松开时给出一次交互反馈音。
+                self.selection_sound.emit()
                 self.session.right_capture_mode = True
             # 几乎没移动的单击视为确认，直接选中当前高亮的窗口或控件。
             selected_element = False
@@ -4973,6 +4978,9 @@ class MaskWindow(QWidget):
         else:
             self.element_index = (self.element_index + step) % len(self.element_chain)
         self.apply_element(self.element_index)
+        # UIA Tab/Shift+Tab 切换层级也要有交互反馈音；它不同于最终截图完成音，
+        # 不设置 capture_sound_played，因此随后确认选区仍会正常响一次。
+        self.selection_sound.emit()
         # 2026-10-11（用户要求：**按 Tab/Shift+Tab 时也要取消鼠标对应的元素高亮** ✓）：
         # Tab 选中一层后，鼠标的悬停高亮必须让位（否则屏幕上同时两个高亮 ✗）。
         # 做法：① 所有视图清掉 hover 高亮；② 记下"抑制位置" ⇒ 鼠标**没真正移动**时轮询不再点亮它 ✓

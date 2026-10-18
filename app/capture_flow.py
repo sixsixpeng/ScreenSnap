@@ -183,7 +183,10 @@ class CaptureFlowMixin:
             view.recapture_requested.connect(self.restart_capture)
         self._connect_sticker_signals(self.mask.session.views)
         # 截图确认（含默认开启的原地编辑、直接保存/复制、快速贴图）统一由遮罩通知一次。
-        self.mask.capture_completed.connect(self.play_capture_sound)
+        # 必须连接**每个显示器视图**：完成动作可能发生在副屏视图，不能只连主遮罩。
+        for view in self.mask.session.views:
+            view.capture_completed.connect(self.play_capture_sound)
+            view.selection_sound.connect(self.play_capture_sound)
         self.mask.close_all_requested.connect(self.close_all_editors)
         self.mask.destroyed.connect(lambda obj=None, current=self.mask: setattr(self, "mask", None)
                                     if self.mask is current else None)

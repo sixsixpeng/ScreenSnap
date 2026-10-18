@@ -2157,6 +2157,30 @@ class CaptureTests(CoreTests):
             self.assertEqual(sound.play_sound("none"), "none")
         beep.assert_not_called()
 
+    def test_mask_tab_cycle_emits_selection_sound(self):
+        """UIA Tab/Shift+Tab 切层也必须有交互反馈音，且不能占掉最终完成音标记。"""
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 160, "height": 100}
+        settings = {**DEFAULTS, "window_detection": True, "window_uia_detect": True,
+                    "inline_edit": False, "capture_after_selection": "save",
+                    "magnifier": False, "crosshair": False}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (160, 100), "blue"), bounds, [bounds], settings)
+        try:
+            hits = []
+            mask.selection_sound.connect(lambda: hits.append(1))
+            mask.position = QPoint(50, 50)
+            mask._element_chain_point = QPoint(50, 50)
+            mask.element_chain = [(0, 0, 160, 100)]
+            mask.element_index = -1
+            mask.cycle_element(1)
+            self.assertEqual(hits, [1])
+            self.assertFalse(getattr(mask.session, "capture_sound_played", False))
+        finally:
+            mask.close()
+
     def test_mask_emits_capture_completed_once_per_round(self):
         """2026-10-17：遮罩确认选区时只发一次 capture_completed。
 
