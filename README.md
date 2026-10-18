@@ -2036,6 +2036,9 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 9. 调整：新增 `zoom_annotation_color`（默认 `#00b8a9`），同时驱动镜片边框/柔光、源区域轮廓、参数对话框颜色与鼠标光标；矩形/椭圆工具的现有光标继续跟随各自线条色。放大工具按住 Ctrl 或 Alt 拖拽时，源选区强制为正方形，圆形镜片得到正圆；**拖动预览也按镜片样式画虚线圆/圆角矩形**，不再先显示矩形。
 10. 调整：橡皮擦从放大之前移到马赛克之后；独立/原地编辑器工具栏、设置页默认标注工具和标注分组顺序同步，顺序为图片 → 放大 → 马赛克 → 橡皮擦 → 裁剪。
 11. 调整：设置窗口宽度固定为 780px（高度仍可调整）。长枚举/单选行改为最多两列折行，组合框允许横向收缩后，最宽页面内容约需 552px；固定 780px 后所有设置页在默认字体下不再出现横向溢出。此前默认 760px 时剪贴板贴图页/B 组会撑到 842px，部分控件比窗口宽；现在手动缩窄/拉宽请求不会改变窗口宽度，避免表单与滚动区互相挤压。
+12. 修复（UIA 桌面图标）：空桌面/桌面图标识别不再从 shell 根深挖壁纸树。`desktop_list_control()` 先定位桌面图标 ListControl，再只对图标列表下钻；桌面 ListControl 走 `deepest_at` 后再判断空白桌面。`is_desktop_window()` 补充 WorkerW/Progman 识别。实测桌面图标查询从约 1.1s 降到约 0.2s，空桌面约 0.08s；不再触发 UIA 慢查询熔断。验证：`test_uia_recognizes_desktop_icon_and_ignores_empty_desktop`、`tests.test_uia -k desktop`、`test_capture -k mask` 23 条。
+13. 调整：开机启动方式的「关闭 / 标准权限 / 管理员权限（免 UAC）」三选一显式使用 3 列，不再被通用两列折行规则拆成两行。验证：`tests.test_elevation` 中启动方式行按钮 y 坐标一致，25 条通过。
+14. 修复（桌面空白/Tab）：桌面图标区、桌面空白区、完全空桌面统一返回桌面 `ListControl`；悬停空白桌面仍不显示整屏高亮，但 Tab/初始识别会返回桌面背景层，`apply_element` 将整块虚拟桌面夹到当前显示器。除显式桌面标记外，第一层几何覆盖当前显示器时也强制夹取，避免“有图标的桌面空白处”仍高亮其他屏。Tab/Shift+Tab 先按光标所在显示器路由到对应遮罩视图，不再始终由主遮罩处理；路由前用 mapper 把 Qt 原生坐标转成物理坐标，并按各视图自己的 `view.monitor` 判断——各遮罩共用 `session.mapper` 时 `physical_bounds` 是整块虚拟桌面，不能拿它区分屏幕。这样也避免混合 DPI/负原点串屏。桌面快路径不再 `hide()`/`show()` 遮罩，避免按 Tab 时闪一下黑屏；UIA 关闭时桌面目标也回退到当前显示器背景。验证：桌面组合矩阵覆盖单屏/横竖双屏/负原点/主屏在右/显示器间隙/三屏/2×2/4K/双 4K/2K+1080p/混合 DPI；`test_uia_recognizes_desktop_icon_and_ignores_empty_desktop`、`test_desktop_tab_detection_does_not_hide_mask`、`test_view_at_cursor_covers_screen_arrangements_and_dpi_conversion`、`test_apply_desktop_element_clamps_to_monitor_across_arrangements`、`tests.test_uia -k desktop` 4 条、`test_capture -k mask` 23 条。
 
 #### 曲线箭头弯向与头部重绘
 

@@ -347,7 +347,18 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
             logger.debug("UIA 之前未取到外部窗口: 物理点(%d,%d)", x, y)
             return ([], "") if with_label else []
         win_rect = physical_rect_of(handle)
-        control = control_at(automation, x, y, handle, logger, exclude_hwnd, cache)
+        # 桌面 shell 的 UIA 根树包含壁纸/Pane 分支，完整下钻会超过 1 秒；
+        # 先定位真正的桌面图标 ListControl，再只对图标列表下钻。普通窗口仍走原路径。
+        if is_desktop_window(handle):
+            desktop_list = desktop_list_control(automation, handle, x, y, logger, cache)
+            # 快路径拿到的是桌面 ListControl 容器；悬停/初始识别都需要先钻到
+            # 光标下的图标。先下钻再走桌面背景判定，空桌面才会返回空。
+            control = (deepest_at(desktop_list, x, y, logger, cache=cache)
+                       if desktop_list is not None else None)
+        else:
+            control = None
+        if control is None:
+            control = control_at(automation, x, y, handle, logger, exclude_hwnd, cache)
         if control is None:
             return ([], "") if with_label else []
         if debug_tree:
@@ -387,9 +398,14 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
         # 复用悬停同款下钻：同一线程、同一读取预算与熔断，不新增风险类型，
         # 而且 Tab 的频率远低于悬停轮询。
         deep = deepest_at(control, x, y, logger, cache=cache)
-        # 桌面背景同理：悬停/点击都不应把整块桌面当成元素；桌面图标已收窄。
+        # 桌面背景：悬停不返回整块桌面（避免鼠标一停就高亮全屏）；
+        # 但 Tab/初始识别需要把桌面背景作为一个可选择层返回，否则空桌面
+        # 按 Tab 会没有层级、看起来像闪一下后恢复黑色遮罩。
         if is_desktop_window(handle) and _mostly_covers(_rect_of(deep, cache), win_rect):
-            return ([], "") if with_label else []
+            if deepest_only:
+                return ([], "") if with_label else []
+            desktop_rect = _rect_of(deep, cache)
+            return ([desktop_rect], "") if with_label else [desktop_rect]
         # 2026-10-11（规则 14）：这里是**高频悬停**入口 ⇒ 显式关掉 climb 的逐元素/逐跳过日志
         # （实测最近 2000 行里「UIA 元素[N]」54 条 + 「UIA 跳过元素」42 条 ✗）。
         # 传 verbose=False 只影响日志：矩形链、层数、命中判定完全不变 ✓；
@@ -405,6 +421,53 @@ def query(automation, point, max_depth, logger, exclude_hwnd=None, debug_tree=Fa
         logger.warning("UIA 识别失败，暂停 %.1f 秒后重试并退回窗口句柄识别: %s",
                    _limits["slow_cooldown"], error)
         return ([], "") if with_label else []
+
+
+def desktop_list_control(automation, handle, x, y, logger, cache=None):
+    """在桌面 shell/WorkerW 下定位桌面图标 ListControl，跳过壁纸树。
+
+    直接对 shell 根做 deepest_at 会同时扫描 WPELiveWallpaper 等壁纸子树，
+    实测单次可超过 1 秒；桌面图标实际都挂在桌面 ListControl 下，先按类型和
+    覆盖点找到它，再只对图标列表下钻，既保留图标识别又把查询压到毫秒级。
+    """
+    getter = getattr(automation, "ControlFromHandle", None)
+    if getter is None:
+        return None
+    try:
+        root = getter(handle)
+    except Exception as error:  # noqa: BLE001 桌面树不可用时交回普通路径
+        logger.debug("UIA 取桌面根控件失败: %s", error)
+        return None
+    if root is None:
+        return None
+    # 深度优先：Program Manager 分支通常先于壁纸分支；找到桌面 ListControl
+    # 就立即返回，避免再枚举 WPELiveWallpaper（实测其 GetFirstChild 约 600ms）。
+    pending = [(root, 0)]
+    visited = set()
+    while pending:
+        current, depth = pending.pop()
+        identity = id(current)
+        if identity in visited:
+            continue
+        visited.add(identity)
+        try:
+            name = _name_of(current, cache)
+            control_type = _type_of(current, cache)
+            rectangle = _rect_of(current, cache)
+        except Exception as error:  # noqa: BLE001 单个控件读取失败只跳过它
+            logger.debug("UIA 读取桌面候选失败: %s", error)
+            continue
+        if name and ("wallpaper" in name.lower() or "壁纸" in name):
+            continue
+        if control_type == "ListControl" and rectangle and covers(rectangle, x, y):
+            return current
+        # 桌面的 ListControl 通常在 shell 根下的第 1–2 层；只扫描有限浅层，
+        # 绝不下钻壁纸树。
+        if depth >= 3:
+            continue
+        children = direct_children(current, logger, limit=8)
+        pending.extend((child, depth + 1) for child in reversed(children))
+    return None
 
 
 def control_at(automation, x, y, handle, logger, exclude_hwnd=None, cache=None):

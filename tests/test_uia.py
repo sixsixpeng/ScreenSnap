@@ -1834,6 +1834,174 @@ class UiaTests(CoreTests):
                              "UIA 路径必须允许把桌面 shell 作为识别目标")
             self.assertTrue(window_snap.is_desktop_window(shell))
             self.assertFalse(window_snap.is_desktop_window(999))
+            with patch.object(window_snap, "window_class", return_value="WorkerW"):
+                self.assertTrue(window_snap.is_desktop_window(999),
+                                "WorkerW 也是桌面图标宿主，不能被当成普通窗口")
+
+
+    def test_desktop_tab_detection_does_not_hide_mask(self):
+        """桌面快路径不依赖隐藏遮罩；Tab/初始识别不能产生黑屏闪烁。"""
+        from config.config_manager import DEFAULTS
+        from screenshot.mask_window import MaskWindow
+
+        bounds = {"left": 0, "top": 0, "width": 160, "height": 100}
+        settings = {**DEFAULTS, "window_detection": True, "window_hover_detect": True,
+                    "window_uia_detect": True, "crosshair": False, "magnifier": False}
+        with patch("screenshot.mask_window.visible_windows", return_value=[]):
+            mask = MaskWindow(Image.new("RGB", (160, 100), "blue"), bounds,
+                              [bounds], settings)
+        try:
+            mask.show()
+            self.app.processEvents()
+            with patch("screenshot.mask_window.top_window_at", return_value=42), \
+                    patch("screenshot.mask_window.is_desktop_window", return_value=True), \
+                    patch("screenshot.mask_window.element_chain", return_value=[(0, 0, 160, 100)]), \
+                    patch.object(mask, "hide") as hide, patch.object(mask, "show") as show:
+                mask.detect_elements()
+                hide.assert_not_called()
+                show.assert_not_called()
+                self.assertTrue(mask._element_chain_desktop)
+                mask.apply_element(0)
+                self.assertEqual(mask.selection.rects[0], mask.monitor_rect,
+                                 "多屏桌面背景只能选中当前显示器")
+                # 即使桌面目标判断漏掉，几何上覆盖当前显示器的第一层也必须夹取。
+                mask._element_chain_desktop = False
+                mask.element_chain = [(bounds["left"], bounds["top"],
+                                       bounds["left"] + bounds["width"],
+                                       bounds["top"] + bounds["height"])]
+                mask.apply_element(0)
+                self.assertEqual(mask.selection.rects[0], mask.monitor_rect)
+            # UIA 关闭/桌面树为空时也要保留桌面背景层，Tab 不能无反应。
+            with patch("screenshot.mask_window.top_window_at", return_value=42), \
+                    patch("screenshot.mask_window.is_desktop_window", return_value=True), \
+                    patch("screenshot.mask_window.element_chain", return_value=[]):
+                mask.detect_elements()
+                self.assertEqual(mask.element_chain, [(bounds["left"], bounds["top"],
+                                                       bounds["left"] + bounds["width"],
+                                                       bounds["top"] + bounds["height"])])
+        finally:
+            mask.close()
+
+
+    def test_view_at_cursor_routes_to_monitor_under_pointer(self):
+        from types import SimpleNamespace
+        from screenshot.mask_window import MaskWindow
+
+        left = SimpleNamespace(
+            mapper=SimpleNamespace(physical_bounds=QRect(0, 0, 100, 100)))
+        right = SimpleNamespace(
+            mapper=SimpleNamespace(physical_bounds=QRect(100, 0, 100, 100)))
+        mask = SimpleNamespace(
+            session=SimpleNamespace(views=[left, right]),
+            mapper=SimpleNamespace(native_global_to_physical_global=lambda point: point))
+        with patch("screenshot.mask_window.QCursor.pos", return_value=QPoint(150, 50)):
+            self.assertIs(MaskWindow._view_at_cursor(mask), right)
+        with patch("screenshot.mask_window.QCursor.pos", return_value=QPoint(50, 50)):
+            self.assertIs(MaskWindow._view_at_cursor(mask), left)
+
+
+    def test_view_at_cursor_covers_screen_arrangements_and_dpi_conversion(self):
+        """多屏矩阵：单屏/横排/竖排/负原点/混合 DPI/间隙/3 屏/2×2 都要命中正确视图。"""
+        from types import SimpleNamespace
+        from screenshot.mask_window import MaskWindow
+
+        def view(bounds):
+            return SimpleNamespace(mapper=SimpleNamespace(physical_bounds=QRect(*bounds)))
+
+        def identity(point):
+            return point
+
+        def scaled(point):
+            return QPoint(point.x() * 2, point.y() * 2)
+
+        cases = [
+            ("single", [(0, 0, 100, 100)], QPoint(50, 50), 0, identity),
+            ("dual-horizontal", [(0, 0, 100, 100), (100, 0, 100, 100)],
+             QPoint(150, 50), 1, identity),
+            ("dual-vertical-negative", [(0, -100, 100, 100), (0, 0, 100, 100)],
+             QPoint(50, -50), 0, identity),
+            ("primary-on-right", [(-100, 0, 100, 100), (0, 0, 100, 100)],
+             QPoint(-50, 50), 0, identity),
+            ("gap-falls-back-to-self", [(0, 0, 100, 100), (150, 0, 100, 100)],
+             QPoint(125, 50), None, identity),
+            ("three-row", [(0, 0, 100, 100), (100, 0, 100, 100), (200, 0, 100, 100)],
+             QPoint(250, 50), 2, identity),
+            ("two-by-two", [(0, 0, 100, 100), (100, 0, 100, 100),
+                            (0, 100, 100, 100), (100, 100, 100, 100)],
+             QPoint(150, 150), 3, identity),
+            ("4k-single", [(0, 0, 3840, 2160)], QPoint(2000, 1000), 0, identity),
+            ("dual-1080p-2k", [(0, 0, 1920, 1080), (1920, 0, 2560, 1440)],
+             QPoint(3000, 500), 1, identity),
+            ("vertical-2k-over-1080p", [(0, -1440, 2560, 1440), (0, 0, 1920, 1080)],
+             QPoint(1000, -1000), 0, identity),
+            ("dual-4k-mixed", [(0, 0, 3840, 2160), (3840, 0, 2560, 1440)],
+             QPoint(4000, 500), 1, identity),
+            ("mixed-dpi-conversion", [(0, 0, 100, 100), (100, 0, 100, 100)],
+             QPoint(150, 50), 1, scaled),
+        ]
+        for name, bounds, physical_cursor, expected, convert in cases:
+            views = [view(item) for item in bounds]
+            source = views[0]
+            mask = SimpleNamespace(
+                session=SimpleNamespace(views=views),
+                mapper=SimpleNamespace(native_global_to_physical_global=convert),
+                primary=True)
+            with self.subTest(case=name):
+                with patch("screenshot.mask_window.QCursor.pos",
+                           return_value=physical_cursor if convert is identity
+                           else QPoint(physical_cursor.x() // 2, physical_cursor.y() // 2)):
+                    got = MaskWindow._view_at_cursor(mask)
+                self.assertIs(got, mask if expected is None else views[expected])
+
+
+    def test_apply_desktop_element_clamps_to_monitor_across_arrangements(self):
+        """桌面整块背景在左屏/右屏/负原点/混合尺寸下都只选当前视图。"""
+        from types import SimpleNamespace
+        from screenshot.mask_window import MaskWindow
+
+        cases = [
+            ("single", 0, QRect(0, 0, 100, 100), (0, 0, 100, 100)),
+            ("left", 0, QRect(0, 0, 100, 100), (0, 0, 200, 100)),
+            ("right", 100, QRect(0, 0, 100, 100), (0, 0, 200, 100)),
+            ("right-lower", 100, QRect(0, 50, 100, 100), (-100, 50, 300, 200)),
+            ("negative-origin", 0, QRect(0, 0, 100, 100), (0, -100, 200, 200)),
+        ]
+        for name, origin, monitor_rect, chain in cases:
+            selection = SimpleNamespace(rects=[], active=None)
+            session = SimpleNamespace(automatic_regions=[], element_selected=False)
+            fake = SimpleNamespace(
+                element_chain=[chain],
+                bounds={"left": origin, "top": 0, "width": 100, "height": 100},
+                monitor_rect=monitor_rect,
+                _element_chain_desktop=False,
+                selection=selection,
+                session=session,
+                _clear_hover_highlights=lambda: None,
+                to_logical_rect=lambda rect: QRectF(rect),
+                update_all=lambda: None,
+            )
+            with self.subTest(case=name):
+                MaskWindow.apply_element(fake, 0)
+                self.assertEqual(selection.rects[0], monitor_rect,
+                                 f"{name} 必须夹到当前视图显示器")
+
+    def test_view_at_cursor_uses_per_view_monitor_with_shared_mapper(self):
+        """真实遮罩共用 session.mapper；必须按 view.monitor 而不是共享 physical_bounds 选屏。"""
+        from types import SimpleNamespace
+        from screenshot.mask_window import MaskWindow
+
+        shared = SimpleNamespace(
+            physical_bounds=QRect(0, 0, 300, 100),
+            native_global_to_physical_global=lambda point: point)
+        left = SimpleNamespace(monitor={"left": 0, "top": 0, "width": 100, "height": 100},
+                               mapper=shared)
+        right = SimpleNamespace(monitor={"left": 100, "top": 0, "width": 100, "height": 100},
+                                mapper=shared)
+        mask = SimpleNamespace(session=SimpleNamespace(views=[left, right]), mapper=shared)
+        with patch("screenshot.mask_window.QCursor.pos", return_value=QPoint(150, 50)):
+            self.assertIs(MaskWindow._view_at_cursor(mask), right)
+        with patch("screenshot.mask_window.QCursor.pos", return_value=QPoint(50, 50)):
+            self.assertIs(MaskWindow._view_at_cursor(mask), left)
 
     def test_uia_recognizes_desktop_icon_and_ignores_empty_desktop(self):
         """悬停桌面：命中图标时返回图标矩形；空白桌面不返回整块桌面。
@@ -1878,7 +2046,11 @@ class UiaTests(CoreTests):
         icon = Node("此电脑", "ListItemControl", (20, 20, 80, 90), [icon_image])
         desktop_list = Node("桌面", "ListControl", desktop_rect, [icon])
         shell_pane = Node("Program Manager", "PaneControl", desktop_rect, [desktop_list])
-        automation = SimpleNamespace(ControlFromPoint=lambda x, y: desktop_list)
+        # 桌面快路径：直接从 shell 根找 ListControl，不应再调用昂贵的 ControlFromPoint。
+        automation = SimpleNamespace(
+            ControlFromHandle=lambda handle: shell_pane,
+            ControlFromPoint=lambda x, y: (_ for _ in ()).throw(
+                AssertionError("桌面图标应走 ListControl 快路径，不能调用 ControlFromPoint")))
 
         with patch.object(window_uia, "top_window_at", return_value=shell), \
                 patch.object(window_uia, "physical_rect_of", return_value=desktop_rect), \
@@ -1895,6 +2067,12 @@ class UiaTests(CoreTests):
                 (500, 500), 8, exclude_hwnd=None, deepest_only=True, with_label=True)
             self.assertEqual(empty_chain, [], "空白桌面不应把整块桌面当作悬停元素")
             self.assertEqual(empty_label, "")
+            # Tab/初始识别需要桌面背景本身作为一层；完全空桌面和图标之间的空白
+            # 都返回桌面 ListControl 的矩形，而不是空链。
+            tab_chain, _ = window_uia.element_chain(
+                (500, 500), 8, exclude_hwnd=None, deepest_only=False, with_label=True)
+            self.assertEqual(tab_chain, [desktop_rect],
+                             "桌面空白处/完全空桌面按 Tab 必须有可选的桌面背景层")
 
     def test_window_hit_ignores_invisible_system_windows(self):
         from core.window_snap import IGNORED_CLASSES, is_cloaked, top_window_at

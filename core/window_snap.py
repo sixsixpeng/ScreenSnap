@@ -151,7 +151,12 @@ def is_desktop_window(handle):
         return False
     try:
         user32 = ctypes.windll.user32
-        return int(handle) in (int(user32.GetDesktopWindow()), int(user32.GetShellWindow()))
+        if int(handle) in (int(user32.GetDesktopWindow()), int(user32.GetShellWindow())):
+            return True
+        # Windows 10/11 的桌面图标有时挂在 WorkerW/Progman 的顶层窗口下；
+        # 只按类名识别，不把它当成普通应用窗口，避免丢桌面图标。
+        class_name = window_class(user32, handle)
+        return class_name in ("WorkerW", "Progman")
     except (OSError, ValueError):
         return False
 

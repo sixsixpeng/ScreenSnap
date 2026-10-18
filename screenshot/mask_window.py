@@ -25,6 +25,7 @@ from core.screen_capture import to_qimage
 from core import qimage_to_pillow
 from core.window_boundaries import visible_windows
 from core.window_elements import element_chain
+from core.window_snap import is_desktop_window, top_window_at
 from core.window_uia import forget_click_through
 from core.window_focus import activate_window
 from config.config_manager import INTRUDER_WARNING_LABELS, hint_bar_style
@@ -1634,6 +1635,9 @@ class MaskWindow(QWidget):
                                               monitor["width"], monitor["height"]))
         # 窗口未显示时先识别一次，此时命中测试不会被本进程遮罩挡住。
         self.element_chain = []
+        # 桌面背景作为整块桌面 ListControl 返回时，Tab 选区要夹到当前显示器；
+        # 否则多屏下会一次选中整块虚拟桌面。
+        self._element_chain_desktop = False
         self.element_index = -1
         # 提示条跟着放大镜走，因此不再需要记录上一帧矩形与"鼠标移入隐藏"状态。
         self.info_bar_rect = QRect()
@@ -4624,10 +4628,13 @@ class MaskWindow(QWidget):
 
     def detect_elements(self):
         """临时隐藏遮罩后识别鼠标下的窗口链，避免遮罩自己挡住命中测试。"""
-        if not self.primary:
-            return self.session.views[0].element_chain
         point = self.mapper.native_global_to_physical_global(QCursor.pos())
-        self.hide()
+        # 桌面快路径通过 ControlFromHandle(shell) 读取桌面 ListControl，不依赖
+        # 临时隐藏遮罩；空桌面/图标区按 Tab 时隐藏再 show 会造成一帧黑屏闪烁。
+        desktop_target = is_desktop_window(
+            top_window_at(point.x(), point.y(), skip_stickers=False, include_shell=True))
+        if not desktop_target:
+            self.hide()
         try:
             self.element_chain = element_chain((point.x(), point.y()),
                                                self.settings.get("element_depth", 8),
@@ -4635,7 +4642,15 @@ class MaskWindow(QWidget):
                                                exclude_hwnd=int(self.winId()),
                                                debug_tree=bool(self.settings.get("uia_debug_tree", False)))
         finally:
-            self.show()
+            if not desktop_target:
+                self.show()
+        # UIA 关闭时也保留桌面背景作为一层；否则空桌面 Tab 仍无反应。
+        if desktop_target and not self.element_chain:
+            self.element_chain = [(self.bounds["left"], self.bounds["top"],
+                                   self.bounds["left"] + self.bounds["width"],
+                                   self.bounds["top"] + self.bounds["height"])]
+        # 桌面背景整块返回时，apply_element 只取当前显示器范围。
+        self._element_chain_desktop = bool(desktop_target and len(self.element_chain) == 1)
         get_logger().debug(
             "窗口元素重查: 鼠标物理点=(%d,%d) UIA=%s 层级上限=%s 候选=%d 层 %s",
             point.x(), point.y(), self.uia_enabled(),
@@ -4695,6 +4710,30 @@ class MaskWindow(QWidget):
                    children_limit=self.settings.get("uia_children_limit"),
                    slow_seconds=self.settings.get("uia_slow_seconds"),
                    slow_cooldown=self.settings.get("uia_slow_cooldown"))
+
+    def _view_at_cursor(self):
+        """返回光标所在显示器对应的遮罩视图；找不到时退回当前视图。
+
+        QCursor.pos() 是 Qt 原生全局坐标，而各视图的 physical_bounds 是物理像素矩形；
+        必须先通过 mapper 转成物理全局点，不能直接比较（混合 DPI/负原点会跨屏串位）。
+        """
+        try:
+            physical = self.mapper.native_global_to_physical_global(QCursor.pos())
+            for view in self.session.views:
+                # 各遮罩共用 session.mapper（physical_bounds 是整块虚拟桌面）；
+                # 每块视图自己的显示器范围在 view.monitor 里，不能拿共享 mapper 的
+                # physical_bounds 判断，否则所有视图都命中同一块（主屏）。
+                monitor = getattr(view, "monitor", None)
+                if monitor:
+                    bounds = QRect(monitor["left"], monitor["top"],
+                                   monitor["width"], monitor["height"])
+                else:
+                    bounds = view.mapper.physical_bounds
+                if bounds.contains(physical):
+                    return view
+        except (RuntimeError, AttributeError, TypeError, KeyError):
+            pass
+        return self
 
     def detect_hover(self):
         """识别鼠标下的元素用于高亮；不隐藏遮罩，避免移动时闪烁。
@@ -4883,6 +4922,12 @@ class MaskWindow(QWidget):
         left, top, right, bottom = self.element_chain[index]
         local = QRect(left - self.bounds["left"], top - self.bounds["top"],
                       right - left, bottom - top)
+        # 多屏空桌面时 UIA 返回整块虚拟桌面；Tab 只应选中当前显示器。
+        # 除了显式桌面标记，也按几何判断：第一层覆盖整块当前显示器时同样夹取，
+        # 覆盖「有图标的桌面空白处」和 UIA 目标判断偶发不一致的情况。
+        if index == 0 and (getattr(self, "_element_chain_desktop", False)
+                           or local.contains(self.monitor_rect)):
+            local = local.intersected(self.monitor_rect)
         self.selection.rects.clear()
         self.selection.rects.append(local)
         self.session.automatic_regions[:] = [(local, QRect(local))]
@@ -4904,16 +4949,20 @@ class MaskWindow(QWidget):
 
     def cycle_element(self, step):
         """在鼠标下的窗口与控件层级间切换选区。"""
-        if not self.primary:
-            self.session.views[0].cycle_element(step)
-            return
         if not self.settings.get("window_detection", True):
+            return
+        # 快捷键可能由主遮罩接收，但光标在多屏的另一块屏：必须由**光标所在视图**
+        # 选层，否则桌面背景会用主屏的 monitor_rect 夹取，表现为“高亮另一块桌面”。
+        target = self._view_at_cursor()
+        if target is not self:
+            target.cycle_element(step)
             return
         # 层级链必须对应【鼠标当前位置】：指针移动过就丢弃旧链重新解析，
         # 否则 Tab / Shift+Tab 会在上一个位置的层级里空转（用户 2026-10-11 要求）。
         chain_point = getattr(self, "_element_chain_point", None)
         if chain_point is None or (self.position - chain_point).manhattanLength() > 2:
             self.element_chain = []
+            self._element_chain_desktop = False
             self.element_index = -1
         if not self.element_chain and not self.detect_elements():
             get_logger().debug("鼠标下没有可识别的窗口或控件")
