@@ -974,9 +974,38 @@ class StickerTests(CoreTests):
         application.edit_images = Mock()
         application.edit_sticker(image)
         images, = application.edit_images.call_args.args
-        self.assertEqual(images[0][0].size(), image.size())
+        passed = images[0][0]
+        passed_size = passed.size if isinstance(passed.size, tuple) else passed.size()
+        self.assertEqual(passed_size, (18, 14))
+        self.assertTrue(hasattr(passed, "mode"), "EditorWindow 需要 Pillow 图")
         self.assertIsNone(images[0][1])
         self.assertIs(application.edit_images.call_args.kwargs["from_capture"], False)
+
+
+    def test_edit_sticker_opening_editor_uses_pillow_image(self):
+        """回归：右键菜单发 QImage，EditorWindow 需要 Pillow；不能再因 .mode 崩溃。"""
+        from types import SimpleNamespace
+        from unittest.mock import patch
+        from PySide6.QtGui import QImage
+        from config.config_manager import DEFAULTS
+        from main import Application
+
+        image = QImage(18, 14, QImage.Format_ARGB32)
+        image.fill(Qt.green)
+        application = Application.__new__(Application)
+        application.config = SimpleNamespace(data=dict(DEFAULTS))
+        application.logger = Mock()
+        application.settings_window = Mock()
+        application.editors = []
+        with patch("app.capture_flow.EditorWindow") as editor_cls, \
+                patch("screenshot.mask_window.take_pending_editor_state",
+                      return_value=([], None)):
+            application.edit_sticker(image)
+        passed = editor_cls.call_args.args[0]
+        self.assertTrue(hasattr(passed, "mode"), "交给 EditorWindow 的必须是 Pillow 图")
+        self.assertEqual(passed.mode, "RGBA")
+        self.assertEqual(passed.size, (18, 14))
+        editor_cls.return_value.show.assert_called_once_with()
 
     def test_editor_save_and_sticker(self):
         from config.config_manager import DEFAULTS

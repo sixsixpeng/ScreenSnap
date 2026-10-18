@@ -2042,6 +2042,7 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 13. 调整：开机启动方式的「关闭 / 标准权限 / 管理员权限（免 UAC）」三选一显式使用 3 列，不再被通用两列折行规则拆成两行。验证：`tests.test_elevation` 中启动方式行按钮 y 坐标一致，25 条通过。
 14. 修复（桌面空白/Tab）：桌面图标区、桌面空白区、完全空桌面统一返回桌面 `ListControl`；悬停空白桌面仍不显示整屏高亮，但 Tab/初始识别会返回桌面背景层，`apply_element` 将整块虚拟桌面夹到当前显示器。除显式桌面标记外，第一层几何覆盖当前显示器时也强制夹取，避免“有图标的桌面空白处”仍高亮其他屏。Tab/Shift+Tab 先按光标所在显示器路由到对应遮罩视图，不再始终由主遮罩处理；路由前用 mapper 把 Qt 原生坐标转成物理坐标，并按各视图自己的 `view.monitor` 判断——各遮罩共用 `session.mapper` 时 `physical_bounds` 是整块虚拟桌面，不能拿它区分屏幕。这样也避免混合 DPI/负原点串屏。桌面快路径不再 `hide()`/`show()` 遮罩，避免按 Tab 时闪一下黑屏；UIA 关闭时桌面目标也回退到当前显示器背景。验证：桌面组合矩阵覆盖单屏/横竖双屏/负原点/主屏在右/显示器间隙/三屏/2×2/4K/双 4K/2K+1080p/混合 DPI；`test_uia_recognizes_desktop_icon_and_ignores_empty_desktop`、`test_desktop_tab_detection_does_not_hide_mask`、`test_view_at_cursor_covers_screen_arrangements_and_dpi_conversion`、`test_apply_desktop_element_clamps_to_monitor_across_arrangements`、`tests.test_uia -k desktop` 4 条、`test_capture -k mask` 23 条。
 15. 修复（截图音效）：每块显示器视图的 `capture_completed` 与 UIA Tab 的 `selection_sound` 都接到应用播放；右键框选松开也发一次交互反馈音。源码直跑和打包统一使用 `ui/assets/sounds`；若打包后仍无声，检查 `dist` 内 `ui/assets/sounds/shutter_*.wav` 是否存在并按当前 `build.bat` 重新打包。验证：`tests.test_capture -k sound` 3 条、`test_mask_tab_cycle_emits_selection_sound`。
+16. 修复（贴图右键「编辑」）：菜单发出的是 QImage，而 EditorWindow/AnnotationCanvas 需要 Pillow Image；此前 `to_qimage()` 读取 `image.mode` 抛 `AttributeError`，窗口不创建。`edit_sticker()` 先用 `qimage_to_pillow()` 转换，失败只记 WARNING 并返回；新增 `test_edit_sticker_opening_editor_uses_pillow_image` 覆盖完整打开路径。
 
 #### 曲线箭头弯向与头部重绘
 

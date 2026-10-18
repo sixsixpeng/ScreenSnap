@@ -109,6 +109,17 @@ class StickerFlowMixin:
 
     def edit_sticker(self, image):
         """在独立编辑器中编辑贴图副本；首次保存会分配新文件名。"""
+        # 右键菜单发来的是 QImage，而 EditorWindow/AnnotationCanvas 的底图契约是
+        # Pillow Image（to_qimage 读 image.mode）；不转换会抛 AttributeError，
+        # 表现为点「编辑」完全没有窗口。
+        from core import qimage_to_pillow
+
+        if not hasattr(image, "mode"):
+            try:
+                image = qimage_to_pillow(image)
+            except (AttributeError, ValueError, TypeError) as error:
+                get_logger().warning("贴图编辑失败：无法转换贴图图像: %s", error)
+                return
         self.edit_images([(image.copy(), None)], from_capture=False)
 
 
