@@ -294,7 +294,6 @@ class EditorPage(SettingsPage):
         self.number("zoom_annotation_max_size", "最大边长 (px)", 80, 1200,
                     "放大标注镜片的最长边上限；80–1200 像素，默认 480。\n"
                     "框选大区域或倍率过高时按比例缩小，避免无限膨胀；不影响源图。")
-        self.group("放大镜")
         self.color_check_number("zoom_annotation_color", "zoom_annotation_border_enabled",
                                 "zoom_annotation_border_width", "放大镜线条", "绘制",
                                 1, 12, " px",
@@ -310,7 +309,6 @@ class EditorPage(SettingsPage):
                                 "放大镜外圈光晕颜色、是否绘制和宽度；关闭开关后不绘制光晕。")
         self.percent_slider("zoom_annotation_glow_opacity", "光晕不透明度 (%)",
                     "镜片光晕的透明度；0 表示不可见，100 表示最明显。")
-        self.group("源区域")
         self.add_color("zoom_annotation_source_color", "源区域框线颜色")
         self.radios("zoom_annotation_source_marker", "源区域标记",
                     [("虚线", "dash"), ("实线", "solid"), ("关闭", "off")],
@@ -393,8 +391,8 @@ class EditorPage(SettingsPage):
         order = [
             "默认工具", "画笔", "记号笔", "箭头", "矩形", "椭圆",
             "序号标注", "文字", "局部放大", "马赛克", "橡皮擦",
-            "裁剪框", "取色", "编辑区边框", "透明背景", "编辑工具栏",
-            "画布与标注交互",
+            "裁剪框", "取色", "编辑区边框",
+            "透明背景", "编辑工具栏", "画布与标注交互",
         ]
         boxes = {}
         for index in range(self.groups.count()):
@@ -407,6 +405,14 @@ class EditorPage(SettingsPage):
             box = boxes.get(title)
             if box is not None:
                 self.groups.insertWidget(index, box)
+        # 未来新增分组若忘记写进 order，也必须保留在布局里；否则会被 removeWidget
+        # 后悬空在 (0,0)，表现为与“默认工具”等分组重叠。
+        known = set(order)
+        next_index = len([title for title in order if title in boxes])
+        for title, box in boxes.items():
+            if title not in known:
+                self.groups.insertWidget(next_index, box)
+                next_index += 1
 
     def _add_annotation_preset(self, tool):
         """在工具预览下方插入「样式预设」下拉（与编辑器工具栏同一份预设数据）。"""
@@ -508,7 +514,8 @@ class EditorPage(SettingsPage):
         spin.setToolTip(self._with_value_help(number_key, help_text, spin))
         row = QHBoxLayout()
         row.setContentsMargins(0, 0, 0, 0)
-        row.setSpacing(8)
+        # 颜色 + 开关 + 数值放在同一行；4px 间距保证 780px 设置窗口内不出现横向滚动。
+        row.setSpacing(4)
         row.addWidget(button)
         row.addWidget(box)
         row.addWidget(spin)

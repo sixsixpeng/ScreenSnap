@@ -30,7 +30,8 @@ from PySide6.QtCore import QObject, QTimer, Signal, Slot
 from core.hotkey_policy import effective_policy, normalize_key_name
 from hotkey.recovery import RecoveryState
 from logger import get_logger
-from hotkey.diagnostics import DiagnosticsMixin, physically_up_codes, stale_pressed_codes
+from hotkey.diagnostics import (DiagnosticsMixin, backend_pressed_codes,
+                                physically_up_codes, stale_pressed_codes)
 
 # 体检周期（设置项 hotkey_health_interval，2–600 秒）与重装限速。
 # 规则 14：健康时既不重装也不打日志，只在**判定失效**并重装时记录。
@@ -455,13 +456,49 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         """
         return "按键名=" + ",".join(names) if names else "按键名未知"
 
+    def _local_stale_names(self):
+        """本程序按键记录里已被系统证明按起的键名；不参与故障判定。"""
+        with self._evidence_lock:
+            local = dict(self._pressed_scans)
+        if not local:
+            return ()
+        up = physically_up_codes([code for code in local.values() if code is not None])
+        if up is None:
+            return ()
+        return tuple(name for name, code in local.items() if code in up)
+
+    def _clear_local_stale(self, names):
+        """清掉只存在于本程序观察器的残留按键，不报告全局热键故障。
+
+        库侧 `_pressed_events` 为空时，残留项只影响 `_note_input` 的
+        “组合键未触发”判据，不会阻断 `keyboard` 的热键派发；把它当成全局
+        热键卡死会误报并弹提示。真实库侧残留仍走 `_clear_stale_pressed()`。
+        """
+        if not names:
+            return
+        with self._evidence_lock:
+            for name in names:
+                self._pressed_names.discard(name)
+                self._pressed_scans.pop(name, None)
+        self._phantom_hits = 0
+        get_logger().debug("已清理仅观察器记录的残留按键 %d 个，不作为热键故障", len(names),
+                           extra={"screensnap_metadata_only": True})
+
     def _confirmed_stale_pressed(self):
         """卡住的按键数量；连续 PHANTOM_CONFIRM_CHECKS 次成立才返回，否则 None。
 
         单次快照与系统按键状态之间天然有竞态（键刚释放），故要求连续成立 ——
         与「组合键未触发」判据同样要求两次的口径一致。
+        库侧按键表为空时，本程序观察器里的残留只做静默清理，绝不触发故障/提示。
         """
         if not self.policy["hotkey_criterion_phantom"]:
+            self._phantom_hits = 0
+            return None
+        backend = backend_pressed_codes(keyboard)
+        # 只有库侧真实残留才算全局热键卡死。库侧为空/不可读，或当前只按着
+        # 普通键时，本程序观察器里的残留只做静默清理，绝不发故障提示。
+        if backend is None or not (physically_up_codes(backend) or ()):
+            self._clear_local_stale(self._local_stale_names())
             self._phantom_hits = 0
             return None
         stale, names = self._stale_pressed()
@@ -852,9 +889,10 @@ class HotkeyManager(DiagnosticsMixin, QObject):
                 self._record_fault("registration-stalled", [a for a, b in request["bindings"].items() if b], now)
                 self.log_diagnostics("registration-stalled", logging.WARNING)
             return
-        intercepted = self._intercepted_hotkey() if self.policy["hotkey_criterion_misses"] else None
-        # 卡住的按键记录（残留项）与「被吞」是互斥的：残留项会让后者静默失效，所以两者都算证据。
+        # 先清掉只存在于本程序观察器的残留（若库侧为空/只有正常按住的键），
+        # 再评估“组合键已按下但无回调”；否则残留会让后者误报。
         phantom = self._confirmed_stale_pressed()
+        intercepted = self._intercepted_hotkey() if self.policy["hotkey_criterion_misses"] else None
         if force:
             reason = "force"
         elif not alive and self.policy["hotkey_criterion_threads"]:

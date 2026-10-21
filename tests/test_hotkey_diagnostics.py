@@ -236,6 +236,55 @@ class HotkeyDiagnosticsTests(unittest.TestCase):
 
     # ---- 卡住的按键记录（2026-10-16 真机故障）-------------------------------------
 
+
+    def test_local_only_stuck_key_is_cleared_without_hotkey_fault_or_notice(self):
+        """观察器自己的残留按键不能当成库侧热键卡死。
+
+        2026-10-21 真机现象：切换到抖音/DeepHarness 后出现一次“热键异常”提示。
+        卡住的是本程序 _pressed_names 里的加号，库侧 _pressed_events 为空；
+        这种残留只影响“组合键未触发”的观察判据，不影响 keyboard 的热键派发，
+        因此应静默清理，不能报故障、不能弹恢复提示。
+        """
+        self.register()
+        self.manager._grace_until = 0
+        self.backend._pressed_events = {}
+        self.backend._pressed_events_lock = threading.Lock()
+        self.manager._pressed_names.add("+")
+        self.manager._pressed_scans["+"] = 77
+        notices = []
+        self.manager.notice.connect(notices.append)
+        requested = self.manager._registration_requested
+        with patch.object(hm, "physically_up_codes",
+                          side_effect=lambda codes: (77,) if 77 in codes else ()):
+            self.manager.check_health()
+            self.manager.check_health()
+        self.assertEqual(self.manager.recovery.reason, "")
+        self.assertEqual(self.manager._pressed_names, set())
+        self.assertEqual(self.manager._pressed_scans, {})
+        self.assertEqual(notices, [])
+        self.assertEqual(self.manager._registration_requested, requested,
+                         "只清观察器残留，不应重建绑定")
+
+
+    def test_local_stuck_key_is_ignored_even_if_backend_has_a_held_key(self):
+        """库侧只按着正常普通键时，也不能把本地残留当成全局热键故障。"""
+        self.register()
+        self.manager._grace_until = 0
+        self.backend._pressed_events = {123: "held"}
+        self.backend._pressed_events_lock = threading.Lock()
+        self.manager._pressed_names.add("+")
+        self.manager._pressed_scans["+"] = 77
+        notices = []
+        self.manager.notice.connect(notices.append)
+        with patch.object(hm, "physically_up_codes",
+                          side_effect=lambda codes: (77,) if 77 in codes else ()):
+            self.manager.check_health()
+            self.manager.check_health()
+        self.assertEqual(self.manager.recovery.reason, "")
+        self.assertEqual(self.manager._pressed_names, set())
+        self.assertEqual(self.manager._pressed_scans, {})
+        self.assertEqual(notices, [])
+
     def test_stale_pressed_clears_only_entries_the_system_says_are_up(self):
         """只清「系统证明未按下」的项：真正按住的键必须保留，否则未触发判据会变成误报源。"""
         self.backend._pressed_events_lock = threading.Lock()

@@ -107,7 +107,10 @@ class PolicyTests(unittest.TestCase):
                 self.assertIn(key, config.data)
             export = Path(folder) / "export.json"
             config.export_to(export)
+            from core.version import APP_VERSION
             original = copy.deepcopy(config.data)
+            # import_from 按产品约定回填当前内置版本；首次运行的空版本也按该约定比较。
+            original["app_version"] = APP_VERSION
             config.import_from(export)
             self.assertEqual(config.data, original)
             self.assertEqual(ConfigManager(path).data, original)
