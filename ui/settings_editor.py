@@ -2,7 +2,8 @@
 
 from PySide6.QtCore import QRectF, QSignalBlocker, Qt
 from PySide6.QtGui import QBrush, QColor, QFontDatabase, QPainter, QPalette, QPen, QPixmap
-from PySide6.QtWidgets import QComboBox, QGroupBox, QSizePolicy, QWidget
+from PySide6.QtWidgets import (QCheckBox, QComboBox, QGroupBox, QHBoxLayout,
+                               QSizePolicy, QSpinBox, QWidget)
 
 from editor.annotation_presets import matching_preset, preset_values, presets_for
 from logger import get_logger
@@ -288,13 +289,34 @@ class EditorPage(SettingsPage):
         self.radios("zoom_annotation_style", "镜片样式",
                     [("圆形", "circle"), ("矩形", "rect")],
                     "放大标注的镜片外轮廓；默认圆形。圆形会裁掉四角，矩形显示完整图像。")
-        self.add_color("zoom_annotation_color", "放大标注颜色")
         self.percent_slider("zoom_annotation_opacity", "放大标注不透明度 (%)",
-                    "放大镜片与云朵尾巴的整体不透明度；100 表示完全不透明。"
-                    "选中放大标注时可在「更多设置」改该对象，未选中时改后续默认值。")
+                    "放大镜片与源区域标记的整体不透明度；100 表示完全不透明。")
         self.number("zoom_annotation_max_size", "最大边长 (px)", 80, 1200,
                     "放大标注镜片的最长边上限；80–1200 像素，默认 480。\n"
                     "框选大区域或倍率过高时按比例缩小，避免无限膨胀；不影响源图。")
+        self.group("放大镜")
+        self.color_check_number("zoom_annotation_color", "zoom_annotation_border_enabled",
+                                "zoom_annotation_border_width", "放大镜线条", "绘制",
+                                1, 12, " px",
+                                "放大镜镜片线条颜色、是否绘制和粗细；默认不绘制线条。",
+                                default_on=False)
+        self.check_number("zoom_annotation_rect_rounded", "zoom_annotation_rect_radius",
+                         "矩形圆角", 0, 60,
+                         "矩形镜片是否使用圆角以及圆角半径；关闭后为直角，圆形镜片不受影响。",
+                         " px")
+        self.color_check_number("zoom_annotation_glow_color", "zoom_annotation_glow_enabled",
+                                "zoom_annotation_glow_width", "放大镜光晕", "绘制",
+                                0, 30, " px",
+                                "放大镜外圈光晕颜色、是否绘制和宽度；关闭开关后不绘制光晕。")
+        self.percent_slider("zoom_annotation_glow_opacity", "光晕不透明度 (%)",
+                    "镜片光晕的透明度；0 表示不可见，100 表示最明显。")
+        self.group("源区域")
+        self.add_color("zoom_annotation_source_color", "源区域框线颜色")
+        self.radios("zoom_annotation_source_marker", "源区域标记",
+                    [("虚线", "dash"), ("实线", "solid"), ("关闭", "off")],
+                    "放大标注源区域轮廓的线型；关闭后只保留镜片。")
+        self.check("zoom_annotation_source_corners", "矩形源区域角标",
+                   "矩形直角模式下是否绘制四角短实线；圆角模式自动不绘制。")
         self.group("马赛克")
         self.preview("mosaic")
         self._add_annotation_preset("mosaic")
@@ -441,6 +463,71 @@ class EditorPage(SettingsPage):
         for sub_key, value in preset.items():
             self.update_value(sub_key, value)
 
+
+    def color_check(self, color_key, check_key, label, check_label, help_text):
+        """颜色按钮与开关放在同一行，避免两个独立设置各占一行。"""
+        button = ColorButton(self.config.data[color_key],
+                             lambda color: self.update_value(color_key, color))
+        box = QCheckBox(check_label)
+        box.setChecked(bool(self.config.data[check_key]))
+        button.setToolTip(help_text)
+        box.setToolTip(help_text + "\n取值：开 / 关；默认开启。")
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(button)
+        row.addWidget(box)
+        row.addStretch()
+        container = QWidget()
+        container.setLayout(row)
+        container.setToolTip(help_text)
+        button._setting_label = label
+        box._setting_label = label
+        self.controls[color_key] = button
+        self.controls[check_key] = box
+        self.color_buttons[color_key] = button
+        self.form.addRow(label, container)
+        box.toggled.connect(lambda value: self.update_value(check_key, value))
+        return container
+
+
+    def color_check_number(self, color_key, check_key, number_key, label,
+                           check_label, low, high, suffix, help_text, default_on=True):
+        """颜色、绘制开关和数值同一行：线条/光晕都按这个紧凑布局。"""
+        button = ColorButton(self.config.data[color_key],
+                             lambda color: self.update_value(color_key, color))
+        box = QCheckBox(check_label)
+        box.setChecked(bool(self.config.data[check_key]))
+        spin = QSpinBox()
+        spin.setRange(low, high)
+        spin.setValue(self.config.data[number_key])
+        if suffix:
+            spin.setSuffix(suffix)
+        button.setToolTip(help_text)
+        box.setToolTip(help_text + "\n取值：开 / 关；默认" + ("开启" if default_on else "关闭") + "。")
+        spin.setToolTip(self._with_value_help(number_key, help_text, spin))
+        row = QHBoxLayout()
+        row.setContentsMargins(0, 0, 0, 0)
+        row.setSpacing(8)
+        row.addWidget(button)
+        row.addWidget(box)
+        row.addWidget(spin)
+        row.addStretch()
+        container = QWidget()
+        container.setLayout(row)
+        container.setToolTip(spin.toolTip())
+        button._setting_label = label
+        box._setting_label = label
+        spin._setting_label = label
+        self.controls[color_key] = button
+        self.controls[check_key] = box
+        self.controls[number_key] = spin
+        self.color_buttons[color_key] = button
+        self.form.addRow(label, container)
+        box.toggled.connect(lambda value: self.update_value(check_key, value))
+        spin.valueChanged.connect(lambda value: self.update_value(number_key, value))
+        return container
+
     def _effect_preview(self, kind):
         """插入编辑器页专用的显示类预览（透明棋盘 / 编辑区边框 / 工具栏光晕）。"""
         preview = EditorEffectPreview(self.config, kind)
@@ -461,7 +548,9 @@ class EditorPage(SettingsPage):
             "editor_border_color": "编辑画布周围的边框颜色；只显示在编辑区，不会写入导出图片。",
             "crop_color": "编辑器裁剪框的线条颜色；只用于裁剪辅助显示。",
             "text_background": "新建文字标注背景色块的颜色；仅当“文字背景”开启时生效。",
-            "zoom_annotation_color": "放大标注的镜片边框、源区域框和鼠标光标颜色；默认清亮青绿色。",
+            "zoom_annotation_color": "放大镜镜片边框颜色；关闭开关后不绘制线条，与光晕颜色独立。",
+            "zoom_annotation_glow_color": "放大镜镜片外圈光晕的独立颜色；默认使用贴图蓝色 #168cff。",
+            "zoom_annotation_source_color": "放大标注源区域虚线框/角标的颜色；与镜片线条和光晕颜色独立。",
             "rect_fill_color": "矩形标注的填充颜色（与边框颜色各自独立，默认值相同）。",
             "ellipse_fill_color": "椭圆标注的填充颜色；与边框颜色各自独立，默认值相同。",
             "mosaic_cursor_color": "编辑画布中马赛克涂抹范围示意圆圈的颜色。",

@@ -1064,6 +1064,16 @@ class AnnotationCanvas(QGraphicsView):
             data["zoom_style"] = item.zoom_style
             data["zoom_border_color"] = item.zoom_border_color
             data["zoom_border_width"] = item.zoom_border_width
+            data["zoom_rect_rounded"] = item.zoom_rect_rounded
+            data["zoom_rect_radius"] = item.zoom_rect_radius
+            data["zoom_glow_enabled"] = item.zoom_glow_enabled
+            data["zoom_glow_color"] = item.zoom_glow_color
+            data["zoom_glow_width"] = item.zoom_glow_width
+            data["zoom_glow_opacity"] = item.zoom_glow_opacity
+            data["zoom_source_marker"] = item.zoom_source_marker
+            data["zoom_source_corners"] = item.zoom_source_corners
+            data["zoom_border_enabled"] = item.zoom_border_enabled
+            data["zoom_source_color"] = item.zoom_source_color
             data["zoom_max_size"] = item.zoom_max_size
         elif data["type"] == "QGraphicsPixmapItem":
             data["pixmap"] = QPixmap(item.pixmap())
@@ -1126,10 +1136,20 @@ class AnnotationCanvas(QGraphicsView):
             item = AnnotationZoomItem(
                 data["source_pixmap"], QRectF(*data["source_rect"]),
                 data.get("zoom_factor", 2), data.get("zoom_style", "circle"),
-                data.get("zoom_border_color", "#00ad91"),
-                data.get("zoom_border_width", 2),
+                data.get("zoom_border_color", "#000000"),
+                data.get("zoom_border_width", 1),
                 round(data.get("opacity", 1.0) * 100),
-                data.get("zoom_max_size", 480))
+                data.get("zoom_max_size", 480),
+                data.get("zoom_rect_rounded", True),
+                data.get("zoom_rect_radius", 10),
+                data.get("zoom_glow_enabled", True),
+                data.get("zoom_glow_color", "#168cff"),
+                data.get("zoom_glow_width", 10),
+                data.get("zoom_glow_opacity", 55),
+                data.get("zoom_source_marker", "dash"),
+                data.get("zoom_source_corners", True),
+                data.get("zoom_border_enabled", False),
+                data.get("zoom_source_color", "#000000"))
         else:
             item = AnnotationPixmapItem(data["pixmap"])
             item.setOffset(QPointF(*data.get("offset", (0, 0))))
@@ -1454,6 +1474,47 @@ class AnnotationCanvas(QGraphicsView):
                 color = QColor(values["zoom_annotation_color"])
                 if color.isValid() and color.name() != item.zoom_border_color:
                     item.set_zoom_border_color(color.name())
+                    changed = True
+            if "zoom_annotation_border_width" in values:
+                width = max(1, min(12, int(values["zoom_annotation_border_width"])))
+                if width != item.zoom_border_width:
+                    item.set_zoom_border_width(width)
+                    changed = True
+            if "zoom_annotation_border_enabled" in values:
+                enabled = bool(values["zoom_annotation_border_enabled"])
+                if enabled != item.zoom_border_enabled:
+                    item.set_zoom_border_enabled(enabled)
+                    changed = True
+            if "zoom_annotation_source_color" in values:
+                source_color = QColor(values["zoom_annotation_source_color"])
+                if source_color.isValid() and source_color.name() != item.zoom_source_color:
+                    item.set_zoom_source_color(source_color.name())
+                    changed = True
+            if "zoom_annotation_glow_color" in values:
+                glow_color = QColor(values["zoom_annotation_glow_color"])
+                if glow_color.isValid() and glow_color.name() != item.zoom_glow_color:
+                    item.set_zoom_glow_color(glow_color.name())
+                    changed = True
+            for key, setter, cast in (
+                    ("zoom_annotation_rect_rounded", item.set_zoom_rect_rounded, bool),
+                    ("zoom_annotation_rect_radius", item.set_zoom_rect_radius, int),
+                    ("zoom_annotation_glow_enabled", item.set_zoom_glow_enabled, bool),
+                    ("zoom_annotation_glow_width", item.set_zoom_glow_width, int),
+                    ("zoom_annotation_glow_opacity", item.set_zoom_glow_opacity, int)):
+                if key in values:
+                    before = getattr(item, key.replace("zoom_annotation_", "zoom_", 1))
+                    setter(cast(values[key]))
+                    after = getattr(item, key.replace("zoom_annotation_", "zoom_", 1))
+                    if before != after:
+                        changed = True
+            if "zoom_annotation_source_marker" in values:
+                if values["zoom_annotation_source_marker"] != item.zoom_source_marker:
+                    item.set_zoom_source_marker(values["zoom_annotation_source_marker"])
+                    changed = True
+            if "zoom_annotation_source_corners" in values:
+                corners = bool(values["zoom_annotation_source_corners"])
+                if corners != item.zoom_source_corners:
+                    item.set_zoom_source_corners(corners)
                     changed = True
             if "zoom_annotation_max_size" in values:
                 size = max(80, min(1200, int(values["zoom_annotation_max_size"])))
@@ -3578,10 +3639,20 @@ class AnnotationCanvas(QGraphicsView):
                 item = editable(AnnotationZoomItem(
                     source_pixmap, QRectF(area), factor,
                     self.settings.get("zoom_annotation_style", "circle"),
-                    self.settings.get("zoom_annotation_color", "#00b8a9"),
-                    max(1, int(self.settings.get("crop_width", 2))),
+                    self.settings.get("zoom_annotation_color", "#000000"),
+                    max(1, int(self.settings.get("zoom_annotation_border_width", 1))),
                     int(self.settings.get("zoom_annotation_opacity", 100)),
-                    int(self.settings.get("zoom_annotation_max_size", 480))))
+                    int(self.settings.get("zoom_annotation_max_size", 480)),
+                    bool(self.settings.get("zoom_annotation_rect_rounded", True)),
+                    int(self.settings.get("zoom_annotation_rect_radius", 10)),
+                    bool(self.settings.get("zoom_annotation_glow_enabled", True)),
+                    self.settings.get("zoom_annotation_glow_color", "#168cff"),
+                    int(self.settings.get("zoom_annotation_glow_width", 10)),
+                    int(self.settings.get("zoom_annotation_glow_opacity", 55)),
+                    self.settings.get("zoom_annotation_source_marker", "dash"),
+                    bool(self.settings.get("zoom_annotation_source_corners", True)),
+                    bool(self.settings.get("zoom_annotation_border_enabled", False)),
+                    self.settings.get("zoom_annotation_source_color", "#000000")))
                 scaled = item.pixmap()
                 scene = self.sceneRect()
                 x = area.right() + 12

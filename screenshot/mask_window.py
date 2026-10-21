@@ -1224,7 +1224,13 @@ class InlineEditor(QWidget):
         elif key == "marker_opacity":
             self.canvas.set_selected_marker_opacity(value)
         elif key in ("zoom_annotation_factor", "zoom_annotation_style",
-                     "zoom_annotation_color", "zoom_annotation_opacity",
+                     "zoom_annotation_color", "zoom_annotation_border_width",
+                     "zoom_annotation_border_enabled", "zoom_annotation_source_color",
+                     "zoom_annotation_rect_rounded", "zoom_annotation_rect_radius",
+                     "zoom_annotation_glow_enabled", "zoom_annotation_glow_color",
+                     "zoom_annotation_glow_width",
+                     "zoom_annotation_glow_opacity", "zoom_annotation_source_marker",
+                     "zoom_annotation_source_corners", "zoom_annotation_opacity",
                      "zoom_annotation_max_size"):
             self.canvas.set_selected_zoom_settings(**{key: value})
         elif key in ("rect_corner_enabled", "rect_corner_radius"):

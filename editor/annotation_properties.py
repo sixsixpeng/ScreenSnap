@@ -258,8 +258,62 @@ class AnnotationPropertiesDialog(QDialog):
         style.setCurrentIndex(max(0, style.findData(item.zoom_style)))
         self.controls["zoom_style"] = style
         form.addRow("镜片样式", style)
-        form.addRow("颜色", self._color_control(
-            "zoom_color", item.zoom_border_color, "放大标注颜色"))
+        line_color = self._color_control(
+            "zoom_color", item.zoom_border_color, "放大镜线条颜色")
+        line_check = QCheckBox("绘制")
+        line_check.setChecked(item.zoom_border_enabled)
+        self.controls["zoom_border_enabled"] = line_check
+        line_row = QWidget()
+        line_layout = QHBoxLayout(line_row)
+        line_layout.setContentsMargins(0, 0, 0, 0)
+        line_layout.setSpacing(8)
+        line_layout.addWidget(line_color)
+        line_layout.addWidget(line_check)
+        line_layout.addWidget(self._spin(
+            "zoom_border_width", item.zoom_border_width, 1, 12, " px"))
+        line_layout.addStretch()
+        form.addRow("放大镜线条", line_row)
+        rounded = QCheckBox("圆角")
+        rounded.setChecked(item.zoom_rect_rounded)
+        self.controls["zoom_rect_rounded"] = rounded
+        rect_row = QWidget()
+        rect_layout = QHBoxLayout(rect_row)
+        rect_layout.setContentsMargins(0, 0, 0, 0)
+        rect_layout.setSpacing(8)
+        rect_layout.addWidget(rounded)
+        rect_layout.addWidget(self._spin(
+            "zoom_rect_radius", item.zoom_rect_radius, 0, 60, " px"))
+        rect_layout.addStretch()
+        form.addRow("矩形圆角", rect_row)
+        glow_color = self._color_control(
+            "zoom_glow_color", item.zoom_glow_color, "放大镜光晕颜色")
+        glow = QCheckBox("绘制")
+        glow.setChecked(item.zoom_glow_enabled)
+        self.controls["zoom_glow_enabled"] = glow
+        glow_row = QWidget()
+        glow_layout = QHBoxLayout(glow_row)
+        glow_layout.setContentsMargins(0, 0, 0, 0)
+        glow_layout.setSpacing(8)
+        glow_layout.addWidget(glow_color)
+        glow_layout.addWidget(glow)
+        glow_layout.addWidget(self._spin(
+            "zoom_glow_width", item.zoom_glow_width, 0, 30, " px"))
+        glow_layout.addStretch()
+        form.addRow("放大镜光晕", glow_row)
+        form.addRow("光晕不透明度", self._opacity(
+            "zoom_glow_opacity", item.zoom_glow_opacity))
+        marker = QComboBox()
+        for label, value in (("虚线", "dash"), ("实线", "solid"), ("关闭", "off")):
+            marker.addItem(label, value)
+        marker.setCurrentIndex(max(0, marker.findData(item.zoom_source_marker)))
+        self.controls["zoom_source_marker"] = marker
+        form.addRow("源区域框线", self._color_control(
+            "zoom_source_color", item.zoom_source_color, "放大标注源区域框线颜色"))
+        form.addRow("源区域标记", marker)
+        corners = QCheckBox("绘制四角角标")
+        corners.setChecked(item.zoom_source_corners)
+        self.controls["zoom_source_corners"] = corners
+        form.addRow("矩形源区域", corners)
         form.addRow("最大边长", self._spin(
             "zoom_max_size", item.zoom_max_size, 80, 1200, " px"))
         form.addRow("不透明度", self._opacity(
@@ -391,6 +445,17 @@ class AnnotationPropertiesDialog(QDialog):
         item.set_zoom_factor(int(self._value("zoom_factor")))
         item.set_zoom_style(self._value("zoom_style"))
         item.set_zoom_border_color(self._value("zoom_color"))
+        item.set_zoom_border_width(int(self._value("zoom_border_width")))
+        item.set_zoom_border_enabled(bool(self._value("zoom_border_enabled")))
+        item.set_zoom_source_color(self._value("zoom_source_color"))
+        item.set_zoom_rect_rounded(bool(self._value("zoom_rect_rounded")))
+        item.set_zoom_rect_radius(int(self._value("zoom_rect_radius")))
+        item.set_zoom_glow_enabled(bool(self._value("zoom_glow_enabled")))
+        item.set_zoom_glow_color(self._value("zoom_glow_color"))
+        item.set_zoom_glow_width(int(self._value("zoom_glow_width")))
+        item.set_zoom_glow_opacity(int(self._value("zoom_glow_opacity")))
+        item.set_zoom_source_marker(self._value("zoom_source_marker"))
+        item.set_zoom_source_corners(bool(self._value("zoom_source_corners")))
         item.set_zoom_opacity(int(self._value("opacity")))
 
     def _apply_sequence(self, item):

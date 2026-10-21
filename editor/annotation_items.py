@@ -197,15 +197,28 @@ class AnnotationZoomItem(AnnotationPaintMixin, QGraphicsPixmapItem):
     """
 
     def __init__(self, source_pixmap, source_rect, factor=2, style="circle",
-                 border_color="#00ad91", border_width=2, opacity=100,
-                 max_size=480):
+                 border_color="#000000", border_width=1, opacity=100,
+                 max_size=480, rect_rounded=True, rect_radius=10,
+                 glow_enabled=True, glow_color="#168cff", glow_width=10, glow_opacity=55,
+                 source_marker="dash", source_corners=True,
+                 border_enabled=False, source_color="#000000"):
         super().__init__()
         self.zoom_source = QPixmap(source_pixmap)
         self.source_rect = QRectF(source_rect)
         self.zoom_factor = max(1, min(16, int(factor)))
         self.zoom_style = "rect" if style == "rect" else "circle"
         self.zoom_border_color = border_color
-        self.zoom_border_width = max(1, int(border_width))
+        self.zoom_border_enabled = bool(border_enabled)
+        self.zoom_source_color = source_color
+        self.zoom_border_width = max(1, min(12, int(border_width)))
+        self.zoom_rect_rounded = bool(rect_rounded)
+        self.zoom_rect_radius = max(0, min(60, int(rect_radius)))
+        self.zoom_glow_enabled = bool(glow_enabled)
+        self.zoom_glow_color = glow_color
+        self.zoom_glow_width = max(0, min(30, int(glow_width)))
+        self.zoom_glow_opacity = max(0, min(100, int(glow_opacity)))
+        self.zoom_source_marker = source_marker if source_marker in ("dash", "solid", "off") else "dash"
+        self.zoom_source_corners = bool(source_corners)
         self.zoom_max_size = max(80, min(1200, int(max_size)))
         self.zoom_display_scale = 1.0
         self._rebuild_pixmap()
@@ -219,8 +232,12 @@ class AnnotationZoomItem(AnnotationPaintMixin, QGraphicsPixmapItem):
         rect = QRectF(rect or self._content_rect())
         path = QPainterPath()
         if self.zoom_style == "rect":
-            radius = min(10.0, rect.width() / 2, rect.height() / 2)
-            path.addRoundedRect(rect, radius, radius)
+            radius = (min(float(self.zoom_rect_radius), rect.width() / 2, rect.height() / 2)
+                      if self.zoom_rect_rounded else 0.0)
+            if radius > 0:
+                path.addRoundedRect(rect, radius, radius)
+            else:
+                path.addRect(rect)
         else:
             path.addEllipse(rect)
         return path
@@ -269,9 +286,75 @@ class AnnotationZoomItem(AnnotationPaintMixin, QGraphicsPixmapItem):
             self.zoom_border_color = value.name()
             self.update()
 
+    def set_zoom_border_width(self, width):
+        value = max(1, min(12, int(width)))
+        if value != self.zoom_border_width:
+            self.zoom_border_width = value
+            self.update()
+
+    def set_zoom_border_enabled(self, enabled):
+        value = bool(enabled)
+        if value != self.zoom_border_enabled:
+            self.zoom_border_enabled = value
+            self.update()
+
+    def set_zoom_source_color(self, color):
+        value = QColor(color)
+        if value.isValid() and value.name() != self.zoom_source_color:
+            self.zoom_source_color = value.name()
+            self.update()
+
+    def set_zoom_rect_rounded(self, enabled):
+        value = bool(enabled)
+        if value != self.zoom_rect_rounded:
+            self.zoom_rect_rounded = value
+            self.update()
+
+    def set_zoom_rect_radius(self, radius):
+        value = max(0, min(60, int(radius)))
+        if value != self.zoom_rect_radius:
+            self.zoom_rect_radius = value
+            self.update()
+
+    def set_zoom_glow_enabled(self, enabled):
+        value = bool(enabled)
+        if value != self.zoom_glow_enabled:
+            self.zoom_glow_enabled = value
+            self.update()
+
+    def set_zoom_glow_color(self, color):
+        value = QColor(color)
+        if value.isValid() and value.name() != self.zoom_glow_color:
+            self.zoom_glow_color = value.name()
+            self.update()
+
+    def set_zoom_glow_width(self, width):
+        value = max(0, min(30, int(width)))
+        if value != self.zoom_glow_width:
+            self.zoom_glow_width = value
+            self.update()
+
+    def set_zoom_glow_opacity(self, opacity):
+        value = max(0, min(100, int(opacity)))
+        if value != self.zoom_glow_opacity:
+            self.zoom_glow_opacity = value
+            self.update()
+
+    def set_zoom_source_marker(self, style):
+        value = style if style in ("dash", "solid", "off") else "dash"
+        if value != self.zoom_source_marker:
+            self.zoom_source_marker = value
+            self.update()
+
+    def set_zoom_source_corners(self, enabled):
+        value = bool(enabled)
+        if value != self.zoom_source_corners:
+            self.zoom_source_corners = value
+            self.update()
+
     def _source_marker(self):
         """源区域轮廓，映射到本图元局部坐标；形状跟随镜片圆/方样式。"""
-        if self.zoom_source.isNull() or self.source_rect.isEmpty():
+        if self.zoom_source_marker == "off" or self.zoom_source.isNull() or self.source_rect.isEmpty():
             return None
         frame = self._frame_path()
         if frame.contains(self.mapFromScene(self.source_rect.center())):
@@ -283,13 +366,18 @@ class AnnotationZoomItem(AnnotationPaintMixin, QGraphicsPixmapItem):
         if self.zoom_style == "circle":
             path.addEllipse(local)
         else:
-            radius = min(8.0, local.width() / 2, local.height() / 2)
-            path.addRoundedRect(local, radius, radius)
+            radius = (min(float(self.zoom_rect_radius), local.width() / 2, local.height() / 2)
+                      if self.zoom_rect_rounded else 0.0)
+            if radius > 0:
+                path.addRoundedRect(local, radius, radius)
+            else:
+                path.addRect(local)
         return path
 
     def boundingRect(self):
         base = super().boundingRect()
-        halo_padding = max(8.0, self.zoom_border_width + 5.0)
+        halo_width = self.zoom_glow_width if self.zoom_glow_enabled else 0
+        halo_padding = max(8.0, self.zoom_border_width + 5.0, halo_width + 3.0)
         base = base.adjusted(-halo_padding, -halo_padding, halo_padding, halo_padding)
         marker = self._source_marker()
         if marker is None:
@@ -309,16 +397,19 @@ class AnnotationZoomItem(AnnotationPaintMixin, QGraphicsPixmapItem):
         return path
 
     def _draw_source_marker(self, painter, marker):
-        """圆形镜片画虚线椭圆源区；矩形镜片画虚线圆角框 + 四角短实线。"""
-        color = QColor(self.zoom_border_color)
+        """源区域按配置绘制：圆形/圆角矩形无直角角标，方形矩形可选四角角标。"""
+        style = Qt.DashLine if self.zoom_source_marker == "dash" else Qt.SolidLine
+        color = QColor(self.zoom_source_color)
         color.setAlpha(190)
         painter.setBrush(Qt.NoBrush)
         painter.setPen(QPen(color, max(1.0, self.zoom_border_width * 0.85),
-                            Qt.DashLine, Qt.RoundCap, Qt.RoundJoin))
+                            style, Qt.RoundCap, Qt.RoundJoin))
         painter.drawPath(marker)
-        if self.zoom_style != "rect":
+        is_square_rect = (self.zoom_style == "rect"
+                          and (not self.zoom_rect_rounded or self.zoom_rect_radius <= 0))
+        if not is_square_rect or not self.zoom_source_corners:
             return
-        corner_color = QColor(self.zoom_border_color)
+        corner_color = QColor(self.zoom_source_color)
         corner_color.setAlpha(235)
         painter.setPen(QPen(corner_color, max(1.4, self.zoom_border_width * 1.1),
                             Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
@@ -342,22 +433,24 @@ class AnnotationZoomItem(AnnotationPaintMixin, QGraphicsPixmapItem):
         marker = self._source_marker()
         if marker is not None:
             self._draw_source_marker(painter, marker)
-        # 镜片外圈柔光：先铺一圈低透明度同色光晕，镜片不再像硬切出来的一块区域。
-        halo = QColor(self.zoom_border_color)
-        halo.setAlpha(55)
-        painter.setPen(QPen(halo, max(4.0, self.zoom_border_width + 5.0),
-                            Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawPath(frame)
+        # 镜片外圈柔光：颜色跟随边框，开关/宽度/不透明度由配置控制。
+        if self.zoom_glow_enabled and self.zoom_glow_width > 0 and self.zoom_glow_opacity > 0:
+            halo = QColor(self.zoom_glow_color)
+            halo.setAlpha(round(255 * self.zoom_glow_opacity / 100))
+            painter.setPen(QPen(halo, max(1.0, float(self.zoom_glow_width)),
+                                Qt.SolidLine, Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(frame)
         painter.save()
         painter.setClipPath(frame)
         painter.drawPixmap(self.offset(), self.pixmap())
         painter.restore()
-        painter.setPen(QPen(QColor(self.zoom_border_color),
-                            self.zoom_border_width, Qt.SolidLine,
-                            Qt.RoundCap, Qt.RoundJoin))
-        painter.setBrush(Qt.NoBrush)
-        painter.drawPath(frame)
+        if self.zoom_border_enabled:
+            painter.setPen(QPen(QColor(self.zoom_border_color),
+                                self.zoom_border_width, Qt.SolidLine,
+                                Qt.RoundCap, Qt.RoundJoin))
+            painter.setBrush(Qt.NoBrush)
+            painter.drawPath(frame)
         painter.restore()
 
 

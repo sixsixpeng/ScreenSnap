@@ -528,7 +528,7 @@ Windows 图片提示优先使用带缩略图的原生图片 Toast；无法导入
 
 ```python
 # core/version.py
-APP_VERSION = "1.0.18"   # ← 发布新版本时只改这一行
+APP_VERSION = "1.0.19"   # ← 发布新版本时只改这一行
 ```
 
 改动流程：
@@ -908,7 +908,18 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `recent_colors` | 10 个种子色 | 最近使用颜色单池（最多 12 个、去重、最近在最前）；由任意颜色按钮右键菜单读取，跨设置页与两个编辑器共用。属于记忆状态，不提供普通设置页输入框。 |
 | `zoom_annotation_factor` | `2` | 「放大」工具框选后生成副本的放大倍数，1–16；只影响新建/对象编辑，最终尺寸仍受 `zoom_annotation_max_size` 封顶。 |
 | `zoom_annotation_style` | `circle` | 放大标注镜片形状：`circle`（默认，圆形裁切）/ `rect`（矩形，显示完整图像）。 |
-| `zoom_annotation_color` | `#00b8a9` | 放大标注颜色（镜片边框/柔光、源区域虚线框、鼠标光标），`#RRGGBB`；默认清亮青绿，颜色选择器附带低饱和备选色。 |
+| `zoom_annotation_color` | `#000000` | 放大镜线条颜色（镜片边框、鼠标光标），`#RRGGBB`；默认黑色，与光晕和源区域框线独立。 |
+| `zoom_annotation_border_enabled` | `false` | 是否绘制放大镜镜片线条；默认关闭，关闭后不画线条，只保留图像与源区域标记。 |
+| `zoom_annotation_source_color` | `#000000` | 源区域虚线框和四角角标的颜色；与镜片线条、光晕颜色分别设置。 |
+| `zoom_annotation_border_width` | `1` | 圆形/矩形放大标注共用的线条粗细，1–12 像素。 |
+| `zoom_annotation_rect_rounded` | `true` | 矩形镜片是否使用圆角；关闭后为直角矩形。 |
+| `zoom_annotation_rect_radius` | `10` | 矩形镜片圆角半径，0–60 像素；0 也表示直角。 |
+| `zoom_annotation_glow_enabled` | `true` | 是否绘制放大镜光晕；关闭后直接不绘制光晕。 |
+| `zoom_annotation_glow_color` | `#168cff` | 放大镜光晕独立颜色；默认使用贴图蓝色，与线条颜色分开设置。 |
+| `zoom_annotation_glow_width` | `10` | 光晕宽度，0–30 像素；默认 10，0 表示不绘制。 |
+| `zoom_annotation_glow_opacity` | `55` | 光晕不透明度，0–100。 |
+| `zoom_annotation_source_marker` | `dash` | 源区域标记：`dash` 虚线 / `solid` 实线 / `off` 关闭。 |
+| `zoom_annotation_source_corners` | `true` | 矩形直角模式下是否绘制四角短实线；圆角模式自动不绘制。 |
 | `zoom_annotation_opacity` | `100` | 放大镜片与源区域标记的整体不透明度，0–100；选中放大标注时改该对象，未选中时改后续默认值。 |
 | `zoom_annotation_max_size` | `480` | 放大标注镜片的最长边上限，80–1200 像素；框选大区域或倍率过高时按比例封顶，不能无限增大。 |
 
@@ -2021,7 +2032,7 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 
 #### 局部放大标注：源区域标记 / 圆形矩形 / 透明度
 
-1. 调整：局部放大从“裸图片副本”改为带**源区域标记**的放大标注：镜片用同色外圈柔光收边，源区域按镜片样式绘制半透明圆形/圆角矩形虚线框（矩形额外四角短实线），不再绘制尾巴、引线和云朵小圆簇；镜片支持 `zoom_annotation_style`（`circle` 默认 / `rect`），放大倍数支持 1–16，颜色支持 `zoom_annotation_color`（默认 `#00b8a9`，可选清亮备选色），整体透明度支持 `zoom_annotation_opacity`，最大边长支持 `zoom_annotation_max_size`（默认 480，超出按比例封顶）。
+1. 调整：局部放大从“裸图片副本”改为带**源区域标记**的放大标注：镜片用独立颜色的外圈光晕收边，源区域按镜片样式绘制半透明圆形/圆角矩形虚线框（矩形额外四角短实线），不再绘制尾巴、引线和云朵小圆簇；镜片支持 `zoom_annotation_style`（`circle` 默认 / `rect`），放大倍数支持 1–16，框线颜色支持 `zoom_annotation_color`（默认 `#000000`），光晕颜色支持 `zoom_annotation_glow_color`（默认贴图蓝色 `#168cff`），整体透明度支持 `zoom_annotation_opacity`，最大边长支持 `zoom_annotation_max_size`（默认 480，超出按比例封顶）；框线粗细、矩形圆角开关/半径、光晕开关/颜色/宽度/透明度、源区域标记线型和矩形源区域角标均可配置。
 2. 调整：工具栏「更多设置」新增镜片样式、不透明度与最大边长；对象「编辑参数」支持改倍率/样式/透明度/最大边长；设置页「编辑器 > 局部放大」加入预览并同步默认值；工具栏与设置页「默认标注工具」中放大位于马赛克之前，取色固定最后。
 3. 验证：`test_zoom_annotation_object_settings_and_source_marker`、`test_zoom_properties_dialog_edits_factor_style_opacity`、`test_zoom_annotation_max_size_caps_large_source`、`test_zoom_tool_respects_max_size_when_drawing`、`test_zoom_tool_alt_creates_square_source`、`test_toolbar_primary_tool_order_and_annotation_icons`；`tests.editor.test_annotation_editing` 46 条、`tests.editor.test_canvas` 102 条。
 
@@ -2043,6 +2054,7 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 14. 修复（桌面空白/Tab）：桌面图标区、桌面空白区、完全空桌面统一返回桌面 `ListControl`；悬停空白桌面仍不显示整屏高亮，但 Tab/初始识别会返回桌面背景层，`apply_element` 将整块虚拟桌面夹到当前显示器。除显式桌面标记外，第一层几何覆盖当前显示器时也强制夹取，避免“有图标的桌面空白处”仍高亮其他屏。Tab/Shift+Tab 先按光标所在显示器路由到对应遮罩视图，不再始终由主遮罩处理；路由前用 mapper 把 Qt 原生坐标转成物理坐标，并按各视图自己的 `view.monitor` 判断——各遮罩共用 `session.mapper` 时 `physical_bounds` 是整块虚拟桌面，不能拿它区分屏幕。这样也避免混合 DPI/负原点串屏。桌面快路径不再 `hide()`/`show()` 遮罩，避免按 Tab 时闪一下黑屏；UIA 关闭时桌面目标也回退到当前显示器背景。验证：桌面组合矩阵覆盖单屏/横竖双屏/负原点/主屏在右/显示器间隙/三屏/2×2/4K/双 4K/2K+1080p/混合 DPI；`test_uia_recognizes_desktop_icon_and_ignores_empty_desktop`、`test_desktop_tab_detection_does_not_hide_mask`、`test_view_at_cursor_covers_screen_arrangements_and_dpi_conversion`、`test_apply_desktop_element_clamps_to_monitor_across_arrangements`、`tests.test_uia -k desktop` 4 条、`test_capture -k mask` 23 条。
 15. 修复（截图音效）：每块显示器视图的 `capture_completed` 与 UIA Tab 的 `selection_sound` 都接到应用播放；右键框选松开也发一次交互反馈音。源码直跑和打包统一使用 `ui/assets/sounds`；若打包后仍无声，检查 `dist` 内 `ui/assets/sounds/shutter_*.wav` 是否存在并按当前 `build.bat` 重新打包。验证：`tests.test_capture -k sound` 3 条、`test_mask_tab_cycle_emits_selection_sound`。
 16. 修复（贴图右键「编辑」）：菜单发出的是 QImage，而 EditorWindow/AnnotationCanvas 需要 Pillow Image；此前 `to_qimage()` 读取 `image.mode` 抛 `AttributeError`，窗口不创建。`edit_sticker()` 先用 `qimage_to_pillow()` 转换，失败只记 WARNING 并返回；新增 `test_edit_sticker_opening_editor_uses_pillow_image` 覆盖完整打开路径。
+17. 调整（局部放大）：放大镜线条默认黑色、粗细默认 1px、默认不绘制；光晕默认 10px。新增线条开关、线条粗细、矩形圆角开关/半径、光晕开关/颜色/宽度/透明度、源区域框线颜色、源区域标记（虚线/实线/关闭）、矩形源区域角标配置。线条颜色与光晕颜色分开设置，光晕默认使用贴图蓝色 `#168cff`；源区域框线颜色也独立。颜色与开关在设置页/工具栏/对象参数中同一行。圆角矩形不再画直角角标，源区域轮廓与镜片使用同一圆角半径；圆形保持椭圆虚线且无角标。设置页按「局部放大 / 放大镜 / 源区域」分组，颜色、绘制开关和数值按同排紧凑布局；工具栏和对象参数也按线条/矩形/光晕分行。所有新增参数进入对象「编辑参数」，由每个放大标注对象独立保存，对象级修改只改当前对象、不写默认配置，也不影响已有对象；快照/撤销/复制会保留。验证：`test_zoom_rectangle_rounding_glow_border_and_source_marker_config`、`test_zoom_properties_dialog_edits_factor_style_opacity`、`test_zoom_annotation_object_settings_and_source_marker`。
 
 #### 曲线箭头弯向与头部重绘
 

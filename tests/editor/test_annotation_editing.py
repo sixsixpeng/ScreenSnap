@@ -920,8 +920,28 @@ class AnnotationEditingTests(CoreTests):
             canvas.set_selected_zoom_settings(zoom_annotation_factor=3,
                                               zoom_annotation_style="rect",
                                               zoom_annotation_color="#123456",
+                                              zoom_annotation_border_width=5,
+                                              zoom_annotation_border_enabled=False,
+                                              zoom_annotation_source_color="#654321",
+                                              zoom_annotation_glow_color="#abcdef",
+                                              zoom_annotation_glow_width=12,
+                                              zoom_annotation_glow_opacity=30,
+                                              zoom_annotation_rect_rounded=False,
+                                              zoom_annotation_rect_radius=24,
+                                              zoom_annotation_source_marker="solid",
+                                              zoom_annotation_source_corners=False,
                                               zoom_annotation_opacity=50)
             self.assertEqual(editable_zoom.zoom_factor, 3)
+            self.assertEqual(editable_zoom.zoom_border_width, 5)
+            self.assertFalse(editable_zoom.zoom_border_enabled)
+            self.assertEqual(editable_zoom.zoom_source_color, "#654321")
+            self.assertEqual(editable_zoom.zoom_glow_color, "#abcdef")
+            self.assertEqual(editable_zoom.zoom_glow_width, 12)
+            self.assertEqual(editable_zoom.zoom_glow_opacity, 30)
+            self.assertFalse(editable_zoom.zoom_rect_rounded)
+            self.assertEqual(editable_zoom.zoom_rect_radius, 24)
+            self.assertEqual(editable_zoom.zoom_source_marker, "solid")
+            self.assertFalse(editable_zoom.zoom_source_corners)
             self.assertEqual(editable_zoom.pixmap().width(), 180)
             self.assertEqual(editable_zoom.zoom_style, "rect")
             self.assertEqual(editable_zoom.zoom_border_color, "#123456")
@@ -929,6 +949,10 @@ class AnnotationEditingTests(CoreTests):
             # 直接经画布对象级 setter 不应改默认配置；默认值由编辑器入口控制。
             self.assertEqual(canvas.settings["zoom_annotation_factor"],
                              defaults["zoom_annotation_factor"])
+            self.assertEqual(canvas.settings["zoom_annotation_border_width"],
+                             defaults["zoom_annotation_border_width"])
+            self.assertEqual(canvas.settings["zoom_annotation_glow_color"],
+                             defaults["zoom_annotation_glow_color"])
             canvas.undo()
             restored = [entry for entry in canvas.annotations()
                         if getattr(entry, "zoom_factor", None) is not None][0]
@@ -937,6 +961,72 @@ class AnnotationEditingTests(CoreTests):
             self.assertAlmostEqual(restored.opacity(), 0.8, places=3)
         finally:
             canvas.close()
+
+
+    def test_zoom_rectangle_rounding_glow_border_and_source_marker_config(self):
+        """矩形圆角开关/半径、共用框线、光晕和源区域标记均可配置。"""
+        from PySide6.QtCore import QPointF, QRectF
+        from PySide6.QtGui import QColor, QPixmap
+        from editor.annotation_items import AnnotationZoomItem, editable
+        from config.config_manager import DEFAULTS, validate
+
+        self.assertEqual(DEFAULTS["zoom_annotation_color"], "#000000")
+        self.assertEqual(DEFAULTS["zoom_annotation_glow_color"], "#168cff")
+        self.assertEqual(DEFAULTS["zoom_annotation_border_width"], 1)
+        self.assertEqual(DEFAULTS["zoom_annotation_source_color"], "#000000")
+        self.assertFalse(DEFAULTS["zoom_annotation_border_enabled"])
+        self.assertEqual(DEFAULTS["zoom_annotation_glow_width"], 10)
+        source = QPixmap(60, 40)
+        source.fill(QColor("#88ccff"))
+        item = editable(AnnotationZoomItem(
+            source, QRectF(20, 20, 60, 40), 2, "rect", "#000000", 4, 100, 480,
+            True, 20, True, "#168cff", 8, 60, "dash", True, True, "#000000"))
+        item.setPos(QPointF(220, 40))
+        self.assertEqual(item.zoom_border_width, 4)
+        self.assertEqual(item.zoom_border_color, "#000000")
+        self.assertEqual(item.zoom_glow_color, "#168cff")
+        self.assertNotEqual(item.zoom_border_color, item.zoom_glow_color)
+        self.assertTrue(item.zoom_border_enabled)
+        self.assertEqual(item.zoom_source_color, "#000000")
+        self.assertTrue(item.zoom_rect_rounded)
+        self.assertEqual(item.zoom_rect_radius, 20)
+        self.assertTrue(item.zoom_glow_enabled)
+        self.assertEqual(item.zoom_glow_color, "#168cff")
+        self.assertEqual(item.zoom_glow_width, 8)
+        self.assertEqual(item.zoom_glow_opacity, 60)
+        self.assertIsNotNone(item._source_marker())
+        rounded_path = item._frame_path()
+        self.assertFalse(rounded_path.contains(QPointF(0.5, 0.5)),
+                         "圆角矩形左上角不应再是直角")
+        item.set_zoom_rect_rounded(False)
+        self.assertTrue(item._frame_path().contains(QPointF(0.5, 0.5)),
+                        "关闭圆角后矩形应恢复直角")
+        item.set_zoom_glow_enabled(False)
+        item.set_zoom_border_enabled(False)
+        item.set_zoom_source_color("#ff0000")
+        item.set_zoom_source_marker("solid")
+        item.set_zoom_source_corners(False)
+        self.assertFalse(item.zoom_glow_enabled)
+        self.assertFalse(item.zoom_border_enabled)
+        self.assertEqual(item.zoom_source_color, "#ff0000")
+        self.assertEqual(item.zoom_source_marker, "solid")
+        self.assertFalse(item.zoom_source_corners)
+        item.set_zoom_source_marker("off")
+        self.assertIsNone(item._source_marker())
+        for key, value in (("zoom_annotation_border_width", 13),
+                           ("zoom_annotation_source_color", "#12345"),
+                           ("zoom_annotation_border_enabled", "yes"),
+                           ("zoom_annotation_rect_radius", 61),
+                           ("zoom_annotation_glow_color", "#12345"),
+                           ("zoom_annotation_glow_width", 31),
+                           ("zoom_annotation_glow_opacity", 101),
+                           ("zoom_annotation_source_marker", "dotted")):
+            with self.subTest(key=key), self.assertRaises(ValueError):
+                validate({key: value})
+        self.assertEqual(validate({"zoom_annotation_rect_rounded": True})
+                         ["zoom_annotation_rect_rounded"], True)
+        self.assertEqual(validate({"zoom_annotation_source_corners": False})
+                         ["zoom_annotation_source_corners"], False)
 
     def test_zoom_properties_dialog_edits_factor_style_opacity(self):
         """对象参数对话框可改放大倍率、镜片形状和透明度。"""
@@ -955,11 +1045,34 @@ class AnnotationEditingTests(CoreTests):
                 dialog.controls["zoom_style"].findData("rect"))
             dialog.controls["zoom_max_size"].setValue(240)
             dialog.controls["zoom_color"].set_color("#abcdef")
+            dialog.controls["zoom_border_width"].setValue(5)
+            dialog.controls["zoom_border_enabled"].setChecked(False)
+            dialog.controls["zoom_source_color"].set_color("#112233")
+            dialog.controls["zoom_rect_rounded"].setChecked(False)
+            dialog.controls["zoom_rect_radius"].setValue(24)
+            dialog.controls["zoom_glow_enabled"].setChecked(False)
+            dialog.controls["zoom_glow_color"].set_color("#ff8800")
+            dialog.controls["zoom_glow_width"].setValue(12)
+            dialog.controls["zoom_glow_opacity"].setValue(30)
+            dialog.controls["zoom_source_marker"].setCurrentIndex(
+                dialog.controls["zoom_source_marker"].findData("solid"))
+            dialog.controls["zoom_source_corners"].setChecked(False)
             dialog.controls["opacity"].setValue(45)
             dialog.apply()
             self.assertEqual(item.zoom_factor, 3)
             self.assertEqual(item.zoom_style, "rect")
             self.assertEqual(item.zoom_border_color, "#abcdef")
+            self.assertEqual(item.zoom_border_width, 5)
+            self.assertFalse(item.zoom_border_enabled)
+            self.assertEqual(item.zoom_source_color, "#112233")
+            self.assertFalse(item.zoom_rect_rounded)
+            self.assertEqual(item.zoom_rect_radius, 24)
+            self.assertFalse(item.zoom_glow_enabled)
+            self.assertEqual(item.zoom_glow_color, "#ff8800")
+            self.assertEqual(item.zoom_glow_width, 12)
+            self.assertEqual(item.zoom_glow_opacity, 30)
+            self.assertEqual(item.zoom_source_marker, "solid")
+            self.assertFalse(item.zoom_source_corners)
             self.assertEqual(item.zoom_max_size, 240)
             self.assertAlmostEqual(item.opacity(), 0.45, places=3)
         finally:

@@ -237,7 +237,18 @@ DEFAULTS = {
     # 局部放大标注：框选区域后按倍数生成放大的副本（工具按钮名为「放大」）。
     "zoom_annotation_factor": 2,
     "zoom_annotation_style": "circle",
-    "zoom_annotation_color": "#00b8a9",
+    "zoom_annotation_color": "#000000",
+    "zoom_annotation_border_enabled": False,
+    "zoom_annotation_source_color": "#000000",
+    "zoom_annotation_border_width": 1,
+    "zoom_annotation_rect_rounded": True,
+    "zoom_annotation_rect_radius": 10,
+    "zoom_annotation_glow_enabled": True,
+    "zoom_annotation_glow_color": "#168cff",
+    "zoom_annotation_glow_width": 10,
+    "zoom_annotation_glow_opacity": 55,
+    "zoom_annotation_source_marker": "dash",
+    "zoom_annotation_source_corners": True,
     "zoom_annotation_opacity": 100,
     "zoom_annotation_max_size": 480,
     "rect_corner_enabled": True, "rect_corner_radius": 12,
@@ -658,8 +669,27 @@ def validate(data):
             raise ValueError("圆角半径必须在 0 到 100 像素之间")
         elif key == "zoom_annotation_factor" and not 1 <= value <= 16:
             raise ValueError("局部放大倍数必须在 1 到 16 之间")
-        elif key == "zoom_annotation_color" and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
+        elif key in ("zoom_annotation_color", "zoom_annotation_glow_color",
+                     "zoom_annotation_source_color") and not re.fullmatch(r"#[0-9a-fA-F]{6}", value):
             raise ValueError(f"配置项 {key} 需要 #RRGGBB 颜色：{value!r}")
+        elif key == "zoom_annotation_border_enabled" and not isinstance(value, bool):
+            raise ValueError("放大标注线条开关必须是布尔值")
+        elif key == "zoom_annotation_border_width" and not 1 <= value <= 12:
+            raise ValueError("放大标注框线粗细必须在 1 到 12 像素之间")
+        elif key == "zoom_annotation_rect_rounded" and not isinstance(value, bool):
+            raise ValueError("放大标注矩形圆角开关必须是布尔值")
+        elif key == "zoom_annotation_rect_radius" and not 0 <= value <= 60:
+            raise ValueError("放大标注矩形圆角半径必须在 0 到 60 像素之间")
+        elif key == "zoom_annotation_glow_enabled" and not isinstance(value, bool):
+            raise ValueError("放大标注光晕开关必须是布尔值")
+        elif key == "zoom_annotation_glow_width" and not 0 <= value <= 30:
+            raise ValueError("放大标注光晕宽度必须在 0 到 30 像素之间")
+        elif key == "zoom_annotation_glow_opacity" and not 0 <= value <= 100:
+            raise ValueError("放大标注光晕不透明度必须在 0 到 100 之间")
+        elif key == "zoom_annotation_source_marker" and value not in ("dash", "solid", "off"):
+            raise ValueError("放大标注源区域标记必须是 dash、solid 或 off")
+        elif key == "zoom_annotation_source_corners" and not isinstance(value, bool):
+            raise ValueError("放大标注源区域角标开关必须是布尔值")
         elif key == "zoom_annotation_style" and value not in ("circle", "rect"):
             raise ValueError("放大镜样式必须是圆形或矩形")
         elif key == "zoom_annotation_opacity" and not 0 <= value <= 100:

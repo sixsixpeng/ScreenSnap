@@ -461,9 +461,102 @@ class ToolbarWidget(QWidget):
             "zoom_annotation_style", (("圆形", "circle"), ("矩形", "rect")),
             settings.get("zoom_annotation_style", "circle"),
             "放大标注镜片形状；圆形为默认样式", columns=0)
-        self.zoom_color = ColorButton(settings.get("zoom_annotation_color", "#00b8a9"),
+        self.zoom_color = ColorButton(settings.get("zoom_annotation_color", "#000000"),
                           lambda color: self.setting_changed.emit("zoom_annotation_color", color),
                           compact=True, purpose="放大标注颜色")
+        self.zoom_border_width = QSpinBox()
+        self.zoom_border_width.setRange(1, 12)
+        self.zoom_border_width.setValue(int(settings.get("zoom_annotation_border_width", 1)))
+        self.zoom_border_width.setSuffix(" px")
+        self.zoom_border_width.setMinimumHeight(34)
+        self.zoom_border_width.setToolTip("放大标注镜片边框粗细；圆形/矩形共用")
+        self.zoom_border_width.valueChanged.connect(
+            lambda value: self.setting_changed.emit("zoom_annotation_border_width", value))
+        self.zoom_border_enabled = QCheckBox("绘制")
+        self.zoom_border_enabled.setChecked(bool(settings.get("zoom_annotation_border_enabled", False)))
+        self.zoom_border_enabled.setToolTip("是否绘制放大镜镜片线条；关闭后只保留图像和源区域标记")
+        self.zoom_border_enabled.toggled.connect(
+            lambda checked: self.setting_changed.emit("zoom_annotation_border_enabled", checked))
+        self.zoom_rect_rounded = QCheckBox("矩形圆角")
+        self.zoom_rect_rounded.setChecked(bool(settings.get("zoom_annotation_rect_rounded", True)))
+        self.zoom_rect_rounded.setToolTip("矩形镜片是否使用圆角；关闭后为直角矩形")
+        self.zoom_rect_rounded.toggled.connect(
+            lambda checked: self.setting_changed.emit("zoom_annotation_rect_rounded", checked))
+        self.zoom_rect_radius = QSpinBox()
+        self.zoom_rect_radius.setRange(0, 60)
+        self.zoom_rect_radius.setValue(int(settings.get("zoom_annotation_rect_radius", 10)))
+        self.zoom_rect_radius.setSuffix(" px")
+        self.zoom_rect_radius.setMinimumHeight(34)
+        self.zoom_rect_radius.setToolTip("矩形镜片圆角半径；0 表示直角")
+        self.zoom_rect_radius.valueChanged.connect(
+            lambda value: self.setting_changed.emit("zoom_annotation_rect_radius", value))
+        self.zoom_glow_enabled = QCheckBox("镜片光晕")
+        self.zoom_glow_enabled.setChecked(bool(settings.get("zoom_annotation_glow_enabled", True)))
+        self.zoom_glow_enabled.setToolTip("镜片外圈是否绘制同色光晕")
+        self.zoom_glow_enabled.toggled.connect(
+            lambda checked: self.setting_changed.emit("zoom_annotation_glow_enabled", checked))
+        self.zoom_glow_color = ColorButton(
+            settings.get("zoom_annotation_glow_color", "#168cff"),
+            lambda color: self.setting_changed.emit("zoom_annotation_glow_color", color),
+            compact=True, purpose="放大标注光晕颜色")
+        self.zoom_source_color = ColorButton(
+            settings.get("zoom_annotation_source_color", "#000000"),
+            lambda color: self.setting_changed.emit("zoom_annotation_source_color", color),
+            compact=True, purpose="放大标注源区域框线颜色")
+        self.zoom_glow_width = QSpinBox()
+        self.zoom_glow_width.setRange(0, 30)
+        self.zoom_glow_width.setValue(int(settings.get("zoom_annotation_glow_width", 10)))
+        self.zoom_glow_width.setSuffix(" px")
+        self.zoom_glow_width.setMinimumHeight(34)
+        self.zoom_glow_width.setToolTip("镜片光晕宽度；0 表示不绘制光晕")
+        self.zoom_glow_width.valueChanged.connect(
+            lambda value: self.setting_changed.emit("zoom_annotation_glow_width", value))
+        self.zoom_glow_opacity = QSlider(Qt.Horizontal)
+        self.zoom_glow_opacity.setRange(0, 100)
+        self.zoom_glow_opacity.setValue(int(settings.get("zoom_annotation_glow_opacity", 55)))
+        self.zoom_glow_opacity.setMinimumWidth(180)
+        self.zoom_glow_opacity.setMinimumHeight(34)
+        self.zoom_glow_opacity.setToolTip("镜片光晕不透明度；0 表示不可见")
+        self.zoom_glow_opacity_label = QLabel(f"{self.zoom_glow_opacity.value()}%")
+        self.zoom_glow_opacity_label.setMinimumWidth(44)
+        self.zoom_glow_opacity_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.zoom_glow_opacity.valueChanged.connect(
+            lambda value: self.zoom_glow_opacity_label.setText(f"{value}%"))
+        self.zoom_glow_opacity.valueChanged.connect(
+            lambda value: self.setting_changed.emit("zoom_annotation_glow_opacity", value))
+        self.zoom_source_marker = self.radio_options(
+            "zoom_annotation_source_marker",
+            (("虚线", "dash"), ("实线", "solid"), ("关闭", "off")),
+            settings.get("zoom_annotation_source_marker", "dash"),
+            "源区域标记样式；关闭后只保留镜片", columns=3)
+        self.zoom_source_corners = QCheckBox("矩形源区域角标")
+        self.zoom_source_corners.setChecked(bool(settings.get("zoom_annotation_source_corners", True)))
+        self.zoom_source_corners.setToolTip("矩形直角模式下是否绘制四角短实线；圆角模式自动不绘制")
+        self.zoom_source_corners.toggled.connect(
+            lambda checked: self.setting_changed.emit("zoom_annotation_source_corners", checked))
+        self.zoom_line_row = QWidget()
+        line_layout = QHBoxLayout(self.zoom_line_row)
+        line_layout.setContentsMargins(0, 0, 0, 0)
+        line_layout.setSpacing(8)
+        line_layout.addWidget(self.zoom_color)
+        line_layout.addWidget(self.zoom_border_enabled)
+        line_layout.addWidget(self.zoom_border_width)
+        line_layout.addStretch()
+        self.zoom_rect_row = QWidget()
+        rect_layout = QHBoxLayout(self.zoom_rect_row)
+        rect_layout.setContentsMargins(0, 0, 0, 0)
+        rect_layout.setSpacing(8)
+        rect_layout.addWidget(self.zoom_rect_rounded)
+        rect_layout.addWidget(self.zoom_rect_radius)
+        rect_layout.addStretch()
+        self.zoom_glow_row = QWidget()
+        glow_layout = QHBoxLayout(self.zoom_glow_row)
+        glow_layout.setContentsMargins(0, 0, 0, 0)
+        glow_layout.setSpacing(8)
+        glow_layout.addWidget(self.zoom_glow_color)
+        glow_layout.addWidget(self.zoom_glow_enabled)
+        glow_layout.addWidget(self.zoom_glow_width)
+        glow_layout.addStretch()
         self.zoom_opacity = QSlider(Qt.Horizontal)
         self.zoom_opacity.setRange(0, 100)
         self.zoom_opacity.setValue(int(settings.get("zoom_annotation_opacity", 100)))
@@ -754,8 +847,20 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(self.zoom_opacity_label, 41, 2)
         panel_layout.addWidget(QLabel("最大边长"), 42, 0)
         panel_layout.addWidget(self.zoom_max_size, 42, 1, 1, 2)
-        panel_layout.addWidget(QLabel("标注颜色"), 43, 0)
-        panel_layout.addWidget(self.zoom_color, 43, 1, 1, 2)
+        panel_layout.addWidget(QLabel("放大镜线条"), 43, 0)
+        panel_layout.addWidget(self.zoom_line_row, 43, 1, 1, 2)
+        panel_layout.addWidget(QLabel("矩形圆角"), 44, 0)
+        panel_layout.addWidget(self.zoom_rect_row, 44, 1, 1, 2)
+        panel_layout.addWidget(QLabel("放大镜光晕"), 45, 0)
+        panel_layout.addWidget(self.zoom_glow_row, 45, 1, 1, 2)
+        panel_layout.addWidget(QLabel("光晕不透明度"), 46, 0)
+        panel_layout.addWidget(self.zoom_glow_opacity, 46, 1)
+        panel_layout.addWidget(self.zoom_glow_opacity_label, 46, 2)
+        panel_layout.addWidget(QLabel("源区域框线"), 47, 0)
+        panel_layout.addWidget(self.zoom_source_color, 47, 1, 1, 2)
+        panel_layout.addWidget(QLabel("源区域标记"), 48, 0)
+        panel_layout.addWidget(self.zoom_source_marker, 48, 1, 1, 2)
+        panel_layout.addWidget(self.zoom_source_corners, 49, 0, 1, 3)
         panel_layout.addWidget(self.mosaic_brush, 30, 0, 1, 3)
         panel_layout.addWidget(self.eraser_erase_base, 31, 0, 1, 3)
         # 2026-10-14 修复（用户报告：文字「更多设置」底部两行叠在一起、还带橡皮擦的 tooltip ✗）：
@@ -817,7 +922,7 @@ class ToolbarWidget(QWidget):
         panel_layout.addWidget(QLabel("预设组合"), 24, 0)
         panel_layout.addWidget(self.sequence_preset, 24, 1, 1, 2)
         self.sequence_rows = (19, 20, 21, 22, 23, 24)
-        option_row_count = 44
+        option_row_count = 50
         for row in range(option_row_count):
             label_item = panel_layout.itemAtPosition(row, 0)
             label = label_item.widget() if label_item is not None else None
@@ -1211,7 +1316,7 @@ class ToolbarWidget(QWidget):
         elif tool == "number":
             rows.update(self.sequence_rows)
         elif tool == "zoom":
-            rows.update((39, 40, 41, 42, 43))
+            rows.update((39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49))
         if tool in ("pen", "rect", "ellipse", "arrow", "marker", "text"):
             rows.add(0)
         elif tool == "crop":
@@ -1322,7 +1427,7 @@ class ToolbarWidget(QWidget):
         elif tool == "number":
             rows.update(self.sequence_rows)
         elif tool == "zoom":
-            rows.update((39, 40, 41, 42, 43))
+            rows.update((39, 40, 41, 42, 43, 44, 45, 46, 47, 48, 49))
         return rows
 
     # 「更多设置」弹层：宽度完全由当前可见内容决定，这里只做可用性上下限的夹取。
@@ -1932,6 +2037,37 @@ class ToolbarWidget(QWidget):
             self.set_choice("zoom_annotation_style", value)
         elif key == "zoom_annotation_color":
             self.zoom_color.set_color(value)
+        elif key == "zoom_annotation_border_width":
+            with QSignalBlocker(self.zoom_border_width):
+                self.zoom_border_width.setValue(int(value))
+        elif key == "zoom_annotation_border_enabled":
+            with QSignalBlocker(self.zoom_border_enabled):
+                self.zoom_border_enabled.setChecked(bool(value))
+        elif key == "zoom_annotation_source_color":
+            self.zoom_source_color.set_color(value)
+        elif key == "zoom_annotation_rect_rounded":
+            with QSignalBlocker(self.zoom_rect_rounded):
+                self.zoom_rect_rounded.setChecked(bool(value))
+        elif key == "zoom_annotation_rect_radius":
+            with QSignalBlocker(self.zoom_rect_radius):
+                self.zoom_rect_radius.setValue(int(value))
+        elif key == "zoom_annotation_glow_enabled":
+            with QSignalBlocker(self.zoom_glow_enabled):
+                self.zoom_glow_enabled.setChecked(bool(value))
+        elif key == "zoom_annotation_glow_color":
+            self.zoom_glow_color.set_color(value)
+        elif key == "zoom_annotation_glow_width":
+            with QSignalBlocker(self.zoom_glow_width):
+                self.zoom_glow_width.setValue(int(value))
+        elif key == "zoom_annotation_glow_opacity":
+            with QSignalBlocker(self.zoom_glow_opacity):
+                self.zoom_glow_opacity.setValue(int(value))
+            self.zoom_glow_opacity_label.setText(f"{int(value)}%")
+        elif key == "zoom_annotation_source_marker":
+            self.set_choice("zoom_annotation_source_marker", value)
+        elif key == "zoom_annotation_source_corners":
+            with QSignalBlocker(self.zoom_source_corners):
+                self.zoom_source_corners.setChecked(bool(value))
         elif key == "zoom_annotation_opacity":
             with QSignalBlocker(self.zoom_opacity):
                 self.zoom_opacity.setValue(int(value))

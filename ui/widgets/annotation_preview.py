@@ -307,10 +307,20 @@ class AnnotationPreview(QWidget):
                 QPixmap.fromImage(source), source_rect,
                 settings.get("zoom_annotation_factor", 2),
                 settings.get("zoom_annotation_style", "circle"),
-                settings.get("zoom_annotation_color", "#00b8a9"),
-                max(1, int(settings.get("crop_width", 2))),
+                settings.get("zoom_annotation_color", "#000000"),
+                int(settings.get("zoom_annotation_border_width", 1)),
                 int(settings.get("zoom_annotation_opacity", 100)),
-                int(settings.get("zoom_annotation_max_size", 480)))
+                int(settings.get("zoom_annotation_max_size", 480)),
+                bool(settings.get("zoom_annotation_rect_rounded", True)),
+                int(settings.get("zoom_annotation_rect_radius", 10)),
+                bool(settings.get("zoom_annotation_glow_enabled", True)),
+                settings.get("zoom_annotation_glow_color", "#168cff"),
+                int(settings.get("zoom_annotation_glow_width", 10)),
+                int(settings.get("zoom_annotation_glow_opacity", 55)),
+                settings.get("zoom_annotation_source_marker", "dash"),
+                bool(settings.get("zoom_annotation_source_corners", True)),
+                bool(settings.get("zoom_annotation_border_enabled", False)),
+                settings.get("zoom_annotation_source_color", "#000000"))
             zoom.setPos(width * 0.44, height * 0.08)
             scene.addItem(zoom)
         elif self.kind == "picker":
