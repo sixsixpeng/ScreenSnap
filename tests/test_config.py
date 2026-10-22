@@ -2263,6 +2263,116 @@ class ConfigTests(CoreTests):
             finally:
                 manager.stop()
 
+
+    def test_hotkey_suppression_skips_modified_bindings_to_keep_ctrl_keys(self):
+        """带 Ctrl/Alt/Shift 的截图热键不得启用 keyboard.suppress。
+
+        keyboard 的 suppress 会把绑定中的修饰键加入 filtered_modifiers，在等待组合键时
+        连 Ctrl 的按下一起拦掉。Windows「按 Ctrl 显示指针位置」正依赖这个按键，
+        所以只有无修饰键的单键绑定可以 suppress。
+        """
+        import time
+        from hotkey.hotkey_manager import HotkeyManager
+
+        manager = HotkeyManager()
+        registered = []
+
+        def add_hotkey(binding, callback, suppress=False):
+            registered.append((binding, suppress))
+            return binding
+
+        with patch("hotkey.hotkey_manager.keyboard.add_hotkey", side_effect=add_hotkey), \
+                patch("hotkey.hotkey_manager.keyboard.remove_hotkey"):
+            try:
+                manager.register({"hotkeys_enabled": True, "capture_hotkey_suppress": True,
+                                  "hotkeys": {"capture": "f1", "repeat": "ctrl+f2",
+                                              "fullscreen": "alt+f3", "monitor": "ctrl+f4",
+                                              "paste": "ctrl+f5"}})
+                deadline = time.monotonic() + 3
+                while manager._registration_completed != manager._registration_requested and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(manager._registration_state, "completed")
+                self.assertEqual(registered, [("f1", True), ("ctrl+f2", False),
+                                             ("alt+f3", False), ("ctrl+f4", False),
+                                             ("ctrl+f5", False)])
+            finally:
+                manager.stop()
+
+
+    def test_hotkey_suppression_disabled_keeps_every_binding_unblocked(self):
+        """关闭「拦截截图快捷键输入」后，即使 F1 等单键也不得传 suppress。"""
+        import time
+        from hotkey.hotkey_manager import HotkeyManager
+
+        manager = HotkeyManager()
+        registered = []
+
+        def add_hotkey(binding, callback, suppress=False):
+            registered.append((binding, suppress))
+            return binding
+
+        with patch("hotkey.hotkey_manager.keyboard.add_hotkey", side_effect=add_hotkey), \
+                patch("hotkey.hotkey_manager.keyboard.remove_hotkey"):
+            try:
+                manager.register({"hotkeys_enabled": True, "capture_hotkey_suppress": False,
+                                  "hotkeys": {"capture": "f1", "monitor": "ctrl+f1",
+                                              "paste": "f3"}})
+                deadline = time.monotonic() + 3
+                while manager._registration_completed != manager._registration_requested and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(manager._registration_state, "completed")
+                self.assertEqual(registered, [("f1", False), ("ctrl+f1", False),
+                                             ("f3", False)])
+            finally:
+                manager.stop()
+
+    def test_hotkey_suppression_keeps_single_key_but_skips_modified_capture(self):
+        """「拦截截图快捷键输入」保留单键拦截；即使 capture 本身带修饰键也不 suppress。"""
+        import time
+        from hotkey.hotkey_manager import HotkeyManager
+
+        manager = HotkeyManager()
+        registered = []
+
+        def add_hotkey(binding, callback, suppress=False):
+            registered.append((binding, suppress))
+            return binding
+
+        with patch("hotkey.hotkey_manager.keyboard.add_hotkey", side_effect=add_hotkey), \
+                patch("hotkey.hotkey_manager.keyboard.remove_hotkey"):
+            try:
+                manager.register({"hotkeys_enabled": True, "capture_hotkey_suppress": True,
+                                  "hotkeys": {"capture": "ctrl+f1", "repeat": "f2",
+                                              "fullscreen": "alt+f3", "monitor": "ctrl+f4"}})
+                deadline = time.monotonic() + 3
+                while manager._registration_completed != manager._registration_requested and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                self.assertEqual(manager._registration_state, "completed")
+                self.assertEqual(registered, [("ctrl+f1", False), ("f2", True),
+                                             ("alt+f3", False), ("ctrl+f4", False)])
+            finally:
+                manager.stop()
+
+
+    def test_keyboard_filtered_modifiers_are_removed_for_non_suppress_hotkeys(self):
+        """keyboard 即使 suppress=False 也会累加 filtered_modifiers；注册后必须清掉。"""
+        from types import SimpleNamespace
+        from hotkey.hotkey_manager import HotkeyManager
+        from hotkey import hotkey_manager as hm
+
+        manager = HotkeyManager.__new__(HotkeyManager)
+        listener = SimpleNamespace(filtered_modifiers={29: 1, 42: 1})
+        with patch.object(hm, "keyboard", SimpleNamespace(_listener=listener)):
+            snapshot = manager._snapshot_filtered_modifiers()
+            listener.filtered_modifiers[29] = 2
+            listener.filtered_modifiers[56] = 1
+            manager._restore_filtered_modifiers(snapshot)
+            self.assertEqual(listener.filtered_modifiers, {29: 1, 42: 1})
+            listener.filtered_modifiers[29] = -1
+            manager._normalize_filtered_modifiers()
+            self.assertNotIn(29, listener.filtered_modifiers)
+            self.assertEqual(listener.filtered_modifiers, {42: 1})
+
     def test_selected_shape_fill_settings_update_live(self):
         from config.config_manager import DEFAULTS
 

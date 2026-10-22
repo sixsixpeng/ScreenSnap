@@ -1025,6 +1025,41 @@ class HotkeyManager(DiagnosticsMixin, QObject):
             finally:
                 self._install_started_at = None
 
+    @staticmethod
+    def _filtered_modifier_map():
+        """keyboard 的修饰键过滤计数；库不可用时返回 None。"""
+        listener = getattr(keyboard, "_listener", None)
+        filters = getattr(listener, "filtered_modifiers", None)
+        return filters if isinstance(filters, dict) else None
+
+    def _snapshot_filtered_modifiers(self):
+        filters = self._filtered_modifier_map()
+        return dict(filters) if filters is not None else None
+
+    def _restore_filtered_modifiers(self, snapshot):
+        """撤销非 suppress 热键注册时库自动加入的修饰键过滤。"""
+        filters = self._filtered_modifier_map()
+        if filters is None or snapshot is None:
+            return
+        for code in list(filters):
+            before = snapshot.get(code, 0)
+            if filters[code] > before:
+                filters[code] = before
+            if filters[code] <= 0:
+                filters.pop(code, None)
+        for code, before in snapshot.items():
+            if before > 0 and code not in filters:
+                filters[code] = before
+
+    def _normalize_filtered_modifiers(self):
+        """清理 removal 后可能留下的负数/零计数。"""
+        filters = self._filtered_modifier_map()
+        if filters is None:
+            return
+        for code in list(filters):
+            if filters[code] <= 0:
+                filters.pop(code, None)
+
     def install(self, request):
         """先移除旧热键，部分注册失败时也清理已注册的部分。"""
         self._ensure_input_hooks()
@@ -1057,11 +1092,27 @@ class HotkeyManager(DiagnosticsMixin, QObject):
                     self._cancel_install(request)
                     return
                 try:
-                    suppress = request.get("suppress_capture", False) and action in (
-                        "capture", "repeat", "fullscreen", "monitor")
-                    handle = keyboard.add_hotkey(
-                        binding, lambda current=action, gen=request.get("_generation", 0): self.emit_action(current, gen), suppress=suppress
-                    )
+                    # keyboard 的 suppress 会把绑定中的修饰键加入 filtered_modifiers；
+                    # 一旦绑定含 Ctrl/Alt/Shift，库在等待组合键时会连修饰键的按下也拦掉，
+                    # 导致 Windows「按 Ctrl 显示指针位置」等系统功能失效。
+                    # 因此只拦截**无修饰键的单键**绑定；带修饰键的组合照常派发。
+                    parsed = parse_binding_keys(binding)
+                    suppress = (request.get("suppress_capture", False)
+                                and action in ("capture", "repeat", "fullscreen", "monitor")
+                                and parsed is not None
+                                and not parsed[0]
+                                and parsed[1] not in MODIFIER_NAMES)
+                    # keyboard 的 _add_hotkey_step 即使 suppress=False 也会给修饰键累加
+                    # filtered_modifiers；这会让 direct_callback 在 modifier 按下时进入
+                    # pending/suppressed 分支，照样吞掉 Ctrl/Alt/Shift。
+                    # 非 suppress 绑定注册后恢复过滤计数，保留非阻塞派发。
+                    snapshot = None if suppress else self._snapshot_filtered_modifiers()
+                    try:
+                        handle = keyboard.add_hotkey(
+                            binding, lambda current=action, gen=request.get("_generation", 0): self.emit_action(current, gen), suppress=suppress
+                        )
+                    finally:
+                        self._restore_filtered_modifiers(snapshot)
                 except (ValueError, OSError) as error:
                     # 单个热键被占用时记录并继续，其余可用热键仍然生效。
                     self._registration_failed = request.get("_generation", 0)
@@ -1100,6 +1151,7 @@ class HotkeyManager(DiagnosticsMixin, QObject):
                 get_logger().warning("移除热键句柄失败（已跳过）: %s", error,
                                                        extra={"screensnap_metadata_only": True})
         self.handles.clear()
+        self._normalize_filtered_modifiers()
 
     def stop(self):
         """通知监听线程注销热键，并等待有限时间避免退出卡住。"""

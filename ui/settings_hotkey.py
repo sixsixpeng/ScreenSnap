@@ -28,7 +28,7 @@ class HotkeyPage(SettingsPage):
                    "体检与自动恢复策略见本页下方的「状态与体检」「自动恢复」等分组。")
         self.group("截图快捷键")
         self.check("capture_hotkey_suppress", "拦截截图快捷键输入",
-               "启用后，截图热键按下/释放会由系统钩子拦截，不传给当前前台应用；释放按键后解除拦截。某些系统权限策略可能限制此能力")
+               "启用后，无修饰键的截图热键（如 F1）按下/释放会由系统钩子拦截，不传给当前前台应用；释放后解除拦截。含 Ctrl/Alt/Shift 的组合不拦截，避免吞掉系统全局修饰键功能（如按 Ctrl 显示指针位置）。某些系统权限策略可能限制此能力")
         for action, label in HOTKEY_LABELS.items():
             if action == "edit_clipboard":
                 self.group("编辑快捷键")

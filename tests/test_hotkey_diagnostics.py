@@ -43,7 +43,7 @@ class HotkeyDiagnosticsTests(unittest.TestCase):
         self.keyboard_patch.start()
         self.mouse_patch.start()
         self.manager = hm.HotkeyManager()
-        self.settings = dict(hotkeys_enabled=True, hotkeys={"capture": "ctrl+alt+a"},
+        self.settings = dict(hotkeys_enabled=True, hotkeys={"capture": "f1"},
                              capture_hotkey_suppress=True, hotkey_health_interval=4)
 
     def tearDown(self):

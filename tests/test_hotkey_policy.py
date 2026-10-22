@@ -529,6 +529,21 @@ class CompatibilityTests(unittest.TestCase):
             owner.sync_keyboard_compatibility()
             self.assertEqual(backend.add_hotkey.call_count, before + 1)
 
+
+    def test_modified_temporary_toolbar_hotkey_is_not_suppressed(self):
+        """工具栏兜底改用 Ctrl/Alt 组合时也不能启用 keyboard.suppress。"""
+        with self.fixture() as (owner, bridge, backend):
+            owner.settings["capture_toolbar_hide_shortcut"] = "Ctrl+H"
+            owner.sync_keyboard_compatibility()
+            call = next(call for call in backend.add_hotkey.call_args_list
+                        if call.args[0] == "Ctrl+H")
+            self.assertFalse(call.kwargs["suppress"])
+            owner.settings["capture_quick_sticker_shortcut"] = "Ctrl+Space"
+            owner.sync_keyboard_compatibility()
+            call = next(call for call in backend.add_hotkey.call_args_list
+                        if call.args[0] == "Ctrl+Space")
+            self.assertFalse(call.kwargs["suppress"])
+
     def test_recording_modal_and_stale_callbacks_are_safe(self):
         with self.fixture() as (owner, bridge, backend):
             old = bridge.handles["toolbar"]

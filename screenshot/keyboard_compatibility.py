@@ -19,6 +19,58 @@ FALLBACKS = {
     "escape": ("capture_escape_hotkey_fallback", "SCREENSNAP_NO_ESC_HOOK", None, "esc", True),
 }
 
+_MODIFIER_TOKENS = frozenset(("ctrl", "alt", "shift", "windows"))
+
+
+def _filtered_modifier_map():
+    """keyboard 的修饰键过滤计数；不可读时返回 None。"""
+    try:
+        import keyboard
+        listener = getattr(keyboard, "_listener", None)
+        filters = getattr(listener, "filtered_modifiers", None)
+        return filters if isinstance(filters, dict) else None
+    except Exception:  # noqa: BLE001 第三方库结构变化时只放弃清理
+        return None
+
+
+def _snapshot_filtered_modifiers():
+    filters = _filtered_modifier_map()
+    return dict(filters) if filters is not None else None
+
+
+def _restore_filtered_modifiers(snapshot):
+    """清掉 add_hotkey 对非 suppress 绑定自动累加的修饰键计数。"""
+    filters = _filtered_modifier_map()
+    if filters is None or snapshot is None:
+        return
+    for code in list(filters):
+        before = snapshot.get(code, 0)
+        if filters[code] > before:
+            filters[code] = before
+        if filters[code] <= 0:
+            filters.pop(code, None)
+    for code, before in snapshot.items():
+        if before > 0 and code not in filters:
+            filters[code] = before
+
+
+def _normalize_filtered_modifiers():
+    filters = _filtered_modifier_map()
+    if filters is None:
+        return
+    for code in list(filters):
+        if filters[code] <= 0:
+            filters.pop(code, None)
+
+def _effective_suppress(binding, requested):
+    """带修饰键的临时快捷键不使用 suppress，避免吞掉 Ctrl/Alt/Shift。"""
+    if not requested:
+        return False
+    signature = shortcut_signature(binding)
+    if signature and set(signature) & _MODIFIER_TOKENS:
+        return False
+    return True
+
 
 def fallback_state(kind, settings, override=False):
     """判定某个兜底当前是否可安装；返回的字符串本身就是要展示/上报的状态。
@@ -117,6 +169,8 @@ class CaptureKeyboardBridge(QObject):
         except Exception as error:  # noqa: BLE001 不让一个坏句柄阻断其他清理
             get_logger().warning("截图临时热键释放失败: kind=%s type=%s", kind, type(error).__name__,
                                                     extra={"screensnap_metadata_only": True})
+        finally:
+            _normalize_filtered_modifiers()
 
     def sync(self, kind):
         owner = self.owner
@@ -128,14 +182,19 @@ class CaptureKeyboardBridge(QObject):
             return
         _, _, key, default, suppress = FALLBACKS[kind]
         binding = QKeySequence(owner.settings.get(key, default)).toString() or default
+        suppress = _effective_suppress(binding, suppress)
         if self.bindings.get(kind) == binding and kind in self.handles:
             return
         self.release(kind)
         generation = self.generations[kind]
+        snapshot = None if suppress else _snapshot_filtered_modifiers()
         try:
             import keyboard
-            self.handles[kind] = keyboard.add_hotkey(binding,
-                lambda current=kind, gen=generation: self.fire(current, gen), suppress=suppress)
+            try:
+                self.handles[kind] = keyboard.add_hotkey(binding,
+                    lambda current=kind, gen=generation: self.fire(current, gen), suppress=suppress)
+            finally:
+                _restore_filtered_modifiers(snapshot)
             self.bindings[kind] = binding
             self.failures.discard(kind)
             # 这是内部机制就绪（非用户可见里程碑），且可能随截图焦点变化多次发生 ⇒ DEBUG（规则 13/14）。
