@@ -539,8 +539,39 @@ class AnnotationCanvas(QGraphicsView):
         self._applied_cursor_key = None
         if tool in TOOL_CURSOR_TOOLS or tool in ("picker", "eraser", "mosaic"):
             self._apply_tool_cursor()
+            self._sync_pointer_cursor()
         else:
             self.unsetCursor()
+
+    def _sync_pointer_cursor(self):
+        """在窗口首次显示/鼠标进入时同步橡皮擦或马赛克圆环位置。
+
+        这两个工具使用 Qt.BlankCursor 并自行绘制圆环；若首次显示时还没有收到
+        mouseMoveEvent，指针会变成空白且圆环不出现，直到用户点击一下（点击路径
+        本身会写 eraser_point）。这里只在指针确实位于 viewport 内时同步，避免
+        把画布外的位置画成圆环。
+        """
+        if self.tool not in ("eraser", "mosaic"):
+            return
+        position = self.viewport().mapFromGlobal(QCursor.pos())
+        if not self.viewport().rect().contains(position):
+            return
+        point = self.mapToScene(position)
+        if self.tool == "eraser":
+            self.eraser_point_raw = point
+            self.eraser_point = self.image_point(point)
+        else:
+            self.mosaic_point_raw = point
+            self.mosaic_point = self.image_point(point)
+        self.viewport().update()
+
+    def enterEvent(self, event):
+        self._sync_pointer_cursor()
+        super().enterEvent(event)
+
+    def showEvent(self, event):
+        super().showEvent(event)
+        QTimer.singleShot(0, self._sync_pointer_cursor)
 
     def _chain_tool(self):
         """当前工具是否支持多段连续绘制（箭头/开启多段的画笔/记号笔）。"""

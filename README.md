@@ -380,7 +380,7 @@ python -m venv .venv
 | 编辑剪贴板图片 | `Ctrl+Alt+V` | 设置 > 快捷键 > 编辑快捷键 |
 | 打开并编辑图片 | `Ctrl+Alt+E` | 同上 |
 
-在"设置 > 快捷键"点击热键框录制，按 `Esc` 取消录制；相同组合键不能分配给多个动作。每项旁边的"清除"只禁用该动作，页面顶部的"启用全局热键"可整体暂停。托盘菜单和支持热键提示的按钮会显示当前绑定。截图类全局热键默认启用"拦截截图快捷键输入"：系统钩子吞掉热键的按下和释放，不转发给前台应用；按键释放时结束拦截，不会把按键保持到延迟截图完成。可在"设置 > 快捷键"关闭；新安装、旧配置缺失该键及恢复全部默认时均默认为开启，已有配置中的显式选择继续保留。
+在"设置 > 快捷键"点击热键框录制，按 `Esc` 取消录制；相同组合键不能分配给多个动作。每项旁边的"清除"只禁用该动作，页面顶部的"启用全局热键"可整体暂停。托盘菜单和支持热键提示的按钮会显示当前绑定。截图类全局热键默认启用"拦截截图快捷键输入"：系统钩子吞掉**无修饰键的单键**热键（如 F1）的按下和释放，不转发给前台应用；按键释放时结束拦截，不会把按键保持到延迟截图完成。含 Ctrl/Alt/Shift 的组合键不启用底层 suppress，否则 `keyboard` 会把修饰键按下也一起拦掉，导致 Windows「按 Ctrl 显示指针位置」等系统功能失效。可在"设置 > 快捷键"关闭；新安装、旧配置缺失该键及恢复全部默认时均默认为开启，已有配置中的显式选择继续保留。
 
 **热键全部失效时的排查**：托盘菜单的“重新注册全局热键”，以及“设置 > 快捷键”页诊断面板里的“重新注册”，都会清除录制暂停标记、提交重建绑定请求；提示“已请求”不代表已经恢复。当前 `keyboard 0.13.5` 的移除/添加绑定只修改回调表，不会重新安装底层 Windows 键盘钩子，也不会重启已死亡的库线程或保证清除库内残留按键状态。因此“18 个绑定已安装”和 `listening=True` 都不是功能正常的证据；仍无效时可以重启，不必反复点击。
 
@@ -788,7 +788,7 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | 参数 | 默认值 | 控制内容 |
 | --- | --- | --- |
 | `hotkeys_enabled` | `true` | 全局热键注册总开关；不影响截图遮罩内的局部按键。 |
-| `capture_hotkey_suppress` | `true` | 是否拦截截图类全局热键的按下/释放，避免透传到前台应用；用户可关闭。 |
+| `capture_hotkey_suppress` | `true` | 是否拦截**无修饰键的截图类单键**热键（如 F1）的按下/释放；含 Ctrl/Alt/Shift 的组合不拦截，避免吞掉系统修饰键功能。用户可关闭。 |
 | `hotkeys` | 动作字典 | 全局动作绑定；各动作默认值和行为见"全局热键"表，空字符串表示清除此动作绑定。 |
 
 #### 热键健康与恢复、诊断和截图键盘兼容性
@@ -2055,9 +2055,6 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 15. 修复（截图音效）：每块显示器视图的 `capture_completed` 与 UIA Tab 的 `selection_sound` 都接到应用播放；右键框选松开也发一次交互反馈音。源码直跑和打包统一使用 `ui/assets/sounds`；若打包后仍无声，检查 `dist` 内 `ui/assets/sounds/shutter_*.wav` 是否存在并按当前 `build.bat` 重新打包。验证：`tests.test_capture -k sound` 3 条、`test_mask_tab_cycle_emits_selection_sound`。
 16. 修复（贴图右键「编辑」）：菜单发出的是 QImage，而 EditorWindow/AnnotationCanvas 需要 Pillow Image；此前 `to_qimage()` 读取 `image.mode` 抛 `AttributeError`，窗口不创建。`edit_sticker()` 先用 `qimage_to_pillow()` 转换，失败只记 WARNING 并返回；新增 `test_edit_sticker_opening_editor_uses_pillow_image` 覆盖完整打开路径。
 17. 调整（局部放大）：放大镜线条默认黑色、粗细默认 1px、默认不绘制；光晕默认 10px。新增线条开关、线条粗细、矩形圆角开关/半径、光晕开关/颜色/宽度/透明度、源区域框线颜色、源区域标记（虚线/实线/关闭）、矩形源区域角标配置。线条颜色与光晕颜色分开设置，光晕默认使用贴图蓝色 `#168cff`；源区域框线颜色也独立。颜色与开关在设置页/工具栏/对象参数中同一行。圆角矩形不再画直角角标，源区域轮廓与镜片使用同一圆角半径；圆形保持椭圆虚线且无角标。设置页按「局部放大 / 放大镜 / 源区域」分组，颜色、绘制开关和数值按同排紧凑布局；工具栏和对象参数也按线条/矩形/光晕分行。所有新增参数进入对象「编辑参数」，由每个放大标注对象独立保存，对象级修改只改当前对象、不写默认配置，也不影响已有对象；快照/撤销/复制会保留。验证：`test_zoom_rectangle_rounding_glow_border_and_source_marker_config`、`test_zoom_properties_dialog_edits_factor_style_opacity`、`test_zoom_annotation_object_settings_and_source_marker`。
-18. 修复（热键健康误报）：切换抖音/DeepHarness 后出现“热键异常”提示，实际是观察器 `_pressed_names` 内残留了 `+`，而 `keyboard` 库侧 `_pressed_events` 为空；该残留只影响“组合键未触发”观察判据，不阻断热键派发。现在仅当库侧确实存在 `GetAsyncKeyState` 判定为按起的残留键时才报故障；库侧为空或只有正常按住的普通键时，只静默清理本程序观察记录，不弹提示、不重建绑定。验证：`test_local_only_stuck_key_is_cleared_without_hotkey_fault_or_notice`，`tests.test_hotkey_diagnostics` 20 条、`test_hotkey_lifecycle` 17 条、`test_hotkey_policy` 29 条通过。
-19. 修复（设置页分组重叠）：局部放大相关配置不再拆成「局部放大 / 放大镜 / 源区域」三个分组框，统一收进一个「局部放大」分组；`EditorPage._reorder_editor_groups()` 只保留该分组，并追加“未列出的分组也必须插回布局”的兜底，避免重排时 `removeWidget` 后分组悬空在 `(0,0)` 与「默认工具」重叠。颜色+开关+粗细/光晕/圆角仍同排，间距调为 4px 以保证 780px 宽度不出现横向滚动。验证：`test_editor_settings_groups_follow_toolbar_order`、`test_settings_pages_group_related_controls_and_scroll`、`test_settings_window_has_fixed_width_and_no_page_overflows`，离屏探针确认 17 个分组无几何重叠。
-
 #### 曲线箭头弯向与头部重绘
 
 1. 调整：曲线箭头新增 `arrow_curve_direction`（`right` / `left`，默认 `right`）；工具栏「更多设置」、设置页「编辑器 > 箭头」和对象级「编辑参数」均可切换。新增 `editor_arrow_curve_shortcut`（默认 `Alt+C`）：选中曲线箭头时只改该对象，未选中时改后续新建箭头的默认方向；复制/撤销/重做保留弯向。
@@ -2068,3 +2065,10 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 
 1. 修复：恢复全部默认/恢复本页默认/导入配置后 `app_version` 为空、程序版本号输入框不显示当前版本；`SettingsWindow.reset_defaults`、`SettingsPage.reset_page`、`ConfigManager.import_from` 现在回填 `core.version.APP_VERSION`，`GeneralPage.sync_controls` 对空值显示当前内置版本。`save_dir`/`log_dir` 保持空值，由 `FilePathEdit` 显示默认目录，不写死绝对路径。
 2. 验证：`test_default_directory_display_survives_full_reset_import_and_reload`、`test_general_page_reset_backfills_builtin_version`、`test_settings_window_resets_defaults_and_clears_session`、`test_settings_window_has_fixed_width_and_no_page_overflows`；`tests.test_config` 130 条中仅 1 条 HEAD 同样失败的既有用例。
+
+### 2026-10-22 当日调整汇总
+
+1. 修复（热键健康误报）：切换抖音/DeepHarness 后出现“热键异常”提示，实际是观察器 `_pressed_names` 内残留了 `+`，而 `keyboard` 库侧 `_pressed_events` 为空；该残留只影响“组合键未触发”观察判据，不阻断热键派发。现在仅当库侧确实存在 `GetAsyncKeyState` 判定为按起的残留键时才报故障；库侧为空或只有正常按住的普通键时，只静默清理本程序观察记录，不弹提示、不重建绑定。验证：`test_local_only_stuck_key_is_cleared_without_hotkey_fault_or_notice`，`tests.test_hotkey_diagnostics` 20 条、`test_hotkey_lifecycle` 17 条、`test_hotkey_policy` 29 条通过。
+2. 修复（设置页分组重叠）：局部放大相关配置不再拆成「局部放大 / 放大镜 / 源区域」三个分组框，统一收进一个「局部放大」分组；`EditorPage._reorder_editor_groups()` 只保留该分组，并追加“未列出的分组也必须插回布局”的兜底，避免重排时 `removeWidget` 后分组悬空在 `(0,0)` 与「默认工具」重叠。颜色+开关+粗细/光晕/圆角仍同排，间距调为 4px 以保证 780px 宽度不出现横向滚动。验证：`test_editor_settings_groups_follow_toolbar_order`、`test_settings_pages_group_related_controls_and_scroll`、`test_settings_window_has_fixed_width_and_no_page_overflows`，离屏探针确认 17 个分组无几何重叠。
+3. 修复（键盘监听影响 Ctrl）：`keyboard` 的 `suppress=True` 会把绑定中的修饰键加入 `filtered_modifiers`，等待组合键时连 Ctrl 按下也拦截，导致 Windows「按 Ctrl 显示指针位置」等系统功能失效。现在只对**无修饰键的单键**截图热键启用 suppress（如 F1）；含 Ctrl/Alt/Shift 的组合键照常派发。另发现 `keyboard.add_hotkey(suppress=False)` 也会给修饰键累加 `filtered_modifiers`，因此注册非 suppress 热键后会恢复过滤计数，避免 Ctrl 仍被 pending/suppressed 分支吞掉。验证：`test_hotkey_suppression_only_applies_to_capture_actions`（F1 等单键仍拦截）、`test_hotkey_suppression_skips_modified_bindings_to_keep_ctrl_keys`、`test_hotkey_suppression_disabled_keeps_every_binding_unblocked`（关闭设置后 F1 也不拦截）、`test_hotkey_suppression_keeps_single_key_but_skips_modified_capture`（capture 本身带修饰键时不拦截）、`test_keyboard_filtered_modifiers_are_removed_for_non_suppress_hotkeys`、`test_modified_temporary_toolbar_hotkey_is_not_suppressed`；默认 18 个绑定真机探针 filtered={}、blocking 仅 F1；`tests.test_hotkey_diagnostics` 20 条、`tests.test_hotkey_lifecycle` 17 条、`tests.test_hotkey_policy` 30 条。
+4. 修复（橡皮擦首次显示光标）：橡皮擦使用 Qt.BlankCursor 并自绘擦除圆环；首次打开编辑器时若还没收到 mouseMoveEvent，`eraser_point` 为空，会表现为鼠标消失/看不到，点一下后才恢复。现在 `set_tool`、`enterEvent`、`showEvent` 都会在指针确实位于画布内时同步圆环位置；马赛克笔刷同样处理。验证：`test_eraser_and_mosaic_sync_pointer_ring_before_first_mouse_move`、`test_only_eraser_and_mosaic_brush_use_blank_cursor`（其余标注工具均使用可见光标）、`tests.editor.test_annotation_editing` 49 条通过。

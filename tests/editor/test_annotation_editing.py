@@ -896,6 +896,52 @@ class AnnotationEditingTests(CoreTests):
             dialog.deleteLater()
 
 
+
+
+    def test_only_eraser_and_mosaic_brush_use_blank_cursor(self):
+        """自绘光标圆环只属于橡皮擦/马赛克涂抹；其它标注工具必须有可见光标。"""
+        from editor.annotation_canvas import TOOL_CURSOR_TOOLS
+        canvas = self._canvas(eraser_brush=False, mosaic_brush=True)
+        canvas.show()
+        self.addCleanup(canvas.close)
+        canvas.set_tool("eraser")
+        self.assertEqual(canvas.cursor().shape(), Qt.BlankCursor,
+                         "橡皮擦（含框选模式）依赖自绘圆环")
+        canvas.set_tool("mosaic")
+        self.assertEqual(canvas.cursor().shape(), Qt.BlankCursor,
+                         "马赛克涂抹模式依赖自绘圆环")
+        canvas.set_tool("mosaic")
+        canvas.settings["mosaic_brush"] = False
+        canvas._applied_cursor_key = None
+        canvas._apply_tool_cursor()
+        self.assertNotEqual(canvas.cursor().shape(), Qt.BlankCursor,
+                            "马赛克框选模式应使用可见光标")
+        for tool in TOOL_CURSOR_TOOLS + ("picker",):
+            canvas.set_tool(tool)
+            self.assertNotEqual(canvas.cursor().shape(), Qt.BlankCursor,
+                                f"{tool} 不应使用空白光标")
+
+    def test_eraser_and_mosaic_sync_pointer_ring_before_first_mouse_move(self):
+        """首次显示时橡皮擦使用 BlankCursor；没有移动事件也要先画出圆环位置。"""
+        from unittest.mock import patch
+        from PySide6.QtCore import QPoint
+        from PySide6.QtGui import QCursor
+
+        canvas = self._canvas(eraser_erase_base=True, eraser_brush=True)
+        canvas.resize(320, 220)
+        canvas.show()
+        self.addCleanup(canvas.close)
+        position = canvas.viewport().mapToGlobal(QPoint(60, 50))
+        with patch.object(QCursor, "pos", return_value=position):
+            canvas.set_tool("eraser")
+        self.assertIsNotNone(canvas.eraser_point)
+        self.assertIsNotNone(canvas.eraser_point_raw)
+        # 马赛克同样使用自绘圆环，切到该工具时也要同步。
+        with patch.object(QCursor, "pos", return_value=position):
+            canvas.set_tool("mosaic")
+        self.assertIsNotNone(canvas.mosaic_point)
+        self.assertIsNotNone(canvas.mosaic_point_raw)
+
     def test_zoom_annotation_object_settings_and_source_marker(self):
         """放大标注的倍率/镜片/透明度只改对象，源区域框存在且快照保留。"""
         from PySide6.QtGui import QColor, QPixmap
