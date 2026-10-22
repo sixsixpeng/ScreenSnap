@@ -603,3 +603,18 @@
   - 现象：左键划满整屏进入原地编辑后，尺寸徽标移到鼠标上**不隐藏**；右键多选（不进原地编辑）却正常 ✓。反复修了三轮（容差 2→14→40→100、周期重绘、实时光标）都没彻底解决 ✓。
   - 排查：三环断点逐环定位（靠加可观测点，不靠猜）—— ① 徽标周期刷新的 `QTimer` **从未启动** ✗：启动逻辑放在 `InfoBar.sync()` 里误用 `self`（InfoBar），`self.selection` 恒为 `None` ⇒ `_rects_now` 恒空 ⇒ timer 从不 `start()` ✓（改 `self`→`view` 即 MaskWindow ✓）；② 进入原地编辑后画布（遮罩子控件）拦截 `mouseMoveEvent` ⇒ `self.position` 停在松开处，hover 判定用过时坐标 ✓（改每拍 `QCursor.pos()` 刷新 ✓）；③ **最终根因** ✗：即使 timer 启动、position 也刷新了（日志 `周期刷新第 21 拍: position=(1233,27)` 已在徽标上），`_badge_poll_tick` 里的 `self.update()` 在遮罩被画布**完全覆盖**后**不触发 paintEvent**（Qt 跳过被遮挡窗口的重绘）⇒ 依赖 `paintEvent → _sync_size_badge` 的判定链路断掉，徽标判定始终没跑 ✓（改为 tick 里**直接**算 `element_rect/size` 并调 `_sync_size_badge` ✓）。
   - 避免：① 覆盖层/多屏下，子控件的可见性/几何/判定**不得**依赖「父窗口 `paintEvent` 会被 `update()` 触发」✗ —— 被另一个（子）控件完全遮挡时 Qt 会跳过重绘 ⇒ 周期任务里要**直接**计算目标状态并调用同步函数（可见性仍走延迟回调，D35 ✓），而不是 `self.update()` 间接触发 ✗；② 定时器/共享状态挂载时先确认 `self` 归属（InfoBar vs MaskWindow）—— 跨类引用不存在的属性会静默返回 `None`，逻辑空转还不报错 ✗；③ 这种「多环断点」问题**先加可观测点逐环定位**（timer 是否启动 / 周期 tick 是否刷新 position / 判定是否出「决策」日志），而不是反复猜测修同一处 ✓。
+
+- **D40 keyboard 的 filtered_modifiers 与 suppress 是两套机制：suppress=False 也会吞修饰键**
+  - 现象：修复“运行 ScreenSnap 后 Windows 按 Ctrl 不显示指针位置”时，先只把带修饰键的热键改为 suppress=False，仍然无效；实际探针显示 `keyboard._listener.filtered_modifiers` 仍包含 Ctrl/Alt/Shift 的扫描码，库在 modifier 按下时进入 pending/suppressed 分支。
+  - 排查：读 `keyboard/__init__.py::_add_hotkey_step`：它在 `suppress=False` 时也会给绑定中的修饰键累加 filtered_modifiers。注册默认 18 个绑定后打印过滤表即可复现；仅把 suppress 设为 False 不够。注册非 suppress 热键前后快照并恢复过滤计数后，真实探针得到 filtered={}，blocking 仅 F1。
+  - 避免：① 任何通过 `keyboard.add_hotkey` 注册的带修饰键绑定（常驻管理器和截图临时兜底都算）必须在注册前后快照/恢复 filtered_modifiers；移除句柄后清理负数/零计数 ✓；② 只有无修饰键的单键截图热键允许 suppress=True ✓；③ 测试不能只断言 add_hotkey(suppress=...)，必须直接检查 `filtered_modifiers` 和临时兜底路径 ✓；④ 修改输入链后先做一次真实 keyboard 探针，再宣称 Ctrl 恢复 ✓。
+
+- **D41 自绘光标的画布工具：首次显示/切换工具时必须主动同步指针位置**
+  - 现象：橡皮擦首次打开编辑器时系统光标空白、看不到鼠标，点一下后才出现；开启“同时擦除原图”时更明显。根因是橡皮擦使用 Qt.BlankCursor，圆环只在 mouseMoveEvent/mousePressEvent 里写 eraser_point；首次显示/进入画布没有移动事件，圆环没有位置。
+  - 排查：检查 `AnnotationCanvas._apply_tool_cursor` 和 `drawForeground`：eraser/mosaic 涂抹使用 BlankCursor 自绘；检查 showEvent/enterEvent/set_tool 均未写 eraser_point。用一个离屏探针在 set_tool 前把 QCursor.pos 指到 viewport 内，修复前 eraser_point=None。
+  - 避免：① 使用 BlankCursor 自绘光标的工具必须在 set_tool、enterEvent、showEvent 中调用统一的 _sync_pointer_cursor（只在指针位于 viewport 内时写）✓；② 马赛克涂抹同样处理，马赛克框选使用可见系统光标 ✓；③ 测试要断言“首次显示/切换工具后自绘图元位置非空”，并审计其余工具不使用 BlankCursor ✓。
+
+- **D42 设置页分组重排：removeWidget 后必须保留未列出的新分组**
+  - 现象：局部放大拆出「放大镜」「源区域」后，设置页与「默认工具」组件重叠；根因是 _reorder_editor_groups 先移除全部分组，再只按硬编码标题插回，新分组不在列表中被悬空在 (0,0)。
+  - 排查：离屏实例化 EditorPage，打印每个 QGroupBox 在 groups 布局中的 index；缺失分组 index=-1、geometry=(0,0,640,480)。补入标题后 index 正常、几何不重叠。
+  - 避免：① 分组重排先收集所有 QGroupBox，插入固定顺序后把未列出的分组按原顺序追加到布局，绝不丢弃 ✓；② 新增分组时同步更新设置页顺序测试，并加“所有分组必须在布局中/不重叠”的回归断言 ✓；③ 视觉重叠优先用离屏几何探针定位，不靠猜 Qt 布局 ✓。
