@@ -5,6 +5,7 @@ import shutil
 from datetime import date
 from pathlib import Path
 
+from core.startup import project_root
 from logger import get_logger
 
 
@@ -77,58 +78,72 @@ def resolved_dir(config, today=None):
     return directory
 
 
-def cache_dir(name, settings=None):
-    """图片类缓存的目录：跟随统一保存目录，不再堆在 %APPDATA%（2026-10-11 用户要求）。
+def cache_root():
+    """所有缓存目录的根：启动文件所在目录。
 
-    <保存目录>/cache/<name>：贴图私有缓存、剪贴板历史图、Native Toast 临时图都放这里，
-    自动创建；%APPDATA%\\ScreenSnap 只保留配置/会话 json 与单实例锁。
-    settings 省略时退回旧位置（data_dir()/name），保证无配置调用点仍可用。
+    源码模式是仓库根，打包后是 exe 所在目录；缓存子目录（sticker_cache、
+    clipboard_history、toast_cache）直接放在这里，不再跟随保存目录或 %APPDATA%。
     """
-    # 只有用户**显式设过**保存目录时才迁走：否则（首次运行 / 测试里的 DEFAULTS）保持旧位置，
-    # 避免把缓存写进「我的图片」默认目录，也保持既有用例的语义（2026-10-11）。
-    if not settings or not settings.get("save_dir"):
-        return data_dir() / name
+    return project_root()
+
+
+def cache_dir(name, settings=None):
+    """图片类缓存目录：启动文件所在目录下的 <name>。
+
+    贴图私有缓存、剪贴板历史图、Native Toast 临时图统一放这里；
+    启动目录不可写时退回 %APPDATA%\\ScreenSnap/<name>，避免缓存功能直接失效。
+    settings 参数保留兼容旧调用，不再影响缓存根位置。
+    """
+    del settings  # 缓存位置不再跟随保存目录
     try:
-        root = configured_dir(settings) / "cache" / name
-    except (TypeError, ValueError, OSError):
-        return data_dir() / name
-    try:
+        root = cache_root() / name
         root.mkdir(parents=True, exist_ok=True)
+        return root
     except OSError:
-        return data_dir() / name
-    return root
+        fallback = data_dir() / name
+        try:
+            fallback.mkdir(parents=True, exist_ok=True)
+        except OSError:
+            pass
+        return fallback
 
 
 def migrate_cache_dirs(settings):
-    """把旧位置（%APPDATA%）里的图片缓存搬到 <保存目录>/cache 下，只搬一次。
+    """把旧缓存搬到启动文件所在目录下，只搬一次。
 
-    返回迁移的文件数。搬不动（被占用等）就跳过并记 WARNING，绝不影响启动。
+    兼容两个历史位置：%APPDATA%\\ScreenSnap/<name> 与 <旧保存目录>/cache/<name>。
+    返回迁移的文件数；搬不动（被占用等）就跳过并记 WARNING，绝不影响启动。
     """
     logger = get_logger()
     moved = 0
-    for name in ("sticker_cache", "clipboard_history", "toast_cache"):
-        old = data_dir() / name
-        if not old.is_dir():
-            continue
-        new = cache_dir(name, settings)
-        if new == old:
-            continue
-        for item in old.iterdir():
-            if not item.is_file():
-                continue
-            target = new / item.name
-            if target.exists():
-                continue
-            try:
-                shutil.move(str(item), str(target))
-                moved += 1
-            except OSError as error:
-                logger.warning("迁移缓存文件失败（跳过）: %s → %s: %s", item, target, error)
+    old_roots = [data_dir()]
+    if settings and settings.get("save_dir"):
         try:
-            if not any(old.iterdir()):
-                old.rmdir()
-        except OSError:
+            old_roots.append(configured_dir(settings) / "cache")
+        except (TypeError, ValueError, OSError):
             pass
+    for name in ("sticker_cache", "clipboard_history", "toast_cache"):
+        new = cache_dir(name, settings)
+        for old_root in old_roots:
+            old = old_root / name
+            if not old.is_dir() or old.resolve() == new.resolve():
+                continue
+            for item in old.iterdir():
+                if not item.is_file():
+                    continue
+                target = new / item.name
+                if target.exists():
+                    continue
+                try:
+                    shutil.move(str(item), str(target))
+                    moved += 1
+                except OSError as error:
+                    logger.warning("迁移缓存文件失败（跳过）: %s → %s: %s", item, target, error)
+            try:
+                if not any(old.iterdir()):
+                    old.rmdir()
+            except OSError:
+                pass
     if moved:
-        logger.info("已把 %d 个缓存图片迁移到保存目录下的 cache/", moved)
+        logger.info("已把 %d 个缓存图片迁移到启动目录下", moved)
     return moved

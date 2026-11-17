@@ -528,7 +528,7 @@ Windows 图片提示优先使用带缩略图的原生图片 Toast；无法导入
 
 ```python
 # core/version.py
-APP_VERSION = "1.0.20"   # ← 发布新版本时只改这一行
+APP_VERSION = "1.0.21"   # ← 发布新版本时只改这一行
 ```
 
 改动流程：
@@ -961,7 +961,7 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `sticker_recycle_enabled` | `true` | 关闭贴图是否先进入回收站（可恢复），关闭则直接删除。 |
 | `sticker_recycle_limit` | `10` | 回收站最多保留的贴图数量，范围 1–200；超限时永久丢弃最早进入回收站的贴图。 |
 
-缓存管理位于“设置 > 保存与输出 > 缓存管理”：可清理剪贴板历史图片、Toast 缩略图及未被活动/回收站贴图引用的私有缓存，也可打开缓存根目录。清理不会删除保存目录中的正式截图、贴图会话或仍被贴图引用的源文件。`history_limit` 超限只限制历史列表并清理不再引用的剪贴板缓存；`sticker_recycle_limit` 超限会永久丢弃最早的回收站项目。
+缓存管理位于“设置 > 保存与输出 > 缓存管理”：可清理剪贴板历史图片、Toast 缩略图及未被活动/回收站贴图引用的私有缓存，也可打开缓存根目录。贴图、剪贴板和 Toast 缓存默认位于**启动文件所在目录**下的 `sticker_cache/`、`clipboard_history/`、`toast_cache/`，不再跟随保存目录或写进 `%APPDATA%`；启动目录不可写时才退回 `%APPDATA%\ScreenSnap`。清理不会删除保存目录中的正式截图、贴图会话或仍被贴图引用的源文件。`history_limit` 超限只限制历史列表并清理不再引用的剪贴板缓存；`sticker_recycle_limit` 超限会永久丢弃最早的回收站项目。
 
 #### 日志
 
@@ -2072,3 +2072,10 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 2. 修复（设置页分组重叠）：局部放大相关配置不再拆成「局部放大 / 放大镜 / 源区域」三个分组框，统一收进一个「局部放大」分组；`EditorPage._reorder_editor_groups()` 只保留该分组，并追加“未列出的分组也必须插回布局”的兜底，避免重排时 `removeWidget` 后分组悬空在 `(0,0)` 与「默认工具」重叠。颜色+开关+粗细/光晕/圆角仍同排，间距调为 4px 以保证 780px 宽度不出现横向滚动。验证：`test_editor_settings_groups_follow_toolbar_order`、`test_settings_pages_group_related_controls_and_scroll`、`test_settings_window_has_fixed_width_and_no_page_overflows`，离屏探针确认 17 个分组无几何重叠。
 3. 修复（键盘监听影响 Ctrl）：`keyboard` 的 `suppress=True` 会把绑定中的修饰键加入 `filtered_modifiers`，等待组合键时连 Ctrl 按下也拦截，导致 Windows「按 Ctrl 显示指针位置」等系统功能失效。现在只对**无修饰键的单键**截图热键启用 suppress（如 F1）；含 Ctrl/Alt/Shift 的组合键照常派发。另发现 `keyboard.add_hotkey(suppress=False)` 也会给修饰键累加 `filtered_modifiers`，因此注册非 suppress 热键后会恢复过滤计数，避免 Ctrl 仍被 pending/suppressed 分支吞掉。验证：`test_hotkey_suppression_only_applies_to_capture_actions`（F1 等单键仍拦截）、`test_hotkey_suppression_skips_modified_bindings_to_keep_ctrl_keys`、`test_hotkey_suppression_disabled_keeps_every_binding_unblocked`（关闭设置后 F1 也不拦截）、`test_hotkey_suppression_keeps_single_key_but_skips_modified_capture`（capture 本身带修饰键时不拦截）、`test_keyboard_filtered_modifiers_are_removed_for_non_suppress_hotkeys`、`test_modified_temporary_toolbar_hotkey_is_not_suppressed`；默认 18 个绑定真机探针 filtered={}、blocking 仅 F1；`tests.test_hotkey_diagnostics` 20 条、`tests.test_hotkey_lifecycle` 17 条、`tests.test_hotkey_policy` 30 条。
 4. 修复（橡皮擦首次显示光标）：橡皮擦使用 Qt.BlankCursor 并自绘擦除圆环；首次打开编辑器时若还没收到 mouseMoveEvent，`eraser_point` 为空，会表现为鼠标消失/看不到，点一下后才恢复。现在 `set_tool`、`enterEvent`、`showEvent` 都会在指针确实位于画布内时同步圆环位置；马赛克笔刷同样处理。验证：`test_eraser_and_mosaic_sync_pointer_ring_before_first_mouse_move`、`test_only_eraser_and_mosaic_brush_use_blank_cursor`（其余标注工具均使用可见光标）、`tests.editor.test_annotation_editing` 49 条通过。
+### 2026-11-17 当日调整汇总
+
+1. 修复（完成音效开关重启后失效）：设置页关闭「完成音效」后，重新启动会被强制改回开启。根因是 `migrate_legacy_settings()` 里的历史默认值更新表每次加载都执行，`sound=False` 恰好等于旧默认值，于是被当成“旧版默认值”迁移成 `True`；同一问题也影响 `crosshair_color`、`element_depth`、`mask_opacity`、`history_limit` 等旧默认值键。现在这些历史默认值只在**没有 `app_version` 的早期配置**上执行一次；带版本号的配置完全尊重用户当前值。验证：`test_user_sound_switch_is_not_reset_on_every_reload`、`test_requested_defaults_migrate_old_factory_values_safely`、`test_preserved_on_version_reset_keys_all_exist`。
+
+2. 修复（以标准权限重启无效）：真机日志显示 `DuplicateTokenEx` 对 UAC linked token 返回 `WinError 1346`（模拟级别无效），随后关闭句柄时又把 `c_void_p` 当成对象读取 `.value`，抛出 `AttributeError: 'int' object has no attribute 'value'`，按钮直接中断。现在：linked token 无法转 primary 时改用交互式 Explorer 的 primary token（普通用户令牌），并设置 `lpDesktop`、显式传入 application name；句柄关闭统一兼容 int / c_void_p / HANDLE，不再崩溃。验证：`test_standard_restart_falls_back_to_shell_token_when_linked_token_invalid`、`tests.test_elevation` 26 条通过；当前环境为非提权，实际 UAC 降权需在管理员进程复验。
+3. 修复（旧版默认热键迁移）：`migrate_legacy_settings()` 原来也会在每次加载时把等于旧默认值的热键改成新默认值，例如用户主动把 `repeat` 选回 `ctrl+shift+f2` 后重启会被改掉。现在旧默认热键和旧版 `arrow_style` 同样只对没有 `app_version` 的早期配置迁移；带版本号的配置尊重用户选择。验证：`test_custom_hotkey_equal_to_old_default_is_not_migrated_on_reload`。
+4. 调整（缓存目录位置）：贴图私有缓存、剪贴板历史图、Toast 缩略图从「<保存目录>/cache/」和「%APPDATA%\ScreenSnap/<name>」统一迁到**启动文件所在目录**下的 `sticker_cache/`、`clipboard_history/`、`toast_cache/`；启动目录不可写时退回 `%APPDATA%`。启动时自动迁移旧位置文件，设置页「打开缓存目录」打开启动目录。验证：`test_cache_dirs_live_under_startup_directory_and_migrate_old_locations`、`tests.test_misc` 45 条、`tests.test_sticker -k cache` 7 条、`tests.test_sticker -k clipboard` 40 条通过。

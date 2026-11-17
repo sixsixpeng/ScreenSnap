@@ -373,7 +373,7 @@ class MiscTests(CoreTests):
         from config.config_manager import DEFAULTS
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(DEFAULTS)
             image = QImage(12, 8, QImage.Format_RGB32)
             image.fill(QColor("red"))
@@ -1086,7 +1086,7 @@ class MiscTests(CoreTests):
         from PySide6.QtGui import QColor, QImage
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(DEFAULTS)
             image = QImage(12, 8, QImage.Format_RGB32)
             image.fill(QColor("red"))
@@ -1135,7 +1135,7 @@ class MiscTests(CoreTests):
         from config.config_manager import DEFAULTS
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             settings = dict(DEFAULTS, save_dir=folder)
             source = Path(folder) / "latest.png"
             newer_source = Path(folder) / "newer.png"
@@ -1174,7 +1174,7 @@ class MiscTests(CoreTests):
         from config.config_manager import DEFAULTS
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             source = Path(folder) / "latest.png"
             Image.new("RGB", (40, 30), "white").save(source)
             manager = StickerManager(dict(DEFAULTS, save_dir=folder))

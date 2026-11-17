@@ -986,6 +986,30 @@ ARROW_STYLE_LEGACY = {
 }
 
 
+def _apply_legacy_default_updates(migrated):
+    """只对没有版本号的早期配置执行历史默认值迁移。
+
+    这些旧默认值（尤其 sound=False）可能恰好是用户的主动选择；如果每次加载
+    都执行，用户关闭完成音效后重启就会被改回 True。
+    """
+    default_updates = {
+        "sound": (False, True),
+        "crosshair_color": ("#000000", "#ff0000"),
+        "element_depth": (12, 8),
+        "mask_opacity": (60, 70),
+        "history_limit": (100, 10),
+        "rect_corner_enabled": (False, True),
+        "sticker_shadow_enabled": (True, False),
+        "sticker_recycle_limit": (50, 10),
+        "marker_width": (2, 4),
+        # 实机实测：旧默认 180 时单次悬停查询约 65ms 且每次都跑满预算，故与复用半径一起下调。
+        "window_hover_reuse_radius": (4, 8),
+    }
+    for key, (old_default, new_default) in default_updates.items():
+        if migrated.get(key) == old_default:
+            migrated[key] = new_default
+
+
 def migrate_legacy_settings(data):
     if not isinstance(data, dict):
         return data
@@ -1012,24 +1036,19 @@ def migrate_legacy_settings(data):
             migrated["crosshair_mode"] = "solid"
     migrated.pop("crosshair_adaptive", None)
     migrated.pop("crosshair_adaptive_mode", None)
-    default_updates = {
-        "sound": (False, True),
-        "crosshair_color": ("#000000", "#ff0000"),
-        "element_depth": (12, 8),
-        "mask_opacity": (60, 70),
-        "history_limit": (100, 10),
-        "rect_corner_enabled": (False, True),
-        "sticker_shadow_enabled": (True, False),
-        "sticker_recycle_limit": (50, 10),
-        "marker_width": (2, 4),
-        # 实机实测：旧默认 180 时单次悬停查询约 65ms 且每次都跑满预算，故与复用半径一起下调。
-        "window_hover_reuse_radius": (4, 8),
-    }
-    for key, (old_default, new_default) in default_updates.items():
-        if migrated.get(key) == old_default:
-            migrated[key] = new_default
+    # 这些是**历史默认值一次性迁移**，不是每次加载都要执行的规则。
+    # 旧默认值恰好等于用户主动选择的值（尤其 sound=False）时，若每次加载都迁移，
+    # 用户关掉“完成音效”后重启又会被强制改回 True。只在没有 app_version 的
+    # 早期配置上执行；带版本号的配置一律尊重用户当前值。
+    from core.version import APP_VERSION as _APP_VERSION
+
+    _stored_version = str(migrated.get("app_version") or "")
+    if not _stored_version:
+        _apply_legacy_default_updates(migrated)
     hotkeys = migrated.get("hotkeys")
-    if isinstance(hotkeys, dict):
+    # 旧版默认热键同样只对无版本号的早期配置迁移；用户主动把某个键改回旧默认值时
+    # 不能每次加载都被改成新默认值。
+    if isinstance(hotkeys, dict) and not _stored_version:
         hotkeys = dict(hotkeys)
         for key, old_default, new_default in (
                 ("repeat", "ctrl+shift+f2", "shift+f1"),
@@ -1054,16 +1073,13 @@ def migrate_legacy_settings(data):
                     hotkeys[key] = new_default
         migrated["hotkeys"] = hotkeys
     legacy = migrated.get("arrow_style")
-    if legacy in ARROW_STYLE_LEGACY:
+    if not _stored_version and legacy in ARROW_STYLE_LEGACY:
         migrated["arrow_style"] = ARROW_STYLE_LEGACY[legacy]
     # 2026-10-11（审查 H2/H3，用户实测）：下面两段"补齐缺失项 + 强制三项顺序"原先**每次加载都跑** ✗，
     # 且结果不同就 `save_safely()` 回写磁盘 ✗ ⇒ 用户在设置页**取消勾选**提示项、或拖动这三项的顺序，
     # 重启后被静默改回来 ✗（实测：3 项 → 被补成 23 项并落盘）。
     # 现在按**一次性迁移**处理：只在"存储的 app_version ≠ 当前版本"（即真的升级了）那一轮执行 ✓；
     # 同版本内完全尊重用户的勾选与顺序 ✓（不新增配置键 ⇒ 不扩散 schema 变更 ✓ 规则 30）。
-    from core.version import APP_VERSION as _APP_VERSION
-
-    _stored_version = str(migrated.get("app_version") or "")
     _is_upgrade = _stored_version != str(_APP_VERSION)
     order = migrated.get("capture_hint_order")
     if isinstance(order, list) and _is_upgrade:

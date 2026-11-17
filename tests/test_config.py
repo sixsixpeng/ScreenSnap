@@ -174,7 +174,7 @@ class ConfigTests(CoreTests):
         from ui.sticker_panel import GroupSettingsDialog, StickerPanel
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             settings = dict(DEFAULTS, save_dir=folder)
             image = QImage(12, 8, QImage.Format_RGB32)
             image.fill(QColor("#23bc58"))
@@ -378,6 +378,41 @@ class ConfigTests(CoreTests):
             self.assertEqual(conflict_manager.data["hotkeys"]["fullscreen"], "ctrl+shift+f1")
             self.assertEqual(conflict_manager.data["hotkeys"]["paste"], "alt+f1")
             self.assertEqual(conflict_manager.data["hotkeys"]["repeat"], "shift+f1")
+
+
+    def test_user_sound_switch_is_not_reset_on_every_reload(self):
+        """带当前 app_version 的配置不能在加载时把用户关闭的 sound 迁移回默认 True。"""
+        from config.config_manager import DEFAULTS
+        from core.version import APP_VERSION
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            payload = dict(DEFAULTS)
+            payload["app_version"] = APP_VERSION
+            payload["sound"] = False
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            manager = ConfigManager(path)
+            self.assertFalse(manager.data["sound"])
+            self.assertFalse(json.loads(path.read_text(encoding="utf-8"))["sound"])
+            manager.data["sound"] = True
+            manager.save()
+            self.assertTrue(ConfigManager(path).data["sound"])
+
+
+    def test_custom_hotkey_equal_to_old_default_is_not_migrated_on_reload(self):
+        """带 app_version 的配置中，用户主动选回旧默认热键也不能每次加载被改掉。"""
+        from config.config_manager import DEFAULTS
+        from core.version import APP_VERSION
+
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "settings.json"
+            payload = dict(DEFAULTS)
+            payload["app_version"] = APP_VERSION
+            payload["hotkeys"] = dict(DEFAULTS["hotkeys"])
+            payload["hotkeys"]["repeat"] = "ctrl+shift+f2"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            manager = ConfigManager(path)
+            self.assertEqual(manager.data["hotkeys"]["repeat"], "ctrl+shift+f2")
 
     def test_inline_hint_items_are_registered_and_migrated(self):
         """原地编辑新增的提示项要注册进设置清单，旧配置的完整默认顺序会自动补上。"""
@@ -841,6 +876,32 @@ class ConfigTests(CoreTests):
                              directory.input.text())
             settings.close()
 
+
+    def test_cache_dirs_live_under_startup_directory_and_migrate_old_locations(self):
+        """贴图/剪贴板/Toast 缓存默认放在启动目录；旧 AppData 与保存目录缓存迁移过来。"""
+        from core.path_utils import cache_dir, migrate_cache_dirs
+
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            startup = base / "startup"
+            appdata = base / "appdata"
+            old_save = base / "old-save"
+            startup.mkdir()
+            appdata.mkdir()
+            (old_save / "cache").mkdir(parents=True)
+            for old_dir, filename in (
+                    (appdata / "sticker_cache", "sticker_1.png"),
+                    (old_save / "cache" / "clipboard_history", "clipboard_1.png")):
+                old_dir.mkdir(parents=True, exist_ok=True)
+                (old_dir / filename).write_bytes(b"x")
+            with patch("core.path_utils.project_root", return_value=startup), patch("core.path_utils.data_dir", return_value=appdata):
+                moved = migrate_cache_dirs({"save_dir": str(old_save)})
+                self.assertEqual(moved, 2)
+                self.assertTrue((startup / "sticker_cache" / "sticker_1.png").is_file())
+                self.assertTrue((startup / "clipboard_history" / "clipboard_1.png").is_file())
+                self.assertEqual(cache_dir("toast_cache"), startup / "toast_cache")
+                self.assertFalse((appdata / "sticker_cache").exists())
+
     def test_save_settings_unified_directory_and_cache_controls(self):
         from PySide6.QtWidgets import QMessageBox
         from ui.settings_save import SaveOutputPage
@@ -863,7 +924,7 @@ class ConfigTests(CoreTests):
                     directory.open_button.click()
                     self.assertEqual(Path(open_url.call_args.args[0].toLocalFile()), save_dir)
                 cache_root = Path(folder) / "appdata"
-                with patch("ui.settings_save.data_dir", return_value=cache_root), \
+                with patch("ui.settings_save.cache_root", return_value=cache_root), \
                         patch("ui.settings_save.QDesktopServices.openUrl") as open_cache, \
                         patch("ui.settings_save.yes_no_dialog") as confirm, \
                         patch("ui.settings_save.QMessageBox.information"):

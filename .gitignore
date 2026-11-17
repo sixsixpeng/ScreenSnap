@@ -16,6 +16,12 @@ pyvenv.cfg
 /_*.py
 /_*.txt
 
+# 启动目录缓存：贴图私有缓存、剪贴板历史图、Toast 缩略图（源码模式运行时会生成）
+/sticker_cache/
+/clipboard_history/
+/toast_cache/
+/cache/
+
 # 本地文档（AGENTS 规则 20/28：发布记录与验收清单只留本地，不入库）
 RELEASE_NOTES.md
 ACCEPTANCE.md

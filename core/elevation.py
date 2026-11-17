@@ -163,10 +163,12 @@ def _shell_execute(command, wait_ms=None, elevated=True):
 
 TOKEN_QUERY = 0x0008
 TOKEN_DUPLICATE = 0x0002
+TOKEN_ASSIGN_PRIMARY = 0x0001
+TOKEN_ALL_ACCESS = 0xF01FF
 TOKEN_LINKED = 19
+PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
 SECURITY_IMPERSONATION = 2
 TOKEN_PRIMARY = 1
-MAXIMUM_ALLOWED = 0x02000000
 LOGON_WITH_PROFILE = 1
 CREATE_UNICODE_ENVIRONMENT = 0x00000400
 
@@ -207,6 +209,56 @@ class _PROCESS_INFORMATION(ctypes.Structure):
     ]
 
 
+def _handle_value(handle):
+    """统一读取 HANDLE / c_void_p / int 的值，供关闭句柄时使用。"""
+    return handle if isinstance(handle, int) else getattr(handle, "value", None)
+
+
+def _duplicate_shell_token(kernel32, advapi32):
+    """取交互式 Explorer 的 primary token，用作降权启动的备用令牌。
+
+    UAC 的 linked token 在部分环境下是 SecurityAnonymous 级别的 impersonation
+    token，DuplicateTokenEx 会报 WinError 1346；Explorer 的 token 是普通用户
+    primary token，可稳定作为标准权限启动来源。
+    """
+    process = wintypes.HANDLE()
+    token = wintypes.HANDLE()
+    primary = wintypes.HANDLE()
+    try:
+        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+        kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        kernel32.OpenProcess.restype = wintypes.HANDLE
+        user32 = ctypes.WinDLL("user32", use_last_error=True)
+        user32.GetShellWindow.restype = wintypes.HWND
+        user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND,
+                                                    ctypes.POINTER(wintypes.DWORD)]
+        shell = user32.GetShellWindow()
+        if not shell:
+            return None
+        pid = wintypes.DWORD()
+        user32.GetWindowThreadProcessId(shell, ctypes.byref(pid))
+        if not pid.value:
+            return None
+        process = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid.value)
+        if not _handle_value(process):
+            return None
+        if not advapi32.OpenProcessToken(process, TOKEN_DUPLICATE | TOKEN_QUERY,
+                                         ctypes.byref(token)):
+            return None
+        if not advapi32.DuplicateTokenEx(token, TOKEN_ALL_ACCESS, None,
+                                         SECURITY_IMPERSONATION, TOKEN_PRIMARY,
+                                         ctypes.byref(primary)):
+            return None
+        return primary
+    except (AttributeError, OSError):
+        return None
+    finally:
+        for handle in (token, process):
+            if _handle_value(handle):
+                kernel32.CloseHandle(handle)
+
+
 def _create_with_linked_token(command):
     """用当前提权令牌的 linked token 启动普通权限进程。
 
@@ -217,6 +269,7 @@ def _create_with_linked_token(command):
     advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
     kernel32.GetCurrentProcess.restype = wintypes.HANDLE
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
     advapi32.OpenProcessToken.argtypes = [wintypes.HANDLE, wintypes.DWORD,
                                           ctypes.POINTER(wintypes.HANDLE)]
     advapi32.OpenProcessToken.restype = wintypes.BOOL
@@ -249,16 +302,28 @@ def _create_with_linked_token(command):
                                             ctypes.sizeof(linked),
                                             ctypes.byref(size)):
             raise ctypes.WinError(ctypes.get_last_error())
-        if not advapi32.DuplicateTokenEx(linked.LinkedToken, MAXIMUM_ALLOWED, None,
+        # TOKEN_ALL_ACCESS 明确包含 CreateProcessWithTokenW 要求的
+        # TOKEN_ASSIGN_PRIMARY / TOKEN_DUPLICATE / TOKEN_QUERY；
+        # MAXIMUM_ALLOWED 在部分 UAC linked token 上会被降权，
+        # 导致 CreateProcessWithTokenW 返回 WinError 1346（模拟级别无效）。
+        if not advapi32.DuplicateTokenEx(linked.LinkedToken, TOKEN_ALL_ACCESS, None,
                                          SECURITY_IMPERSONATION, TOKEN_PRIMARY,
                                          ctypes.byref(primary)):
-            raise ctypes.WinError(ctypes.get_last_error())
+            original_error = ctypes.get_last_error()
+            # 某些 UAC/沙箱环境的 linked token 是 SecurityAnonymous 的
+            # impersonation token，无法转 primary；改用 Explorer 的普通用户令牌。
+            get_logger().info("linked token 不可用于降权（%s），改用 Explorer 令牌",
+                              ctypes.WinError(original_error))
+            primary = _duplicate_shell_token(kernel32, advapi32) or wintypes.HANDLE()
+            if not _handle_value(primary):
+                raise ctypes.WinError(original_error)
         startup = _STARTUPINFOW()
         startup.cb = ctypes.sizeof(_STARTUPINFOW)
+        startup.lpDesktop = "winsta0\\default"
         process = _PROCESS_INFORMATION()
         command_line = ctypes.create_unicode_buffer(subprocess.list2cmdline(command))
         if not advapi32.CreateProcessWithTokenW(
-                primary, LOGON_WITH_PROFILE, None, command_line,
+                primary, LOGON_WITH_PROFILE, command[0], command_line,
                 CREATE_UNICODE_ENVIRONMENT, None, str(project_root()),
                 ctypes.byref(startup), ctypes.byref(process)):
             raise ctypes.WinError(ctypes.get_last_error())
@@ -269,6 +334,8 @@ def _create_with_linked_token(command):
         get_logger().warning("以标准权限重启失败: %s", error)
         return False
     finally:
+        # linked.LinkedToken 是 ctypes 结构里的 c_void_p 字段，读取后是 int，
+        # 不能再假设所有 handle 都有 .value；直接按 int / c_void_p 统一兼容。
         for handle in (primary, linked.LinkedToken, token):
-            if handle and handle.value:
+            if _handle_value(handle):
                 kernel32.CloseHandle(handle)

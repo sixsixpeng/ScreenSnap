@@ -216,7 +216,7 @@ class UiaTests(CoreTests):
         from ui.recycle_window import RecycleWindow
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(DEFAULTS)
             item = manager.add(QImage(12, 8, QImage.Format_RGB32), show=False)
             item.close()

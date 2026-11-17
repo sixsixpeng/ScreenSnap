@@ -51,7 +51,7 @@ class StickerDragGifTests(CoreTests):
 
     def test_add_paths_creates_cascade_and_replaces_first(self):
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = self._manager(folder)
             manager.publish_output = Mock()
             first = make_png(folder, "a.png", (255, 0, 0))
@@ -75,6 +75,7 @@ class StickerDragGifTests(CoreTests):
     def test_sticker_drop_replaces_or_creates_with_shift(self):
         with tempfile.TemporaryDirectory() as folder, \
                 patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), \
+                patch("core.path_utils.project_root", return_value=Path(folder)), \
                 patch("sticker.sticker_item.QDrag"):
             manager = self._manager(folder)
             manager.publish_output = Mock()
@@ -152,7 +153,7 @@ class StickerDragGifTests(CoreTests):
 
     def test_gif_animation_state_survives_session_restore(self):
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             from sticker.sticker_manager import StickerManager
             path = make_gif(folder)
             manager = StickerManager(dict(DEFAULTS))
@@ -194,7 +195,7 @@ class StickerDragGifTests(CoreTests):
         from ui.sticker_panel import StickerPanel
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             path = make_png(folder, "panel.png")
             manager = StickerManager(dict(DEFAULTS))
             panel = StickerPanel(manager)

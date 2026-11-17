@@ -124,7 +124,7 @@ class DpiTests(CoreTests):
         from ui.native_toast import cache_toast_image, show_native_toast
 
         with tempfile.TemporaryDirectory() as folder:
-            with patch("ui.native_toast.data_dir", return_value=Path(folder)):
+            with patch("ui.native_toast.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
                 image = QImage(32, 20, QImage.Format_RGB32)
                 image.fill(Qt.green)
                 path = cache_toast_image(image)

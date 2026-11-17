@@ -166,31 +166,27 @@ class StickerManager(QObject):
             "恢复剪贴板历史: %d 条", len(self.clipboard_history))
 
     def _cache_dir(self, name):
-        """图片类缓存目录（2026-10-11）：设过保存目录时放 <保存目录>/cache/<name>，
+        """图片类缓存统一走启动文件目录下的 cache/<name>。
 
-        否则退回 `<数据目录>/name` —— 退回分支必须走**本模块导入的 data_dir**，
-        这样用例 patch('sticker.sticker_manager.data_dir') 依然有效（曾经直接用
-        core.path_utils.cache_dir 导致用例的缓存写进了真实 %APPDATA%）。
-        配置 json 始终留在数据目录。
+        配置 json 始终留在用户数据目录；缓存位置不再跟随保存目录。
         """
-        if self.settings.get("save_dir"):
-            try:
-                root = configured_dir(self.settings) / "cache" / name
-                root.mkdir(parents=True, exist_ok=True)
-                return root
-            except (OSError, TypeError, ValueError):
-                pass
-        root = data_dir() / name
-        try:
-            root.mkdir(parents=True, exist_ok=True)
-        except OSError:
-            pass
-        return root
+        return cache_dir(name, self.settings)
+
+    def _resolve_moved_cache_source(self, source):
+        """缓存目录迁移后，用同名的 sticker_cache 文件恢复旧会话源路径。"""
+        path = Path(source)
+        if path.is_file() or path.parent.name != "sticker_cache":
+            return source
+        candidate = self._cache_dir("sticker_cache") / path.name
+        if candidate.is_file():
+            get_logger().info("贴图缓存已迁移，恢复源路径: %s → %s", source, candidate)
+            return str(candidate)
+        return source
 
     def persist_clipboard_history(self):
         """把剪贴板历史图片和可再贴出的来源信息写入独立缓存。"""
         self._clipboard_persist_timer.stop()
-        # 图片跟随保存目录（2026-10-11：缓存不再堆在 %APPDATA%）；**json 索引仍留在数据目录**，
+        # 图片缓存统一放在启动文件目录；**json 索引仍留在数据目录**，
         # 因此 root 仍需要（2026-10-11 修：早前删掉它导致 persist 直接 NameError）。
         root = data_dir()
         image_dir = self._cache_dir("clipboard_history")
@@ -250,7 +246,7 @@ class StickerManager(QObject):
     def clear_rebuildable_cache(self):
         """清理可重建图片缓存，不删除已保存截图或贴图会话引用的源文件。
 
-        2026-10-11：图片缓存已迁到 <保存目录>/cache 下，这里必须用同一个 cache_dir()，
+        图片缓存位于启动文件目录，这里必须用同一个 cache_dir()，
         否则清理会找不到文件（配置 json 仍在 %APPDATA%）。
         """
         clipboard_images = history_entries = sticker_images = toast_images = 0
@@ -1034,6 +1030,8 @@ class StickerManager(QObject):
                 logger.warning("贴图会话记录格式错误，已跳过: %r", state)
                 continue
             source = state.get("source")
+            if isinstance(source, str) and source:
+                source = self._resolve_moved_cache_source(source)
             if (not isinstance(source, str) or not source or
                     any(type(state.get(key)) is not int for key in ("x", "y")) or
                     type(state.get("scale")) not in (int, float) or

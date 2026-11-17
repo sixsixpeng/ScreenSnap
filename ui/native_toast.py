@@ -26,8 +26,8 @@ def native_toast_duration(timeout_seconds):
 def cache_toast_image(image, settings=None):
     """Write a toast image to a durable local path understood by WinRT.
 
-    2026-10-11：缓存位置跟随统一保存目录（<保存目录>/cache/toast_cache），不再落在 %APPDATA%；
-    settings 省略时退回旧位置，保证独立调用仍可用。
+    缓存位置固定在启动文件所在目录的 toast_cache；启动目录不可写时才退回 %APPDATA%。
+    settings 参数保留兼容旧调用，不再影响缓存位置。
     """
     if isinstance(image, PillowImage.Image):
         image = to_qimage(image)

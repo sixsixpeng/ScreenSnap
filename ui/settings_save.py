@@ -4,7 +4,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import QLabel, QMessageBox, QPushButton, QStyle
 
-from core.path_utils import configured_dir, data_dir
+from core.path_utils import cache_root, configured_dir
 from logger import get_logger
 from ui.widgets.confirmation import yes_no_dialog
 from ui.widgets.file_path_edit import FilePathEdit
@@ -123,7 +123,7 @@ class SaveOutputPage(SettingsPage):
 
     def open_cache_directory(self):
         """打开缓存根目录；目录不存在就先建出来，再交给系统资源管理器。"""
-        directory = data_dir()
+        directory = cache_root()
         try:
             directory.mkdir(parents=True, exist_ok=True)
         except OSError as error:

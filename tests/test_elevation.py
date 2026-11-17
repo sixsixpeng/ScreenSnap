@@ -42,6 +42,25 @@ class ElevationTests(CoreTests):
             command = execute.call_args[0][0]
             self.assertEqual(command[-1], elevation.ELEVATED_MARKER)
 
+
+    def test_standard_restart_falls_back_to_shell_token_when_linked_token_invalid(self):
+        """linked token DuplicateTokenEx 失败时不能用 .value 崩溃，并应尝试 Explorer token。"""
+        import ctypes
+        from core import elevation
+
+        kernel = Mock()
+        advapi = Mock()
+        advapi.OpenProcessToken.return_value = True
+        advapi.GetTokenInformation.return_value = True
+        advapi.DuplicateTokenEx.return_value = False
+        advapi.CreateProcessWithTokenW.return_value = True
+        fake_primary = ctypes.c_void_p(123)
+        with patch.object(elevation, "_duplicate_shell_token", return_value=fake_primary), \
+                patch.object(elevation.ctypes, "WinDLL", side_effect=[kernel, advapi]):
+            self.assertTrue(elevation._create_with_linked_token(["cmd.exe", "/c", "exit 0"]))
+        self.assertTrue(advapi.CreateProcessWithTokenW.called)
+        self.assertEqual(advapi.CreateProcessWithTokenW.call_args.args[0], fake_primary)
+
     def test_restart_as_standard_requires_elevation(self):
         from core import elevation
 

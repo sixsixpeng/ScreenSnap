@@ -100,7 +100,7 @@ class StickerTests(CoreTests):
         from sticker.sticker_manager import StickerManager
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             session = Path(folder) / "stickers.json"
             session.write_text('[{"id": "keep-me"}]', encoding='utf-8')
             manager = StickerManager(dict(DEFAULTS))
@@ -248,7 +248,7 @@ class StickerTests(CoreTests):
         from config.config_manager import DEFAULTS
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             settings = dict(DEFAULTS, save_dir=folder)
             image = QImage(12, 8, QImage.Format_RGB32)
             image.fill(QColor("#23bc58"))
@@ -338,7 +338,7 @@ class StickerTests(CoreTests):
         from config.config_manager import DEFAULTS
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             settings = dict(DEFAULTS, save_dir=folder)
             image = QImage(12, 8, QImage.Format_RGB32)
             image.fill(QColor("#23bc58"))
@@ -560,7 +560,7 @@ class StickerTests(CoreTests):
         from config.config_manager import DEFAULTS
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             image = QImage(12, 8, QImage.Format_RGB32)
             image.fill(QColor("#23bc58"))
             manager = StickerManager(DEFAULTS)
@@ -598,7 +598,7 @@ class StickerTests(CoreTests):
         from config.config_manager import DEFAULTS
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             image = QImage(5000, 1000, QImage.Format_RGB32)
             image.fill(QColor("#23bc58"))
             manager = StickerManager(DEFAULTS)
@@ -618,7 +618,7 @@ class StickerTests(CoreTests):
         from sticker.sticker_item import StickerItem
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             source = Path(folder) / "source.png"
             image = QImage(80, 40, QImage.Format_RGB32)
             image.fill(QColor("#23bc58"))
@@ -653,7 +653,7 @@ class StickerTests(CoreTests):
         from config.config_manager import DEFAULTS
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(DEFAULTS)
             item = manager.add(QImage(12, 8, QImage.Format_RGB32), show=False)
             self.assertEqual(len(manager.items), 1)
@@ -679,7 +679,7 @@ class StickerTests(CoreTests):
         from sticker.sticker_item import StickerItem
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(DEFAULTS)
             item = manager.add(QImage(12, 8, QImage.Format_RGB32), show=False)
             item.close()
@@ -784,7 +784,7 @@ class StickerTests(CoreTests):
 
         with tempfile.TemporaryDirectory() as folder, \
             patch("screenshot.mask_window.visible_windows", return_value=[]), \
-            patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             bounds = {"left": 0, "top": 0, "width": 100, "height": 80}
             settings = dict(DEFAULTS, save_dir=folder, inline_edit=True,
                             magnifier=False, crosshair=False, mask_opacity=0)
@@ -849,7 +849,7 @@ class StickerTests(CoreTests):
 
         with tempfile.TemporaryDirectory() as folder, \
             patch("screenshot.mask_window.visible_windows", return_value=[]), \
-            patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             bounds = {"left": 0, "top": 0, "width": 100, "height": 80}
             settings = dict(DEFAULTS, save_dir=folder, inline_edit=True,
                             magnifier=False, crosshair=False, mask_opacity=0,
@@ -930,7 +930,7 @@ class StickerTests(CoreTests):
         image = QImage(32, 24, QImage.Format_ARGB32)
         image.fill(Qt.red)
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(dict(DEFAULTS))
             sticker = manager.add(image)
             edits = []
@@ -953,7 +953,7 @@ class StickerTests(CoreTests):
         from sticker.sticker_manager import StickerManager
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(dict(DEFAULTS))
             item = manager.add(Image.new("RGBA", (16, 12), "#2a78bd"))
             try:
@@ -1042,7 +1042,7 @@ class StickerTests(CoreTests):
         from main import Application
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             settings = dict(DEFAULTS, save_dir=folder, filename="single")
             manager = StickerManager(settings)
             app = Application.__new__(Application)
@@ -1078,7 +1078,7 @@ class StickerTests(CoreTests):
         from main import Application
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             source = Path(folder) / "quick-edit.png"
             Image.new("RGBA", (90, 70), "#2a78bd").save(source)
             settings = dict(DEFAULTS, save_dir=folder,
@@ -1120,7 +1120,7 @@ class StickerTests(CoreTests):
         from PySide6.QtGui import QImage, QColor
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             image = QImage(90, 70, QImage.Format_ARGB32)
             image.fill(QColor("#2a78bd"))
             settings = dict(DEFAULTS, save_dir=folder,
@@ -1207,7 +1207,7 @@ class StickerTests(CoreTests):
         from config.config_manager import DEFAULTS
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(DEFAULTS)
             image = QImage(24, 18, QImage.Format_ARGB32)
             image.fill(Qt.red)
@@ -1246,7 +1246,7 @@ class StickerTests(CoreTests):
     def test_sticker_session_and_closed_item(self):
         from config.config_manager import DEFAULTS
         with tempfile.TemporaryDirectory() as folder:
-            with patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+            with patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
                 manager = StickerManager(DEFAULTS)
                 item = manager.add(EditorWindow(Image.new("RGB", (50, 40)), DEFAULTS).output_image())
                 item.move(12, 25)
@@ -1280,7 +1280,7 @@ class StickerTests(CoreTests):
         from PySide6.QtGui import QColor, QImage
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             path = Path(folder) / "stickers.json"
             path.write_text("{invalid", encoding="utf-8")
             manager = StickerManager(DEFAULTS)
@@ -1310,7 +1310,7 @@ class StickerTests(CoreTests):
         from PySide6.QtGui import QColor, QImage
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             # 本用例验证真正孤儿；回收站引用由 lifecycle 回归单独覆盖。
             manager = StickerManager(dict(DEFAULTS, sticker_recycle_enabled=False))
             image = QImage(12, 8, QImage.Format_RGB32)
@@ -1327,7 +1327,7 @@ class StickerTests(CoreTests):
         from PySide6.QtGui import QColor, QImage
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(dict(DEFAULTS, sticker_recycle_enabled=False))
             image = QImage(12, 8, QImage.Format_RGB32)
             image.fill(QColor("red"))
@@ -1529,7 +1529,7 @@ class StickerTests(CoreTests):
         from config.config_manager import DEFAULTS
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             board = QGuiApplication.clipboard()
             board.clear()
             manager = StickerManager(DEFAULTS)
@@ -1557,7 +1557,7 @@ class StickerTests(CoreTests):
 
         board = QGuiApplication.clipboard()
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             board.clear()
             manager = StickerManager(DEFAULTS, board)
             try:
@@ -1638,7 +1638,7 @@ class StickerTests(CoreTests):
 
         board = QGuiApplication.clipboard()
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             board.clear()
             manager = StickerManager(DEFAULTS, board)
             board.setText("survive restart")
@@ -1670,7 +1670,7 @@ class StickerTests(CoreTests):
         from sticker.sticker_menu import build_menu
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(DEFAULTS)
             try:
                 image = QImage(12, 8, QImage.Format_RGB32)
@@ -1742,7 +1742,7 @@ class StickerTests(CoreTests):
         from ui.sticker_panel import StickerPanel
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(DEFAULTS)
             panel = StickerPanel(manager)
             events = []
@@ -1779,7 +1779,7 @@ class StickerTests(CoreTests):
         from ui.sticker_panel import StickerPanel
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(dict(DEFAULTS))
             image = QImage(18, 12, QImage.Format_RGB32)
             image.fill(QColor("red"))
@@ -1812,6 +1812,7 @@ class StickerTests(CoreTests):
 
         with tempfile.TemporaryDirectory() as folder, \
                 patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), \
+                patch("core.path_utils.project_root", return_value=Path(folder)), \
                 patch("ui.sticker_panel.QInputDialog.getText", side_effect=[("refs", True),
                                                                             ("archive", True)]):
             manager = StickerManager(dict(DEFAULTS))
@@ -1900,7 +1901,7 @@ class StickerTests(CoreTests):
         from config.config_manager import DEFAULTS
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             manager = StickerManager(dict(DEFAULTS))
             image = QImage(24, 18, QImage.Format_ARGB32)
             image.fill(Qt.transparent)
@@ -2000,7 +2001,7 @@ class StickerTests(CoreTests):
         from ui.sticker_panel import StickerPanel
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             path = Path(folder) / "group.png"
             image = QImage(24, 18, QImage.Format_ARGB32)
             image.fill(Qt.red)
@@ -2104,7 +2105,7 @@ class StickerTests(CoreTests):
 
         board = QGuiApplication.clipboard()
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             board.clear()
             manager = StickerManager(dict(DEFAULTS, sticker_follow_sticker=True), board)
             image = QImage(24, 18, QImage.Format_RGB32)
@@ -2186,14 +2187,14 @@ class StickerTests(CoreTests):
                 path.write_bytes(b"x")
             settings = {"cache_clear_clipboard": False, "cache_clear_toast": False,
                         "cache_clear_sticker": False}
-            with patch("sticker.sticker_manager.data_dir", return_value=root):
+            with patch("sticker.sticker_manager.data_dir", return_value=root), patch("core.path_utils.project_root", return_value=root):
                 manager = StickerManager(settings)
                 manager.clear_rebuildable_cache()
             self.assertTrue(clipboard.exists() and toast.exists() and sticker.exists())
 
             settings = {"cache_clear_clipboard": True, "cache_clear_toast": True,
                         "cache_clear_sticker": True}
-            with patch("sticker.sticker_manager.data_dir", return_value=root):
+            with patch("sticker.sticker_manager.data_dir", return_value=root), patch("core.path_utils.project_root", return_value=root):
                 manager = StickerManager(settings)
                 manager.clear_rebuildable_cache()
             self.assertFalse(clipboard.exists() or toast.exists() or sticker.exists())
@@ -2260,6 +2261,7 @@ class ClipboardOutputTests(CoreTests):
                 stack.enter_context(patch("PySide6.QtGui.QGuiApplication.clipboard", return_value=board))
                 stack.enter_context(patch("editor.image_effects.clipboard_available", return_value=True))
                 stack.enter_context(patch("sticker.sticker_manager.data_dir", return_value=folder))
+                stack.enter_context(patch("core.path_utils.project_root", return_value=folder))
                 stack.enter_context(patch("screenshot.mask_window.visible_windows", return_value=[]))
                 manager = StickerManager(settings, clipboard=board)
                 app = Application.__new__(Application)

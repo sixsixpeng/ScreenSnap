@@ -147,8 +147,8 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
         self._session_monitor.available_changed.connect(self.hotkeys.session_changed)
         self._capture_pending = 0
         self._next_capture_comparison = False
-        # 图片缓存迁移（2026-10-11）：把旧位置 %APPDATA% 里的贴图缓存/剪贴板历史图搬到
-        # <保存目录>/cache 下，只搬一次；搬不动只记 WARNING，绝不阻塞启动。
+        # 图片缓存迁移：把旧 %APPDATA% 或旧保存目录 cache/ 里的贴图/剪贴板/Toast 缓存
+        # 搬到启动文件所在目录，只搬一次；搬不动只记 WARNING，绝不阻塞启动。
         from core.path_utils import migrate_cache_dirs
 
         migrate_cache_dirs(self.config.data)

@@ -2028,7 +2028,7 @@ class CaptureTests(CoreTests):
         from main import Application
 
         with tempfile.TemporaryDirectory() as folder, \
-                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)):
+                patch("sticker.sticker_manager.data_dir", return_value=Path(folder)), patch("core.path_utils.project_root", return_value=Path(folder)):
             settings = dict(DEFAULTS, save_dir=folder,
                             capture_after_selection="edit", bubble=False, sound=False)
             manager = StickerManager(settings)

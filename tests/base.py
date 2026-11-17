@@ -45,6 +45,15 @@ class CoreTests(unittest.TestCase):
         window_focus.FOREGROUND_FALLBACK = cls._foreground_fallback
         mask_window.ESCAPE_FALLBACK_ENABLED = cls._escape_fallback
 
+    def setUp(self):
+        # 缓存默认写在“启动目录”；测试必须隔离到临时目录，避免把 clipboard_history/
+        # sticker_cache 等产物写进仓库。需要指定路径的用例可在 with 中覆盖该 patch。
+        self._cache_temp = tempfile.TemporaryDirectory()
+        self.addCleanup(self._cache_temp.cleanup)
+        self._cache_root_patch = patch(
+            "core.path_utils.project_root", return_value=Path(self._cache_temp.name))
+        self._cache_root_patch.start()
+        self.addCleanup(self._cache_root_patch.stop)
 
     def _check_options_refresh_after_delete(self, editor):
         from PySide6.QtCore import QTimer
