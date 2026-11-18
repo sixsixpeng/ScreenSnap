@@ -680,6 +680,11 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
             self.logger.error("保存贴图会话失败: %s", error, exc_info=True)
         # 会话先落盘再清理缓存，避免把本会话还引用着的贴图源文件当成孤儿删掉。
         self.cleanup_cache_if_scheduled("exit")
+        save_workers = getattr(self, "_preset_save_workers", None) or ()
+        for save_worker in save_workers:
+            save_worker.stop()
+        for save_worker in save_workers:
+            save_worker.wait(3000)
         self.hotkeys.stop()
         monitor = getattr(self, "_session_monitor", None)
         if monitor is not None:

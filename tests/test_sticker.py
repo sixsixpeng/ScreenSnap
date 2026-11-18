@@ -2469,6 +2469,23 @@ class ClipboardOutputTests(CoreTests):
                     self.assertFalse(QImage(str(path)).isNull())
                     self.assert_output_clipboard(context, to_qimage(image), path)
 
+
+    def test_consecutive_direct_captures_save_each_current_frame(self):
+        """连续直接保存必须各写当前帧，不能复用上一张画面。"""
+        from PySide6.QtGui import QImage
+
+        with self.output_context(capture_after_selection="save") as context:
+            for color in ("red", "green"):
+                context.app.handle_capture_selection(
+                    [(Image.new("RGB", (30, 20), color), None)])
+            paths = sorted(path for path in context.folder.glob("output*.png") if path.is_file())
+            self.assertEqual(len(paths), 2)
+            pixels = []
+            for path in paths:
+                image = QImage(str(path))
+                pixels.append(image.pixelColor(10, 10).getRgb()[:3])
+            self.assertEqual(pixels, [(255, 0, 0), (0, 128, 0)])
+
     def test_clipboard_output_save_as_both_editors_and_cancel(self):
         from PySide6.QtGui import QImage
 

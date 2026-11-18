@@ -1,11 +1,14 @@
 """截图保存格式与质量的统一处理。"""
 
 import os
+import re
 import tempfile
+from datetime import datetime
 from pathlib import Path
 
 from PySide6.QtGui import QColor, QImage, QPainter
 
+from core.path_utils import resolved_dir
 from logger import get_logger
 
 # 保存格式 -> (Qt 保存器名称, 文件扩展名)。键同时用于配置值与设置页选项。
@@ -29,6 +32,21 @@ IMAGE_FILE_FILTER = "图片文件 (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *
 def saved_extension(settings):
     """返回配置对应的扩展名；未知格式回退到 png。"""
     return SAVE_FORMATS.get(str(settings.get("save_format", "png")).lower(), SAVE_FORMATS["png"])[1]
+
+
+def allocate_path(settings, directory=None):
+    """按命名规则分配不重复的输出路径；保存与直接截图共用。"""
+    directory = Path(directory) if directory else resolved_dir(settings)
+    directory.mkdir(parents=True, exist_ok=True)
+    prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_",
+                    datetime.now().strftime(settings["filename"])).strip(" .") or "Capture"
+    extension = saved_extension(settings)
+    path = directory / f"{prefix}.{extension}"
+    number = 1
+    while path.exists():
+        path = directory / f"{prefix}_{number}.{extension}"
+        number += 1
+    return path
 
 
 SAVE_FORMAT_LABELS = {"png": "PNG 图片", "jpg": "JPEG 图片", "jpeg": "JPEG 图片",

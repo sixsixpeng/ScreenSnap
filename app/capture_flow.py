@@ -2,18 +2,22 @@
 
 import ctypes
 import os
+import queue
 import subprocess
 import sys
 import threading
 from pathlib import Path
 import shiboken6
-from PySide6.QtCore import Qt, QPoint, QRect, QTimer, QSignalBlocker, QObject, Signal, Slot, QLockFile
+from PySide6.QtCore import (Qt, QPoint, QRect, QTimer, QSignalBlocker, QObject, Signal,
+                            Slot, QLockFile, QThread)
 from PySide6.QtGui import QIcon, QPixmap, QPainter, QColor, QPen, QGuiApplication, QFont, QCursor
 from PySide6.QtWidgets import QApplication, QSystemTrayIcon, QGraphicsView, QFileDialog
 from config import ConfigManager
 from config.config_manager import TOOL_WIDTH_KEYS
 from core import app_icon, data_dir, capture, qimage_to_pillow
-from core.screen_capture import to_qimage
+from core.screen_capture import capture_preset, to_qimage
+from core.image_io import allocate_path, save_image
+from editor.image_effects import apply_output_effects, copy_saved_to_clipboard
 from core.dpi import DisplayMapper
 from core.startup import set_start_on_boot
 from editor import EditorWindow
@@ -33,13 +37,109 @@ from app.bootstrap import (QApp, acquire_single_instance_lock, install_exception
 from app.notifications import NotificationBridge, drawn_icon, tray_icon
 
 
+PRESET_CAPTURE_MODES = ("fullscreen", "monitor", "repeat")
+# 预设直接保存的并发度：单线程在连续截图时会把文件写入拖成 1 秒以上的队列。
+PRESET_SAVE_WORKERS = 4
+_SAVE_PATH_LOCK = threading.Lock()
+
+
+def _reserve_output_path(settings):
+    """在并发保存线程中预留唯一路径，避免两个线程拿到同一个文件名。"""
+    with _SAVE_PATH_LOCK:
+        path = allocate_path(settings)
+        path.touch(exist_ok=False)
+        return path
+
+
+def _save_preset_job(job):
+    """在保存线程里完成输出效果和落盘；不碰 Qt 通知/剪贴板。"""
+    settings = job["settings"]
+    image = job["image"]
+    source = to_qimage(image) if isinstance(image, Image.Image) else image
+    if job.get("final_output"):
+        result = source
+    else:
+        result = apply_output_effects(
+            source, settings,
+            bool(settings.get("editor_image_round_corners", True)),
+            settings.get("editor_image_corner_radius", 16))
+    if isinstance(result, Image.Image):
+        result = to_qimage(result)
+    path = _reserve_output_path(settings)
+    try:
+        if not save_image(result, path, settings):
+            raise OSError(f"图片保存失败: {path}")
+    except Exception:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+    return path, result
+
+
+class _PresetSaveWorker(QThread):
+    """单线程保存队列：抓屏已在主线程完成，保存不再阻塞下一次按键。"""
+
+    done = Signal(object)
+
+    def __init__(self):
+        super().__init__()
+        self._queue = queue.Queue()
+
+    def submit(self, job):
+        self._queue.put(job)
+
+    def stop(self):
+        self._queue.put(None)
+
+    def run(self):
+        while True:
+            job = self._queue.get()
+            if job is None:
+                return
+            try:
+                path, result = _save_preset_job(job)
+                self.done.emit((job, path, result, None))
+            except Exception as error:  # noqa: BLE001 单张失败继续保存后续
+                self.done.emit((job, None, None, f"{type(error).__name__}: {error}"))
+
+
 class CaptureFlowMixin:
     """截图流程：抓屏、遮罩、选区结果分发、编辑器打开与保存。"""
 
     def start_capture(self, mode, from_tray=False, initial_rect=None, preferred_monitor=None):
         """跳过已显示的遮罩；仅托盘菜单发起的截图等待菜单关闭。"""
+        # 预设截图不创建遮罩，也不进入普通截图的串行队列：每次按键都独立在
+        # QThread 里立刻抓屏，避免快速连按时排队等待上一张保存。
+        if mode in PRESET_CAPTURE_MODES:
+            if mode == "repeat" and not self.config.data["last_capture_rect"]:
+                self.logger.debug("尚无上次截图区域，跳过重复截图")
+                self.notify("暂无上次截图区域")
+                return
+            delay = int(self.config.data.get("capture_delay", 0) or 0)
+            waiting = (150 if from_tray else 0) + delay
+            if waiting > 0:
+                QTimer.singleShot(
+                    waiting,
+                    lambda m=mode, r=initial_rect, p=preferred_monitor:
+                    self._launch_preset_capture(m, r, p))
+            else:
+                self._launch_preset_capture(mode, initial_rect, preferred_monitor)
+            return
         if self.mask is not None and self.mask.isVisible():
             self.logger.debug("遮罩已显示，忽略截图请求: %s", mode)
+            return
+        # 去抖/串行化：连续快速按热键时，请求可能都发生在上一次 show_mask 的定时器
+        # 执行之前；若不拦住，会排队创建多个遮罩并各自抓屏，既慢又可能保存到旧遮罩画面。
+        if getattr(self, "_capture_pending", 0) > 0:
+            # 串行化但不能丢请求：快速连按时把后续请求排队，当前 show_mask 完成后再执行。
+            queue = getattr(self, "_capture_requests", None)
+            if queue is None:
+                queue = self._capture_requests = []
+            queue.append((mode, from_tray, initial_rect, preferred_monitor))
+            self.logger.debug("上一轮截图仍在启动，截图请求入队: %s（队列=%d）",
+                              mode, len(queue))
             return
         if mode == "repeat" and not self.config.data["last_capture_rect"]:
             self.logger.debug("尚无上次截图区域，跳过重复截图")
@@ -56,17 +156,124 @@ class CaptureFlowMixin:
 
         def deliver():
             try:
+                if self.mask is not None and self.mask.isVisible():
+                    self.logger.debug("截图启动时遮罩已存在，跳过本次: %s", mode)
+                    return
                 self.show_mask(mode, initial_rect, preferred_monitor)
             finally:
                 self._capture_pending = max(0, self._capture_pending - 1)
                 if getattr(self, "hotkeys", None) is not None:
                     self.hotkeys.set_busy_state(self.hotkey_busy())
+                if self._capture_pending == 0:
+                    QTimer.singleShot(0, self._drain_capture_requests)
 
         QTimer.singleShot(waiting, deliver)
 
+    def _launch_preset_capture(self, mode, initial_rect=None, preferred_monitor=None):
+        """预设快捷键在主线程立即抓当前区域；保存交给后台队列。"""
+        try:
+            last_rect = (self.config.data.get("last_capture_rect")
+                         if mode == "repeat" else None)
+            payload = capture_preset(
+                mode, last_rect, preferred_monitor,
+                bool(self.config.data.get("cursor", True)),
+                self.config.data.get("capture_gap_fill", "transparent"))
+        except Exception as error:  # noqa: BLE001 单次抓屏失败不影响后续
+            self._on_preset_capture_failed(f"{type(error).__name__}: {error}")
+            return
+        self._on_preset_capture(mode, payload, initial_rect, preferred_monitor)
+
+    def _on_preset_capture(self, mode, payload, initial_rect=None, preferred_monitor=None):
+        image, bounds, monitors, alternate = payload[:4]
+        self._finish_preset_capture(mode, image, bounds, monitors, alternate,
+                                    initial_rect, preferred_monitor, async_save=True)
+
+    def _on_preset_capture_failed(self, message):
+        self.initial_save_failed(f"预设截图抓屏失败: {message}")
+
+    def _ensure_preset_save_workers(self):
+        workers = getattr(self, "_preset_save_workers", None)
+        if workers is None:
+            workers = self._preset_save_workers = []
+            for _ in range(PRESET_SAVE_WORKERS):
+                worker = _PresetSaveWorker()
+                worker.done.connect(self._on_preset_save_done)
+                worker.start()
+                workers.append(worker)
+            self._preset_save_index = 0
+        return workers
+
+    def _queue_preset_saves(self, images):
+        """把已实时抓好的画面轮流交给保存线程；主线程马上回去接收下一次按键。"""
+        workers = self._ensure_preset_save_workers()
+        settings = dict(self.config.data)
+        for image, alternate in images:
+            worker = workers[self._preset_save_index % len(workers)]
+            self._preset_save_index += 1
+            worker.submit({"image": image, "alternate": alternate,
+                           "settings": settings, "notify": True,
+                           "copy_to_clipboard": True})
+
+    def _on_preset_save_done(self, payload):
+        job, path, result, error = payload
+        if error is not None:
+            self.initial_save_failed(f"直接保存截图失败: {error}")
+            return
+        self.logger.info("保存图片: %s（%sx%s，%s）", path, result.width(), result.height(),
+                         job["settings"].get("save_format", "png"))
+        self.saved(path, result, notify=job["notify"])
+        if job["copy_to_clipboard"]:
+            copy_saved_to_clipboard(path, result, job["settings"])
+        if job["settings"].get("open_dir") and os.name == "nt":
+            try:
+                os.startfile(str(path.parent))
+            except OSError as error:  # noqa: BLE001 打开目录失败不影响保存
+                self.logger.warning("打开保存目录失败 %s: %s", path.parent, error)
+
+    def _finish_preset_capture(self, mode, image, bounds, monitors, alternate,
+                               initial_rect=None, preferred_monitor=None, async_save=False):
+        """预设截图在主线程完成裁剪、音效和保存/编辑分发。"""
+        popup = QApplication.activePopupWidget()
+        if popup is not None and popup is not getattr(self, "menu", None):
+            popup.close()
+        if mode == "repeat":
+            rect = QRect(*self.config.data["last_capture_rect"]).intersected(
+                QRect(bounds["left"], bounds["top"], bounds["width"], bounds["height"]))
+            if rect.isEmpty():
+                self.logger.warning("上次截图区域已不在屏幕范围内: %s",
+                                    self.config.data["last_capture_rect"])
+                self.notify("上次截图区域已不在当前屏幕")
+                return
+            left, top = rect.x() - bounds["left"], rect.y() - bounds["top"]
+            crop = (left, top, left + rect.width(), top + rect.height())
+            images = [(image.crop(crop), alternate.crop(crop) if alternate else None)]
+            self.play_capture_sound()
+            if self.config.data.get("capture_repeat_action", "save") == "save":
+                if async_save:
+                    self._queue_preset_saves(images)
+                else:
+                    self.save_capture_images(images)
+            else:
+                self.edit_images(images)
+            return
+        self.complete_preset_capture(mode, image, bounds, monitors, alternate,
+                                     preferred_monitor, initial_rect, async_save=async_save)
+
+    def _drain_capture_requests(self):
+        """当前截图完成后按顺序执行排队请求；遮罩打开期间等待其销毁。"""
+        if self.mask is not None and self.mask.isVisible():
+            return
+        queue = getattr(self, "_capture_requests", None)
+        if not queue:
+            return
+        mode, from_tray, initial_rect, preferred_monitor = queue.pop(0)
+        self.logger.debug("执行排队截图请求: %s（剩余=%d）", mode, len(queue))
+        self.start_capture(mode, from_tray=from_tray, initial_rect=initial_rect,
+                           preferred_monitor=preferred_monitor)
+
 
     def complete_preset_capture(self, mode, image, bounds, monitors, alternate,
-                                preferred_monitor=None, initial_rect=None):
+                                preferred_monitor=None, initial_rect=None, async_save=False):
         """全屏 / 当前显示器：不显示遮罩，直接按“截图后”设置保存或进入编辑器。"""
         mapper = DisplayMapper(bounds, monitors)
         full = QRect(bounds["left"], bounds["top"], bounds["width"], bounds["height"])
@@ -95,7 +302,7 @@ class CaptureFlowMixin:
         # 全屏/当前显示器不经过遮罩，没有 capture_completed 信号 ⇒ 在这里补一次完成音效。
         self.play_capture_sound()
         self.logger.info("预设截图直接完成: mode=%s 区域=%s", mode, tuple(region.getRect()))
-        self.handle_capture_selection(images, [position], mode=mode)
+        self.handle_capture_selection(images, [position], mode=mode, async_save=async_save)
 
 
     def popup_intruders(self):
@@ -132,29 +339,9 @@ class CaptureFlowMixin:
         popup = QApplication.activePopupWidget()
         if popup is not None and popup is not getattr(self, "menu", None):
             popup.close()
-        if mode == "repeat":
-            rect = QRect(*self.config.data["last_capture_rect"]).intersected(
-                QRect(bounds["left"], bounds["top"], bounds["width"], bounds["height"]))
-            if rect.isEmpty():
-                self.logger.warning("上次截图区域已不在屏幕范围内: %s",
-                                    self.config.data["last_capture_rect"])
-                self.notify("上次截图区域已不在当前屏幕")
-                return
-            left, top = rect.x() - bounds["left"], rect.y() - bounds["top"]
-            crop = (left, top, left + rect.width(), top + rect.height())
-            images = [(image.crop(crop), alternate.crop(crop) if alternate else None)]
-            # “上次区域”不显示遮罩，也就没有 capture_completed ⇒ 直接补一次完成音效。
-            self.play_capture_sound()
-            if self.config.data.get("capture_repeat_action", "save") == "save":
-                self.save_capture_images(images)
-            else:
-                self.edit_images(images)
-            return
-        if mode in ("fullscreen", "monitor"):
-            # 全屏/当前显示器是按整块屏固定的预设区域，没有可框选内容；以前会先弹出遮罩
-            # 再靠 QTimer 自动完成，视觉上闪一下、还卡一帧。这里直接裁好按设置交出去。
-            self.complete_preset_capture(mode, image, bounds, monitors, alternate,
-                                         preferred_monitor, initial_rect)
+        if mode in PRESET_CAPTURE_MODES:
+            self._finish_preset_capture(mode, image, bounds, monitors, alternate,
+                                        initial_rect, preferred_monitor)
             return
         self.mask = MaskWindow(image, bounds, monitors, self.config.data, mode, alternate,
                        initial_rect=initial_rect, preferred_monitor=preferred_monitor,
@@ -188,8 +375,14 @@ class CaptureFlowMixin:
             view.capture_completed.connect(self.play_capture_sound)
             view.selection_sound.connect(self.play_capture_sound)
         self.mask.close_all_requested.connect(self.close_all_editors)
-        self.mask.destroyed.connect(lambda obj=None, current=self.mask: setattr(self, "mask", None)
-                                    if self.mask is current else None)
+
+        def _mask_destroyed(obj=None, current=self.mask):
+            del obj
+            if self.mask is current:
+                self.mask = None
+            QTimer.singleShot(0, self._drain_capture_requests)
+
+        self.mask.destroyed.connect(_mask_destroyed)
         self.mask.show()
         self.mask.raise_()
         self.mask.activateWindow()
@@ -349,7 +542,7 @@ class CaptureFlowMixin:
         self.saved(path, image, notify=notify, notification_setting="save_notification")
 
 
-    def handle_capture_selection(self, images, positions=None, mode=None):
+    def handle_capture_selection(self, images, positions=None, mode=None, async_save=False):
         """按用户默认偏好保存截图，或打开编辑器继续处理。"""
         action_key = {"fullscreen": "capture_fullscreen_action",
                       "monitor": "capture_monitor_action",
@@ -358,9 +551,51 @@ class CaptureFlowMixin:
                   self.config.data.get("capture_after_selection", "save"))
         if action == "edit":
             self.edit_images(images, positions=positions)
+        elif async_save:
+            self._queue_preset_saves(images)
         else:
             self.save_capture_images(images)
 
+
+    def _save_capture_image_direct(self, image, notify=True, copy_to_clipboard=True,
+                                    final_output=False):
+        """直接保存一张截图，不创建完整 EditorWindow。
+
+        直接保存只需要输出效果、命名、落盘与通知；创建编辑器 UI 会让每次连续截图
+        多花约 100ms，且这段 UI 从未显示。
+        """
+        settings = self.config.data
+        if final_output:
+            result = image
+        else:
+            source = to_qimage(image) if isinstance(image, Image.Image) else image
+            result = apply_output_effects(
+                source, settings,
+                bool(settings.get("editor_image_round_corners", True)),
+                settings.get("editor_image_corner_radius", 16))
+        if isinstance(result, Image.Image):
+            result = to_qimage(result)
+        path = _reserve_output_path(settings)
+        try:
+            if not save_image(result, path, settings):
+                raise OSError(f"图片保存失败：{path}")
+        except Exception:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
+        self.logger.info("保存图片: %s（%sx%s，%s）", path, result.width(), result.height(),
+                         settings.get("save_format", "png"))
+        self.saved(path, result, notify=notify)
+        if copy_to_clipboard:
+            copy_saved_to_clipboard(path, result, settings)
+        if settings.get("open_dir") and os.name == "nt":
+            try:
+                os.startfile(str(path.parent))
+            except OSError as error:
+                self.logger.warning("打开保存目录失败 %s: %s", path.parent, error)
+        return path
 
     def save_capture_images(self, images, positions=None, notify=True, copy_to_clipboard=True,
                             final_output=False):
@@ -372,24 +607,13 @@ class CaptureFlowMixin:
         """
         saved_paths = []
         for image, alternate in images:
-            source = qimage_to_pillow(image) if final_output and not isinstance(image, Image.Image) else image
-            editor = EditorWindow(source, self.config.data, alternate, from_capture=True)
-            editor.copy_done.connect(self.notify_capture_copied)
-            editor.save_as_dir_chosen.connect(self.remember_save_as_dir)
-            # notify=False 时仍记录日志与历史，只是不弹保存提示（快速贴图只要贴图那一条提示）。
-            editor.image_saved.connect(
-                lambda path, image, flag=notify: (saved_paths.append(str(path)),
-                                                  self.saved(path, image, notify=flag))[1])
             try:
-                if final_output:
-                    result = to_qimage(image) if isinstance(image, Image.Image) else image
-                    editor.save(automatic=True, copy_to_clipboard=copy_to_clipboard, result=result)
-                else:
-                    editor.save(automatic=True, copy_to_clipboard=copy_to_clipboard)
+                path = self._save_capture_image_direct(
+                    image, notify=notify, copy_to_clipboard=copy_to_clipboard,
+                    final_output=final_output)
+                saved_paths.append(str(path))
             except OSError as error:
                 self.initial_save_failed(f"直接保存截图失败: {error}")
-            finally:
-                editor.close()
         return saved_paths
 
 

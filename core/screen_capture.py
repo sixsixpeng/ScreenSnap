@@ -68,6 +68,58 @@ def native_cursor():
             win32gui.DeleteObject(color_handle)
 
 
+def _cursor_monitor(monitors):
+    """返回鼠标所在的 mss 物理显示器字典。"""
+    if not monitors:
+        return None
+    if os.name != "nt":
+        return monitors[0]
+    try:
+        import ctypes
+        from ctypes import wintypes
+        point = wintypes.POINT()
+        ctypes.windll.user32.GetCursorPos(ctypes.byref(point))
+        for monitor in monitors:
+            if (monitor["left"] <= point.x < monitor["left"] + monitor["width"] and
+                    monitor["top"] <= point.y < monitor["top"] + monitor["height"]):
+                return monitor
+    except (AttributeError, OSError):
+        pass
+    return monitors[0]
+
+
+def capture_preset(mode, last_rect=None, preferred_monitor=None, cursor=False,
+                   gap_fill="transparent"):
+    """只抓预设需要的区域：当前屏/上次区域不再每次合成整个虚拟桌面。"""
+    if mode == "fullscreen":
+        return capture(cursor=cursor, alternatives=True,
+                       gap_fill=gap_fill) + (True,)
+    with _mss_factory() as grabber:
+        monitors = [dict(monitor) for monitor in grabber.monitors[1:]]
+        if mode == "monitor":
+            target = preferred_monitor or _cursor_monitor(monitors) or dict(grabber.monitors[0])
+        elif mode == "repeat" and last_rect:
+            target = {"left": int(last_rect[0]), "top": int(last_rect[1]),
+                      "width": max(1, int(last_rect[2])),
+                      "height": max(1, int(last_rect[3]))}
+        else:
+            target = dict(grabber.monitors[0])
+        bounds = dict(target)
+        shot = grabber.grab(bounds)
+        image = Image.frombytes("RGB", shot.size, shot.rgb)
+    alternate = image
+    if cursor:
+        pointer = native_cursor()
+        if pointer is not None:
+            cursor_image, left, top = pointer
+            with_pointer = image.copy()
+            with_pointer.paste(cursor_image,
+                               (left - bounds["left"], top - bounds["top"]),
+                               cursor_image)
+            image, alternate = with_pointer, image
+    return image, bounds, [bounds], alternate, True
+
+
 def capture(cursor=False, alternatives=False, gap_fill="transparent"):
     """按显示器合成虚拟桌面；屏幕间隙可透明、纯黑或纯白。"""
     with _mss_factory() as grabber:
@@ -94,18 +146,21 @@ def capture(cursor=False, alternatives=False, gap_fill="transparent"):
             offset = (monitor["left"] - bounds["left"],
                       monitor["top"] - bounds["top"])
             if transparent:
-                image.alpha_composite(screen.convert("RGBA"), offset)
+                # 屏幕本身不透明，直接 paste 到 RGBA 画布即可留下屏幕间隙透明；
+                # 不再逐屏 convert+alpha_composite（大分辨率下每屏多一次全屏合成）。
+                image.paste(screen, offset)
             else:
                 image.paste(screen, offset)
     logger = get_logger()
     logger.debug("捕获虚拟桌面: %sx%s，显示器 %d 个", image.width, image.height, len(monitors))
-    with_pointer = image.copy()
+    with_pointer = image
     try:
         pointer = native_cursor()
     except Exception as error:  # 指针形状偶发无法读取，降级为不含光标的截图。
         logger.warning("无法读取鼠标指针，本次截图不含光标: %s", error)
         pointer = None
     if pointer is not None:
+        with_pointer = image.copy()
         cursor_image, left, top = pointer
         with_pointer.paste(cursor_image, (left - bounds["left"], top - bounds["top"]), cursor_image)
     selected, other = (with_pointer, image) if cursor else (image, with_pointer)

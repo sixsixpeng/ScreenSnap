@@ -945,6 +945,83 @@ class CaptureTests(CoreTests):
         self.assertIsNone(mask.session.inline_editor)
         self.assertFalse(mask.isVisible())
 
+
+
+    def test_rapid_capture_requests_are_serialized_not_dropped(self):
+        """连续按截图键时请求串行执行，不能因为上一轮尚未启动就被吞掉。"""
+        from main import Application
+
+        app = Application.__new__(Application)
+        app.mask = None
+        app.config = Mock()
+        app.config.data = {"capture_delay": 0, "cursor": False, "last_capture_rect": []}
+        app.logger = Mock()
+        app.hotkeys = Mock()
+        app.show_mask = Mock()
+        timers = []
+        with patch("app.capture_flow.QTimer.singleShot") as single_shot:
+            Application.start_capture(app, "capture")
+            Application.start_capture(app, "capture")
+            self.assertEqual(single_shot.call_count, 1)
+            self.assertEqual(len(app._capture_requests), 1)
+            timers.append(single_shot.call_args.args[1])
+            timers[0]()
+            self.assertEqual(app.show_mask.call_count, 1)
+            # deliver 的 finally 会排一个 drain；手动执行，模拟事件循环下一轮。
+            Application._drain_capture_requests(app)
+            # drain 本身由 deliver 排了一次，start_capture 又排了下一轮的 deliver。
+            self.assertEqual(single_shot.call_count, 3)
+            timers.append(single_shot.call_args.args[1])
+            timers[1]()
+        self.assertEqual(app.show_mask.call_count, 2)
+        self.assertEqual(app._capture_pending, 0)
+        self.assertFalse(app._capture_requests)
+
+
+    def test_rapid_preset_captures_use_current_frame_without_save_wait(self):
+        """预设快捷键连按时抓屏不等待保存；保存交给后台队列。"""
+        import time
+        from types import SimpleNamespace
+        from config.config_manager import DEFAULTS
+        from main import Application
+
+        app = Application.__new__(Application)
+        app.config = SimpleNamespace(data=dict(
+            DEFAULTS, cursor=False, capture_gap_fill="transparent",
+            capture_monitor_action="save", capture_fullscreen_action="save",
+            capture_repeat_action="save"))
+        app.mask = None
+        app.logger = Mock()
+        app.notify = Mock()
+        app.play_capture_sound = Mock()
+        app._queue_preset_saves = Mock()
+        app.save_capture_images = Mock()
+        app.edit_images = Mock()
+        bounds = {"left": 0, "top": 0, "width": 40, "height": 30}
+        frames = [Image.new("RGB", (40, 30), color) for color in ("red", "green", "blue")]
+        lock = __import__("threading").Lock()
+        index = {"value": 0}
+
+        def fake_capture(*args, **kwargs):
+            del args, kwargs
+            with lock:
+                current = index["value"]
+                index["value"] += 1
+            return frames[current % len(frames)], bounds, [bounds], None, True
+
+        with patch("app.capture_flow.capture_preset", side_effect=fake_capture):
+            Application.start_capture(app, "monitor")
+            Application.start_capture(app, "monitor")
+            Application.start_capture(app, "monitor")
+            deadline = time.monotonic() + 2
+            while app._queue_preset_saves.call_count < 3 and time.monotonic() < deadline:
+                self.app.processEvents()
+                time.sleep(0.01)
+        self.assertEqual(app._queue_preset_saves.call_count, 3)
+        saved = [call.args[0][0][0].getpixel((0, 0))
+                 for call in app._queue_preset_saves.call_args_list]
+        self.assertCountEqual(saved, [(255, 0, 0), (0, 128, 0), (0, 0, 255)])
+
     def test_preset_capture_modes_bypass_mask_and_apply_action(self):
         """全屏/当前显示器不再弹遮罩，裁好后直接按设置保存或进编辑器。"""
         from types import SimpleNamespace

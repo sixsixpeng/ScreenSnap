@@ -649,16 +649,8 @@ class EditorWindow(QMainWindow):
 
         directory 非空时使用该目录（「另存为」），否则使用设置里的保存目录。
         """
-        directory = Path(directory) if directory else resolved_dir(self.settings)
-        directory.mkdir(parents=True, exist_ok=True)
-        prefix = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", datetime.now().strftime(self.settings["filename"])).strip(" .") or "Capture"
-        extension = saved_extension(self.settings)
-        path = directory / f"{prefix}.{extension}"
-        number = 1
-        while path.exists():
-            path = directory / f"{prefix}_{number}.{extension}"
-            number += 1
-        return path
+        from core.image_io import allocate_path
+        return allocate_path(self.settings, directory)
 
     def save(self, automatic=False, copy_to_clipboard=False, force_copy_image=False,
              result=None):
