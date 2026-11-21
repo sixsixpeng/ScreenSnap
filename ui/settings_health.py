@@ -124,8 +124,12 @@ class DiagnosticPanel(QWidget):
         line1 = (f"热键：{'已注册 %d 项' % handles if handles else '未注册'} · {listening}"
                  f" · {pressed_text} · 最近故障：{fault}{paused}")
 
+        raw_available = state.get("independent_input_available")
+        raw_text = ("不可用" if raw_available is False
+                    else cls._age_text(state.get("independent_input_age")))
         line2 = (f"输入：键盘 {cls._age_text(state.get('keyboard_age'))}"
                  f" · 鼠标 {cls._age_text(state.get('mouse_age'))}"
+                 f" · 独立观察 {raw_text}"
                  f" · 回调 {state.get('callbacks') or 0} 次（Qt 投递 {state.get('qt_callbacks') or 0} 次）")
 
         evidence = state.get("evidence") or {}
@@ -142,8 +146,10 @@ class DiagnosticPanel(QWidget):
         else:
             phantom_text = f"卡住按键 {phantom} 个" if phantom else "无卡住按键"
         stale = " · 输入链停滞" if evidence.get("input_stale") else ""
+        action = state.get("last_action")
+        action_text = "" if not action else f" · 最近动作 {action}={state.get('last_action_accepted')}"
         line3 = (f"判定：{threads} · {f'未触发：{unfired}' if unfired else '无未触发动作'}"
-                 f" · {phantom_text}{stale}")
+                 f" · {phantom_text}{stale}{action_text}")
         return "\n".join((line1, line2, line3))
 
     _FALLBACK_TEXT = {"enabled": "启用", "environment-disabled": "环境变量关闭",

@@ -21,6 +21,7 @@ pyvenv.cfg
 /clipboard_history/
 /toast_cache/
 /cache/
+/data/
 
 # 本地文档（AGENTS 规则 20/28：发布记录与验收清单只留本地，不入库）
 RELEASE_NOTES.md

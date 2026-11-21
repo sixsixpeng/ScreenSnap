@@ -234,6 +234,93 @@ class HotkeyDiagnosticsTests(unittest.TestCase):
         self.assertIn("管理员", notices[0])
         self.assertIn("切换", notices[0])
 
+
+
+    def test_independent_observer_allows_single_miss_evidence(self):
+        """独立观察器确认物理键盘活动时，一次未触发即可进入故障判定。"""
+        now = time.monotonic()
+        self.manager._misses["capture"] = [1, now - 1.0]
+        self.manager._independent_input = SimpleNamespace(last_event_at=now - 1.0)
+        self.assertEqual(self.manager._intercepted_hotkey(), "capture")
+
+        self.manager._misses["capture"] = [1, now - 1.0]
+        self.manager._independent_input = None
+        self.assertIsNone(self.manager._intercepted_hotkey())
+
+    def test_independent_keyboard_observer_overrides_mouse_masking(self):
+        """独立观察器看到键盘活动时，鼠标时间戳不能掩盖 input-stale。"""
+        now = time.monotonic()
+        self.manager._observed_keyboard_input = now - 10
+        self.manager._observed_mouse_input = now - 0.2
+        self.manager._observed_input = now - 0.2
+        self.manager._mouse_observer = True
+        self.manager._independent_input = SimpleNamespace(last_event_at=now - 0.1)
+        with patch.object(hm, "last_input_seconds", return_value=0.2):
+            self.assertTrue(self.manager._hook_missed_input())
+
+
+
+    def test_action_ack_is_visible_in_diagnostic_snapshot(self):
+        self.manager.report_action_result("capture", False)
+        state = self.manager.diagnostic_snapshot()
+        self.assertEqual(state["last_action"], "capture")
+        self.assertFalse(state["last_action_accepted"])
+
+    def test_dispatch_reports_rejected_hotkey_action(self):
+        """动作级确认：捕获到回调但截图被明确拒绝时，应用层要回报 accepted=False。"""
+        from main import Application
+
+        app = Application.__new__(Application)
+        app.logger = Mock()
+        app.hotkeys = Mock()
+        app.start_capture = Mock(return_value=False)
+        accepted = Application.dispatch(app, "capture")
+        self.assertFalse(accepted)
+        app.hotkeys.report_action_result.assert_called_once_with("capture", False)
+
+        app.start_capture.return_value = True
+        self.assertTrue(Application.dispatch(app, "capture"))
+        app.hotkeys.report_action_result.assert_called_with("capture", True)
+
+    def test_input_stale_after_slow_health_tick_emits_notice(self):
+        """键盘观察停滞、鼠标不是最后一次输入时，体检必须产生提示而不是只写日志。"""
+        self.register()
+        self.manager._grace_until = 0
+        self.manager._health_seconds = 4
+        now = time.monotonic()
+        self.manager._observed_keyboard_input = now - 10
+        self.manager._observed_mouse_input = now - 30
+        self.manager._observed_input = now - 30
+        self.manager._mouse_observer = True
+        notices = []
+        self.manager.notice.connect(notices.append)
+        with patch.object(hm, "last_input_seconds", return_value=4.0):
+            self.manager.check_health()
+        self.assertTrue(notices, "input-stale 必须弹出提示")
+        self.assertIn("键盘输入", notices[0])
+
+    def test_input_stale_uses_keyboard_observer_and_survives_health_tick_delay(self):
+        """鼠标活动不能掩盖键盘钩子停滞；单次按键后下一次体检仍要能判定。"""
+        now = time.monotonic()
+        self.manager._observed_keyboard_input = now - 10
+        self.manager._observed_mouse_input = now - 0.2
+        self.manager._observed_input = now - 0.2
+        self.manager._mouse_observer = True
+        with patch.object(hm, "last_input_seconds", return_value=0.2):
+            self.assertFalse(self.manager._hook_missed_input(),
+                             "最后一次输入可由鼠标解释时不得误报键盘钩子失效")
+
+        self.manager._observed_mouse_input = now - 30
+        self.manager._observed_input = now - 30
+        with patch.object(hm, "last_input_seconds", return_value=4.0):
+            self.assertTrue(self.manager._hook_missed_input(),
+                            "键盘观察停滞且最后一次输入无法由鼠标解释，必须判定 input-stale")
+
+        self.manager._observed_keyboard_input = now - 0.1
+        with patch.object(hm, "last_input_seconds", return_value=4.0):
+            self.assertFalse(self.manager._hook_missed_input(),
+                             "键盘观察仍新鲜时不能误报")
+
     # ---- 卡住的按键记录（2026-10-16 真机故障）-------------------------------------
 
 

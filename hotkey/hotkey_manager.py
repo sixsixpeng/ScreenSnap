@@ -2,6 +2,7 @@
 
 import json
 import logging
+import os
 import queue
 import threading
 import time
@@ -32,6 +33,7 @@ from hotkey.recovery import RecoveryState
 from logger import get_logger
 from hotkey.diagnostics import (DiagnosticsMixin, backend_pressed_codes,
                                 physically_up_codes, stale_pressed_codes)
+from hotkey.independent_input import IndependentKeyboardObserver
 
 # 体检周期（设置项 hotkey_health_interval，2–600 秒）与重装限速。
 # 规则 14：健康时既不重装也不打日志，只在**判定失效**并重装时记录。
@@ -226,6 +228,8 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         # （同一串事件维护），需要能按“系统证明未按下”精确对账，而不是整体清空。
         self._pressed_scans = {}
         self._phantom_hits = 0
+        # 动作级确认：热键回调到达 Qt 后，应用层回报该动作是否被接受。
+        self._action_results = {}
         self.intercept_reinstalls = 0
         self._callback_trace.connect(self._log_callback)
         self.registration_finished.connect(self._registration_arrived)
@@ -238,6 +242,16 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         self._housekeeping_timer.setInterval(500)
         self._housekeeping_timer.timeout.connect(self._housekeeping)
         self._housekeeping_timer.start()
+        # 独立键盘活动观察器：不依赖 keyboard 钩子，作为 input-stale 的兜底证据。
+        # offscreen 测试不轮询真实桌面，避免把宿主机输入带进用例。
+        self._independent_input = None
+        if os.name == "nt" and os.environ.get("QT_QPA_PLATFORM") != "offscreen":
+            try:
+                self._independent_input = IndependentKeyboardObserver()
+                self._independent_input.start()
+            except Exception as error:  # noqa: BLE001 观察器不可用不能阻塞启动
+                self._observer_error = type(error).__name__
+                self._independent_input = None
         # 所有纯 Python 状态初始化完才启动工作线程。
         self.worker.start()
 
@@ -398,11 +412,43 @@ class HotkeyManager(DiagnosticsMixin, QObject):
         self._mouse_observer = False
 
     def _hook_missed_input(self):
-        """系统近期有输入而观察器没收到：只说明疑似输入链异常，不能证明系统摘钩。"""
+        """系统有近期输入而键盘观察器长期没收到：只说明疑似键盘链异常。
+
+        2026-11-21：旧判据用合并的 `_observed_input`，鼠标钩子会不断刷新它 ⇒
+        键盘钩子已经失效、只要鼠标还在动就永远不触发 input-stale，也不提示。
+        这里改为：
+        * 系统最后一次输入由鼠标事件解释时不下结论（避免正常鼠标活动误报）；
+        * 否则必须比较**键盘观察时间**；
+        * 判定窗口至少覆盖一个体检周期，避免单次按键后下一次体检已超过
+          `hotkey_recent_input_ms`（默认 1.5s、体检默认 4s）而永远漏检。
+        """
         idle = last_input_seconds()
-        if idle is None or idle > self.policy["hotkey_recent_input_ms"] / 1000.0:
-            return False   # 空闲中或无法判定 ⇒ 不下结论
-        return (time.monotonic() - self._observed_input) > self.policy["hotkey_missed_input_ms"] / 1000.0
+        if idle is None:
+            return False   # 无法判定 ⇒ 不下结论
+        now = time.monotonic()
+        recent_window = max(self.policy["hotkey_recent_input_ms"] / 1000.0,
+                            min(10.0, self._health_seconds + 1.0))
+        if idle > recent_window:
+            return False   # 早已空闲，不能把长时间无输入当故障
+        keyboard_seen = self._observed_keyboard_input
+        if keyboard_seen is None:
+            keyboard_seen = self._observed_input
+        if now - keyboard_seen <= self.policy["hotkey_missed_input_ms"] / 1000.0:
+            return False
+        # 独立观察器直接看到键盘活动：说明最近输入不是鼠标，不能再用鼠标掩盖键盘停滞。
+        observer = getattr(self, "_independent_input", None)
+        raw_seen = getattr(observer, "last_event_at", None) if observer is not None else None
+        if raw_seen is not None and now - raw_seen <= recent_window:
+            return True
+        # 没有独立观察器证据时，系统最后一次输入可能来自鼠标：
+        # 鼠标观察器命中同一时刻时，不能推断键盘链失效。
+        # 若鼠标事件明显早于最后一次系统输入，则最后一次输入更可能是键盘，继续判定。
+        system_input_at = now - idle
+        mouse_seen = self._observed_mouse_input
+        if (self._mouse_observer and mouse_seen is not None
+                and mouse_seen >= system_input_at - 0.25):
+            return False
+        return True
 
     def _intercepted_hotkey(self):
         """连续 REQUIRED_MISSES 次「组合键已按下但回调未触发」的动作名（顺便清计数）。
@@ -424,9 +470,23 @@ class HotkeyManager(DiagnosticsMixin, QObject):
             for action, entry in list(self._misses.items()):
                 if now - entry[1] > self.policy["hotkey_miss_window"]:
                     self._misses.pop(action, None)
-                elif entry[0] >= self.policy["hotkey_miss_count"]:
+                    continue
+                required = self.policy["hotkey_miss_count"]
+                # 独立键盘观察器确认这次组合键确实对应物理键盘活动时，
+                # 一次未触发即可作为证据，避免“只按一次、没有提示”。
+                if required > 1 and self._raw_activity_confirms(entry[1]):
+                    required = 1
+                if entry[0] >= required:
                     return action  # 限速期间不消费证据；真正开始尝试时才清。
         return None
+
+    def _raw_activity_confirms(self, attempt_at):
+        """独立观察器是否在本次尝试前后看到了键盘活动。"""
+        observer = getattr(self, "_independent_input", None)
+        raw_at = getattr(observer, "last_event_at", None) if observer is not None else None
+        if raw_at is None:
+            return False
+        return attempt_at - 0.5 <= raw_at <= time.monotonic() + 0.5
 
     def _maybe_log_heartbeat(self):
         """只由独立汇总计时器输出，健康检查不会另产一条重复汇总。"""
@@ -649,7 +709,10 @@ class HotkeyManager(DiagnosticsMixin, QObject):
             except (AttributeError, TypeError):
                 return None
 
+        latest_action = max(self._action_results.items(), key=lambda item: item[1][0], default=None)
         return dict(
+            last_action=latest_action[0] if latest_action else None,
+            last_action_accepted=latest_action[1][1] if latest_action else None,
             listening=getattr(listener, "listening", None),
             native_thread=self._thread_alive(getattr(listener, "listening_thread", None)),
             processing_thread=self._thread_alive(getattr(listener, "processing_thread", None)),
@@ -663,6 +726,8 @@ class HotkeyManager(DiagnosticsMixin, QObject):
             completed=self._registration_completed, failed=self._registration_failed,
             install_age=age(self._install_started_at),
             keyboard_age=age(self._observed_keyboard_input), mouse_age=age(self._observed_mouse_input),
+            independent_input_age=age(getattr(getattr(self, "_independent_input", None), "last_event_at", None)),
+            independent_input_available=getattr(getattr(self, "_independent_input", None), "available", None),
             keyboard_events=self._keyboard_events, mouse_events=self._mouse_events,
             callbacks=self._callback_events, qt_callbacks=self._qt_callbacks,
             paused_callbacks=self._paused_callbacks, observer_error=self._observer_error,
@@ -806,6 +871,13 @@ class HotkeyManager(DiagnosticsMixin, QObject):
                 self._paused_callbacks += 1
         else:
             self._paused_callbacks += 1
+
+    def report_action_result(self, action, accepted=True):
+        """应用层确认热键动作已处理；仅用于诊断，不改变热键恢复策略。"""
+        self._action_results[action] = (time.monotonic(), bool(accepted))
+        if not accepted:
+            get_logger().debug("热键动作未执行: %s", action,
+                               extra={"screensnap_metadata_only": True})
 
     @Slot(str, float, int, int, bool)
     def _log_callback(self, action, fired_at, generation, epoch, suppress_action):
@@ -1164,5 +1236,9 @@ class HotkeyManager(DiagnosticsMixin, QObject):
                 pass
         self.requests.put(None)
         self.worker.join(timeout=2)
+        observer = getattr(self, "_independent_input", None)
+        stop_observer = getattr(observer, "stop", None) if observer is not None else None
+        if callable(stop_observer):
+            stop_observer()
         if self.worker.is_alive():
             self.log_diagnostics("shutdown-cleanup-pending:worker-still-alive", logging.WARNING)

@@ -512,7 +512,7 @@ Windows 图片提示优先使用带缩略图的原生图片 Toast；无法导入
 
 全局热键在"设置 > 快捷键"修改；截图遮罩内的快速贴图/快速保存键在"设置 > 截图 > 截图快捷操作"修改。设置页底部"恢复本页默认"只重置本页；窗口底部的"恢复全部默认"是最终手段，会先把当前设置备份成同目录的 `settings.bak` 再整体重置，"清理贴图会话"则删除贴图会话文件与私有缓存，方便从空白状态验证。
 
-设置窗口底部新增"清空全部数据"：经二次确认后退出当前实例并删除 `%APPDATA%\ScreenSnap`（实际路径以 tooltip 为准）及其中所有文件；不会重建配置或自动启动新实例，下次手动启动时程序会生成默认 `settings.json`。范围包括所有配置/备份、贴图会话与回收站、剪贴板历史及图片、缓存和保存在该目录的日志；若自定义截图保存目录设在此目录内，正式截图也会被删除。目录外的文件不受影响，不创建备份；同时关闭 Windows 开机自动启动项（注册表 Run 项与管理员计划任务）。该操作不可撤销，与"恢复全部默认"和"清理贴图会话"不同。
+设置窗口底部新增"清空全部数据"：经二次确认后退出当前实例并删除运行文件所在目录的 `data/`（实际路径以 tooltip 为准）及其中所有文件；不会重建配置或自动启动新实例，下次手动启动时程序会生成默认 `settings.json`。范围包括所有配置/备份、贴图会话与回收站、剪贴板历史及图片、缓存；运行目录 `logs/` 中的日志不随数据目录删除。若自定义截图保存目录设在该目录内，正式截图也会被删除。目录外的文件不受影响，不创建备份；同时关闭 Windows 开机自动启动项（注册表 Run 项与管理员计划任务）。该操作不可撤销，与"恢复全部默认"和"清理贴图会话"不同。
 
 - 4K/125% 大屏与小屏上下排列时，需在真实桌面分别测试新建截图贴图和重启恢复；若小屏仍偏移，查看 `logs/YYYY-MM/app.log` 中的"截图贴图锚点映射"与"贴图锚点应用"两条 DEBUG 记录，核对物理锚点、Qt 原生屏幕矩形和实际图像原点。
 
@@ -528,13 +528,13 @@ Windows 图片提示优先使用带缩略图的原生图片 Toast；无法导入
 
 ```python
 # core/version.py
-APP_VERSION = "1.0.21"   # ← 发布新版本时只改这一行
+APP_VERSION = "1.0.23"   # ← 发布新版本时只改这一行
 ```
 
 改动流程：
 
 1. 发布新版本时修改 `APP_VERSION`（形如 `主版本.次版本.修订号`，如 `1.1.0`）；
-2. 程序启动时把它写入配置键 `app_version`（`%APPDATA%\ScreenSnap\settings.json`）；
+2. 程序启动时把它写入配置键 `app_version`（`运行目录/data/settings.json`）；
 3. 老用户升级后首次启动，记录的版本与内置版本不一致 → 触发一次数据重置（见下一节）。
 
 配置里的 `app_version` 是**记录值**，正常情况下不需要手动改。设置页「通用 > 版本与数据 > 程序版本号」可以改它，但那等同于**主动触发一次数据重置**（下次启动生效）。
@@ -961,7 +961,7 @@ Windows 11 只在系统里存在「带该应用标识（AppUserModelID）的开�
 | `sticker_recycle_enabled` | `true` | 关闭贴图是否先进入回收站（可恢复），关闭则直接删除。 |
 | `sticker_recycle_limit` | `10` | 回收站最多保留的贴图数量，范围 1–200；超限时永久丢弃最早进入回收站的贴图。 |
 
-缓存管理位于“设置 > 保存与输出 > 缓存管理”：可清理剪贴板历史图片、Toast 缩略图及未被活动/回收站贴图引用的私有缓存，也可打开缓存根目录。贴图、剪贴板和 Toast 缓存默认位于**启动文件所在目录**下的 `sticker_cache/`、`clipboard_history/`、`toast_cache/`，不再跟随保存目录或写进 `%APPDATA%`；启动目录不可写时才退回 `%APPDATA%\ScreenSnap`。清理不会删除保存目录中的正式截图、贴图会话或仍被贴图引用的源文件。`history_limit` 超限只限制历史列表并清理不再引用的剪贴板缓存；`sticker_recycle_limit` 超限会永久丢弃最早的回收站项目。
+缓存管理位于“设置 > 保存与输出 > 缓存管理”：可清理剪贴板历史图片、Toast 缩略图及未被活动/回收站贴图引用的私有缓存，也可打开缓存根目录。贴图、剪贴板和 Toast 缓存位于运行文件所在目录的 `data/sticker_cache/`、`data/clipboard_history/`、`data/toast_cache/`，不再跟随保存目录或写进 `%APPDATA%`；运行目录不可写时缓存功能会记录失败，不创建 AppData 回退目录。清理不会删除保存目录中的正式截图、贴图会话或仍被贴图引用的源文件。`history_limit` 超限只限制历史列表并清理不再引用的剪贴板缓存；`sticker_recycle_limit` 超限会永久丢弃最早的回收站项目。
 
 #### 日志
 
@@ -1094,8 +1094,8 @@ python run_tests.py --list               # 列出模块
 - **窗口类用例不依赖真实屏幕**：`setUpClass` 创建唯一的 `QApplication`（`QApplication.instance() or QApplication([])`），不注册全局热键、不读真实显示器几何。需要在无桌面环境（CI/远程）跑时设置 `QT_QPA_PLATFORM=offscreen`；离屏环境 DPR 为 1、逻辑坐标与设备像素 1:1，按固定坐标采样是确定的。需要真实像素时用 `QImage` + `QPainter` 自己画再取 `pixelColor`，避免依赖屏幕抓取。
 - **覆盖边界**：用例不覆盖 Windows 原生 Toast、真实全局热键权限、真实混合 DPI 与系统窗口管理器行为，这些仍需桌面手动验收（见"未支持与待桌面验收"）。
 - **几何断言读控件而非截图**：工具栏、按钮、网格布局用 `geometry()`、`grid.getItemPosition()`、`spacing()` 等直接断言，比像素比对稳定。
-- **配置用例用临时目录**：`tempfile.TemporaryDirectory()` + `ConfigManager(path)`，不读写用户真实配置；默认值断言直接对比 `DEFAULTS`。注意显式传路径只覆盖该用例，走 `core.path_utils.data_dir()` 的代码路径仍然落到**真实**的 `%APPDATA%\ScreenSnap`（见下条）。
-- **跑测前把 `APPDATA` 指向临时目录**：`data_dir()` 每次调用都读 `APPDATA` 环境变量，而贴图管理、剪贴板历史、Toast 缓存等用例仍会写 `%APPDATA%\ScreenSnap`。该目录一旦有第二个写入者（多个测试进程同时跑、残留句柄、杀软扫描）就会报 `PermissionError: ...clipboard_history.tmp` / `...sticker_cache`，看起来像"代码坏了"，其实与代码无关；因此建议 `$env:APPDATA = <临时目录>` 后再跑，运行期间也不要同时开着程序实例（托盘程序会另外占用剪贴板、全局热键与贴图窗口）。
+- **配置用例用临时目录**：`tempfile.TemporaryDirectory()` + `ConfigManager(path)`，不读写用户真实配置；默认值断言直接对比 `DEFAULTS`。注意显式传路径只覆盖该用例，走 `core.path_utils.data_dir()` 的代码路径仍然落到**运行目录的 `data/`**，测试进程之间不要并发写同一份运行数据。
+- **跑测前隔离运行数据**：`data_dir()` 现在固定返回运行文件目录的 `data/`，不再读取 `APPDATA`；贴图管理、剪贴板历史、Toast 缓存等用例会写该目录。建议在独立工作副本或临时目录中跑测，运行期间不要同时开着程序实例（托盘程序会另外占用剪贴板、全局热键与贴图窗口）。
 - **大批次拆半跑**：遮罩/采集自检这一大组（`-k mask -k capture -k notification -k self_check`，约 80 项）在本机会**偶发**进程级崩溃（退出码 `0xC0000374` 堆损坏 / `0xC0000409` / `0xC0000354`）。这不是用例或代码的问题：用 `git worktree` 干净副本对照，**只加 4 条纯空转用例**同样复现，且同一组合时崩时不崩。把大组按用例名字母序拆成 8–16 条一组都能稳定通过，建议这类大组一律拆小运行。另有两条 Windows 平台敏感的既有失败（放大镜首次悬停可见性、原地编辑键盘微调焦点），HEAD 干净副本同样失败，与代码改动无关。
 
 维护约定：
@@ -2084,3 +2084,13 @@ pyinstaller --name ScreenSnap --windowed --onedir --icon ui/assets/icon.ico --ad
 1. 修复（连续快速截图）：预设快捷键 `Shift+F1` / `Ctrl+F1` / `Alt+F1` 每次按键立即抓取当前画面，抓完马上把保存任务交给后台 **4 个保存线程**，主线程不等待上一张落盘；抓屏不再用多个线程争抢 GDI，保存文件名在线程间预留避免同名覆盖。当前屏/上次区域只抓目标区域，不再合成整个虚拟桌面（实测当前屏约 95ms、上次区域约 12ms、全桌面约 224ms）。普通 `F1` 需要交互选区，仍保持单遮罩串行。验证：`test_rapid_preset_captures_use_current_frame_without_save_wait`、`test_rapid_capture_requests_are_serialized_not_dropped`、`test_consecutive_direct_captures_save_each_current_frame`。
 
 2. 优化（截图到保存）：直接保存不再为每张截图创建完整 `EditorWindow`（只创建未显示的 UI，约多花 100ms），改为共用输出效果、路径分配和 `save_image()`；遮罩抓屏合成从逐屏 `convert + alpha_composite` 改为直接 `paste`，无光标时不再复制整张画面。当前 5120×1899 双屏环境实测抓屏约 150–200ms、直接保存约 65ms（旧路径约 230ms + 190ms）。验证：`tests.test_sticker.ClipboardOutputTests.test_clipboard_output_capture_presets_direct_save_and_formats`、`tests.test_capture.CaptureTests.test_capture_cursor_variants_share_one_frame`、`tests.editor.test_tools` 18 条。
+
+### 2026-11-21 当日调整汇总
+
+1. 修复（热键自检漏报）：`hotkey/hotkey_manager.py::_hook_missed_input()` 原先用合并的 `_observed_input` 判定输入停滞，鼠标钩子会持续刷新该时间戳，导致“键盘钩子已失效但鼠标仍在动”时 `input-stale` 永不成立，既不记录故障也不弹提示；同时 4 秒体检周期与 1.5 秒近期输入窗口错位，单次按键后的下一次体检已超出窗口。现在改为比较 `_observed_keyboard_input`，最后一次系统输入可由鼠标事件解释时不误报，否则按键盘观察停滞判定；近期输入窗口至少覆盖一个体检周期。验证：`test_input_stale_uses_keyboard_observer_and_survives_health_tick_delay`、`test_input_stale_after_slow_health_tick_emits_notice`，`tests.test_hotkey_diagnostics` 26 条、`tests.test_hotkey_policy` 30 条、`tests.test_hotkey_lifecycle` 17 条通过；真实提权窗口/其他设备热键故障仍需真机复核。
+2. 新增（独立键盘观察器）：新增 `hotkey/independent_input.py`，在 Windows 上用独立线程轮询 `GetAsyncKeyState` 记录物理键盘活动，不调用 `keyboard` API、不派发热键；`HotkeyManager._hook_missed_input()` 在独立观察器确认近期键盘活动时不再被鼠标时间戳或合并时间戳掩盖。`_intercepted_hotkey()` 在独立观察器确认同一次尝试有键盘活动时，一次未触发即可作为故障证据；没有独立证据时仍保持连续两次门槛。诊断快照新增 `independent_input_age`、`independent_input_available`。验证：`tests.test_hotkey_diagnostics` 26 条、`tests.test_hotkey_policy` 30 条、`tests.test_hotkey_lifecycle` 17 条、`tests.test_hotkey_independent_input` 2 条，共 75 条通过；真实桌面轮询行为仍需真机复核。
+3. 新增（动作级确认与独立观察状态）：`Application.dispatch()` 读取 `start_capture()` 的返回值并调用 `HotkeyManager.report_action_result()`；遮罩已显示、无上次区域等明确拒绝的截图记为 `accepted=False`，其余已受理动作记为 `True`，只用于诊断，不回退恢复策略。诊断面板「输入」行新增独立观察年龄与不可用状态，「判定」行新增最近动作及其 accepted 结果。验证：`test_dispatch_reports_rejected_hotkey_action`；热键相关四个模块共 75 条通过。
+4. 修复（启动权限审计）：`main.py` 原先只在 `start_on_boot` 或 `start_on_boot_admin` 为真时才调用 `sync_autostart()`；配置切回普通/关闭后，系统里残留的 `ScreenSnapAdminStartup`（HIGHEST）任务仍可能在登录时以管理员权限拉起程序。现在每次启动都审计：按配置删除/写入 Run 项；若当前已提权而配置已关闭管理员启动，则删除残留 HIGHEST 任务；当前是标准权限时只记录警告，不调用 `set_enabled()`、不弹 UAC、不主动提权。验证：`test_startup_audit_cleans_stale_admin_task_when_already_elevated`、`test_startup_audit_never_requests_uac_when_stale_task_cannot_be_removed`；`tests.test_elevation` 30 条通过。
+5. 修复（继承管理员权限）：新增 `core.elevation.should_demote_at_startup()`；启动时若不是用户主动 `--elevated`、不是 `--startup-standard` 降权重试、且配置未选择管理员开机启动，则通过 `restart_as_standard()` 自动切回标准权限，不弹 UAC。配置明确选择管理员启动时保留；降权失败只记录警告、保持当前会话，不循环重启。验证：`test_startup_demotion_policy_only_keeps_explicit_admin_paths`、`test_demote_unrequested_admin_launches_standard_then_quits`；`tests.test_elevation` 30 条通过。
+6. 版本：`1.0.23`（`1.0.22` + `0.0.1`）。内置版本更新于 `core/version.py`；升级后首次启动按版本闸门重建用户数据，保留 `PRESERVED_ON_VERSION_RESET` 中的环境/习惯键，其余配置回到新默认值，截图保存目录中的图片不受影响。
+7. 调整（用户数据位置）：运行时数据统一到运行文件所在目录的 `data/`：`settings.json`、`stickers.json`、`sticker_placements.json`、`clipboard_history.json`、`screensnap.lock` 及 `sticker_cache/`、`clipboard_history/`、`toast_cache/`。启动时自动迁移旧 `%APPDATA%\ScreenSnap` 与旧运行根缓存并清理旧 AppData；此后不再创建 AppData 用户数据。验证：`test_legacy_appdata_and_root_caches_migrate_into_runtime_data`、`test_cache_dirs_live_under_startup_directory_and_migrate_old_locations`、`tests.test_config -k version` 6 条通过。

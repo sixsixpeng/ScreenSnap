@@ -894,13 +894,43 @@ class ConfigTests(CoreTests):
                     (old_save / "cache" / "clipboard_history", "clipboard_1.png")):
                 old_dir.mkdir(parents=True, exist_ok=True)
                 (old_dir / filename).write_bytes(b"x")
-            with patch("core.path_utils.project_root", return_value=startup), patch("core.path_utils.data_dir", return_value=appdata):
+            with patch("core.path_utils.project_root", return_value=startup), \
+                    patch("core.path_utils.data_dir", return_value=startup), \
+                    patch("core.path_utils.legacy_data_dir", return_value=appdata):
                 moved = migrate_cache_dirs({"save_dir": str(old_save)})
                 self.assertEqual(moved, 2)
                 self.assertTrue((startup / "sticker_cache" / "sticker_1.png").is_file())
                 self.assertTrue((startup / "clipboard_history" / "clipboard_1.png").is_file())
                 self.assertEqual(cache_dir("toast_cache"), startup / "toast_cache")
                 self.assertFalse((appdata / "sticker_cache").exists())
+
+
+    def test_legacy_appdata_and_root_caches_migrate_into_runtime_data(self):
+        """旧 AppData 与旧根目录缓存都迁入运行目录 data/，旧目录不保留。"""
+        from core.path_utils import migrate_legacy_data
+
+        with tempfile.TemporaryDirectory() as folder:
+            base = Path(folder)
+            startup = base / "startup"
+            appdata = base / "appdata"
+            startup.mkdir()
+            appdata.mkdir()
+            (appdata / "settings.json").write_text("{}", encoding="utf-8")
+            (appdata / "clipboard_history.json").write_text("[]", encoding="utf-8")
+            (appdata / "sticker_cache").mkdir()
+            (appdata / "sticker_cache" / "a.png").write_bytes(b"x")
+            (startup / "toast_cache").mkdir()
+            (startup / "toast_cache" / "t.png").write_bytes(b"y")
+            with patch("core.path_utils.project_root", return_value=startup), \
+                    patch("core.path_utils.legacy_data_dir", return_value=appdata):
+                migrate_legacy_data()
+            data = startup / "data"
+            self.assertTrue((data / "settings.json").is_file())
+            self.assertTrue((data / "clipboard_history.json").is_file())
+            self.assertTrue((data / "sticker_cache" / "a.png").is_file())
+            self.assertTrue((data / "toast_cache" / "t.png").is_file())
+            self.assertFalse(appdata.exists())
+            self.assertFalse((startup / "toast_cache").exists())
 
     def test_save_settings_unified_directory_and_cache_controls(self):
         from PySide6.QtWidgets import QMessageBox
@@ -3809,6 +3839,11 @@ class ConfigTests(CoreTests):
             self.assertEqual(schedule.call_args.args[0], 800)
             # 托盘菜单本来就有 150 毫秒等待，用户延迟在此基础上累加。
             app.start_capture("capture", from_tray=True)
+            # 上一轮尚未启动时请求会入队，不能同时排队两个遮罩；
+            # 先执行第一轮，再 drain 后检查托盘延迟仍在原延迟上累加。
+            self.assertEqual(schedule.call_args.args[0], 800)
+            schedule.call_args.args[1]()
+            app._drain_capture_requests()
             self.assertEqual(schedule.call_args.args[0], 950)
 
     def test_editor_save_uses_default_filename_template(self):
@@ -3818,7 +3853,7 @@ class ConfigTests(CoreTests):
         with tempfile.TemporaryDirectory() as folder:
             editor = EditorWindow(Image.new("RGB", (90, 70), "white"),
                                   dict(DEFAULTS, save_dir=folder))
-            with patch("editor.editor_window.datetime") as clock:
+            with patch("core.image_io.datetime") as clock:
                 clock.now.return_value = datetime(2026, 9, 27, 14, 5, 6)
                 path = editor.save()
             self.assertEqual(path.name, "ScreenSnap_20260927_140506.png")

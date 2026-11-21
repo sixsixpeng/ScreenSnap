@@ -10,6 +10,7 @@
 import ctypes
 import os
 import subprocess
+import sys
 from ctypes import wintypes
 
 from core.startup import launch_command, project_root
@@ -17,6 +18,8 @@ from logger import get_logger
 
 ELEVATED_MARKER = "--elevated"
 STANDARD_MARKER = "--standard"
+# 启动时自动降权只尝试一次；supervisor 会剥掉 --standard，所以用独立标记防止失败循环。
+STARTUP_STANDARD_MARKER = "--startup-standard"
 
 RESULT_LAUNCHED = "launched"
 RESULT_CANCELLED = "cancelled"
@@ -39,6 +42,22 @@ def is_elevated():
         return False
 
 
+def should_demote_at_startup(argv=None, admin_autostart=False, elevated=None):
+    """启动时是否应把“未主动请求”的管理员进程切回标准权限。
+
+    用户主动提权走 `--elevated` 标记；配置里明确选择管理员开机启动时保留。
+    `--standard` 表示已经尝试过降权，若仍是管理员则不再重复尝试，避免循环。
+    """
+    argv = list(sys.argv[1:] if argv is None else argv)
+    elevated = is_elevated() if elevated is None else bool(elevated)
+    if not elevated:
+        return False
+    if (ELEVATED_MARKER in argv or STANDARD_MARKER in argv
+            or STARTUP_STANDARD_MARKER in argv):
+        return False
+    return not bool(admin_autostart)
+
+
 def restart_as_admin():
     """以管理员权限拉起自身；返回 launched / cancelled / failed / already。"""
     if os.name != "nt":
@@ -55,7 +74,7 @@ def restart_as_standard():
         return RESULT_FAILED
     if not is_elevated():
         return RESULT_ALREADY
-    command = launch_command([STANDARD_MARKER], windowed=True)
+    command = launch_command([STANDARD_MARKER, STARTUP_STANDARD_MARKER], windowed=True)
     if _create_with_linked_token(command):
         return RESULT_LAUNCHED
     return RESULT_FAILED

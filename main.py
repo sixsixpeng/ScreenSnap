@@ -58,7 +58,8 @@ from config.config_manager import TOOL_WIDTH_KEYS
 from core import app_icon, data_dir, capture, qimage_to_pillow
 from core.constants import APP_USER_MODEL_ID
 from core.elevation import (ELEVATED_MARKER, RESULT_ALREADY, RESULT_CANCELLED, RESULT_LAUNCHED,
-                            STANDARD_MARKER, is_elevated, restart_as_admin, restart_as_standard)
+                            STANDARD_MARKER, is_elevated, restart_as_admin, restart_as_standard,
+                            should_demote_at_startup)
 from core.version import APP_VERSION
 from core.dpi import DisplayMapper
 from core.path_utils import clear_data_directory
@@ -123,20 +124,32 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
         set_recent_colors_provider(
             lambda: list(self.config.data.get("recent_colors", [])))
         set_recent_color_recorder(self.remember_recent_color)
-        if self.config.data["start_on_boot"] or self.config.data.get("start_on_boot_admin"):
-            try:
-                from core.autostart_admin import sync_autostart
+        # 每次启动都审计开机启动状态，即使配置已经关闭。否则残留的 HIGHEST
+        # 计划任务会在下次登录时继续以管理员权限拉起本程序，而普通启动路径没有机会
+        # 清理它。此路径绝不调用 set_enabled()/runas：当前不是管理员时只记录警告，
+        # 不主动索取管理员权限。
+        try:
+            from core.autostart_admin import sync_autostart
 
-                if self.config.data.get("start_on_boot_admin") and not self.config.data["start_on_boot"]:
-                    # 计划任务本身就是开机自启：配置与界面保持一致（README 已说明该联动）。
-                    self.config.data["start_on_boot"] = True
-                    self.config.save()
-                if (self.config.data.get("start_on_boot_admin")
-                        and not sync_autostart(self.config.data)):
-                    self.logger.warning("开机管理员计划任务缺失：登录时可能不会自动启动，"
-                                        "请在「设置 → 启动与通知」中重新开启")
-            except OSError as error:
-                self.logger.warning("无法同步开机启动设置: %s", error)
+            if self.config.data.get("start_on_boot_admin") and not self.config.data["start_on_boot"]:
+                # 计划任务本身就是开机自启：配置与界面保持一致（README 已说明该联动）。
+                self.config.data["start_on_boot"] = True
+                self.config.save()
+            task_present = sync_autostart(self.config.data)
+            self.logger.info(
+                "开机启动审计: start_on_boot=%s start_on_boot_admin=%s elevated=%s task=%s",
+                self.config.data.get("start_on_boot"), self.config.data.get("start_on_boot_admin"),
+                is_elevated(), task_present,
+                extra={"screensnap_metadata_only": True})
+            if self.config.data.get("start_on_boot_admin") and not task_present:
+                self.logger.warning("开机管理员计划任务缺失：登录时可能不会自动启动，"
+                                    "请在「设置 → 启动与通知」中重新开启")
+        except OSError as error:
+            self.logger.warning("无法审计开机启动设置: %s", error)
+        # 版本闸门和自启审计完成后才判断：配置明确选择管理员启动、或本次由用户主动
+        # 提权（--elevated）时保留管理员；其余继承来的管理员令牌在事件循环启动后降权。
+        self._startup_demote = should_demote_at_startup(
+            sys.argv, bool(self.config.data.get("start_on_boot_admin")), is_elevated())
         self.hotkeys = HotkeyManager()
         # 键盘监听在工作线程执行，Qt 信号把热键动作送回 GUI 主线程。
         self.hotkeys.triggered.connect(self.dispatch)
@@ -200,8 +213,23 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
         self._applied_logging_settings = self.logging_settings()
         self.stickers.restore()
         self.qt.aboutToQuit.connect(self.shutdown)
+        # 未主动请求的管理员令牌先降权，避免先弹出一条“管理员权限已启动”的提示。
+        if self._startup_demote:
+            QTimer.singleShot(0, self._demote_unrequested_admin)
         # 托盘显示后等事件循环启动，再请求系统显示就绪提示。
         QTimer.singleShot(0, self.announce_startup)
+
+    def _demote_unrequested_admin(self):
+        """未主动请求却继承了管理员令牌时，启动后切回标准权限，不弹 UAC。"""
+        if not getattr(self, "_startup_demote", False):
+            return
+        self._startup_demote = False
+        self.logger.warning("启动时检测到未主动请求的管理员权限，正在以标准权限重启")
+        status = restart_as_standard()
+        if status == RESULT_LAUNCHED:
+            self.quit_app()
+            return
+        self.logger.warning("自动切换标准权限未成功（%s），保持当前会话", status)
 
 
     def desktop_available_rect(self):
@@ -316,6 +344,8 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
 
     def announce_startup(self):
         """事件循环开始后提示就绪，沿用托盘气泡总开关。"""
+        if getattr(self, "_startup_demote", False):
+            return
         self.logger.info("ScreenSnap 已启动")
         if getattr(self, "version_reset_from", ""):
             # 版本变化导致数据被清空时必须明确告知，避免用户以为设置/贴图丢了。
@@ -602,10 +632,11 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
     def dispatch(self, action):
         """在 Qt 主线程把热键动作分发给截图或贴图模块。"""
         self.logger.info("触发热键: %s", action)
+        accepted = True
         if action in ("capture", "fullscreen", "monitor", "repeat"):
             # 不在此关闭活动弹出菜单：贴图右键菜单等本程序菜单应当能被一起拍进截图；
             # 真正抓取发生在 show_mask 的 capture()，抓取后再由 show_mask 关闭残留菜单。
-            self.start_capture(action)
+            accepted = self.start_capture(action) is not False
         elif action == "paste":
             if self.stickers.paste_latest():
                 item = self.stickers.active_sticker
@@ -637,6 +668,11 @@ class Application(HotkeyControlMixin, CaptureFlowMixin, StickerFlowMixin, Notifi
             self.open_recycle_bin()
         else:
             self.logger.warning("未处理的热键动作: %s", action)
+            accepted = False
+        ack = getattr(getattr(self, "hotkeys", None), "report_action_result", None)
+        if callable(ack):
+            ack(action, accepted)
+        return accepted
 
 
     def cleanup_cache_if_scheduled(self, when):
@@ -758,6 +794,9 @@ if __name__ == "__main__":
         import supervisor
         sys.exit(supervisor.main(sys.argv[1:]))
     # 无看护模式下由本进程自己等旧实例退出；有看护时由 supervisor 先等锁。
+    from core.path_utils import migrate_legacy_data
+
+    migrate_legacy_data()
     instance_lock = acquire_single_instance_lock(wait_ms=20000 if permission_launch else 0)
     if instance_lock is None:
         notify_existing_instance()

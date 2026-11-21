@@ -109,14 +109,17 @@ class CaptureFlowMixin:
     """截图流程：抓屏、遮罩、选区结果分发、编辑器打开与保存。"""
 
     def start_capture(self, mode, from_tray=False, initial_rect=None, preferred_monitor=None):
-        """跳过已显示的遮罩；仅托盘菜单发起的截图等待菜单关闭。"""
+        """跳过已显示的遮罩；仅托盘菜单发起的截图等待菜单关闭。
+
+        返回动作是否被接受：False 表示明确的忽略/无效请求，供热键动作级确认使用。
+        """
         # 预设截图不创建遮罩，也不进入普通截图的串行队列：每次按键都独立在
         # QThread 里立刻抓屏，避免快速连按时排队等待上一张保存。
         if mode in PRESET_CAPTURE_MODES:
             if mode == "repeat" and not self.config.data["last_capture_rect"]:
                 self.logger.debug("尚无上次截图区域，跳过重复截图")
                 self.notify("暂无上次截图区域")
-                return
+                return False
             delay = int(self.config.data.get("capture_delay", 0) or 0)
             waiting = (150 if from_tray else 0) + delay
             if waiting > 0:
@@ -126,10 +129,10 @@ class CaptureFlowMixin:
                     self._launch_preset_capture(m, r, p))
             else:
                 self._launch_preset_capture(mode, initial_rect, preferred_monitor)
-            return
+            return True
         if self.mask is not None and self.mask.isVisible():
             self.logger.debug("遮罩已显示，忽略截图请求: %s", mode)
-            return
+            return False
         # 去抖/串行化：连续快速按热键时，请求可能都发生在上一次 show_mask 的定时器
         # 执行之前；若不拦住，会排队创建多个遮罩并各自抓屏，既慢又可能保存到旧遮罩画面。
         if getattr(self, "_capture_pending", 0) > 0:
@@ -140,11 +143,11 @@ class CaptureFlowMixin:
             queue.append((mode, from_tray, initial_rect, preferred_monitor))
             self.logger.debug("上一轮截图仍在启动，截图请求入队: %s（队列=%d）",
                               mode, len(queue))
-            return
+            return True
         if mode == "repeat" and not self.config.data["last_capture_rect"]:
             self.logger.debug("尚无上次截图区域，跳过重复截图")
             self.notify("暂无上次截图区域")
-            return
+            return False
         # 托盘菜单发起时稍后捕获，避免菜单进入截图；用户设置的延迟在此基础上累加。
         delay = int(self.config.data.get("capture_delay", 0) or 0)
         waiting = (150 if from_tray else 0) + delay
@@ -168,6 +171,7 @@ class CaptureFlowMixin:
                     QTimer.singleShot(0, self._drain_capture_requests)
 
         QTimer.singleShot(waiting, deliver)
+        return True
 
     def _launch_preset_capture(self, mode, initial_rect=None, preferred_monitor=None):
         """预设快捷键在主线程立即抓当前区域；保存交给后台队列。"""

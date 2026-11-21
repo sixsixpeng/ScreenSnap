@@ -108,6 +108,62 @@ class ElevationTests(CoreTests):
             self.assertFalse(autostart_admin.sync_autostart(data))
         set_run.assert_called_once_with(True)
 
+
+
+    def test_startup_demotion_policy_only_keeps_explicit_admin_paths(self):
+        from core.elevation import (ELEVATED_MARKER, STARTUP_STANDARD_MARKER,
+                                    STANDARD_MARKER, should_demote_at_startup)
+
+        self.assertTrue(should_demote_at_startup([], False, elevated=True))
+        self.assertTrue(should_demote_at_startup(["--some-arg"], False, elevated=True))
+        self.assertFalse(should_demote_at_startup([ELEVATED_MARKER], False, elevated=True))
+        self.assertFalse(should_demote_at_startup([STANDARD_MARKER], False, elevated=True))
+        self.assertFalse(should_demote_at_startup([STARTUP_STANDARD_MARKER], False, elevated=True))
+        self.assertFalse(should_demote_at_startup([], True, elevated=True))
+        self.assertFalse(should_demote_at_startup([], False, elevated=False))
+
+    def test_demote_unrequested_admin_launches_standard_then_quits(self):
+        from main import Application
+
+        app = Application.__new__(Application)
+        app._startup_demote = True
+        app.logger = Mock()
+        app.quit_app = Mock()
+        with patch("main.restart_as_standard", return_value="launched"):
+            Application._demote_unrequested_admin(app)
+        app.quit_app.assert_called_once()
+
+        app2 = Application.__new__(Application)
+        app2._startup_demote = True
+        app2.logger = Mock()
+        app2.quit_app = Mock()
+        with patch("main.restart_as_standard", return_value="failed"):
+            Application._demote_unrequested_admin(app2)
+        app2.quit_app.assert_not_called()
+
+    def test_startup_audit_cleans_stale_admin_task_when_already_elevated(self):
+        from core import autostart_admin
+
+        data = {"start_on_boot": False, "start_on_boot_admin": False}
+        with patch("core.autostart_admin.task_exists", return_value=True), \
+                patch("core.autostart_admin.elevation.is_elevated", return_value=True), \
+                patch("core.autostart_admin.remove_task", return_value=(True, "删除")) as remove, \
+                patch("core.autostart_admin.startup.set_start_on_boot") as set_run:
+            self.assertFalse(autostart_admin.sync_autostart(data))
+        remove.assert_called_once()
+        set_run.assert_called_once_with(False)
+
+    def test_startup_audit_never_requests_uac_when_stale_task_cannot_be_removed(self):
+        from core import autostart_admin
+
+        data = {"start_on_boot": False, "start_on_boot_admin": False}
+        with patch("core.autostart_admin.task_exists", return_value=True), \
+                patch("core.autostart_admin.elevation.is_elevated", return_value=False), \
+                patch("core.autostart_admin.elevation.run_elevated") as runas, \
+                patch("core.autostart_admin.startup.set_start_on_boot"):
+            self.assertFalse(autostart_admin.sync_autostart(data))
+        runas.assert_not_called()
+
     def test_set_enabled_reports_cancelled_uac(self):
         from core import autostart_admin, elevation
 

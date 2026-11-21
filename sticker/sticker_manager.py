@@ -246,8 +246,8 @@ class StickerManager(QObject):
     def clear_rebuildable_cache(self):
         """清理可重建图片缓存，不删除已保存截图或贴图会话引用的源文件。
 
-        图片缓存位于启动文件目录，这里必须用同一个 cache_dir()，
-        否则清理会找不到文件（配置 json 仍在 %APPDATA%）。
+        图片缓存位于运行目录 data/，这里必须用同一个 cache_dir()，
+        否则清理会找不到文件；配置 json 也统一在 data/。
         """
         clipboard_images = history_entries = sticker_images = toast_images = 0
         # 清理范围按设置逐类勾选；未勾选的类别完全不碰。
